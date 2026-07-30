@@ -2,7 +2,7 @@ import AppKit
 
 /// Zed's bottom-left action bar: a 40pt row spanning the panel width with four
 /// evenly-spaced buttons (project, search, git, settings). The button for the
-/// visible panel gets a white rounded background.
+/// visible panel gets a full-height active background.
 final class ActivityBarView: NSView {
     static let height: CGFloat = 40
 
@@ -51,11 +51,10 @@ final class ActivityBarView: NSView {
     override func layout() {
         super.layout()
         guard !buttons.isEmpty else { return }
-        let inset: CGFloat = 4
-        let height = bounds.height - inset * 2 - 1   // -1 for the top border
+        let height = bounds.height - 1   // preserve the one-point top divider
         let slot = bounds.width / CGFloat(buttons.count)
         for (i, b) in buttons.enumerated() {
-            b.frame = NSRect(x: (slot * CGFloat(i)).rounded(), y: inset,
+            b.frame = NSRect(x: (slot * CGFloat(i)).rounded(), y: 0,
                              width: slot.rounded(), height: height)
         }
     }
@@ -67,7 +66,7 @@ final class ActivityBarView: NSView {
     }
 }
 
-/// Flat icon button with a white rounded background when selected.
+/// Flat icon button with an edge-to-edge background when selected.
 final class ActivityButton: NSView {
     var onClick: (() -> Void)?
     var isSelected = false { didSet { needsDisplay = true; updateTint() } }
@@ -101,7 +100,7 @@ final class ActivityButton: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected else { return }
         Theme.activeTab.setFill()   // white in light, editor bg in dark
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 0), xRadius: 6, yRadius: 6).fill()
+        bounds.fill()
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }

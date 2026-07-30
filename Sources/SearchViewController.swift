@@ -92,6 +92,14 @@ final class SearchViewController: NSViewController {
 
     func refreshFonts() { searchField.refreshFonts() }
 
+    func releaseTransientMemory() {
+        searchWork?.cancel()
+        searchWork = nil
+        groups.removeAll()
+        hitRowCache.removeAll()
+        if isViewLoaded { outline.reloadData() }
+    }
+
     /// Run a query programmatically (used by the `--search` launch flag).
     func performSearch(_ query: String) {
         searchField.stringValue = query
@@ -107,6 +115,11 @@ final class SearchViewController: NSViewController {
             summaryLabel.stringValue = query.isEmpty ? "" : "Type at least 2 characters"
             return
         }
+        // Release the previous result tree before the replacement is built, so
+        // two large searches never coexist during the debounce/backend work.
+        groups.removeAll()
+        hitRowCache.removeAll()
+        outline.reloadData()
         summaryLabel.stringValue = "Searching…"
         let work = DispatchWorkItem { [weak self] in
             let found = Self.search(query: query, in: directory, options: options)
@@ -229,8 +242,8 @@ final class SearchViewController: NSViewController {
 
     /// Result caps — the panel can't usefully show more than this, and holding
     /// every hit of a common word was the single largest memory spike measured.
-    private static let maxHits = 1000
-    private static let maxPreviewChars = 200
+    private static let maxHits = 500
+    private static let maxPreviewChars = 160
 
     private static let skipDirs: Set<String> = [".git", "node_modules", ".build", "build",
                                                 "DerivedData", ".svn", "Pods", ".obj"]
@@ -253,7 +266,7 @@ final class SearchViewController: NSViewController {
                 no += 1
                 if raw.lowercased().contains(needle) {
                     out.append((rel, no, String(raw.trimmingCharacters(in: .whitespaces).prefix(300))))
-                    if out.count >= 2000 { return out }
+                    if out.count >= maxHits { return out }
                 }
             }
         }
@@ -286,80 +299,103 @@ extension SearchViewController: NSOutlineViewDelegate {
     /// Flat selection matching the file tree's active row — the system blue
     /// made the result text unreadable.
     func outlineView(_ ov: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        SearchRowView()
+        let id = NSUserInterfaceItemIdentifier("search-row")
+        let row = (ov.makeView(withIdentifier: id, owner: self) as? SearchRowView)
+            ?? SearchRowView()
+        row.identifier = id
+        return row
     }
 
     func outlineView(_ ov: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         if let group = item as? FileGroup {
-            let cell = NSTableCellView()
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName:
-                FileTreeViewController.iconName(for: group.url.pathExtension),
-                accessibilityDescription: nil)
-            icon.contentTintColor = Theme.dimText
-            let name = NSTextField(labelWithString: group.name)
-            name.font = Theme.uiFont(11.5)
-            name.textColor = Theme.foreground
-            let folder = NSTextField(labelWithString: group.folder)
-            folder.font = Theme.uiFont(10)
-            folder.textColor = Theme.dimText
-            folder.lineBreakMode = .byTruncatingHead
-            for v in [icon, name, folder] as [NSView] {
-                v.translatesAutoresizingMaskIntoConstraints = false
-                cell.addSubview(v)
-            }
-            NSLayoutConstraint.activate([
-                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                icon.widthAnchor.constraint(equalToConstant: 13),
-                icon.heightAnchor.constraint(equalToConstant: 13),
-                name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
-                name.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                folder.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 6),
-                folder.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
-                folder.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
+            let id = NSUserInterfaceItemIdentifier("search-group-cell")
+            let cell = (ov.makeView(withIdentifier: id, owner: self)
+                        as? SearchGroupCell) ?? SearchGroupCell()
+            cell.identifier = id
+            cell.configure(group: group)
             return cell
         }
 
         guard let row = item as? HitRow else { return nil }
-        let cell = NSTableCellView()
-        let number = NSTextField(labelWithString: "\(row.hit.line)")
-        number.font = Theme.uiFont(10)
-        number.textColor = Theme.dimText
-        number.alignment = .right
+        let id = NSUserInterfaceItemIdentifier("search-hit-cell")
+        let cell = (ov.makeView(withIdentifier: id, owner: self)
+                    as? SearchHitCell) ?? SearchHitCell()
+        cell.identifier = id
+        cell.configure(hit: row.hit)
+        return cell
+    }
+}
 
-        // Highlight the matched substring, like Zed. Keep it to a single
-        // truncated line, otherwise long previews wrap and overlap rows.
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
+private final class SearchGroupCell: DrawnSidebarCell {
+    private var icon: NSImage?
+    private var name = ""
+    private var folder = ""
+
+    func configure(group: SearchViewController.FileGroup) {
+        icon = Theme.symbol(FileTreeViewController.iconName(for: group.url.pathExtension))
+        name = group.name
+        folder = group.folder
+        toolTip = group.relative
+        exposeToAccessibility(group.relative)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        SidebarCellDrawing.image(icon, tint: Theme.dimText,
+                                 in: NSRect(x: 2, y: floor((bounds.height - 13) / 2),
+                                            width: 13, height: 13))
+        SidebarCellDrawing.primaryAndSecondary(
+            primary: name, primaryFont: Theme.uiFont(11.5), primaryColor: Theme.foreground,
+            secondary: folder, secondaryFont: Theme.uiFont(10), secondaryColor: Theme.dimText,
+            in: NSRect(x: 20, y: 0, width: max(0, bounds.width - 24), height: bounds.height))
+    }
+}
+
+private final class SearchHitCell: DrawnSidebarCell {
+    private var content = NSAttributedString()
+    private let paragraph: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        // A single line fragment draws the gutter and preview on exactly the
+        // same baseline. The first tab right-aligns the line number; the second
+        // establishes the fixed code column.
+        style.tabStops = [
+            NSTextTab(textAlignment: .right, location: 32, options: [:]),
+            NSTextTab(textAlignment: .left, location: 38, options: [:]),
+        ]
+        return style.copy() as! NSParagraphStyle
+    }()
+    func configure(hit: SearchViewController.Hit) {
+        let number = String(hit.line)
+        let prefix = "\t\(number)\t"
         let attributed = NSMutableAttributedString(
-            string: row.hit.preview,
+            string: prefix + hit.preview,
             attributes: [.font: Theme.uiFont(11),
                          .foregroundColor: Theme.foreground,
                          .paragraphStyle: paragraph])
-        if let match = row.hit.matchRange, NSMaxRange(match) <= attributed.length {
-            attributed.addAttribute(.backgroundColor, value: Theme.searchMatch, range: match)
+        attributed.addAttribute(
+            .foregroundColor,
+            value: Theme.dimText,
+            range: NSRange(location: 1, length: (number as NSString).length))
+        if let match = hit.matchRange,
+           NSMaxRange(match) <= (hit.preview as NSString).length {
+            let previewOffset = (prefix as NSString).length
+            attributed.addAttribute(
+                .backgroundColor,
+                value: Theme.searchMatch,
+                range: NSRange(location: previewOffset + match.location, length: match.length))
         }
-        let text = NSTextField(labelWithAttributedString: attributed)
-        text.lineBreakMode = .byTruncatingTail
-        text.usesSingleLineMode = true
-        text.maximumNumberOfLines = 1
-        text.cell?.truncatesLastVisibleLine = true
+        content = attributed
+        exposeToAccessibility("Line \(number): \(hit.preview)")
+        needsDisplay = true
+    }
 
-        for v in [number, text] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(v)
-        }
-        NSLayoutConstraint.activate([
-            number.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 0),
-            number.widthAnchor.constraint(equalToConstant: 32),
-            number.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            text.leadingAnchor.constraint(equalTo: number.trailingAnchor, constant: 6),
-            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
+    override func draw(_ dirtyRect: NSRect) {
+        // Gutter number and source text are intentionally one attributed line:
+        // tab stops and a shared baseline make vertical drift impossible.
+        SidebarCellDrawing.attributedText(
+            content,
+            in: NSRect(x: 0, y: 0, width: max(0, bounds.width - 4), height: bounds.height))
     }
 }
 

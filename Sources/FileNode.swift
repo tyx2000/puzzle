@@ -59,15 +59,25 @@ final class FileNode {
         loadedChildren = nil
     }
 
+    /// Never shown: version-control internals and OS bookkeeping. Matches the
+    /// set Zed hides by default.
+    private static let excludedNames: Set<String> = [
+        ".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db",
+    ]
+
     private static func loadChildren(of directory: URL, parent: FileNode) -> [FileNode] {
         let fm = FileManager.default
+        // Dotfiles are shown. `.skipsHiddenFiles` hid every one of them —
+        // .gitignore, .eslintrc.js, .env, .storybook — which in a JS project is
+        // most of the configuration. Only VCS metadata and OS junk are dropped.
         guard let entries = try? fm.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return [] }
 
-        let nodes: [FileNode] = entries.map { url in
+        let nodes: [FileNode] = entries.compactMap { url -> FileNode? in
+            guard !excludedNames.contains(url.lastPathComponent) else { return nil }
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             // Keep only the name: the URLs handed back by
             // `contentsOfDirectory(includingPropertiesForKeys:)` also carry a

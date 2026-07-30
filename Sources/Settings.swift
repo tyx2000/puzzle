@@ -12,9 +12,8 @@ final class Settings {
     var fontSize: CGFloat = 12
     var fontWeight: CGFloat = 400
     var lineHeight: CGFloat = 1.8
-    var showWrapGuides = false
-    var wrapColumn = 80
     var tabSize = 4
+    var showInlineBlame = true
 
     // UI font — the left panel, tabs, git/search panels
     var uiFontFamily = "Monaco"
@@ -61,11 +60,8 @@ final class Settings {
           // Width of a tab character, in characters. Range 1–16.  Default: 4
           "tab_size": \(tabSize),
 
-          // Draw a vertical rule at `wrap_column`.  Default: false
-          "show_wrap_guides": \(showWrapGuides),
-
-          // Column for the wrap guide (only when show_wrap_guides is true).  Default: 80
-          "wrap_column": \(wrapColumn),
+          // Show git blame (author, time, subject) after the cursor's line.  Default: true
+          "show_inline_blame": \(showInlineBlame),
 
           // ── UI text: left panel (file tree, search, git), tabs ─────────────────
 
@@ -91,8 +87,13 @@ final class Settings {
     /// build that predates some options.
     private static let knownKeys = [
         "buffer_font_family", "buffer_font_size", "buffer_font_weight",
-        "buffer_line_height", "tab_size", "show_wrap_guides", "wrap_column",
+        "buffer_line_height", "tab_size", "show_inline_blame",
         "ui_font_family", "ui_font_size", "ui_font_weight", "ui_line_height",
+    ]
+
+    /// Accepted by older settings files but no longer backed by UI behavior.
+    private static let retiredKeys = [
+        "show_wrap_guides", "wrap_column", "show_indent_guides", "show_completion",
     ]
 
     /// A file written by an earlier build won't contain options added since, so
@@ -101,10 +102,13 @@ final class Settings {
     func upgradeFileIfNeeded() {
         guard let text = try? String(contentsOf: Self.fileURL, encoding: .utf8) else { return }
         let missing = Self.knownKeys.filter { !text.contains("\"\($0)\"") }
-        guard !missing.isEmpty else { return }
+        let retired = Self.retiredKeys.filter { text.contains("\"\($0)\"") }
+        guard !missing.isEmpty || !retired.isEmpty else { return }
         try? contents().write(to: Self.fileURL, atomically: true, encoding: .utf8)
-        FileHandle.standardError.write(Data(
-            "puzzle: added missing settings keys: \(missing.joined(separator: ", "))\n".utf8))
+        var changes: [String] = []
+        if !missing.isEmpty { changes.append("added \(missing.joined(separator: ", "))") }
+        if !retired.isEmpty { changes.append("removed \(retired.joined(separator: ", "))") }
+        FileHandle.standardError.write(Data("puzzle: updated settings: \(changes.joined(separator: "; "))\n".utf8))
     }
 
 
@@ -144,8 +148,7 @@ final class Settings {
         if let v = number("buffer_font_weight") { fontWeight = v }
         if let v = number("buffer_line_height"), v >= 1.0, v <= 3.0 { lineHeight = v }
         if let v = number("tab_size"), v >= 1, v <= 16 { tabSize = Int(v) }
-        if let v = json["show_wrap_guides"] as? Bool { showWrapGuides = v }
-        if let v = number("wrap_column"), v > 0 { wrapColumn = Int(v) }
+        if let v = json["show_inline_blame"] as? Bool { showInlineBlame = v }
 
         if let v = json["ui_font_family"] as? String, !v.isEmpty { uiFontFamily = v }
         if let v = number("ui_font_size"), v >= 8, v <= 32 { uiFontSize = v }

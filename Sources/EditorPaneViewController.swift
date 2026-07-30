@@ -9,6 +9,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onEmptied: ((EditorPaneViewController) -> Void)?
     var onDocumentEdited: (() -> Void)?
     var onDocumentSaved: ((URL) -> Void)?
+    var onTabOpened: ((URL) -> Void)?
+    /// A tab was closed here. The container decides whether the buffer is still
+    /// open elsewhere before releasing it — a pane can't see its siblings.
+    var onTabClosed: ((URL) -> Void)?
+    /// The markdown preview appeared or disappeared in this pane.
+    var onPreviewVisibilityChanged: (() -> Void)?
 
     private(set) var openURLs: [URL] = []
     private var activeIndex: Int?
@@ -29,6 +35,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     private let findBar = FindBarView()
     private var findBarHeight: NSLayoutConstraint!
+    /// Shown instead of the text view when the active document is a picture.
+    private var imagePreview: ImagePreviewView?
+
+    /// Live markdown preview, shown to the right of the source.
+    private var markdownPreview: MarkdownPreviewView?
+    /// Editor trailing edge: to the window edge, or to the preview's leading.
+    private var editorTrailingFull: NSLayoutConstraint!
+    private var editorTrailingSplit: NSLayoutConstraint?
+    /// Remembered per file so toggling tabs doesn't lose the preview state.
+    private var previewEnabled: Set<URL> = []
+
+    var isPreviewVisible: Bool { markdownPreview.map { !$0.isHidden } ?? false }
 
     override func loadView() {
         let container = FlatView()
@@ -83,7 +101,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelect = { [weak self] in self?.activate(index: $0) }
         tabBar.onClose = { [weak self] in self?.close(index: $0) }
+        tabBar.onCloseOthers = { [weak self] in self?.closeOtherTabs(around: $0) }
+        tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
         tabBar.onSplit = { [weak self] in self?.onRequestSplit?() }
+        tabBar.onTogglePreview = { [weak self] in self?.toggleMarkdownPreview() }
 
         container.addSubview(tabBar)
         container.addSubview(scrollView)
@@ -93,6 +114,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         container.addSubview(findBar)
 
         findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
+        editorTrailingFull = scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+        editorTrailingFull.isActive = true
+
         NSLayoutConstraint.activate([
             tabBar.topAnchor.constraint(equalTo: container.topAnchor),
             tabBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -106,11 +130,43 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // Height follows the pills (grows when tabs wrap to a second row).
             scrollView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         self.view = container
         reloadTabs()
+    }
+
+    private func ensureImagePreview() -> ImagePreviewView {
+        if let imagePreview { return imagePreview }
+        let preview = ImagePreviewView()
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.isHidden = true
+        view.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            preview.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        imagePreview = preview
+        return preview
+    }
+
+    private func ensureMarkdownPreview() -> MarkdownPreviewView {
+        if let markdownPreview { return markdownPreview }
+        let preview = MarkdownPreviewView()
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.isHidden = true
+        view.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            preview.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
+        ])
+        editorTrailingSplit = scrollView.trailingAnchor.constraint(equalTo: preview.leadingAnchor)
+        markdownPreview = preview
+        return preview
     }
 
     // MARK: - Find bar
@@ -142,6 +198,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             activate(index: existing); return
         }
         openURLs.append(url)
+        onTabOpened?(url)
         activate(index: openURLs.count - 1)
     }
 
@@ -179,6 +236,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // Diffs and binaries are read-only.
         textView.isEditable = !doc.isUnsupported && !doc.isVirtual
         textView.showsCurrentLineBand = true
+        textView.diffBands = doc.diffBands
+
+        // Pictures preview as an image instead of the text view.
+        if let image = doc.image {
+            let imagePreview = ensureImagePreview()
+            imagePreview.show(image: image, caption: doc.text)
+            imagePreview.isHidden = false
+            scrollView.isHidden = true
+        } else {
+            imagePreview?.isHidden = true
+            scrollView.isHidden = false
+        }
+
+        syncMarkdownPreview(for: doc, url: url, rerender: true)
 
         reloadTabs()
         scrollView.verticalRulerView?.needsDisplay = true
@@ -191,18 +262,112 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard openURLs.indices.contains(index) else { return }
         let url = openURLs.remove(at: index)
         selections.removeValue(forKey: url)
+        previewEnabled.remove(url)
+        defer { onTabClosed?(url) }
         if openURLs.isEmpty {
             activeIndex = nil
+            markdownPreview?.cancelPendingUpdate()
+            markdownPreview?.isHidden = true
+            editorTrailingSplit?.isActive = false
+            editorTrailingFull.isActive = true
+            tabBar.showsPreviewToggle = false
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             blankStorage.addLayoutManager(layoutManager)
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
+            imagePreview?.isHidden = true
+            scrollView.isHidden = false
             reloadTabs()
             onActiveDocumentChanged?(nil)
             onEmptied?(self)
             return
         }
         activate(index: min(index, openURLs.count - 1))
+    }
+
+    // MARK: - Markdown preview
+
+    /// Whether a document can be previewed at all. Diffs and binaries can't:
+    /// a diff is not markdown even when it patches a .md file.
+    private func isPreviewable(_ doc: Document) -> Bool {
+        doc.languageSpec?.name == "markdown" && !doc.isVirtual && !doc.isUnsupported
+            && doc.image == nil
+    }
+
+    func toggleMarkdownPreview() {
+        guard let url = currentURL else { return }
+        let doc = DocumentStore.shared.document(for: url)
+        guard isPreviewable(doc) else { return }
+        if previewEnabled.contains(url) {
+            previewEnabled.remove(url)
+        } else {
+            previewEnabled.insert(url)
+        }
+        syncMarkdownPreview(for: doc, url: url, rerender: true)
+    }
+
+    /// Bring the preview in line with the active document: hide it entirely for
+    /// non-markdown, otherwise show it if this file had it turned on.
+    private func syncMarkdownPreview(for doc: Document, url: URL, rerender: Bool) {
+        let previewable = isPreviewable(doc)
+        tabBar.showsPreviewToggle = previewable
+
+        let shouldShow = previewable && previewEnabled.contains(url) && doc.image == nil
+        tabBar.previewActive = shouldShow
+
+        if !shouldShow {
+            let wasVisible = markdownPreview.map { !$0.isHidden } ?? false
+            markdownPreview?.cancelPendingUpdate()
+            markdownPreview?.isHidden = true
+            editorTrailingSplit?.isActive = false
+            editorTrailingFull.isActive = true
+            if wasVisible { onPreviewVisibilityChanged?() }
+            return
+        }
+
+        let markdownPreview = ensureMarkdownPreview()
+        let wasHidden = markdownPreview.isHidden
+        markdownPreview.isHidden = false
+        editorTrailingFull.isActive = false
+        editorTrailingSplit?.isActive = true
+        // Switching files must repaint now, not after the typing debounce.
+        if rerender { markdownPreview.update(source: doc.text, immediately: true) }
+        if wasHidden { onPreviewVisibilityChanged?() }
+    }
+
+    /// Close every tab except `index`.
+    func closeOtherTabs(around index: Int) {
+        guard openURLs.indices.contains(index) else { return }
+        closeTabs(openURLs.indices.filter { $0 != index }, anchor: index)
+    }
+
+    /// Close the tabs sitting after `index`.
+    func closeTabsToTheRight(of index: Int) {
+        guard openURLs.indices.contains(index) else { return }
+        closeTabs(Array(openURLs.indices.dropFirst(index + 1)), anchor: index)
+    }
+
+    /// Remove a batch of tabs in one pass, leaving `anchor` active.
+    ///
+    /// Deliberately not a loop over `close(index:)`: that reactivates (and so
+    /// re-lays-out and re-highlights) a document per removed tab, and every
+    /// removal shifts the indices the caller computed.
+    private func closeTabs(_ doomed: [Int], anchor: Int) {
+        guard !doomed.isEmpty, openURLs.indices.contains(anchor) else { return }
+        let anchorURL = openURLs[anchor]
+        let doomedSet = Set(doomed)
+        var closed: [URL] = []
+        for i in doomed where openURLs.indices.contains(i) {
+            selections.removeValue(forKey: openURLs[i])
+            previewEnabled.remove(openURLs[i])
+            closed.append(openURLs[i])
+        }
+        defer { closed.forEach { onTabClosed?($0) } }
+        openURLs = openURLs.enumerated()
+            .filter { !doomedSet.contains($0.offset) }
+            .map { $0.element }
+        guard let kept = openURLs.firstIndex(of: anchorURL) else { return }
+        activate(index: kept)
     }
 
     func save() {
@@ -228,6 +393,33 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         view.window?.makeFirstResponder(textView)
     }
 
+    /// Detach this pane's layout manager from whatever buffer it shows.
+    ///
+    /// `NSTextStorage` retains its layout managers, so without this a closed
+    /// pane leaves its layout manager attached to the document — leaking it,
+    /// and pinning that document against eviction forever.
+    func detachFromDocument() {
+        layoutManager.textStorage?.removeLayoutManager(layoutManager)
+        blankStorage.addLayoutManager(layoutManager)
+    }
+
+    /// Tear down asynchronous/cached state and surrender this pane's tab
+    /// ownership. Used both for a closed split and for a closing window.
+    func prepareForClose() {
+        blameWork?.cancel()
+        blameWork = nil
+        blameCache.removeAll()
+        blameOrder.removeAll()
+        markdownPreview?.cancelPendingUpdate()
+        detachFromDocument()
+        let urls = openURLs
+        openURLs.removeAll()
+        activeIndex = nil
+        selections.removeAll()
+        previewEnabled.removeAll()
+        urls.forEach { onTabClosed?($0) }
+    }
+
     /// Re-apply font / line metrics after settings change.
     func refreshDisplay() {
         textView.font = Theme.editorFont()
@@ -240,7 +432,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func reloadTabs() {
         let infos = openURLs.map { url -> EditorTabBar.TabInfo in
             let doc = DocumentStore.shared.document(for: url)
-            let title = doc.isVirtual ? "\(url.lastPathComponent) (diff)" : url.lastPathComponent
+            let title = doc.displayName
+                ?? (doc.isVirtual ? "\(url.lastPathComponent) (diff)" : url.lastPathComponent)
             return EditorTabBar.TabInfo(title: title, modified: doc.isModified)
         }
         tabBar.reload(tabs: infos, active: activeIndex ?? -1)
@@ -252,12 +445,108 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let doc = currentDocument else { return }
         if !doc.isModified { doc.isModified = true; onDocumentEdited?() }
         HighlightService.shared.scheduleHighlight(doc)
+        // The preview debounces internally, so this is cheap per keystroke.
+        if let markdownPreview, !markdownPreview.isHidden {
+            markdownPreview.update(source: doc.text)
+        }
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         if let url = currentURL { selections[url] = textView.selectedRange() }
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
+        scheduleInlineBlame()
+    }
+
+    // MARK: - Inline blame
+
+    /// Project root, needed to run `git blame` in the right repository.
+    var repositoryRoot: URL?
+
+    private var blameWork: DispatchWorkItem?
+    /// Blame results keyed by file + line, so revisiting a line is free.
+    private var blameCache: [String: String] = [:]
+    private var blameOrder: [String] = []
+    private let maxBlameEntries = 500
+
+    private func cacheBlame(_ text: String, for key: String) {
+        blameCache[key] = text
+        blameOrder.removeAll { $0 == key }
+        blameOrder.append(key)
+        while blameOrder.count > maxBlameEntries {
+            blameCache.removeValue(forKey: blameOrder.removeFirst())
+        }
+    }
+
+    private func caretLine() -> Int {
+        let ns = textView.string as NSString
+        let caret = min(textView.selectedRange().location, ns.length)
+        var line = 1
+        var index = 0
+        while index < caret {
+            let range = ns.lineRange(for: NSRange(location: index, length: 0))
+            if NSMaxRange(range) > caret { break }
+            index = NSMaxRange(range)
+            if index <= caret { line += 1 }
+            if range.length == 0 { break }
+        }
+        return line
+    }
+
+    private func scheduleInlineBlame() {
+        blameWork?.cancel()
+
+        guard Settings.shared.showInlineBlame,
+              let url = currentURL,
+              let root = repositoryRoot else {
+            textView.inlineBlame = nil
+            return
+        }
+        let doc = DocumentStore.shared.document(for: url)
+        // A modified buffer has line numbers that no longer match what git
+        // knows about, so any annotation would be attributed to the wrong line.
+        guard !doc.isVirtual, !doc.isUnsupported, doc.image == nil, !doc.isModified else {
+            textView.inlineBlame = nil
+            return
+        }
+
+        let line = caretLine()
+        let key = "\(url.path):\(line)"
+        if let hit = blameCache[key] {
+            blameOrder.removeAll { $0 == key }
+            blameOrder.append(key)
+            textView.inlineBlame = hit
+            return
+        }
+        // Clear immediately: showing the previous line's author while the new
+        // one loads is worse than showing nothing.
+        textView.inlineBlame = nil
+
+        let work = DispatchWorkItem { [weak self] in
+            let blame = GitService.blame(file: url, line: line, in: root)
+            DispatchQueue.main.async {
+                guard let self, !(self.blameWork?.isCancelled ?? true) else { return }
+                // The caret may have moved on while git ran.
+                guard self.currentURL == url, self.caretLine() == line else { return }
+                let text = blame?.inlineText ?? ""
+                self.cacheBlame(text, for: key)
+                self.textView.inlineBlame = text.isEmpty ? nil : text
+            }
+        }
+        blameWork = work
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// Drop cached blame for a file whose contents changed on disk.
+    func invalidateBlame(for url: URL? = nil) {
+        if let url {
+            blameCache = blameCache.filter { !$0.key.hasPrefix(url.path + ":") }
+            blameOrder.removeAll { $0.hasPrefix(url.path + ":") }
+        } else {
+            blameCache.removeAll()
+            blameOrder.removeAll()
+        }
+        scheduleInlineBlame()
     }
 
     func textViewDidChangeTypingAttributes(_ notification: Notification) {}

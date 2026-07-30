@@ -8,6 +8,11 @@ final class FileTreeViewController: NSViewController {
     private var root: FileNode?
     /// Relative paths (from root) that git reports as modified/untracked.
     private var dirtyPaths: Set<String> = []
+    private var untrackedPaths: Set<String> = []
+    /// Directories containing a change, so a collapsed folder still shows that
+    /// something under it differs — git reports files, never their folders.
+    private var dirtyDirectories: Set<String> = []
+    private var untrackedDirectories: Set<String> = []
     /// The file open in the active editor pane — gets a persistent background.
     private var activeURL: URL?
 
@@ -92,8 +97,45 @@ final class FileTreeViewController: NSViewController {
     }
 
     func setDirtyPaths(_ paths: Set<String>) {
-        dirtyPaths = paths
+        setStatus(modified: paths, untracked: [])
+    }
+
+    func setStatus(modified: Set<String>, untracked: Set<String>) {
+        dirtyPaths = modified
+        untrackedPaths = untracked
+        dirtyDirectories = Self.ancestors(of: modified)
+        untrackedDirectories = Self.ancestors(of: untracked)
         outlineView.reloadData()
+    }
+
+    /// Every directory prefix of the given paths.
+    private static func ancestors(of paths: Set<String>) -> Set<String> {
+        var out: Set<String> = []
+        for path in paths {
+            var components = path.split(separator: "/").map(String.init)
+            guard components.count > 1 else { continue }
+            components.removeLast()
+            var prefix = ""
+            for component in components {
+                prefix = prefix.isEmpty ? component : prefix + "/" + component
+                out.insert(prefix)
+            }
+        }
+        return out
+    }
+
+    /// Colour for a row: untracked reads as "new", modified as "changed", and a
+    /// folder inherits from whatever is inside it.
+    private func statusColor(for node: FileNode) -> NSColor? {
+        guard let path = relativePath(for: node) else { return nil }
+        if node.isDirectory {
+            if untrackedDirectories.contains(path) { return Theme.green }
+            if dirtyDirectories.contains(path) { return Theme.yellow }
+            return nil
+        }
+        if untrackedPaths.contains(path) { return Theme.green }
+        if dirtyPaths.contains(path) { return Theme.yellow }
+        return nil
     }
 
     /// Expand ancestors and select the row for `url` (keeps the tree in sync
@@ -196,52 +238,28 @@ extension FileTreeViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? FileNode else { return nil }
         let id = NSUserInterfaceItemIdentifier("cell")
-        let cell: NSTableCellView
-        if let reused = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
+        let cell: FileTreeCell
+        if let reused = outlineView.makeView(withIdentifier: id, owner: self) as? FileTreeCell {
             cell = reused
         } else {
-            cell = NSTableCellView()
+            cell = FileTreeCell()
             cell.identifier = id
-            let imageView = NSImageView()
-            let textField = NSTextField(labelWithString: "")
-            textField.lineBreakMode = .byTruncatingMiddle
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            textField.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(imageView)
-            cell.addSubview(textField)
-            cell.imageView = imageView
-            cell.textField = textField
-            NSLayoutConstraint.activate([
-                imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: 16),
-                imageView.heightAnchor.constraint(equalToConstant: 16),
-                textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 5),
-                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
         }
 
         // Directories show open/closed state through both icon and colour.
+        let icon: NSImage?
+        let iconColor: NSColor
         if node.isDirectory {
             let expanded = outlineView.isItemExpanded(node)
-            cell.imageView?.image = NSImage(
-                systemSymbolName: expanded ? "folder.fill" : "folder",
-                accessibilityDescription: nil)
-            cell.imageView?.contentTintColor = expanded ? Theme.blue : Theme.folderClosed
+            icon = Theme.symbol(expanded ? "folder.fill" : "folder")
+            iconColor = expanded ? Theme.blue : Theme.folderClosed
         } else {
-            cell.imageView?.image = NSImage(
-                systemSymbolName: Self.iconName(for: node.url.pathExtension),
-                accessibilityDescription: nil)
-            cell.imageView?.contentTintColor = Theme.dimText
+            icon = Theme.symbol(Self.iconName(for: node.url.pathExtension))
+            iconColor = Theme.dimText
         }
 
-        let isDirty = relativePath(for: node).map { dirtyPaths.contains($0) } ?? false
-        cell.textField?.stringValue = node.name
-        cell.textField?.textColor = isDirty ? Theme.yellow : Theme.foreground
-        // Set on every pass, not just on creation — cells are reused, so a
-        // settings change must re-apply the font to already-built cells.
-        cell.textField?.font = Theme.uiFont(12)
+        cell.configure(title: node.name, icon: icon, iconColor: iconColor,
+                       titleColor: statusColor(for: node) ?? Theme.foreground)
         return cell
     }
 
@@ -268,12 +286,11 @@ extension FileTreeViewController: NSOutlineViewDelegate {
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        let row = TreeRowView()
-        row.depth = outlineView.level(forItem: item)
-        row.indentPerLevel = outlineView.indentationPerLevel
-        if let node = item as? FileNode, let active = activeURL {
-            row.isActiveFile = (node.url == active)
-        }
+        let id = NSUserInterfaceItemIdentifier("tree-row")
+        let row = (outlineView.makeView(withIdentifier: id, owner: self) as? TreeRowView)
+            ?? TreeRowView()
+        row.identifier = id
+        row.isActiveFile = (item as? FileNode)?.url == activeURL
         return row
     }
 
@@ -290,11 +307,40 @@ extension FileTreeViewController: NSOutlineViewDelegate {
     }
 }
 
-/// Tree row that draws Zed-style indent guides and a persistent background for
-/// the file open in the active editor pane.
+private final class FileTreeCell: DrawnSidebarCell {
+    private var title = ""
+    private var icon: NSImage?
+    private var iconColor = NSColor.clear
+    private var titleColor = NSColor.clear
+
+    func configure(title: String, icon: NSImage?, iconColor: NSColor,
+                   titleColor: NSColor) {
+        self.title = title
+        self.icon = icon
+        self.iconColor = iconColor
+        self.titleColor = titleColor
+        toolTip = title
+        exposeToAccessibility(title)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let font = Theme.uiFont(12)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
+        SidebarCellDrawing.image(icon, tint: iconColor,
+                                 in: NSRect(x: 3, y: floor(bounds.midY - 7),
+                                            width: 14, height: 14))
+        SidebarCellDrawing.text(title, font: font, color: titleColor,
+                                baseline: baseline,
+                                in: NSRect(x: 22, y: 0,
+                                           width: max(0, bounds.width - 27),
+                                           height: bounds.height),
+                                lineBreak: .byTruncatingMiddle)
+    }
+}
+
+/// Tree row with a persistent background for the file open in the active pane.
 final class TreeRowView: NSTableRowView {
-    var depth = 0
-    var indentPerLevel: CGFloat = 14
     var isActiveFile = false
 
     override func drawBackground(in dirtyRect: NSRect) {
@@ -303,13 +349,6 @@ final class TreeRowView: NSTableRowView {
         if isActiveFile {
             Theme.activeRow.setFill()
             bounds.fill()
-        }
-        // Indent guides for each ancestor level.
-        guard depth > 0 else { return }
-        Theme.indentGuide.setFill()
-        for level in 0..<depth {
-            let x = 10 + indentPerLevel * CGFloat(level)
-            NSRect(x: x, y: 0, width: 1, height: bounds.height).fill()
         }
     }
 

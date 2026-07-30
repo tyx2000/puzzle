@@ -4,6 +4,7 @@ import AppKit
 /// Everything per-window lives in `WorkspaceWindowController`.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var windows: [WorkspaceWindowController] = []
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     /// Rebuilt each time the menu opens, so it always reflects current history.
     private let recentMenu = NSMenu(title: "Open Recent")
 
@@ -16,21 +17,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.shared.load()
+        LauncherInstaller.installIfNeeded()
         // A settings.json written by an older build lacks options added since;
         // rewrite it with the full documented set, keeping the user's values.
         Settings.shared.upgradeFileIfNeeded()
         setupMenu()
+        setupMemoryPressureHandling()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(settingsChanged),
             name: Settings.didChange, object: nil)
 
-        let controller = makeWindow()
+        // When the app is launched WITH a document (Finder open-with, or `pz`),
+        // `application(_:openFiles:)` fires BEFORE this method and has already
+        // made a window for it. Creating one unconditionally here left an extra
+        // empty welcome window alongside the project.
+        let controller = windows.first ?? makeWindow()
         NSApp.activate(ignoringOtherApps: true)
         applyLaunchArguments(to: controller)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    private func setupMemoryPressureHandling() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.windows.forEach { $0.releaseTransientMemory() }
+            DocumentStore.shared.releaseTransientMemory()
+            MarkdownRenderer.releaseParsers()
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    /// Paths handed to an ALREADY-RUNNING instance (Finder "Open With", or the
+    /// `pz` command). Each opens in its own window, so `pz` never has to spawn a
+    /// second copy of the app — one process, one window per invocation.
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        var handled = false
+        for path in filenames {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+            let url = URL(fileURLWithPath: path)
+            // Reuse an empty welcome window rather than stacking another on top.
+            let target = windows.first { !$0.hasProject } ?? makeWindow()
+            if isDir.boolValue {
+                target.openProject(url)
+            } else {
+                target.openProject(url.deletingLastPathComponent())
+                target.editor.open(url: url)
+            }
+            target.window?.makeKeyAndOrderFront(nil)
+            handled = true
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        sender.reply(toOpenOrPrint: handled ? .success : .failure)
+    }
 
     /// Clicking the dock icon with no windows open makes a fresh one.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -45,6 +88,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let controller = WorkspaceWindowController()
         controller.onClose = { [weak self] closed in
             self?.windows.removeAll { $0 === closed }
+        }
+        // Opening a folder gets its own window, unless this one is still the
+        // empty welcome screen (then filling it in place is what you'd expect).
+        controller.onOpenFolderRequested = { [weak self, weak controller] url in
+            guard let self else { return }
+            if let controller, !controller.hasProject {
+                controller.openProject(url)
+            } else {
+                self.makeWindow().openProject(url)
+            }
         }
         windows.append(controller)
         controller.showWindow(nil)
@@ -81,7 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.async {
             // No auto file-picker: with no arguments the window shows the
             // welcome screen (recent projects + an Open Folder button).
-            if let preset, !preset.isEmpty {
+            // Skip if openFiles already gave this window a project.
+            if let preset, !preset.isEmpty, !controller.hasProject {
                 controller.openProject(URL(fileURLWithPath: preset))
             }
             for f in fileArgs { controller.editor.open(url: URL(fileURLWithPath: f)) }
@@ -97,10 +151,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if let i = args.firstIndex(of: "--search"), i + 1 < args.count {
                 controller.sidebar.showSearch()
-                controller.sidebar.search.performSearch(args[i + 1])
+                controller.sidebar.performSearch(args[i + 1])
             }
             if let i = args.firstIndex(of: "--find"), i + 1 < args.count {
                 controller.editor.showFindBar(seed: args[i + 1])
+            }
+            // `--history N`: open the History tab and expand the Nth commit.
+            if let i = args.firstIndex(of: "--history"), i + 1 < args.count,
+                let n = Int(args[i + 1]) {
+                controller.sidebar.showGit()
+                controller.sidebar.showHistory()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    controller.sidebar.expandCommit(at: n)
+                    // `--history-file M` also opens that file's diff.
+                    if let j = args.firstIndex(of: "--history-file"), j + 1 < args.count,
+                        let m = Int(args[j + 1]) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            controller.sidebar.openCommitFile(commitIndex: n, fileIndex: m)
+                        }
+                    }
+                }
+            }
+            // `--diff <relative-path>`: show that file's git diff (scripting).
+            if let i = args.firstIndex(of: "--diff"), i + 1 < args.count,
+               let dir = controller.projectURL {
+                let path = args[i + 1]
+                if let entry = GitService.status(in: dir).entries.first(where: { $0.path == path }) {
+                    controller.sidebar.showGit()
+                    controller.showDiff(for: entry, in: dir)
+                }
             }
             // `--windows N` opens N extra windows (scripting / screenshots).
             if let i = args.firstIndex(of: "--windows"), i + 1 < args.count,
@@ -172,6 +251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.toggleSidebar(_:)), keyEquivalent: "b")
         viewMenu.addItem(withTitle: "Split Editor",
                          action: #selector(WorkspaceWindowController.splitEditor(_:)), keyEquivalent: "\\")
+        viewMenu.addItem(withTitle: "Markdown Preview",
+                         action: #selector(WorkspaceWindowController.toggleMarkdownPreview(_:)),
+                         keyEquivalent: "p").keyEquivalentModifierMask = [.command, .shift]
         viewMenuItem.submenu = viewMenu
 
         let windowMenuItem = NSMenuItem()

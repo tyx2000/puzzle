@@ -47,8 +47,11 @@ enum DiffHighlighter {
         return .context
     }
 
-    /// Paint a whole diff buffer.
-    static func apply(to storage: NSTextStorage) {
+    /// Paint a whole diff buffer, returning the full-width line bands the text
+    /// view should draw (see `PuzzleTextView.diffBands`).
+    @discardableResult
+    static func apply(to storage: NSTextStorage) -> [(range: NSRange, color: NSColor)] {
+        var bands: [(range: NSRange, color: NSColor)] = []
         let text = storage.string as NSString
         let full = NSRange(location: 0, length: text.length)
         storage.beginEditing()
@@ -63,8 +66,9 @@ enum DiffHighlighter {
 
             storage.addAttribute(.foregroundColor, value: kind.foreground, range: lineRange)
             if let bg = kind.background {
-                // Cover the whole line so the change reads as a block.
-                storage.addAttribute(.backgroundColor, value: bg, range: lineRange)
+                // Recorded, not applied as an attribute — the text view paints
+                // these full-width so every changed line reads as a solid block.
+                bands.append((lineRange, bg))
             }
             if kind == .hunkHeader || kind == .fileHeader {
                 let bold = NSFontManager.shared.convert(Theme.editorFont(),
@@ -73,6 +77,7 @@ enum DiffHighlighter {
             }
         }
         storage.endEditing()
+        return bands
     }
 
     /// Counts for the tab subtitle / status line.

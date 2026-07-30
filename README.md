@@ -16,20 +16,20 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   `DocumentStore`, so the same file open in both panes edits one buffer (Zed
   behavior). Toggling again collapses back to one pane.
 - **Tree ↔ tab sync** — the active tab's file gets a persistent background row in
-  the tree; the tree also shows indent guides and git-dirty coloring.
+  the tree; the tree also shows git-dirty coloring.
 - **No status bar** — four evenly-spaced buttons (project · search · git ·
   settings) live in the sidebar's 40pt bottom action bar, whose width is the
   panel's width and stays fixed when switching panels. The active button has a
   white background; tapping the active one collapses the panel.
-- **Pill tabs** — floating rounded tabs that wrap to more rows when they don't
-  fit; the active tab is a plain white pill with no border, with a file-type icon.
+- **File tabs** — flat 36-point rows that wrap when needed; active tabs use the
+  same edge-to-edge background rule as the panel action buttons.
 - **Search panel** — results grouped per file (name + folder) with line numbers
   and the match highlighted; click a file to open it, a line to jump to it.
-- **Git panel** — Changes / History, Tracked & Untracked sections with status
-  codes, per-file stage checkboxes, Stage All, branch, commit message + commit.
+- **Git panel** — flat Changes / History tabs, automatically staged changed
+  files with status codes, branch, full-width commit message editor + commit.
 - **Settings** — the gear opens `~/.config/puzzle/settings.json`. Editor font:
   `buffer_font_family`, `buffer_font_size`, `buffer_font_weight`,
-  `buffer_line_height`, `tab_size`, `show_wrap_guides`, `wrap_column`. Panel/UI
+  `buffer_line_height`, `tab_size`. Panel/UI
   font: `ui_font_family`, `ui_font_size`, `ui_font_weight` (`ui_font_size` scales
   the whole tree/tab/panel type hierarchy). Saving re-applies live; `//` comments
   are allowed.
@@ -64,6 +64,10 @@ open build/Puzzle.app --args /path/to/repo a.ts --split   # start split
 Ad-hoc signed (not notarized). If Gatekeeper blocks it, right-click → Open, or
 `xattr -dr com.apple.quarantine build/Puzzle.app`.
 
+On first launch, Puzzle automatically installs or refreshes the bundled `pz`
+command in the first writable directory on your login shell's `PATH`. It never
+overwrites an unrelated command with the same name.
+
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
 ⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘\ split editor · ⌘G git
@@ -89,8 +93,6 @@ with every property documented inline. Keys and defaults:
 | `buffer_font_weight` | `400` | code weight; 600+ renders bold |
 | `buffer_line_height` | `1.8` | line height as a multiple of natural height (1.0–3.0) |
 | `tab_size` | `4` | tab width in characters (1–16) |
-| `show_wrap_guides` | `false` | draw the vertical wrap rule |
-| `wrap_column` | `80` | column for the wrap rule |
 | `ui_font_family` | `"Monaco"` | font for tree / tabs / panels |
 | `ui_font_size` | `12` | base UI size; scales the whole panel hierarchy (8–32) |
 | `ui_font_weight` | `400` | UI weight; 600+ renders bold |

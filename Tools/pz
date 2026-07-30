@@ -1,0 +1,56 @@
+#!/bin/bash
+# PUZZLE_PZ_LAUNCHER=1
+# pz — open a folder (or file) in Puzzle from the terminal.
+#
+#   pz              open the current directory
+#   pz ~/code/app   open that folder
+#   pz a.swift      open that file
+#   pz . --panel git
+set -euo pipefail
+
+# Search the usual places. Tools/install.sh rewrites DEV_BUILD to the build it
+# installed from, so `pz` keeps working even for a dev build that was never
+# copied into /Applications. (The old version guessed a path relative to the
+# script itself, which is wrong once the script is installed to ~/.local/bin.)
+DEV_BUILD=""
+
+APP=""
+for candidate in "${PUZZLE_APP:-}" \
+                 "/Applications/Puzzle.app" \
+                 "$HOME/Applications/Puzzle.app" \
+                 "$DEV_BUILD"; do
+  if [ -n "$candidate" ] && [ -d "$candidate" ]; then APP="$candidate"; break; fi
+done
+
+if [ -z "$APP" ]; then
+  cat >&2 <<'MSG'
+pz: Puzzle.app not found.
+Looked in: $PUZZLE_APP, /Applications/Puzzle.app, ~/Applications/Puzzle.app
+
+  PUZZLE_APP=/path/to/Puzzle.app pz .      # one-off
+  cp -R /path/to/Puzzle.app /Applications  # install it properly
+MSG
+  exit 1
+fi
+
+# No arguments means "here".
+if [ "$#" -eq 0 ]; then
+  set -- "."
+fi
+
+# Resolve the first path argument to an absolute path; pass the rest through.
+args=()
+resolved_first=false
+for a in "$@"; do
+  if [ "$resolved_first" = false ] && [ -e "$a" ]; then
+    args+=("$(cd "$(dirname "$a")" && pwd)/$(basename "$a")")
+    resolved_first=true
+  else
+    args+=("$a")
+  fi
+done
+
+# Pass paths as documents (NOT --args) so a RUNNING Puzzle handles them and
+# opens a new window in the same process. `open -n` would fork a whole second
+# copy of the app for every invocation, multiplying memory use.
+exec open -a "$APP" "${args[@]}"

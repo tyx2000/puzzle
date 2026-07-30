@@ -8,12 +8,14 @@ final class RootViewController: NSViewController {
     let editor: EditorViewController
 
     /// Panel width is preserved across panel switches / collapses.
-    private let minimumSidebarWidth: CGFloat = 180
-    private var lastSidebarWidth: CGFloat = 260
+    private let minimumSidebarWidth: CGFloat = 150
+    private var lastSidebarWidth: CGFloat = 280
     /// Owns the panel width so switching panels can never change it. Dragging the
     /// divider updates its constant, so the divider still works.
     private var sidebarWidthConstraint: NSLayoutConstraint!
     private var sidebarItem: NSSplitViewItem!
+    private let dividerHandle = SplitDividerHandleView()
+    private var dividerDragStartWidth: CGFloat = 280
 
     init(sidebar: SidebarViewController, editor: EditorViewController) {
         self.sidebar = sidebar
@@ -28,8 +30,12 @@ final class RootViewController: NSViewController {
 
         sidebarItem = NSSplitViewItem(viewController: sidebar)
         sidebarItem.minimumThickness = minimumSidebarWidth
-        sidebarItem.maximumThickness = 520
-        sidebarItem.canCollapse = true
+        // Upper bound is 80% of the window (applied live in onDividerDrag);
+        // this static cap is just a sane ceiling before the window exists.
+        sidebarItem.maximumThickness = 2000
+        // The panel is always visible — clicking the active action button (or
+        // ⌘B) must not hide it.
+        sidebarItem.canCollapse = false
         // The panel holds its width; the editor absorbs window resizing. With
         // `.defaultLow` the panel is the pane that yields, so it snapped back to
         // its content minimum and could not be widened.
@@ -47,20 +53,31 @@ final class RootViewController: NSViewController {
         sidebarWidthConstraint.isActive = true
 
         split.onDividerDrag = { [weak self] proposed in
-            guard let self else { return }
-            let width = min(max(proposed, self.minimumSidebarWidth), 520)
-            self.sidebarWidthConstraint.constant = width
-            self.lastSidebarWidth = width
+            self?.resizeSidebar(to: proposed)
         }
 
         let splitView = split.view
         splitView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(splitView)
+        dividerHandle.translatesAutoresizingMaskIntoConstraints = false
+        dividerHandle.onDragBegan = { [weak self] in
+            guard let self else { return }
+            self.dividerDragStartWidth = self.lastSidebarWidth
+        }
+        dividerHandle.onDrag = { [weak self] deltaX in
+            guard let self else { return }
+            self.resizeSidebar(to: self.dividerDragStartWidth + deltaX)
+        }
+        root.addSubview(dividerHandle, positioned: .above, relativeTo: splitView)
         NSLayoutConstraint.activate([
             splitView.topAnchor.constraint(equalTo: root.topAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            dividerHandle.centerXAnchor.constraint(equalTo: sidebar.view.trailingAnchor),
+            dividerHandle.topAnchor.constraint(equalTo: root.topAnchor),
+            dividerHandle.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            dividerHandle.widthAnchor.constraint(equalToConstant: SplitDividerHandleView.hitWidth),
         ])
         self.view = root
 
@@ -77,26 +94,22 @@ final class RootViewController: NSViewController {
         sidebarWidthConstraint.constant = target
     }
 
-    var isSidebarCollapsed: Bool { sidebarItem.isCollapsed }
-
-    /// Collapse / expand the left panel. Uses a direct assignment — the
-    /// `animator()` proxy did not reliably toggle the item.
-    func toggleSidebar() {
-        if sidebarItem.isCollapsed {
-            let target = lastSidebarWidth
-            sidebarItem.isCollapsed = false
-            applyWidth(target)
-        } else {
-            // `lastSidebarWidth` already tracks the constraint (updated on drag),
-            // so don't read the frame here — mid-collapse it reports the minimum.
-            sidebarItem.isCollapsed = true
-        }
+    private func resizeSidebar(to proposedWidth: CGFloat) {
+        // Never let the panel take more than 80% of the window.
+        let limit = max(minimumSidebarWidth, (view.bounds.width * 0.8).rounded())
+        let width = min(max(proposedWidth, minimumSidebarWidth), limit)
+        sidebarWidthConstraint.constant = width
+        lastSidebarWidth = width
     }
 
+    var isSidebarCollapsed: Bool { sidebarItem.isCollapsed }
+
+    /// The panel no longer collapses; this just guarantees it is visible at its
+    /// remembered width (kept so existing callers/menu items stay valid).
+    func toggleSidebar() { showSidebar() }
+
     func showSidebar() {
-        guard sidebarItem.isCollapsed else { return }
-        let target = lastSidebarWidth
-        sidebarItem.isCollapsed = false
-        applyWidth(target)
+        if sidebarItem.isCollapsed { sidebarItem.isCollapsed = false }
+        applyWidth(max(lastSidebarWidth, minimumSidebarWidth))
     }
 }

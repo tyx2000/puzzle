@@ -36,7 +36,6 @@ enum Theme {
     static let inactiveTab      = dyn(0xefefef, 0x21252b)
     static let hover            = dyn(0xe0e0e1, 0x2f343e)
     static let activeRow        = dyn(0xdadadb, 0x2f343e)  // active file in the tree
-    static let wrapGuide        = dyn(0xe8e8e9, 0x2f343e)
     static let searchMatch      = dyn(0xc5d5f5, 0x3a4a63)  // matched text in search results
 
     // Text
@@ -45,8 +44,6 @@ enum Theme {
     static let gutter       = dyn(0xb6b6b8, 0x4b5263)
     static let gutterActive = dyn(0x383a42, 0xc8ccd4)
     static let cursor       = dyn(0x526fff, 0x528bff)
-    // File-tree indent guides — deliberately visible, not hairline-faint.
-    static let indentGuide  = dyn(0xc9c9cc, 0x3f4653)
     static let folderClosed = dyn(0x9a9aa0, 0x6b7280)  // collapsed folder icon
 
     // Search / find input
@@ -73,6 +70,10 @@ enum Theme {
     static let cyan    = dyn(0x0184bc, 0x56b6c2)  // escapes, operators, builtins
     static let comment = dyn(0xa0a1a7, 0x5c6370)  // comments
     static let punct   = dyn(0x9ca0a4, 0x8b929e)  // punctuation
+
+    /// macOS window corner radius on this OS — action buttons and file tabs use
+    /// the same value so their corners read as part of the same window.
+    static let cornerRadius: CGFloat = 10
 
     // Font + metrics come from settings.json (defaults match this Mac's Zed:
     // Monaco 12, line height 1.8).
@@ -129,6 +130,7 @@ enum Theme {
     private static var cachedParagraph: NSParagraphStyle?
     private static var cachedCharWidth: CGFloat?
     private static var cachedAttributes: [NSColor: [NSAttributedString.Key: Any]] = [:]
+    private static var cachedSymbols: [String: NSImage] = [:]
 
     /// Called from Settings.reload() so cached metrics don't go stale.
     static func invalidateCaches() {
@@ -136,6 +138,9 @@ enum Theme {
         cachedParagraph = nil
         cachedCharWidth = nil
         cachedAttributes.removeAll()
+        // Symbols are appearance-independent templates, but clearing here also
+        // bounds the cache if future settings add configurable symbol sizes.
+        cachedSymbols.removeAll()
     }
 
     static func paragraphStyle() -> NSParagraphStyle {
@@ -160,6 +165,26 @@ enum Theme {
         ]
         cachedAttributes[color] = attrs
         return attrs
+    }
+
+    /// SF Symbols are immutable template images. Creating them repeatedly in
+    /// table-cell configuration builds CoreSVG representations and internal
+    /// SwiftUI state, so share one image for every distinct configuration.
+    static func symbol(_ name: String, accessibilityDescription: String? = nil,
+                       pointSize: CGFloat? = nil,
+                       weight: NSFont.Weight = .regular) -> NSImage? {
+        let key = "\(name)|\(pointSize ?? 0)|\(weight.rawValue)|\(accessibilityDescription ?? "")"
+        if let image = cachedSymbols[key] { return image }
+        guard var image = NSImage(systemSymbolName: name,
+                                  accessibilityDescription: accessibilityDescription) else {
+            return nil
+        }
+        if let pointSize {
+            image = image.withSymbolConfiguration(
+                .init(pointSize: pointSize, weight: weight)) ?? image
+        }
+        cachedSymbols[key] = image
+        return image
     }
 }
 

@@ -7,6 +7,10 @@ final class EditorViewController: NSViewController {
     var onActiveDocumentChanged: ((URL?) -> Void)?
     /// Welcome-screen actions, forwarded to the window controller.
     var onOpenFolder: (() -> Void)?
+    /// True once this window has a project. The welcome screen invites you to
+    /// open a folder, which is misleading once one is already open — then the
+    /// editor area should simply be empty until a file is picked.
+    var hasProject = false { didSet { updatePlaceholder() } }
     var onOpenRecent: ((URL) -> Void)?
 
     private var panes: [EditorPaneViewController] = []
@@ -55,11 +59,26 @@ final class EditorViewController: NSViewController {
         addPane()  // first pane
     }
 
+    /// Read-only access for the test harnesses.
+    var activePaneForTesting: EditorPaneViewController? { activePane }
+    var panesForTesting: [EditorPaneViewController] { panes }
+
     // MARK: - Panes
+
+    /// Project root, forwarded to panes so inline blame knows which repo to ask.
+    var repositoryRoot: URL? {
+        didSet { panes.forEach { $0.repositoryRoot = repositoryRoot } }
+    }
+
+    /// Blame is keyed by file and line; a commit or checkout invalidates it.
+    func invalidateBlame(for url: URL? = nil) {
+        panes.forEach { $0.invalidateBlame(for: url) }
+    }
 
     @discardableResult
     private func addPane() -> EditorPaneViewController {
         let pane = EditorPaneViewController()
+        pane.repositoryRoot = repositoryRoot
         pane.onRequestSplit = { [weak self] in self?.splitEditor() }
         pane.onBecameActive = { [weak self] p in self?.setActivePane(p) }
         pane.onDocumentSaved = { [weak self] url in self?.onDocumentSaved?(url) }
@@ -72,6 +91,15 @@ final class EditorViewController: NSViewController {
             self.updatePlaceholder()
         }
         pane.onEmptied = { [weak self] p in self?.closePane(p) }
+        pane.onTabOpened = { [weak pane] url in
+            guard let pane else { return }
+            DocumentStore.shared.registerOpen(url, owner: pane)
+        }
+        pane.onTabClosed = { [weak pane] url in
+            guard let pane else { return }
+            DocumentStore.shared.unregisterOpen(url, owner: pane)
+        }
+        pane.onPreviewVisibilityChanged = { [weak self] in self?.releasePreviewParsersIfIdle() }
 
         addChild(pane)
         panes.append(pane)
@@ -81,11 +109,26 @@ final class EditorViewController: NSViewController {
         return pane
     }
 
+    /// Markdown parsers are per-process; free them once no pane shows a preview.
+    private func releasePreviewParsersIfIdle() {
+        guard !panes.contains(where: { $0.isPreviewVisible }) else { return }
+        MarkdownRenderer.releaseParsers()
+    }
+
+    /// Detach every pane's layout manager — called when the window closes.
+    func detachAllPanes() {
+        panes.forEach { $0.prepareForClose() }
+        MarkdownRenderer.releaseParsers()
+    }
+
     private func closePane(_ pane: EditorPaneViewController) {
         // Keep at least one pane alive.
         guard panes.count > 1, let index = panes.firstIndex(of: pane) else {
             updatePlaceholder(); return
         }
+        // Before the pane goes away, or its layout manager stays attached to
+        // the document and pins it.
+        pane.prepareForClose()
         pane.view.removeFromSuperview()
         pane.removeFromParent()
         panes.remove(at: index)
@@ -102,7 +145,7 @@ final class EditorViewController: NSViewController {
 
     private func updatePlaceholder() {
         let hasOpenFiles = panes.contains { !$0.openURLs.isEmpty }
-        welcome.isHidden = hasOpenFiles
+        welcome.isHidden = hasOpenFiles || hasProject
         // The split (and its blank text view) must not cover the welcome screen.
         editorSplit.isHidden = !hasOpenFiles
     }
@@ -130,6 +173,8 @@ final class EditorViewController: NSViewController {
         updatePlaceholder()
     }
     func save() { activePane?.save() }
+
+    func toggleMarkdownPreview() { activePane?.toggleMarkdownPreview() }
 
     /// Show the in-file find bar in the focused pane, optionally pre-filled.
     func showFindBar(seed: String? = nil) {

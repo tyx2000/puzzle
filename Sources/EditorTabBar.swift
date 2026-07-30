@@ -1,15 +1,30 @@
 import AppKit
 
-/// Zed-style floating pill tabs. Tabs wrap onto extra rows when they don't fit;
-/// the active tab is a plain white pill with no border. The split button is
-/// pinned at the top-right.
+/// Flat file tabs. Tabs wrap onto extra 36-point rows when they do not fit; the
+/// active tab uses the same edge-to-edge background rule as the action bar.
 final class EditorTabBar: NSView {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
+    var onCloseOthers: ((Int) -> Void)?
+    var onCloseRight: ((Int) -> Void)?
     var onSplit: (() -> Void)?
+    var onTogglePreview: (() -> Void)?
 
     var splitActive = false {
         didSet { splitButton.contentTintColor = splitActive ? Theme.cursor : Theme.dimText }
+    }
+
+    /// The preview button only makes sense for markdown, so it appears per-file.
+    var showsPreviewToggle = false {
+        didSet {
+            guard showsPreviewToggle != oldValue else { return }
+            previewButton.isHidden = !showsPreviewToggle
+            needsLayout = true
+            layoutPills()
+        }
+    }
+    var previewActive = false {
+        didSet { previewButton.contentTintColor = previewActive ? Theme.cursor : Theme.dimText }
     }
     var paneActive = true { didSet { needsDisplay = true } }
 
@@ -20,11 +35,16 @@ final class EditorTabBar: NSView {
 
     private var pills: [TabPillView] = []
     private let splitButton = NSButton()
-    private let rowHeight: CGFloat = 28
-    private let gap: CGFloat = 6
-    private let padding: CGFloat = 8
-    private let splitAreaWidth: CGFloat = 34
-    private var contentHeight: CGFloat = 44
+    private let previewButton = NSButton()
+    /// Shared with the sidebar's titlebar clearance so both surfaces start on
+    /// the same horizontal rhythm.
+    static let rowHeight: CGFloat = 36
+    private let gap: CGFloat = 0
+    private let padding: CGFloat = 0
+    /// Space reserved on the right for the action buttons — grows when the
+    /// markdown preview toggle is showing, so pills never slide underneath it.
+    private var splitAreaWidth: CGFloat { showsPreviewToggle ? 60 : 34 }
+    private var contentHeight: CGFloat = 36
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
@@ -46,9 +66,30 @@ final class EditorTabBar: NSView {
         addSubview(splitButton)
         NSLayoutConstraint.activate([
             splitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            splitButton.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            splitButton.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             splitButton.widthAnchor.constraint(equalToConstant: 22),
             splitButton.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
+        previewButton.image = NSImage(systemSymbolName: "eye",
+                                      accessibilityDescription: "Toggle markdown preview")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        previewButton.isBordered = false
+        previewButton.bezelStyle = .regularSquare
+        previewButton.imageScaling = .scaleProportionallyDown
+        previewButton.contentTintColor = Theme.dimText
+        previewButton.toolTip = "Toggle markdown preview"
+        previewButton.target = self
+        previewButton.action = #selector(previewAction)
+        previewButton.isHidden = true
+        previewButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(previewButton)
+        NSLayoutConstraint.activate([
+            previewButton.trailingAnchor.constraint(equalTo: splitButton.leadingAnchor,
+                                                    constant: -6),
+            previewButton.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            previewButton.widthAnchor.constraint(equalToConstant: 22),
+            previewButton.heightAnchor.constraint(equalToConstant: 20),
         ])
     }
 
@@ -57,8 +98,6 @@ final class EditorTabBar: NSView {
     override func draw(_ dirtyRect: NSRect) {
         Theme.barBackground.setFill()
         bounds.fill()
-        Theme.border.setFill()
-        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -67,14 +106,24 @@ final class EditorTabBar: NSView {
     }
 
     func reload(tabs: [TabInfo], active: Int) {
-        pills.forEach { $0.removeFromSuperview() }
-        pills = tabs.enumerated().map { index, tab in
+        while pills.count > tabs.count {
+            pills.removeLast().removeFromSuperview()
+        }
+        while pills.count < tabs.count {
             let pill = TabPillView()
+            addSubview(pill)
+            pills.append(pill)
+        }
+        for (index, tab) in tabs.enumerated() {
+            let pill = pills[index]
             pill.configure(title: tab.title, modified: tab.modified, active: index == active)
             pill.onSelect = { [weak self] in self?.onSelect?(index) }
             pill.onClose = { [weak self] in self?.onClose?(index) }
-            addSubview(pill)
-            return pill
+            pill.onCloseOthers = { [weak self] in self?.onCloseOthers?(index) }
+            pill.onCloseRight = { [weak self] in self?.onCloseRight?(index) }
+            // Nothing to close: only tab open / already the last tab.
+            pill.canCloseOthers = tabs.count > 1
+            pill.canCloseRight = index < tabs.count - 1
         }
         needsLayout = true
         layoutPills()
@@ -94,13 +143,13 @@ final class EditorTabBar: NSView {
             let width = min(pill.preferredWidth, available - padding)
             if x + width > available, x > padding {
                 x = padding
-                y += rowHeight + gap
+                y += Self.rowHeight + gap
                 rows += 1
             }
-            pill.frame = NSRect(x: x, y: y, width: width, height: rowHeight)
+            pill.frame = NSRect(x: x, y: y, width: width, height: Self.rowHeight)
             x += width + gap
         }
-        let height = padding * 2 + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
+        let height = padding * 2 + CGFloat(rows) * Self.rowHeight + CGFloat(rows - 1) * gap
         if abs(height - contentHeight) > 0.5 {
             contentHeight = height
             invalidateIntrinsicContentSize()
@@ -108,16 +157,23 @@ final class EditorTabBar: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: max(44, contentHeight))
+        NSSize(width: NSView.noIntrinsicMetric, height: max(36, contentHeight))
     }
 
     @objc private func splitAction() { onSplit?() }
+    @objc private func previewAction() { onTogglePreview?() }
 }
 
-/// One floating pill tab. Active = white pill, no border.
+/// One flat tab. Active = full-height background, no border or outer gap.
 final class TabPillView: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    var onCloseOthers: (() -> Void)?
+    var onCloseRight: (() -> Void)?
+
+    /// Drive the context menu's enabled state — set by the tab bar on reload.
+    var canCloseOthers = false
+    var canCloseRight = false
 
     private let label = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
@@ -130,9 +186,8 @@ final class TabPillView: NSView {
         label.lineBreakMode = .byTruncatingTail
         closeButton.isBordered = false
         closeButton.bezelStyle = .regularSquare
-        closeButton.image = NSImage(systemSymbolName: "xmark",
-                                    accessibilityDescription: "Close tab")?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
+        closeButton.image = Theme.symbol("xmark", accessibilityDescription: "Close tab",
+                                         pointSize: 8, weight: .semibold)
         closeButton.imageScaling = .scaleProportionallyDown
         closeButton.target = self
         closeButton.action = #selector(closeAction)
@@ -145,8 +200,10 @@ final class TabPillView: NSView {
         self.active = active
         label.stringValue = modified ? "\(title) ●" : title
         label.font = Theme.uiFont(11.5)
-        label.textColor = active ? Theme.foreground : Theme.dimText
-        closeButton.contentTintColor = active ? Theme.foreground : Theme.dimText
+        // Selection is communicated solely by the active tab surface. Keeping
+        // the foreground stable avoids making inactive file names look disabled.
+        label.textColor = Theme.foreground
+        closeButton.contentTintColor = Theme.foreground
         needsDisplay = true
         needsLayout = true
     }
@@ -165,11 +222,9 @@ final class TabPillView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Floating pill: white when active, transparent otherwise. No border.
         guard active else { return }
-        let path = NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6)
         Theme.activeTab.setFill()
-        path.fill()
+        bounds.fill()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -183,5 +238,27 @@ final class TabPillView: NSView {
         onSelect?()
     }
 
+    // Built per right-click rather than assigned to `menu` once, so the
+    // enabled state always reflects the tab list as it is right now.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let close = NSMenuItem(title: "Close",
+                               action: #selector(closeAction), keyEquivalent: "")
+        let others = NSMenuItem(title: "Close Others",
+                                action: #selector(closeOthersAction), keyEquivalent: "")
+        let right = NSMenuItem(title: "Close Tabs to the Right",
+                               action: #selector(closeRightAction), keyEquivalent: "")
+        others.isEnabled = canCloseOthers
+        right.isEnabled = canCloseRight
+
+        let menu = NSMenu()
+        // Without this AppKit re-derives enablement and ignores isEnabled above.
+        menu.autoenablesItems = false
+        for item in [close, others, right] { item.target = self }
+        menu.items = [close, .separator(), others, right]
+        return menu
+    }
+
     @objc private func closeAction() { onClose?() }
+    @objc private func closeOthersAction() { onCloseOthers?() }
+    @objc private func closeRightAction() { onCloseRight?() }
 }

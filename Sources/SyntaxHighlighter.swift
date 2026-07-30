@@ -37,8 +37,23 @@ final class SyntaxHighlighter {
         let name: String
         let display: String
         let extensions: Set<String>
+        /// Whole filenames, lowercased. Needed for files that have no usable
+        /// extension — `Dockerfile`, `.gitignore`, `Cargo.lock` — where
+        /// `pathExtension` is empty or means nothing.
+        let filenames: Set<String>
         let queryFiles: [String]
         let makeLanguage: () -> OpaquePointer?
+
+        init(name: String, display: String, extensions: Set<String>,
+             filenames: Set<String> = [], queryFiles: [String],
+             makeLanguage: @escaping () -> OpaquePointer?) {
+            self.name = name
+            self.display = display
+            self.extensions = extensions
+            self.filenames = filenames
+            self.queryFiles = queryFiles
+            self.makeLanguage = makeLanguage
+        }
     }
 
     static let specs: [LanguageSpec] = [
@@ -67,6 +82,49 @@ final class SyntaxHighlighter {
         LanguageSpec(name: "css", display: "CSS",
                      extensions: ["css", "scss"],
                      queryFiles: ["css.scm"], makeLanguage: { tree_sitter_css() }),
+        LanguageSpec(name: "python", display: "Python",
+                     extensions: ["py", "pyi", "pyw"],
+                     queryFiles: ["python.scm"], makeLanguage: { tree_sitter_python() }),
+        LanguageSpec(name: "rust", display: "Rust",
+                     extensions: ["rs"],
+                     queryFiles: ["rust.scm"], makeLanguage: { tree_sitter_rust() }),
+        LanguageSpec(name: "go", display: "Go",
+                     extensions: ["go"],
+                     queryFiles: ["go.scm"], makeLanguage: { tree_sitter_go() }),
+        LanguageSpec(name: "c", display: "C",
+                     extensions: ["c", "h"],
+                     queryFiles: ["c.scm"], makeLanguage: { tree_sitter_c() }),
+        // Several lockfiles are TOML with a name that hides it.
+        LanguageSpec(name: "toml", display: "TOML",
+                     extensions: ["toml"],
+                     filenames: ["cargo.lock", "poetry.lock", "uv.lock", "gopkg.lock"],
+                     queryFiles: ["toml.scm"], makeLanguage: { tree_sitter_toml() }),
+        LanguageSpec(name: "xml", display: "XML",
+                     extensions: ["xml", "xsd", "xsl", "xslt", "svg", "plist",
+                                  "storyboard", "xib", "csproj", "resx"],
+                     queryFiles: ["xml.scm"], makeLanguage: { tree_sitter_xml() }),
+        LanguageSpec(name: "sql", display: "SQL",
+                     extensions: ["sql", "psql", "mysql", "ddl"],
+                     queryFiles: ["sql.scm"], makeLanguage: { tree_sitter_sql() }),
+        LanguageSpec(name: "dockerfile", display: "Dockerfile",
+                     extensions: ["dockerfile"],
+                     filenames: ["dockerfile", "containerfile"],
+                     queryFiles: ["dockerfile.scm"], makeLanguage: { tree_sitter_dockerfile() }),
+        // Every *ignore file shares gitignore's syntax.
+        LanguageSpec(name: "gitignore", display: "Ignore",
+                     extensions: ["gitignore", "dockerignore", "npmignore",
+                                  "eslintignore", "prettierignore", "rgignore"],
+                     filenames: [".gitignore", ".dockerignore", ".npmignore",
+                                 ".eslintignore", ".prettierignore", ".rgignore",
+                                 ".gitattributes", ".ignore", "exclude"],
+                     queryFiles: ["gitignore.scm"], makeLanguage: { tree_sitter_gitignore() }),
+    ]
+
+    /// Lockfiles that are really JSON / YAML under another name.
+    private static let filenameAliases: [String: String] = [
+        "composer.lock": "json", "deno.lock": "json", "flake.lock": "json",
+        "pipfile.lock": "json", "package-lock.json": "json",
+        "yarn.lock": "yaml", "pnpm-lock.yaml": "yaml",
     ]
 
     /// Materialised definitions, built on demand and cached by name.
@@ -76,6 +134,24 @@ final class SyntaxHighlighter {
     static func spec(forExtension ext: String) -> LanguageSpec? {
         let e = ext.lowercased()
         return specs.first { $0.extensions.contains(e) }
+    }
+
+    /// The spec for a file, by name first and extension second.
+    ///
+    /// Extension alone is not enough: `Dockerfile` has none, `.gitignore` is
+    /// all extension and no stem, and `Cargo.lock` shares `.lock` with files
+    /// that are actually JSON.
+    static func spec(for url: URL) -> LanguageSpec? {
+        let name = url.lastPathComponent.lowercased()
+        if let language = filenameAliases[name] {
+            return specs.first { $0.name == language }
+        }
+        if let hit = specs.first(where: { $0.filenames.contains(name) }) { return hit }
+        // Dockerfile.dev, Dockerfile.prod — the suffix is a variant, not a type.
+        if name.hasPrefix("dockerfile.") || name.hasSuffix(".dockerfile") {
+            return specs.first { $0.name == "dockerfile" }
+        }
+        return spec(forExtension: url.pathExtension)
     }
 
     /// Load (and cache) the grammar + queries for a spec. Only call this when a
@@ -111,6 +187,14 @@ final class SyntaxHighlighter {
     private let parser: OpaquePointer
     private let definition: LanguageDefinition
     private var queries: [OpaquePointer] = []
+    /// Colour and specificity per capture id, per query.
+    ///
+    /// These used to be derived inside the capture loop, which meant building a
+    /// Swift String from the capture name — and counting its dots — once for
+    /// *every capture in the file*. Capture ids are fixed when the query is
+    /// compiled, so both are resolved here, once.
+    private var captureColors: [[NSColor?]] = []
+    private var captureSpecificity: [[Int]] = []
 
     init?(definition: LanguageDefinition) {
         guard let p = ts_parser_new() else { return nil }
@@ -126,6 +210,21 @@ final class SyntaxHighlighter {
                 if let q = ts_query_new(definition.language, cstr,
                                         UInt32(strlen(cstr)), &errOffset, &errType) {
                     queries.append(q)
+                    var colors: [NSColor?] = []
+                    var specificity: [Int] = []
+                    for id in 0..<ts_query_capture_count(q) {
+                        var len: UInt32 = 0
+                        guard let namePtr = ts_query_capture_name_for_id(q, id, &len) else {
+                            colors.append(nil); specificity.append(0); continue
+                        }
+                        let name = String(decoding: UnsafeBufferPointer(
+                            start: UnsafeRawPointer(namePtr).assumingMemoryBound(to: UInt8.self),
+                            count: Int(len)), as: UTF8.self)
+                        colors.append(Self.color(for: name))
+                        specificity.append(name.reduce(0) { $1 == "." ? $0 + 1 : $0 })
+                    }
+                    captureColors.append(colors)
+                    captureSpecificity.append(specificity)
                 } else {
                     FileHandle.standardError.write(Data(
                         "puzzle: query compile failed for \(definition.name) at \(errOffset) (err \(errType.rawValue))\n".utf8))
@@ -146,17 +245,31 @@ final class SyntaxHighlighter {
     /// Parse `text` and paint colors onto `storage` over `fullRange`.
     /// Base font/foreground/paragraph are assumed already applied by the caller.
     func highlight(text: String, storage: NSTextStorage, fullRange: NSRange) {
-        let bytes = Array(text.utf8)
-        guard !bytes.isEmpty else { return }
-        let parsed: OpaquePointer? = text.withCString { cstr in
-            ts_parser_parse_string(parser, nil, cstr, UInt32(bytes.count))
+        let byteCount = text.utf8.count
+        guard byteCount > 0 else { return }
+        // One pass over the text, not two: `Array(text.utf8)` copied the whole
+        // file and `withCString` copied it again, so a 500 KB file allocated a
+        // megabyte of transient buffers on every highlight. The C string that
+        // tree-sitter needs is also the byte buffer the predicates need.
+        text.withCString { cstr in
+            cstr.withMemoryRebound(to: UInt8.self, capacity: byteCount) { raw in
+                let bytes = UnsafeBufferPointer(start: raw, count: byteCount)
+                highlight(text: text, bytes: bytes, cstr: cstr,
+                          storage: storage, fullRange: fullRange)
+            }
         }
-        guard let tree = parsed else { return }
+    }
+
+    private func highlight(text: String, bytes: UnsafeBufferPointer<UInt8>,
+                           cstr: UnsafePointer<CChar>,
+                           storage: NSTextStorage, fullRange: NSRange) {
+        let byteCount = bytes.count
+        guard let tree = ts_parser_parse_string(parser, nil, cstr, UInt32(byteCount)) else { return }
         defer { ts_tree_delete(tree) }
         let rootNode = ts_tree_root_node(tree)
 
         // byte-offset -> UTF-16 offset mapping (identity fast-path for ASCII).
-        let mapper = ByteMapper(text: text, utf8Count: bytes.count)
+        let mapper = ByteMapper(text: text, utf8Count: byteCount)
 
         // Collect spans, then apply so the winning capture ends up on top.
         var spans: [(range: NSRange, color: NSColor, len: Int, spec: Int, rank: Int)] = []
@@ -175,17 +288,14 @@ final class SyntaxHighlighter {
                     let startByte = Int(ts_node_start_byte(node))
                     let endByte = Int(ts_node_end_byte(node))
                     guard endByte > startByte else { continue }
-                    var nameLen: UInt32 = 0
-                    guard let namePtr = ts_query_capture_name_for_id(query, cap.index, &nameLen) else { continue }
-                    let capName = String(decoding: UnsafeBufferPointer(
-                        start: UnsafeRawPointer(namePtr).assumingMemoryBound(to: UInt8.self),
-                        count: Int(nameLen)), as: UTF8.self)
-                    guard let color = Self.color(for: capName) else { continue }
+                    let id = Int(cap.index)
+                    guard id < captureColors[queryIndex].count,
+                          let color = captureColors[queryIndex][id] else { continue }
                     guard let u0 = mapper.utf16(forByte: startByte),
                           let u1 = mapper.utf16(forByte: endByte) else { continue }
                     let r = NSRange(location: u0, length: u1 - u0)
                     if NSMaxRange(r) <= fullRange.length {
-                        let spec = capName.reduce(0) { $1 == "." ? $0 + 1 : $0 }
+                        let spec = captureSpecificity[queryIndex][id]
                         let rank = queryIndex * 100_000 + Int(match.pattern_index)
                         spans.append((r, color, endByte - startByte, spec, rank))
                     }
@@ -209,7 +319,8 @@ final class SyntaxHighlighter {
 
     // MARK: Predicate evaluation (#eq? #match? #any-of? and negations)
 
-    private func predicatesPass(query: OpaquePointer, match: TSQueryMatch, bytes: [UInt8]) -> Bool {
+    private func predicatesPass(query: OpaquePointer, match: TSQueryMatch,
+                                bytes: UnsafeBufferPointer<UInt8>) -> Bool {
         var count: UInt32 = 0
         guard let steps = ts_query_predicates_for_pattern(query, UInt32(match.pattern_index), &count),
               count > 0 else { return true }
@@ -268,7 +379,7 @@ final class SyntaxHighlighter {
             return op == "eq?" ? equal : !equal
         case "match?", "not-match?":
             guard let a = arg(0), let b = arg(1) else { return true }
-            let matched = (try? NSRegularExpression(pattern: b.value))?.firstMatch(
+            let matched = Self.regex(b.value)?.firstMatch(
                 in: a.value, range: NSRange(a.value.startIndex..., in: a.value)) != nil
             return op == "match?" ? matched : !matched
         case "any-of?", "not-any-of?":
@@ -279,6 +390,25 @@ final class SyntaxHighlighter {
         default:
             return true  // unknown predicate: don't filter
         }
+    }
+
+    /// Compiled `#match?` patterns, cached by pattern text.
+    ///
+    /// These were previously rebuilt on *every* predicate evaluation — i.e. per
+    /// matching node, per file. Compiling an ICU regex is expensive and each one
+    /// drags in a RegexPattern/BMPSet/UnicodeSet cluster, so a heap snapshot
+    /// showed ~900 of them live at once. The patterns come from the grammar's
+    /// query file, so the set is small and fixed for the life of the process.
+    private static var regexCache: [String: NSRegularExpression] = [:]
+    private static let regexCacheLock = NSLock()
+
+    private static func regex(_ pattern: String) -> NSRegularExpression? {
+        regexCacheLock.lock()
+        defer { regexCacheLock.unlock() }
+        if let hit = regexCache[pattern] { return hit }
+        guard let made = try? NSRegularExpression(pattern: pattern) else { return nil }
+        regexCache[pattern] = made
+        return made
     }
 
     // MARK: Capture name -> color
