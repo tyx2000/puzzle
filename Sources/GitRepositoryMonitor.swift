@@ -6,13 +6,24 @@ import Foundation
 /// area, while ordinary compiler/build output does not continuously wake the
 /// Git panel.
 final class GitRepositoryMonitor {
+    private static let resolutionQueue = DispatchQueue(
+        label: "app.puzzle.git-monitor-resolution", qos: .utility)
     private var stream: FSEventStreamRef?
     private var pendingDelivery: DispatchWorkItem?
     private var onChange: (() -> Void)?
+    private var stopped = false
+    private(set) var isMonitoring = false
 
     init(directory: URL, onChange: @escaping () -> Void) {
         self.onChange = onChange
-        let paths = Self.metadataDirectories(in: directory).map(\.path)
+        Self.resolutionQueue.async { [weak self] in
+            let paths = Self.metadataDirectories(in: directory).map(\.path)
+            DispatchQueue.main.async { [weak self] in self?.start(paths: paths) }
+        }
+    }
+
+    private func start(paths: [String]) {
+        guard !stopped else { return }
         guard !paths.isEmpty else { return }
 
         var context = FSEventStreamContext(
@@ -40,11 +51,14 @@ final class GitRepositoryMonitor {
             stream = nil
             return
         }
+        isMonitoring = true
     }
 
     deinit { stop() }
 
     func stop() {
+        stopped = true
+        isMonitoring = false
         pendingDelivery?.cancel()
         pendingDelivery = nil
         onChange = nil

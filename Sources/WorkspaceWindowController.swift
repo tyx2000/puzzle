@@ -16,6 +16,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private let gitSummaryQueue = DispatchQueue(
         label: "app.puzzle.workspace-git-summary", qos: .utility)
     private var gitRefreshGeneration = 0
+    private var gitSummaryRefreshInFlight = false
+    private var gitSummaryRefreshAgain = false
+    private var gitSummaryDirectory: URL?
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
@@ -98,7 +101,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.showCommitDiff(commit: commit, file: file, in: directory)
         }
         sidebar.onGitChanged = { [weak self] in
-            self?.refreshGit()
+            self?.refreshGit(requireFollowUp: true)
             // Committing rewrites authorship for the committed lines.
             self?.editor.invalidateBlame()
         }
@@ -108,7 +111,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
             self?.sidebar.refreshGitPanelIfLoaded()
-            self?.refreshGit()
+            self?.refreshGit(requireFollowUp: true)
             // The file changed on disk, so its cached blame is stale.
             self?.editor.invalidateBlame(for: url)
             // Saving settings.json applies the new display config immediately.
@@ -172,7 +175,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func refreshExternalGitState() {
         guard projectURL != nil else { return }
         sidebar.refreshGitPanelIfLoaded()
-        refreshGit()
+        refreshGit(requireFollowUp: true)
         editor.invalidateBlame()
     }
 
@@ -299,21 +302,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             .appendingPathComponent(path)
     }
 
-    func refreshGit() {
+    func refreshGit(requireFollowUp: Bool = false) {
         guard let projectURL else { return }
+        if gitSummaryRefreshInFlight {
+            if gitSummaryDirectory != projectURL || requireFollowUp {
+                gitSummaryRefreshAgain = true
+            }
+            return
+        }
+        gitSummaryRefreshInFlight = true
+        gitSummaryDirectory = projectURL
         gitRefreshGeneration += 1
         let generation = gitRefreshGeneration
         gitSummaryQueue.async { [weak self] in
             let split = GitService.trackedAndUntracked(in: projectURL)
             let status = GitService.status(in: projectURL)
             DispatchQueue.main.async {
-                guard let self,
-                      self.projectURL == projectURL,
-                      self.gitRefreshGeneration == generation else { return }
-                self.sidebar.fileTree.setStatus(modified: split.modified,
-                                                untracked: split.untracked)
-                if status.isRepo {
-                    self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
+                guard let self else { return }
+                self.gitSummaryRefreshInFlight = false
+                self.gitSummaryDirectory = nil
+                if self.projectURL == projectURL,
+                   self.gitRefreshGeneration == generation {
+                    self.sidebar.fileTree.setStatus(modified: split.modified,
+                                                    untracked: split.untracked)
+                    if status.isRepo {
+                        self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
+                    }
+                }
+                if self.gitSummaryRefreshAgain {
+                    self.gitSummaryRefreshAgain = false
+                    self.refreshGit()
                 }
             }
         }

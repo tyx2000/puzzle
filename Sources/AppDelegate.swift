@@ -5,6 +5,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var windows: [WorkspaceWindowController] = []
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var hasCompletedInitialActivation = false
     /// Rebuilt each time the menu opens, so it always reflects current history.
     private let recentMenu = NSMenu(title: "Open Recent")
 
@@ -43,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// background. Refresh on activation as a fallback for coalesced/missed
     /// events and for repositories whose metadata directory was replaced.
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard hasCompletedInitialActivation else {
+            hasCompletedInitialActivation = true
+            return
+        }
         windows.forEach { $0.refreshExternalGitState() }
     }
 

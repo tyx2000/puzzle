@@ -224,6 +224,11 @@ enum RegressionTests {
         let monitor = GitRepositoryMonitor(directory: repository) {
             observedChange = true
         }
+        let monitorDeadline = Date().addingTimeInterval(3)
+        while !monitor.isMonitoring && Date() < monitorDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(monitor.isMonitoring, "Git metadata monitor did not start")
         try Data("external commit".utf8)
             .write(to: repository.appendingPathComponent("external.txt"))
         try expect(GitService.commit("external", in: repository).code == 0,
@@ -240,6 +245,11 @@ enum RegressionTests {
         let pushMonitor = GitRepositoryMonitor(directory: repository) {
             observedPush = true
         }
+        let pushMonitorDeadline = Date().addingTimeInterval(3)
+        while !pushMonitor.isMonitoring && Date() < pushMonitorDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(pushMonitor.isMonitoring, "Git push monitor did not start")
         try expect(GitService.run(["push", "-q", "-u", "origin", "main"],
                                   in: repository).code == 0,
                    "external push fixture failed")

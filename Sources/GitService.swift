@@ -264,8 +264,14 @@ enum GitService {
         // `for-each-ref` uses `%00` for a NUL byte. `%x00` belongs to the
         // pretty-log formatter and is emitted literally here, which previously
         // turned `main` into an invalid name such as `main%x00origin/main`.
-        let refs = run(["for-each-ref", "--format=%(refname:short)%00%(upstream:short)",
-                        "refs/heads"], in: directory)
+        // Read tip metadata in the same `for-each-ref` process. The previous
+        // implementation spawned an additional `git log` for every branch,
+        // making the Branch tab scale linearly with process startup cost.
+        let refs = run([
+            "for-each-ref",
+            "--format=%(refname:short)%00%(upstream:short)%00%(authorname)%00%(authordate:format:%Y-%m-%d %H:%M)%00%(authordate:unix)",
+            "refs/heads",
+        ], in: directory)
         guard refs.code == 0 else { return [] }
 
         var branches: [Branch] = []
@@ -276,15 +282,16 @@ enum GitService {
             guard let rawName = fields.first else { continue }
             let name = String(rawName)
             localNames.insert(name)
-            let upstream = fields.count > 1 ? String(fields[1]) : ""
+            guard fields.count >= 5,
+                  let timestamp = Int64(fields[4]) else { continue }
+            let upstream = String(fields[1])
             if !upstream.isEmpty { representedRemoteRefs.insert(upstream) }
             let upstreamParts = upstream.split(separator: "/", maxSplits: 1).map(String.init)
-            guard let metadata = branchMetadata(for: name, in: directory) else { continue }
             branches.append(Branch(
                 name: name,
-                author: metadata.author,
-                createdAt: metadata.date,
-                createdTimestamp: metadata.timestamp,
+                author: String(fields[2]),
+                createdAt: String(fields[3]),
+                createdTimestamp: timestamp,
                 isCurrent: name == current,
                 isRemote: false,
                 upstreamRemote: upstreamParts.first,
@@ -296,7 +303,7 @@ enum GitService {
         // omitted so the list has one actionable row per logical branch.
         let remoteRefs = run([
             "for-each-ref",
-            "--format=%(refname:short)%00%(symref)",
+            "--format=%(refname:short)%00%(symref)%00%(authorname)%00%(authordate:format:%Y-%m-%d %H:%M)%00%(authordate:unix)",
             "refs/remotes",
         ], in: directory)
         if remoteRefs.code == 0 {
@@ -304,18 +311,19 @@ enum GitService {
                 let fields = record.split(separator: "\0", omittingEmptySubsequences: false)
                 guard let rawName = fields.first else { continue }
                 let name = String(rawName)
-                let symref = fields.count > 1 ? String(fields[1]) : ""
+                guard fields.count >= 5,
+                      let timestamp = Int64(fields[4]) else { continue }
+                let symref = String(fields[1])
                 guard symref.isEmpty,
                       !representedRemoteRefs.contains(name) else { continue }
                 let parts = name.split(separator: "/", maxSplits: 1).map(String.init)
                 guard parts.count == 2,
-                      !localNames.contains(parts[1]),
-                      let metadata = branchMetadata(for: name, in: directory) else { continue }
+                      !localNames.contains(parts[1]) else { continue }
                 branches.append(Branch(
                     name: name,
-                    author: metadata.author,
-                    createdAt: metadata.date,
-                    createdTimestamp: metadata.timestamp,
+                    author: String(fields[2]),
+                    createdAt: String(fields[3]),
+                    createdTimestamp: timestamp,
                     isCurrent: false,
                     isRemote: true,
                     upstreamRemote: parts[0],
@@ -328,17 +336,6 @@ enum GitService {
             }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
-    }
-
-    private static func branchMetadata(for reference: String, in directory: URL)
-        -> (author: String, date: String, timestamp: Int64)? {
-        let log = run(["--no-pager", "log", "--reverse", "-n", "1",
-                       "--format=%an%x00%ad%x00%ct", "--date=format:%Y-%m-%d %H:%M",
-                       reference], in: directory)
-        let metadata = log.out.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
-        guard metadata.count >= 3, let timestamp = Int64(metadata[2]) else { return nil }
-        return (metadata[0], metadata[1], timestamp)
     }
 
     static func remotes(in directory: URL) -> [Remote] {

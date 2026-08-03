@@ -61,6 +61,7 @@ final class GitPanelViewController: NSViewController {
     private var aheadCount = 0
     private var refreshInFlight = false
     private var refreshAgain = false
+    private var refreshDirectory: URL?
     /// Serialize panel-owned Git commands so refresh staging cannot race a
     /// commit, checkout, pull, or other index/worktree mutation.
     private let gitQueue = DispatchQueue(label: "app.puzzle.git-panel", qos: .userInitiated)
@@ -69,6 +70,19 @@ final class GitPanelViewController: NSViewController {
 
     func setDirectory(_ url: URL) {
         directory = url
+        entries.removeAll()
+        history.removeAll()
+        historyRows.removeAll()
+        unpushed.removeAll()
+        branches.removeAll()
+        remotes.removeAll()
+        aheadCount = 0
+        if isViewLoaded {
+            branchLabel.stringValue = "Loading Git status…"
+            segmented.setLabel("Changes", forSegment: 0)
+            rebuildPushMenu()
+            table.reloadData()
+        }
         refresh()
     }
 
@@ -242,17 +256,36 @@ final class GitPanelViewController: NSViewController {
             table.noteHeightOfRows(withIndexesChanged:
                 IndexSet(integersIn: 0..<table.numberOfRows))
         }
-        refresh()
     }
 
     func refresh() {
+        requestRefresh(requireFollowUp: false)
+    }
+
+    /// External repository events and completed Git mutations must not be lost
+    /// if they arrive while a snapshot is already being collected.
+    func refreshExternal() {
+        requestRefresh(requireFollowUp: true)
+    }
+
+    private enum RefreshPriority {
+        case changes, branches, history
+    }
+
+    private func requestRefresh(requireFollowUp: Bool) {
         guard let directory else { return }
         if refreshInFlight {
-            refreshAgain = true
+            if refreshDirectory != directory || requireFollowUp {
+                refreshAgain = true
+            }
             return
         }
         refreshInFlight = true
+        refreshDirectory = directory
+        let priority: RefreshPriority = showingBranches
+            ? .branches : (showingHistory ? .history : .changes)
         gitQueue.async { [weak self] in
+            guard let self else { return }
             var status = GitService.status(in: directory)
             if status.isRepo,
                status.entries.contains(where: {
@@ -261,30 +294,62 @@ final class GitPanelViewController: NSViewController {
                 GitService.stageAll(in: directory)
                 status = GitService.status(in: directory)
             }
-            let log = GitService.log(in: directory, limit: 40)
-            let pending = GitService.unpushedHashes(in: directory)
-            let branches = GitService.branches(in: directory)
-            let remotes = GitService.remotes(in: directory)
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard self.directory == directory else { return }
+                self.applyStatus(status, in: directory)
+                if !self.showingBranches && !self.showingHistory {
+                    self.table.reloadData()
+                }
+            }
+
+            let loadRemotes = {
+                let remotes = GitService.remotes(in: directory)
+                DispatchQueue.main.async {
+                    guard self.directory == directory else { return }
+                    self.remotes = remotes
+                    self.rebuildPushMenu()
+                }
+            }
+            let loadBranches = {
+                let branches = GitService.branches(in: directory)
+                DispatchQueue.main.async {
+                    guard self.directory == directory else { return }
+                    self.branches = branches
+                    if self.showingBranches { self.table.reloadData() }
+                }
+            }
+            let loadHistory = {
+                let log = GitService.log(in: directory, limit: 40)
+                let pending = GitService.unpushedHashes(in: directory)
+                DispatchQueue.main.async {
+                    guard self.directory == directory else { return }
+                    self.history = log
+                    self.unpushed = pending
+                    self.rebuildHistoryRows()
+                    if self.showingHistory { self.table.reloadData() }
+                }
+            }
+
+            switch priority {
+            case .changes:
+                loadRemotes(); loadBranches(); loadHistory()
+            case .branches:
+                loadBranches(); loadRemotes(); loadHistory()
+            case .history:
+                loadHistory(); loadRemotes(); loadBranches()
+            }
+
+            DispatchQueue.main.async {
                 self.refreshInFlight = false
-                // A project switch while Git was running makes this result
-                // stale; immediately service the queued refresh instead.
+                self.refreshDirectory = nil
                 guard self.directory == directory else {
                     self.refreshAgain = false
                     self.refresh()
                     return
                 }
-                self.history = log
-                self.unpushed = pending
-                self.branches = branches
-                self.remotes = remotes
-                self.rebuildHistoryRows()
-                self.applyStatus(status, in: directory)
-                self.table.reloadData()
                 if self.refreshAgain {
                     self.refreshAgain = false
-                    self.refresh()
+                    self.requestRefresh(requireFollowUp: false)
                 }
             }
         }
@@ -436,7 +501,7 @@ final class GitPanelViewController: NSViewController {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
                 guard self.directory == operationDirectory else { return }
-                self.refresh()
+                self.refreshExternal()
                 self.onChanged?()
                 if !result.ok {
                     self.presentOperationError(title: "\(verb) failed", message: result.message)
@@ -472,7 +537,7 @@ final class GitPanelViewController: NSViewController {
                 }
                 if commit.code != 0 {
                     self.finishOperation(operationID)
-                    self.refresh()
+                    self.refreshExternal()
                     self.onChanged?()
                     self.presentOperationError(
                         title: "Commit failed",
@@ -493,7 +558,7 @@ final class GitPanelViewController: NSViewController {
                                                  directory: directory)
                 } else {
                     self.finishOperation(operationID)
-                    self.refresh()
+                    self.refreshExternal()
                 }
             }
         }
@@ -508,7 +573,7 @@ final class GitPanelViewController: NSViewController {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
                 guard self.directory == directory else { return }
-                self.refresh()
+                self.refreshExternal()
                 self.onChanged?()
                 if !result.ok {
                     self.presentOperationError(title: "Committed, but push failed",

@@ -76,7 +76,6 @@ final class SidebarViewController: NSViewController {
         visiblePanel = .git
         reveal(gitPanel)
         activityBar.setSelected(.git)
-        gitPanel.refresh()
     }
 
     /// Re-apply the UI font (`ui_font_*`) across every panel in the sidebar.
@@ -90,7 +89,7 @@ final class SidebarViewController: NSViewController {
     /// through one of the panel's own actions. Do not instantiate a hidden Git
     /// panel just for this; its first reveal already performs a full refresh.
     func refreshGitPanelIfLoaded() {
-        gitController?.refresh()
+        gitController?.refreshExternal()
     }
 
     private func reveal(_ vc: NSViewController) {
