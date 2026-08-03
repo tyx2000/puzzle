@@ -105,7 +105,15 @@ final class SearchViewController: NSViewController {
 
     func focusSearchField() { searchField.focus() }
 
-    func refreshFonts() { searchField.refreshFonts() }
+    func refreshFonts() {
+        searchField.refreshFonts()
+        summaryLabel.font = Theme.uiFont(10.5)
+        outline.reloadData()
+        if outline.numberOfRows > 0 {
+            outline.noteHeightOfRows(withIndexesChanged:
+                IndexSet(integersIn: 0..<outline.numberOfRows))
+        }
+    }
 
     func releaseTransientMemory() {
         searchGeneration += 1

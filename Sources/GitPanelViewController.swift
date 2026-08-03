@@ -91,7 +91,7 @@ final class GitPanelViewController: NSViewController {
         branchToolbar.isHidden = true
 
         newBranchButton.title = "New Branch"
-        newBranchButton.bezelStyle = .rounded
+        newBranchButton.bezelStyle = .regularSquare
         newBranchButton.controlSize = .small
         newBranchButton.font = Theme.uiFont(10.5)
         newBranchButton.target = self
@@ -99,7 +99,7 @@ final class GitPanelViewController: NSViewController {
         newBranchButton.translatesAutoresizingMaskIntoConstraints = false
 
         remoteButton.title = "Remote"
-        remoteButton.bezelStyle = .rounded
+        remoteButton.bezelStyle = .regularSquare
         remoteButton.controlSize = .small
         remoteButton.font = Theme.uiFont(10.5)
         remoteButton.target = self
@@ -181,9 +181,11 @@ final class GitPanelViewController: NSViewController {
             branchToolbarHeight,
             newBranchButton.leadingAnchor.constraint(equalTo: branchToolbar.leadingAnchor, constant: 8),
             newBranchButton.centerYAnchor.constraint(equalTo: branchToolbar.centerYAnchor),
+            newBranchButton.heightAnchor.constraint(equalToConstant: 32),
             remoteButton.leadingAnchor.constraint(equalTo: newBranchButton.trailingAnchor, constant: 20),
             remoteButton.trailingAnchor.constraint(equalTo: branchToolbar.trailingAnchor, constant: -8),
             remoteButton.centerYAnchor.constraint(equalTo: branchToolbar.centerYAnchor),
+            remoteButton.heightAnchor.constraint(equalToConstant: 32),
             remoteButton.widthAnchor.constraint(equalTo: newBranchButton.widthAnchor),
 
             tableTopToTabs,
@@ -223,7 +225,12 @@ final class GitPanelViewController: NSViewController {
         pushButton.font = Theme.uiFont(10.5)
         newBranchButton.font = Theme.uiFont(10.5)
         remoteButton.font = Theme.uiFont(10.5)
-        refresh()          // rebuilds the rows, which set their own fonts
+        table.reloadData()
+        if table.numberOfRows > 0 {
+            table.noteHeightOfRows(withIndexesChanged:
+                IndexSet(integersIn: 0..<table.numberOfRows))
+        }
+        refresh()
     }
 
     func refresh() {
@@ -321,7 +328,7 @@ final class GitPanelViewController: NSViewController {
     private func updateTabLayout() {
         let branchTab = showingBranches
         branchToolbar.isHidden = !branchTab
-        branchToolbarHeight.constant = branchTab ? 36 : 0
+        branchToolbarHeight.constant = branchTab ? 52 : 0
         tableTopToTabs.isActive = !branchTab
         tableTopToBranchToolbar.isActive = branchTab
         tableBottomToFooter.isActive = !branchTab
@@ -476,8 +483,8 @@ final class GitPanelViewController: NSViewController {
         guard row >= 0, let directory else { return }
 
         if showingBranches {
-            guard row < branches.count else { return }
-            switchBranch(branches[row], in: directory)
+            // Only the explicit switch button may change branches. Selecting
+            // or double-clicking the informational row is intentionally inert.
             return
         }
 
@@ -536,14 +543,27 @@ final class GitPanelViewController: NSViewController {
 
         let nameField = NSTextField(string: "")
         nameField.placeholderString = "Branch name"
-        let basePopup = NSPopUpButton()
-        basePopup.addItems(withTitles: names)
+        let baseSelector = NSComboBox()
+        baseSelector.isEditable = false
+        baseSelector.completes = false
+        baseSelector.usesDataSource = false
+        baseSelector.addItems(withObjectValues: names)
+        baseSelector.font = Theme.uiFont(10.5)
+        baseSelector.itemHeight = max(
+            20, ceil(Theme.uiFont(10.5).boundingRectForFont.height) + 6)
+        // NSComboBox provides a scrolling list once the item count exceeds
+        // numberOfVisibleItems. Reserve a few points for its list border so the
+        // complete drop-down remains within the requested 300pt maximum.
+        let maxVisibleItems = max(1, Int(floor((300 - 8) / baseSelector.itemHeight)))
+        baseSelector.numberOfVisibleItems = min(names.count, maxVisibleItems)
         if let current = branches.firstIndex(where: { $0.isCurrent }) {
-            basePopup.selectItem(at: current)
+            baseSelector.selectItem(at: current)
+        } else {
+            baseSelector.selectItem(at: 0)
         }
         let accessory = dialogStack([
             labeledField("Name", nameField),
-            labeledField("Base", basePopup),
+            labeledField("Base", baseSelector),
         ], width: 340)
 
         let alert = NSAlert()
@@ -559,20 +579,14 @@ final class GitPanelViewController: NSViewController {
             presentGitError(title: "Invalid branch name", message: "Enter a branch name.")
             return
         }
-        let base = basePopup.titleOfSelectedItem ?? names[0]
+        let selectedBase = baseSelector.indexOfSelectedItem
+        let base = names.indices.contains(selectedBase) ? names[selectedBase] : names[0]
         runRemote("Create branch") { GitService.createBranch(name, from: base, in: directory) }
     }
 
     @objc private func remoteAction() {
         guard let directory else { return }
         let currentRemotes = GitService.remotes(in: directory)
-        let existing = currentRemotes.map {
-            "\($0.name)\n  Fetch: \($0.fetchURL)\n  Push:  \($0.pushURL)"
-        }.joined(separator: "\n\n")
-        let summary = NSTextField(wrappingLabelWithString:
-            existing.isEmpty ? "No remote repositories are configured." : existing)
-        summary.textColor = Theme.dimText
-
         let nameField = NSTextField(string: currentRemotes.first?.name ?? "origin")
         nameField.placeholderString = "Remote name"
         let fetchField = NSTextField(string: currentRemotes.first?.fetchURL ?? "")
@@ -580,7 +594,6 @@ final class GitPanelViewController: NSViewController {
         let pushField = NSTextField(string: currentRemotes.first?.pushURL ?? "")
         pushField.placeholderString = "Optional push URL"
         let accessory = dialogStack([
-            summary,
             labeledField("Name", nameField),
             labeledField("Fetch", fetchField),
             labeledField("Push", pushField),
@@ -588,7 +601,6 @@ final class GitPanelViewController: NSViewController {
 
         let alert = NSAlert()
         alert.messageText = "Remote repositories"
-        alert.informativeText = "Existing remotes are listed above. Save adds a new remote or updates the named remote."
         alert.accessoryView = accessory
         alert.addButton(withTitle: "Save Remote")
         alert.addButton(withTitle: "Close")
@@ -609,7 +621,15 @@ final class GitPanelViewController: NSViewController {
 
     private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
         guard !branch.isCurrent else { return }
-        runRemote("Switch branch") { GitService.switchBranch(branch.name, in: directory) }
+        let alert = NSAlert()
+        alert.messageText = "Switch to branch \(branch.name)?"
+        alert.informativeText = branch.isRemote
+            ? "A local tracking branch will be created before switching."
+            : "The project working tree will be updated to this branch."
+        alert.addButton(withTitle: "Switch")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runRemote("Switch branch") { GitService.switchBranch(branch, in: directory) }
     }
 
     private func deleteBranch(_ branch: GitService.Branch, in directory: URL) {
@@ -619,11 +639,13 @@ final class GitPanelViewController: NSViewController {
         }
         let alert = NSAlert()
         alert.messageText = "Delete branch \(branch.name)?"
-        alert.informativeText = "Only fully merged branches can be deleted."
+        alert.informativeText = branch.isRemote
+            ? "This deletes the branch from remote \(branch.upstreamRemote ?? "repository")."
+            : "Only fully merged local branches can be deleted."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        runRemote("Delete branch") { GitService.deleteBranch(branch.name, in: directory) }
+        runRemote("Delete branch") { GitService.deleteBranch(branch, in: directory) }
     }
 
     private func presentGitError(title: String, message: String) {
@@ -642,6 +664,7 @@ final class GitPanelViewController: NSViewController {
         labelField.textColor = Theme.dimText
         labelField.translatesAutoresizingMaskIntoConstraints = false
         field.translatesAutoresizingMaskIntoConstraints = false
+        (field as? NSControl)?.font = Theme.uiFont(10.5)
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         row.addSubview(labelField)
@@ -736,14 +759,15 @@ extension GitPanelViewController: NSTableViewDataSource {
 
 extension GitPanelViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if showingBranches { return 58 }
+        if showingBranches { return GitBranchCell.preferredRowHeight }
         if showingHistory, row < historyRows.count,
            case .commit = historyRows[row] {
             let titleHeight = ceil(Theme.uiFont(11).boundingRectForFont.height)
             let infoHeight = ceil(Theme.uiFont(9.5).boundingRectForFont.height)
             return max(38, titleHeight + infoHeight + 7)
         }
-        return 22
+        let fontHeight = ceil(Theme.uiFont(11).boundingRectForFont.height)
+        return max(22, fontHeight + 6)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -916,18 +940,28 @@ private final class GitBranchCell: DrawnSidebarCell {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        switchButton.title = "Switch"
-        switchButton.bezelStyle = .rounded
-        switchButton.controlSize = .small
-        switchButton.font = Theme.uiFont(9.5)
+        switchButton.title = ""
+        switchButton.image = Theme.symbol("arrow.right.circle", accessibilityDescription: "Switch branch",
+                                          pointSize: 12)
+        switchButton.imagePosition = .imageOnly
+        switchButton.imageScaling = .scaleProportionallyDown
+        switchButton.bezelStyle = .inline
+        switchButton.isBordered = false
+        switchButton.toolTip = "Switch branch"
+        switchButton.setAccessibilityLabel("Switch branch")
         switchButton.target = self
         switchButton.action = #selector(switchAction)
         switchButton.translatesAutoresizingMaskIntoConstraints = false
 
-        deleteButton.title = "Delete"
-        deleteButton.bezelStyle = .rounded
-        deleteButton.controlSize = .small
-        deleteButton.font = Theme.uiFont(9.5)
+        deleteButton.title = ""
+        deleteButton.image = Theme.symbol("trash", accessibilityDescription: "Delete branch",
+                                          pointSize: 12)
+        deleteButton.imagePosition = .imageOnly
+        deleteButton.imageScaling = .scaleProportionallyDown
+        deleteButton.bezelStyle = .inline
+        deleteButton.isBordered = false
+        deleteButton.toolTip = "Delete branch"
+        deleteButton.setAccessibilityLabel("Delete branch")
         deleteButton.target = self
         deleteButton.action = #selector(deleteAction)
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
@@ -954,17 +988,51 @@ private final class GitBranchCell: DrawnSidebarCell {
 
     override func layout() {
         super.layout()
-        deleteButton.frame = NSRect(x: bounds.width - 72, y: 19, width: 64, height: 22)
-        switchButton.frame = NSRect(x: bounds.width - 142, y: 19, width: 64, height: 22)
+        let totalWidth = Self.actionButtonWidth * 2 + Self.actionButtonGap
+        let x = max(8, bounds.width - totalWidth - 8)
+        let y = floor((bounds.height - Self.actionButtonHeight) / 2)
+        switchButton.frame = NSRect(x: x, y: y,
+                                    width: Self.actionButtonWidth,
+                                    height: Self.actionButtonHeight)
+        deleteButton.frame = NSRect(x: x + Self.actionButtonWidth + Self.actionButtonGap,
+                                    y: y,
+                                    width: Self.actionButtonWidth,
+                                    height: Self.actionButtonHeight)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let content = NSRect(x: 8, y: 2, width: max(0, bounds.width - 154), height: bounds.height - 4)
-        SidebarCellDrawing.primaryAndSecondary(
-            primary: name, primaryFont: Theme.uiFont(11), primaryColor: isCurrent ? Theme.cursor : Theme.foreground,
-            secondary: metadata, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: content, gap: 5, primaryLineBreak: .byTruncatingMiddle)
+        let primaryFont = Theme.uiFont(11)
+        let secondaryFont = Theme.uiFont(9.5)
+        let primaryHeight = ceil(primaryFont.boundingRectForFont.height) + 1
+        let secondaryHeight = ceil(secondaryFont.boundingRectForFont.height) + 1
+        let textHeight = primaryHeight + Self.textLineGap + secondaryHeight
+        let top = floor((bounds.height - textHeight) / 2)
+        let buttonX = max(8, bounds.width - (Self.actionButtonWidth * 2
+                                             + Self.actionButtonGap) - 8)
+        let width = max(0, buttonX - 16)
+        SidebarCellDrawing.text(
+            name, font: primaryFont,
+            color: isCurrent ? Theme.cursor : Theme.foreground,
+            in: NSRect(x: 8, y: top, width: width, height: primaryHeight),
+            lineBreak: .byTruncatingMiddle)
+        SidebarCellDrawing.text(
+            metadata, font: secondaryFont, color: Theme.dimText,
+            in: NSRect(x: 8, y: top + primaryHeight + Self.textLineGap,
+                       width: width, height: secondaryHeight),
+            lineBreak: .byTruncatingTail)
     }
+
+    static var preferredRowHeight: CGFloat {
+        let primaryHeight = ceil(Theme.uiFont(11).boundingRectForFont.height) + 1
+        let secondaryHeight = ceil(Theme.uiFont(9.5).boundingRectForFont.height) + 1
+        let textHeight = primaryHeight + textLineGap + secondaryHeight
+        return max(44, max(textHeight, actionButtonHeight) + 8)
+    }
+
+    private static let actionButtonWidth: CGFloat = 26
+    private static let actionButtonHeight: CGFloat = 26
+    private static let actionButtonGap: CGFloat = 6
+    private static let textLineGap: CGFloat = 0
 
     @objc private func switchAction() { onSwitch?() }
     @objc private func deleteAction() { onDelete?() }

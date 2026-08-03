@@ -11,6 +11,7 @@ enum RegressionTests {
         _ = NSApplication.shared
         try testProcessDrain()
         try testScopedStatusAndStaging()
+        try testBranchListing()
         try testSearchMatcher()
         try testProjectSearchBackend()
         try testReadOnlyAndEncodingProtection()
@@ -117,6 +118,67 @@ enum RegressionTests {
                    "history path was not project-relative or lossless")
         try expect(GitService.log(in: project, limit: 1).first?.subject == unusualSubject,
                    "commit metadata delimiters corrupted the history subject")
+    }
+
+    private static func testBranchListing() throws {
+        let root = try temporaryDirectory("branches")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+        let remote = root.appendingPathComponent("remote.git", isDirectory: true)
+
+        try expect(GitService.run(["init", "--bare", "-q", remote.path], in: root).code == 0,
+                   "bare remote init failed")
+        try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
+                   "branch fixture init failed")
+        _ = GitService.run(["config", "user.name", "Branch Author"], in: repository)
+        _ = GitService.run(["config", "user.email", "branch@example.invalid"], in: repository)
+        try Data("fixture".utf8).write(to: repository.appendingPathComponent("file.txt"))
+        try expect(GitService.run(["add", "file.txt"], in: repository).code == 0,
+                   "branch fixture staging failed")
+        try expect(GitService.run(["commit", "-q", "-m", "initial"], in: repository).code == 0,
+                   "branch fixture commit failed")
+        try expect(GitService.run(["remote", "add", "origin", remote.path], in: repository).code == 0,
+                   "branch fixture remote failed")
+        try expect(GitService.run(["push", "-q", "-u", "origin", "main"], in: repository).code == 0,
+                   "branch fixture push failed")
+
+        try expect(GitService.run(["checkout", "-q", "-b", "feature/test"],
+                                  in: repository).code == 0,
+                   "remote-only branch fixture checkout failed")
+        try Data("feature".utf8).write(to: repository.appendingPathComponent("feature.txt"))
+        try expect(GitService.run(["add", "feature.txt"], in: repository).code == 0,
+                   "remote-only branch fixture staging failed")
+        try expect(GitService.run(["commit", "-q", "-m", "feature"], in: repository).code == 0,
+                   "remote-only branch fixture commit failed")
+        try expect(GitService.run(["push", "-q", "-u", "origin", "feature/test"],
+                                  in: repository).code == 0,
+                   "remote-only branch fixture push failed")
+        try expect(GitService.run(["checkout", "-q", "main"], in: repository).code == 0,
+                   "branch fixture return to main failed")
+        try expect(GitService.run(["branch", "-D", "feature/test"], in: repository).code == 0,
+                   "remote-only local branch removal failed")
+
+        let branches = GitService.branches(in: repository)
+        let main = branches.first(where: { $0.name == "main" })
+        try expect(main != nil,
+                   "local main branch was omitted: \(branches.map(\.name))")
+        try expect(main?.isCurrent == true,
+                   "main branch was not marked current")
+        try expect(main?.upstreamRemote == "origin"
+                   && main?.upstreamBranch == "main",
+                   "main upstream was parsed incorrectly")
+
+        guard let remoteOnly = branches.first(where: { $0.name == "origin/feature/test" }) else {
+            throw Failure(description: "known remote-only branch was omitted: \(branches.map(\.name))")
+        }
+        try expect(remoteOnly.isRemote,
+                   "remote-only branch was not identified as remote")
+        let switched = GitService.switchBranch(remoteOnly, in: repository)
+        try expect(switched.ok, "remote-only branch switch failed: \(switched.message)")
+        let current = GitService.run(["branch", "--show-current"], in: repository)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(current == "feature/test",
+                   "remote-only branch did not create its local tracking branch")
     }
 
     private static func testSearchMatcher() throws {
