@@ -91,6 +91,7 @@ swiftc \
   -sdk "$SDK" \
   -target "$TARGET" \
   -framework AppKit \
+  -framework CoreServices \
   -import-objc-header "$ROOT/Sources/ts_bridge.h" \
   -Xcc -I"$TS_INC" \
   -o "$APP/Contents/MacOS/Puzzle" \

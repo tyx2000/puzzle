@@ -86,6 +86,13 @@ final class SidebarViewController: NSViewController {
         gitController?.refreshFonts()
     }
 
+    /// External Git tools can update an already-visible panel without routing
+    /// through one of the panel's own actions. Do not instantiate a hidden Git
+    /// panel just for this; its first reveal already performs a full refresh.
+    func refreshGitPanelIfLoaded() {
+        gitController?.refresh()
+    }
+
     private func reveal(_ vc: NSViewController) {
         for other in mountedControllers {
             other.view.isHidden = (other !== vc)

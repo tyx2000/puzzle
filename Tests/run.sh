@@ -15,6 +15,7 @@ swiftc -Onone \
   -sdk "$SDK" \
   -target "$TARGET" \
   -framework AppKit \
+  -framework CoreServices \
   -import-objc-header "$ROOT/Sources/ts_bridge.h" \
   -Xcc -I"$ROOT/vendor/tree-sitter/lib/include" \
   -o "$ROOT/.obj/regression-tests" \

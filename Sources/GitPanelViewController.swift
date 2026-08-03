@@ -47,6 +47,7 @@ final class GitPanelViewController: NSViewController {
     private let branchLabel = NSTextField(labelWithString: "")
     private let commitField = NSTextView()
     private var commitScroll: HorizontalBorderScrollView!
+    private let progressShimmer = GitProgressShimmerView()
     private let commitButton = NSButton()
     private let pushButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let branchToolbar = FlatView()
@@ -60,6 +61,11 @@ final class GitPanelViewController: NSViewController {
     private var aheadCount = 0
     private var refreshInFlight = false
     private var refreshAgain = false
+    /// Serialize panel-owned Git commands so refresh staging cannot race a
+    /// commit, checkout, pull, or other index/worktree mutation.
+    private let gitQueue = DispatchQueue(label: "app.puzzle.git-panel", qos: .userInitiated)
+    private var activeOperationID: UUID?
+    private var operationLocksMessage = false
 
     func setDirectory(_ url: URL) {
         directory = url
@@ -144,6 +150,8 @@ final class GitPanelViewController: NSViewController {
         commitScroll.drawsBackground = true
         commitScroll.backgroundColor = Theme.activeTab
         commitScroll.translatesAutoresizingMaskIntoConstraints = false
+        progressShimmer.translatesAutoresizingMaskIntoConstraints = false
+        progressShimmer.isHidden = true
 
         commitButton.title = "Commit"
         commitButton.bezelStyle = .rounded
@@ -161,7 +169,7 @@ final class GitPanelViewController: NSViewController {
         pushButton.translatesAutoresizingMaskIntoConstraints = false
         rebuildPushMenu()
 
-        [segmented, branchToolbar, scroll, branchLabel, commitScroll,
+        [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
          commitButton, pushButton].forEach { container.addSubview($0) }
 
         branchToolbarHeight = branchToolbar.heightAnchor.constraint(equalToConstant: 0)
@@ -200,6 +208,10 @@ final class GitPanelViewController: NSViewController {
             commitScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             commitScroll.heightAnchor.constraint(equalToConstant: 200),
             commitScroll.bottomAnchor.constraint(equalTo: commitButton.topAnchor, constant: -6),
+            progressShimmer.topAnchor.constraint(equalTo: commitScroll.topAnchor),
+            progressShimmer.leadingAnchor.constraint(equalTo: commitScroll.leadingAnchor),
+            progressShimmer.trailingAnchor.constraint(equalTo: commitScroll.trailingAnchor),
+            progressShimmer.heightAnchor.constraint(equalToConstant: 3),
 
             // "Commit && Push" left, "Commit" right.
             pushButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
@@ -240,7 +252,7 @@ final class GitPanelViewController: NSViewController {
             return
         }
         refreshInFlight = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        gitQueue.async { [weak self] in
             var status = GitService.status(in: directory)
             if status.isRepo,
                status.entries.contains(where: {
@@ -263,27 +275,12 @@ final class GitPanelViewController: NSViewController {
                     self.refresh()
                     return
                 }
-                self.entries = status.entries
                 self.history = log
                 self.unpushed = pending
                 self.branches = branches
                 self.remotes = remotes
                 self.rebuildHistoryRows()
-                // Surface the ahead-count: without it there is no sign that
-                // commits are sitting locally waiting to be pushed.
-                var label = "\(directory.lastPathComponent) / \(status.branch)"
-                if status.ahead > 0 { label += "  ↑\(status.ahead)" }
-                else if status.isRepo && !status.hasUpstream { label += "  (no upstream)" }
-                self.branchLabel.stringValue = status.isRepo ? label : "not a git repository"
-                self.branchLabel.toolTip = status.ahead > 0
-                    ? "\(status.ahead) commit\(status.ahead == 1 ? "" : "s") not pushed yet"
-                    : nil
-                self.segmented.setLabel("Changes (\(status.entries.count))", forSegment: 0)
-                if self.aheadCount != status.ahead {
-                    self.aheadCount = status.ahead
-                    self.rebuildPushMenu()
-                }
-                self.rebuildPushMenu()
+                self.applyStatus(status, in: directory)
                 self.table.reloadData()
                 if self.refreshAgain {
                     self.refreshAgain = false
@@ -291,6 +288,23 @@ final class GitPanelViewController: NSViewController {
                 }
             }
         }
+    }
+
+    /// Apply the cheap status snapshot independently of the slower history and
+    /// remote refresh. Commit success uses this before a network push starts so
+    /// Changes clears immediately even if that push later fails.
+    private func applyStatus(_ status: GitService.Status, in directory: URL) {
+        entries = status.entries
+        var label = "\(directory.lastPathComponent) / \(status.branch)"
+        if status.ahead > 0 { label += "  ↑\(status.ahead)" }
+        else if status.isRepo && !status.hasUpstream { label += "  (no upstream)" }
+        branchLabel.stringValue = status.isRepo ? label : "not a git repository"
+        branchLabel.toolTip = status.ahead > 0
+            ? "\(status.ahead) commit\(status.ahead == 1 ? "" : "s") not pushed yet"
+            : nil
+        segmented.setLabel("Changes (\(status.entries.count))", forSegment: 0)
+        aheadCount = status.ahead
+        rebuildPushMenu()
     }
 
     /// Colour for a commit file's status letter (A added, M modified, D deleted).
@@ -335,6 +349,7 @@ final class GitPanelViewController: NSViewController {
         tableBottomToContainer.isActive = branchTab
         branchLabel.isHidden = branchTab
         commitScroll.isHidden = branchTab
+        progressShimmer.isHidden = branchTab || activeOperationID == nil
         commitButton.isHidden = branchTab
         pushButton.isHidden = branchTab
     }
@@ -409,22 +424,23 @@ final class GitPanelViewController: NSViewController {
         runRemote("Force push") { GitService.forcePush(in: directory) }
     }
 
-    /// Run a remote operation off the main thread and report the outcome.
+    /// Run a remote operation on the panel's serial Git queue and report the
+    /// outcome without blocking subsequent UI refreshes behind a modal alert.
     private func runRemote(_ verb: String, _ work: @escaping () -> GitService.RemoteResult) {
-        pushButton.isEnabled = false
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let operationDirectory = directory,
+              let operationID = beginOperation(verb, lockCommitMessage: false) else { return }
+        gitQueue.async { [weak self] in
+            guard let self else { return }
             let result = work()
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.pushButton.isEnabled = true
-                if !result.ok {
-                    let alert = NSAlert()
-                    alert.messageText = "\(verb) failed"
-                    alert.informativeText = result.message
-                    alert.runModal()
-                }
+                guard self.activeOperationID == operationID else { return }
+                self.finishOperation(operationID)
+                guard self.directory == operationDirectory else { return }
                 self.refresh()
                 self.onChanged?()
+                if !result.ok {
+                    self.presentOperationError(title: "\(verb) failed", message: result.message)
+                }
             }
         }
     }
@@ -443,38 +459,110 @@ final class GitPanelViewController: NSViewController {
             alert.runModal(); return
         }
 
-        commitButton.isEnabled = false
-        pushButton.isEnabled = false
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let operationID = beginOperation("Committing", lockCommitMessage: true) else { return }
+        gitQueue.async { [weak self] in
+            guard let self else { return }
             let commit = GitService.commit(message, in: directory)
-            // A failed push still leaves the commit in place, so the two
-            // outcomes are reported separately.
-            var pushResult: GitService.RemoteResult?
-            if commit.code == 0, push {
-                pushResult = GitService.push(in: directory)
-            }
+            let postCommitStatus = commit.code == 0 ? GitService.status(in: directory) : nil
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.commitButton.isEnabled = true
-                self.pushButton.isEnabled = true
-
-                if commit.code != 0 {
-                    let alert = NSAlert()
-                    alert.messageText = "Commit failed"
-                    alert.informativeText = commit.err.isEmpty ? commit.out : commit.err
-                    alert.runModal()
-                } else {
-                    self.commitField.string = ""
-                    if let pushResult, !pushResult.ok {
-                        let alert = NSAlert()
-                        alert.messageText = "Committed, but push failed"
-                        alert.informativeText = pushResult.message
-                        alert.runModal()
-                    }
+                guard self.activeOperationID == operationID else { return }
+                guard self.directory == directory else {
+                    self.finishOperation(operationID)
+                    return
                 }
+                if commit.code != 0 {
+                    self.finishOperation(operationID)
+                    self.refresh()
+                    self.onChanged?()
+                    self.presentOperationError(
+                        title: "Commit failed",
+                        message: commit.err.isEmpty ? commit.out : commit.err)
+                    return
+                }
+
+                // Commit succeeded. Reflect the local repository state before
+                // starting any network push, so Changes clears immediately.
+                self.commitField.string = ""
+                if let postCommitStatus {
+                    self.applyStatus(postCommitStatus, in: directory)
+                    self.table.reloadData()
+                }
+                self.onChanged?()
+                if push {
+                    self.continuePushAfterCommit(operationID: operationID,
+                                                 directory: directory)
+                } else {
+                    self.finishOperation(operationID)
+                    self.refresh()
+                }
+            }
+        }
+    }
+
+    private func continuePushAfterCommit(operationID: UUID, directory: URL) {
+        transitionOperation(operationID, to: "Pushing")
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            let result = GitService.push(in: directory)
+            DispatchQueue.main.async {
+                guard self.activeOperationID == operationID else { return }
+                self.finishOperation(operationID)
+                guard self.directory == directory else { return }
                 self.refresh()
                 self.onChanged?()
+                if !result.ok {
+                    self.presentOperationError(title: "Committed, but push failed",
+                                               message: result.message)
+                }
             }
+        }
+    }
+
+    private func beginOperation(_ label: String, lockCommitMessage: Bool) -> UUID? {
+        guard activeOperationID == nil else {
+            NSSound.beep()
+            return nil
+        }
+        let id = UUID()
+        activeOperationID = id
+        operationLocksMessage = lockCommitMessage
+        commitButton.isEnabled = false
+        pushButton.isEnabled = false
+        newBranchButton.isEnabled = false
+        remoteButton.isEnabled = false
+        table.isEnabled = false
+        if lockCommitMessage { commitField.isEditable = false }
+        progressShimmer.start(label: label)
+        progressShimmer.isHidden = showingBranches
+        return id
+    }
+
+    private func transitionOperation(_ id: UUID, to label: String) {
+        guard activeOperationID == id else { return }
+        progressShimmer.start(label: label)
+    }
+
+    private func finishOperation(_ id: UUID) {
+        guard activeOperationID == id else { return }
+        activeOperationID = nil
+        commitButton.isEnabled = true
+        pushButton.isEnabled = true
+        newBranchButton.isEnabled = true
+        remoteButton.isEnabled = true
+        table.isEnabled = true
+        if operationLocksMessage { commitField.isEditable = true }
+        operationLocksMessage = false
+        progressShimmer.stop()
+    }
+
+    private func presentOperationError(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let window = view.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
         }
     }
 
@@ -1150,6 +1238,65 @@ private final class FlatPanelTabButton: NSView {
     override func accessibilityPerformPress() -> Bool {
         onSelect?()
         return true
+    }
+}
+
+/// Thin animated progress band pinned to the commit editor's top border. It is
+/// deliberately indeterminate because hooks and network pushes expose no useful
+/// percentage through the Git CLI.
+private final class GitProgressShimmerView: NSView {
+    private var timer: Timer?
+    private var phase: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func start(label: String) {
+        setAccessibilityLabel(label)
+        isHidden = false
+        guard timer == nil else { return }
+        phase = 0
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.phase = (self.phase + 0.015).truncatingRemainder(dividingBy: 1)
+            self.needsDisplay = true
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        isHidden = true
+        needsDisplay = true
+    }
+
+    deinit { timer?.invalidate() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.border.setFill()
+        bounds.fill()
+        let sweepWidth = max(48, bounds.width * 0.24)
+        let travel = bounds.width + sweepWidth
+        let x = -sweepWidth + travel * phase
+        let colors = [
+            Theme.cursor.withAlphaComponent(0),
+            Theme.cursor.withAlphaComponent(0.95),
+            Theme.cursor.withAlphaComponent(0),
+        ]
+        NSGradient(colors: colors)?.draw(
+            in: NSRect(x: x, y: 0, width: sweepWidth, height: bounds.height), angle: 0)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

@@ -39,6 +39,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// FSEvents normally delivers external Git changes while Puzzle is in the
+    /// background. Refresh on activation as a fallback for coalesced/missed
+    /// events and for repositories whose metadata directory was replaced.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        windows.forEach { $0.refreshExternalGitState() }
+    }
+
     private func setupMemoryPressureHandling() {
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical], queue: .main)

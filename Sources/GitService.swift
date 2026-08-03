@@ -401,11 +401,17 @@ enum GitService {
 
         let push = pushURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !push.isEmpty, push != fetchURL else {
+            // An omitted/equal push URL means "use the fetch URL". Remove a
+            // previously configured pushurl instead of silently retaining it.
+            let unset = run(["config", "--unset-all", "remote.\(name).pushurl"],
+                            in: directory)
+            guard unset.code == 0 || unset.code == 5 else {
+                return RemoteResult(ok: false,
+                                    message: unset.err.isEmpty ? unset.out : unset.err)
+            }
             return RemoteResult(ok: true, message: "Remote \(name) saved.")
         }
-        let pushResult = existing
-            ? run(["remote", "set-url", "--push", name, push], in: directory)
-            : run(["remote", "set-url", "--push", name, push], in: directory)
+        let pushResult = run(["remote", "set-url", "--push", name, push], in: directory)
         guard pushResult.code == 0 else {
             return RemoteResult(ok: false,
                                 message: pushResult.err.isEmpty ? pushResult.out : pushResult.err)
@@ -434,7 +440,10 @@ enum GitService {
             return RemoteResult(ok: true, message: text.isEmpty ? "\(verb) succeeded." : text)
         }
         let text = result.err.isEmpty ? result.out : result.err
-        return RemoteResult(ok: false, message: text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let detail = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return RemoteResult(
+            ok: false,
+            message: detail.isEmpty ? "\(verb) failed (Git exit code \(result.code))." : detail)
     }
 
     static func push(in directory: URL) -> RemoteResult {
@@ -448,7 +457,22 @@ enum GitService {
         guard !branch.isEmpty, branch != "HEAD" else {
             return RemoteResult(ok: false, message: "Detached HEAD — nothing to push.")
         }
-        return remote(["push", "--set-upstream", "origin", branch], in: directory, verb: "Push")
+        let remoteNames = run(["remote"], in: directory).out
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        let target: String
+        if remoteNames.contains("origin") {
+            target = "origin"
+        } else if remoteNames.count == 1, let onlyRemote = remoteNames.first {
+            target = onlyRemote
+        } else if remoteNames.isEmpty {
+            return RemoteResult(ok: false, message: "No remote repository is configured.")
+        } else {
+            return RemoteResult(
+                ok: false,
+                message: "This branch has no upstream. Choose a specific ‘Push to …’ item from the Push menu.")
+        }
+        return remote(["push", "--set-upstream", target, branch], in: directory, verb: "Push")
     }
 
     static func fetch(in directory: URL) -> RemoteResult {
@@ -466,14 +490,15 @@ enum GitService {
         run(["add", "-A", "--", "."], in: directory)
     }
 
-    /// Commit the staged changes in the opened project. A path-limited commit
-    /// keeps staged changes outside a nested project in the index, while still
-    /// including staged new files (unlike `--only` with an actually untracked
-    /// path).
+    /// Stage and commit every change in the opened project. Staging at the
+    /// commit boundary captures edits made after the last panel refresh. The
+    /// path-limited commit keeps staged sibling-project changes in the index.
     @discardableResult
     static func commit(_ message: String,
                        in directory: URL) -> (out: String, err: String, code: Int32) {
-        run(["commit", "-m", message, "--", "."], in: directory)
+        let staged = stageAll(in: directory)
+        guard staged.code == 0 else { return staged }
+        return run(["commit", "-m", message, "--", "."], in: directory)
     }
 
     static func forcePush(in directory: URL) -> RemoteResult {

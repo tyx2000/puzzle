@@ -12,6 +12,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private let resizeHandles = WindowResizeHandleView()
     private var root: RootViewController!
     private(set) var projectURL: URL?
+    private var gitRepositoryMonitor: GitRepositoryMonitor?
+    private let gitSummaryQueue = DispatchQueue(
+        label: "app.puzzle.workspace-git-summary", qos: .utility)
+    private var gitRefreshGeneration = 0
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
@@ -103,6 +107,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
+            self?.sidebar.refreshGitPanelIfLoaded()
             self?.refreshGit()
             // The file changed on disk, so its cached blame is stale.
             self?.editor.invalidateBlame(for: url)
@@ -120,6 +125,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        gitRepositoryMonitor?.stop()
+        gitRepositoryMonitor = nil
         // Release this window's buffers rather than leaving its layout
         // managers attached to them.
         editor.detachAllPanes()
@@ -144,6 +151,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Project
 
     func openProject(_ url: URL) {
+        gitRepositoryMonitor?.stop()
+        gitRepositoryMonitor = nil
         projectURL = url
         editor.hasProject = true
         editor.repositoryRoot = url
@@ -152,6 +161,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setDirectory(url)
         window?.title = url.lastPathComponent
         refreshGit()
+        gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
+            guard let self, self.projectURL == url else { return }
+            self.refreshExternalGitState()
+        }
+    }
+
+    /// Synchronize every Git-derived surface after another process changes the
+    /// repository, and when Puzzle becomes active after such a change.
+    func refreshExternalGitState() {
+        guard projectURL != nil else { return }
+        sidebar.refreshGitPanelIfLoaded()
+        refreshGit()
+        editor.invalidateBlame()
     }
 
     /// Show a file's git diff in the editor, coloured by DiffHighlighter.
@@ -279,11 +301,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     func refreshGit() {
         guard let projectURL else { return }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        gitRefreshGeneration += 1
+        let generation = gitRefreshGeneration
+        gitSummaryQueue.async { [weak self] in
             let split = GitService.trackedAndUntracked(in: projectURL)
             let status = GitService.status(in: projectURL)
             DispatchQueue.main.async {
-                guard let self, self.projectURL == projectURL else { return }
+                guard let self,
+                      self.projectURL == projectURL,
+                      self.gitRefreshGeneration == generation else { return }
                 self.sidebar.fileTree.setStatus(modified: split.modified,
                                                 untracked: split.untracked)
                 if status.isRepo {

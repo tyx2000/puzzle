@@ -11,6 +11,8 @@ enum RegressionTests {
         _ = NSApplication.shared
         try testProcessDrain()
         try testScopedStatusAndStaging()
+        try testRemoteConfigurationAndPushSelection()
+        try testGitRepositoryMonitor()
         try testBranchListing()
         try testSearchMatcher()
         try testProjectSearchBackend()
@@ -101,6 +103,24 @@ enum RegressionTests {
         try expect(stillStaged == ["outside.txt"],
                    "commit disturbed staged changes outside the project")
 
+        // The panel may have refreshed before the user's final edit. Commit
+        // must stage once more at the operation boundary so that edit is not
+        // silently omitted.
+        let lateFile = project.appendingPathComponent("late.txt")
+        try Data("late edit".utf8).write(to: lateFile)
+        try expect(GitService.commit("late edit", in: project).code == 0,
+                   "commit did not stage a last-moment edit")
+        let lateCommitted = GitService.run(
+            ["show", "--pretty=format:", "--name-only", "-z", "HEAD"], in: root)
+            .out.split(separator: "\0").map(String.init)
+        try expect(lateCommitted == ["project/late.txt"],
+                   "last-moment edit was omitted from commit: \(lateCommitted)")
+        let outsideAfterLateCommit = GitService.run(
+            ["diff", "--cached", "--name-only", "-z"], in: root)
+            .out.split(separator: "\0").map(String.init)
+        try expect(outsideAfterLateCommit == ["outside.txt"],
+                   "final staging disturbed changes outside the project")
+
         let renamed = "renamed -> \"value\"\nnext.txt"
         try FileManager.default.moveItem(at: project.appendingPathComponent(special),
                                          to: project.appendingPathComponent(renamed))
@@ -118,6 +138,126 @@ enum RegressionTests {
                    "history path was not project-relative or lossless")
         try expect(GitService.log(in: project, limit: 1).first?.subject == unusualSubject,
                    "commit metadata delimiters corrupted the history subject")
+    }
+
+    private static func testRemoteConfigurationAndPushSelection() throws {
+        let root = try temporaryDirectory("remotes")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+        let remote = root.appendingPathComponent("backup.git", isDirectory: true)
+
+        try expect(GitService.run(["init", "--bare", "-q", remote.path], in: root).code == 0,
+                   "remote fixture init failed")
+        try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
+                   "repository fixture init failed")
+        _ = GitService.run(["config", "user.name", "Remote Test"], in: repository)
+        _ = GitService.run(["config", "user.email", "remote@example.invalid"], in: repository)
+        try Data("fixture".utf8).write(to: repository.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("initial", in: repository).code == 0,
+                   "remote fixture commit failed")
+        let noRemote = GitService.push(in: repository)
+        try expect(!noRemote.ok && noRemote.message.contains("No remote"),
+                   "push without a remote did not return a useful error")
+
+        let customPush = root.appendingPathComponent("custom-push.git").path
+        let saved = GitService.saveRemote(name: "backup", fetchURL: remote.path,
+                                          pushURL: customPush, in: repository)
+        try expect(saved.ok, "custom push URL was not saved: \(saved.message)")
+        let configuredPush = GitService.run(["remote", "get-url", "--push", "backup"],
+                                            in: repository).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(configuredPush == customPush, "custom push URL was not applied")
+
+        let reset = GitService.saveRemote(name: "backup", fetchURL: remote.path,
+                                          pushURL: "", in: repository)
+        try expect(reset.ok, "custom push URL was not cleared: \(reset.message)")
+        let resetPush = GitService.run(["remote", "get-url", "--push", "backup"],
+                                       in: repository).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(resetPush == remote.path,
+                   "cleared push URL did not fall back to fetch URL: \(resetPush)")
+
+        let pushed = GitService.push(in: repository)
+        try expect(pushed.ok, "single non-origin remote was not selected: \(pushed.message)")
+        let upstream = GitService.run(["rev-parse", "--abbrev-ref", "@{upstream}"],
+                                      in: repository).out
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(upstream == "backup/main",
+                   "push configured the wrong upstream: \(upstream)")
+
+        _ = GitService.run(["branch", "--unset-upstream"], in: repository)
+        let secondRemote = root.appendingPathComponent("second.git", isDirectory: true)
+        try expect(GitService.run(["init", "--bare", "-q", secondRemote.path], in: root).code == 0,
+                   "second remote fixture init failed")
+        try expect(GitService.run(["remote", "add", "second", secondRemote.path],
+                                  in: repository).code == 0,
+                   "second remote fixture configuration failed")
+        let ambiguous = GitService.push(in: repository)
+        try expect(!ambiguous.ok && ambiguous.message.contains("Push to"),
+                   "push arbitrarily selected one of multiple non-origin remotes")
+    }
+
+    private static func testGitRepositoryMonitor() throws {
+        let root = try temporaryDirectory("git-monitor")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+
+        try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
+                   "monitor fixture init failed")
+        _ = GitService.run(["config", "user.name", "Monitor Test"], in: repository)
+        _ = GitService.run(["config", "user.email", "monitor@example.invalid"], in: repository)
+        try Data("initial".utf8).write(to: repository.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("initial", in: repository).code == 0,
+                   "monitor fixture commit failed")
+        let remote = root.appendingPathComponent("remote.git", isDirectory: true)
+        try expect(GitService.run(["init", "--bare", "-q", remote.path], in: root).code == 0,
+                   "monitor remote fixture init failed")
+        try expect(GitService.run(["remote", "add", "origin", remote.path],
+                                  in: repository).code == 0,
+                   "monitor remote fixture configuration failed")
+
+        let metadata = GitRepositoryMonitor.metadataDirectories(in: repository)
+        try expect(metadata.count == 1 && metadata[0].lastPathComponent == ".git",
+                   "regular repository metadata directory was not resolved: \(metadata)")
+
+        var observedChange = false
+        let monitor = GitRepositoryMonitor(directory: repository) {
+            observedChange = true
+        }
+        try Data("external commit".utf8)
+            .write(to: repository.appendingPathComponent("external.txt"))
+        try expect(GitService.commit("external", in: repository).code == 0,
+                   "external commit fixture failed")
+        let deadline = Date().addingTimeInterval(3)
+        while !observedChange && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        monitor.stop()
+        try expect(observedChange,
+                   "Git metadata monitor did not observe an external commit")
+
+        var observedPush = false
+        let pushMonitor = GitRepositoryMonitor(directory: repository) {
+            observedPush = true
+        }
+        try expect(GitService.run(["push", "-q", "-u", "origin", "main"],
+                                  in: repository).code == 0,
+                   "external push fixture failed")
+        let pushDeadline = Date().addingTimeInterval(3)
+        while !observedPush && Date() < pushDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        pushMonitor.stop()
+        try expect(observedPush,
+                   "Git metadata monitor did not observe an external push")
+
+        let linked = root.appendingPathComponent("linked", isDirectory: true)
+        try expect(GitService.run(["worktree", "add", "-q", "-b", "linked-test", linked.path],
+                                  in: repository).code == 0,
+                   "linked worktree fixture failed")
+        let linkedMetadata = GitRepositoryMonitor.metadataDirectories(in: linked)
+        try expect(linkedMetadata.count == 2,
+                   "linked worktree did not resolve private and common Git directories")
     }
 
     private static func testBranchListing() throws {
