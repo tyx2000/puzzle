@@ -4,6 +4,19 @@ import ImageIO
 /// An open file's buffer. Shared between editor panes so the same file opened in
 /// two panes edits one buffer (Zed behavior) while each pane keeps its own tabs.
 final class Document {
+    static let structureDidChange = Notification.Name("PuzzleDocumentStructureDidChange")
+
+    private enum SaveError: LocalizedError {
+        case readOnly
+        case encodingFailure
+        var errorDescription: String? {
+            switch self {
+            case .readOnly: return "This document is read-only and cannot be saved."
+            case .encodingFailure: return "The document could not be encoded as UTF-8."
+            }
+        }
+    }
+
     let url: URL
     let storage: NSTextStorage
     /// Cheap language *spec* — describes the language without loading its
@@ -26,12 +39,27 @@ final class Document {
         "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",
         "heic", "heif", "webp", "ico", "icns",
     ]
+    /// TextKit materialises several representations of a buffer. Refuse files
+    /// large enough to turn one accidental click on a generated log into a
+    /// hundreds-of-megabytes allocation spike.
+    static let maxTextFileBytes = 16 * 1024 * 1024
+    /// Compressed pictures need a little more input headroom; their decoded
+    /// dimensions are bounded separately by `decodePreviewImage`.
+    static let maxImageFileBytes = 32 * 1024 * 1024
 
     /// A generated, read-only buffer (a git diff) rather than a file on disk.
     /// Never saved, and coloured by the diff painter instead of tree-sitter.
     private(set) var isVirtual = false
+    /// Images, generated diffs and unreadable/unsupported files must never be
+    /// written back from their display-only placeholder.
+    var isReadOnly: Bool { isUnsupported || isVirtual || isImage }
+    /// Preserve the encoding that was decoded instead of silently converting a
+    /// Latin-1 source file to UTF-8 on its first save.
+    private var textEncoding: String.Encoding = .utf8
     /// Full-width line tints for a diff buffer (empty for normal files).
     var diffBands: [(range: NSRange, color: NSColor)] = []
+    /// Foldable blocks derived from the current source.
+    private(set) var codeBlocks: [CodeBlock] = []
 
     /// Tab label override (diffs show "file.swift (diff)" / "… @ abc1234").
     private(set) var displayName: String?
@@ -51,16 +79,55 @@ final class Document {
         self.url = url
         self.languageSpec = SyntaxHighlighter.spec(for: url)
 
-        let data = (try? Data(contentsOf: url)) ?? Data()
+        let hasImageExtension = Self.imageExtensions.contains(url.pathExtension.lowercased())
+        let byteLimit = hasImageExtension ? Self.maxImageFileBytes : Self.maxTextFileBytes
+        if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = values.fileSize, fileSize > byteLimit {
+            isUnsupported = true
+            storage = NSTextStorage(string: Self.largeFileMessage(
+                for: url, byteCount: fileSize, limit: byteLimit))
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                  range: NSRange(location: 0, length: storage.length))
+            return
+        }
 
-        // Pictures preview as images, not as "unsupported binary".
-        if Self.imageExtensions.contains(url.pathExtension.lowercased()),
-           let (decoded, pixelWidth, pixelHeight) = Self.decodePreviewImage(data),
-           decoded.size.width > 0 {
-            image = decoded
-            let px = "\(pixelWidth) × \(pixelHeight)"
-            let bytes = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
-            storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(px)  ·  \(bytes)")
+        let data: Data
+        do {
+            data = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            isUnsupported = true
+            storage = NSTextStorage(string: Self.unreadableMessage(for: url, error: error))
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                  range: NSRange(location: 0, length: storage.length))
+            return
+        }
+        // The file may have grown between the metadata lookup and the read.
+        guard data.count <= byteLimit else {
+            isUnsupported = true
+            storage = NSTextStorage(string: Self.largeFileMessage(
+                for: url, byteCount: data.count, limit: byteLimit))
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                  range: NSRange(location: 0, length: storage.length))
+            return
+        }
+
+        // Pictures preview as images, not as "unsupported binary". A corrupt
+        // image must remain read-only instead of falling through to the very
+        // permissive Latin-1 text decoder.
+        if hasImageExtension {
+            if let (decoded, pixelWidth, pixelHeight) = Self.decodePreviewImage(data),
+               decoded.size.width > 0 {
+                image = decoded
+                let px = "\(pixelWidth) × \(pixelHeight)"
+                let bytes = ByteCountFormatter.string(
+                    fromByteCount: Int64(data.count), countStyle: .file)
+                storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(px)  ·  \(bytes)")
+                storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                      range: NSRange(location: 0, length: storage.length))
+                return
+            }
+            isUnsupported = true
+            storage = NSTextStorage(string: Self.unsupportedMessage(for: url, byteCount: data.count))
             storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                                   range: NSRange(location: 0, length: storage.length))
             return
@@ -71,6 +138,7 @@ final class Document {
             text = utf8
         } else if let latin = String(data: data, encoding: .isoLatin1), !Self.looksBinary(data) {
             text = latin
+            textEncoding = .isoLatin1
         } else {
             isUnsupported = true
             text = Self.unsupportedMessage(for: url, byteCount: data.count)
@@ -102,21 +170,18 @@ final class Document {
             }
         }
 
-        let maximumDimension = 4096
-        if max(width, height) > maximumDimension {
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maximumDimension,
-                kCGImageSourceShouldCacheImmediately: true,
-            ]
-            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
-                source, 0, options as CFDictionary) else { return nil }
-            return (NSImage(cgImage: thumbnail, size: .zero), width, height)
-        }
-
-        guard let image = NSImage(data: data) else { return nil }
-        return (image, width, height)
+        // Always materialise one bounded frame. `NSImage(data:)` can retain all
+        // frames/representations of a GIF or ICNS even when its dimensions are
+        // small, defeating the pixel cap.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 4096,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, options as CFDictionary) else { return nil }
+        return (NSImage(cgImage: thumbnail, size: .zero), width, height)
     }
 
     private static func unsupportedMessage(for url: URL, byteCount: Int) -> String {
@@ -132,8 +197,58 @@ final class Document {
         """
     }
 
+    private static func unreadableMessage(for url: URL, error: Error) -> String {
+        """
+        Unable to read file
+
+        \(url.lastPathComponent)
+        \(error.localizedDescription)
+
+        This file is read-only in Puzzle to protect its existing contents.
+        """
+    }
+
+    private static func largeFileMessage(for url: URL, byteCount: Int, limit: Int) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+        let maximum = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
+        return """
+        Large file not loaded
+
+        \(url.lastPathComponent)
+        \(size) · Puzzle's in-memory editor limit is \(maximum)
+
+        Open this file with a streaming or large-file editor to avoid excessive memory use.
+        """
+    }
+
     var name: String { url.lastPathComponent }
     var text: String { storage.string }
+
+    /// Refresh a generated diff without allocating a second document while an
+    /// existing layout manager still owns the old one.
+    func replaceVirtualContent(_ text: String, displayName: String?) {
+        guard isVirtual else { return }
+        self.displayName = displayName
+        storage.setAttributedString(NSAttributedString(string: text))
+        storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                              range: NSRange(location: 0, length: storage.length))
+        diffBands.removeAll(keepingCapacity: false)
+        codeBlocks.removeAll(keepingCapacity: false)
+    }
+
+    func refreshCodeBlocks() {
+        let refreshed: [CodeBlock]
+        if isVirtual || isUnsupported || isImage {
+            refreshed = []
+        } else {
+            refreshed = CodeBlockAnalyzer.analyze(
+                text, language: languageSpec?.name)
+        }
+        guard refreshed != codeBlocks else { return }
+        codeBlocks = refreshed
+        NotificationCenter.default.post(
+            name: Self.structureDidChange, object: self)
+    }
 
     /// Approximate retained bytes used by this document. Attributed text costs
     /// more than its UTF-16 characters because syntax runs retain attributes.
@@ -150,7 +265,24 @@ final class Document {
     }
 
     func save() throws {
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        guard !isReadOnly else { throw SaveError.readOnly }
+        // Keep the source encoding whenever the edited text can represent it.
+        // If an edit introduces a character outside that encoding, UTF-8 is a
+        // lossless fallback and becomes the document's encoding for later saves.
+        let data: Data
+        let savedEncoding: String.Encoding
+        if let encoded = text.data(using: textEncoding) {
+            data = encoded
+            savedEncoding = textEncoding
+        } else {
+            guard let utf8 = text.data(using: .utf8) else {
+                throw SaveError.encodingFailure
+            }
+            data = utf8
+            savedEncoding = .utf8
+        }
+        try data.write(to: url, options: .atomic)
+        textEncoding = savedEncoding
         isModified = false
     }
 }
@@ -181,10 +313,24 @@ final class DocumentStore {
 
     /// Whether a buffer is currently held (tests / diagnostics).
     func documentIsCached(_ url: URL) -> Bool { docs[url] != nil }
+    func cachedDocument(for url: URL) -> Document? { docs[url] }
 
     /// Number of buffers currently held (tests / diagnostics).
     var cachedCount: Int { docs.count }
     var cachedBytes: Int { docs.values.reduce(0) { $0 + $1.estimatedMemoryCost } }
+
+    /// Immutable copies of current unsaved text inside a project. Project
+    /// search runs off the main thread, so its worker must not read directly
+    /// from `NSTextStorage`. Clean files need no copy because disk is current.
+    func modifiedTextSnapshots(in directory: URL) -> [(url: URL, text: String)] {
+        let root = directory.standardizedFileURL.path
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return docs.values.compactMap { doc in
+            guard doc.isModified, !doc.isReadOnly, doc.url.isFileURL,
+                  doc.url.standardizedFileURL.path.hasPrefix(prefix) else { return nil }
+            return (doc.url, doc.text)
+        }
+    }
 
     func registerOpen(_ url: URL, owner: AnyObject) {
         owners[url, default: []].insert(ObjectIdentifier(owner))
@@ -210,7 +356,9 @@ final class DocumentStore {
         docs[url] = doc
         touch(url)
         HighlightService.shared.highlight(doc)
-        evictIfNeeded()
+        // The caller has not attached its layout manager yet, so explicitly
+        // protect the document it is about to display from evicting itself.
+        evictIfNeeded(excluding: url)
         return doc
     }
 
@@ -226,10 +374,11 @@ final class DocumentStore {
     ///   * virtual documents (git diffs) — synthetic URLs, nothing to re-read;
     ///   * documents whose storage is attached to a layout manager, i.e. the
     ///     buffer a pane is displaying right now.
-    private func evictIfNeeded() {
+    private func evictIfNeeded(excluding protectedURL: URL? = nil) {
         guard docs.count > maxCachedDocuments || cachedBytes > maxCachedBytes else { return }
         for url in order {
             guard docs.count > maxCachedDocuments || cachedBytes > maxCachedBytes else { break }
+            guard url != protectedURL else { continue }
             guard let doc = docs[url] else { continue }
             guard !doc.isModified, !doc.isVirtual else { continue }
             guard doc.storage.layoutManagers.isEmpty else { continue }
@@ -245,6 +394,12 @@ final class DocumentStore {
     /// matters because re-clicking a file should show its *current* diff.
     @discardableResult
     func setVirtualDocument(url: URL, text: String, displayName: String? = nil) -> Document {
+        if let existing = docs[url], existing.isVirtual {
+            existing.replaceVirtualContent(text, displayName: displayName)
+            touch(url)
+            HighlightService.shared.highlight(existing)
+            return existing
+        }
         let doc = Document(virtualURL: url, text: text, displayName: displayName)
         docs[url] = doc
         touch(url)
@@ -306,6 +461,7 @@ final class HighlightService {
 
     func highlight(_ doc: Document) {
         let storage = doc.storage
+        doc.refreshCodeBlocks()
         // Generated diff buffers get the diff painter, not tree-sitter.
         if doc.isVirtual {
             doc.diffBands = DiffHighlighter.apply(to: storage)

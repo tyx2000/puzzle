@@ -1,12 +1,5 @@
 import AppKit
 
-/// Search options toggled by the Aa / wd / .* glyphs.
-struct SearchOptions: Equatable {
-    var caseSensitive = false
-    var wholeWord = false
-    var regex = false
-}
-
 /// A flat, rounded search field with Aa / wd / .* toggles on the right.
 /// No focus ring — focus is shown by a subtle border tint instead.
 /// Used by both the project search panel and the in-file find bar.

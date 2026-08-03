@@ -6,10 +6,15 @@ import AppKit
 /// re-parsing a long README on each one is wasted work when only the last one
 /// is ever seen.
 final class MarkdownPreviewView: NSView {
+    /// Rendering creates a byte copy plus a second attributed document. Keep the
+    /// optional preview below a size where those representations dominate RAM.
+    static let maxSourceCharacters = 2_000_000
+
     private let scrollView = NSScrollView()
     private let textView = MarkdownTextView()
     private var pending: DispatchWorkItem?
     private var lastSource: String?
+    private var renderGeneration = 0
 
     /// How long typing must pause before the preview re-renders.
     private let debounce: TimeInterval = 0.15
@@ -69,9 +74,12 @@ final class MarkdownPreviewView: NSView {
     func update(source: String, immediately: Bool = false) {
         guard source != lastSource else { return }
         pending?.cancel()
+        renderGeneration += 1
+        let generation = renderGeneration
 
         let apply = { [weak self] in
-            guard let self else { return }
+            guard let self, self.renderGeneration == generation else { return }
+            self.pending = nil
             self.lastSource = source
             let rendered = MarkdownRenderer.render(source)
             // Preserve the scroll position: re-rendering replaces the whole
@@ -92,9 +100,21 @@ final class MarkdownPreviewView: NSView {
     }
 
     func cancelPendingUpdate() {
+        renderGeneration += 1
         pending?.cancel()
         pending = nil
     }
+
+    /// Drop both retained copies of a rendered document. A hidden preview can
+    /// always be rebuilt from its document when shown again.
+    func clearContent() {
+        cancelPendingUpdate()
+        lastSource = nil
+        textView.textStorage?.setAttributedString(NSAttributedString())
+    }
+
+    var retainedSourceLengthForTesting: Int { lastSource?.utf16.count ?? 0 }
+    var renderedLengthForTesting: Int { textView.textStorage?.length ?? 0 }
 }
 
 /// Draws the decorations that can't be expressed as text attributes: the left

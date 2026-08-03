@@ -12,6 +12,9 @@ final class SearchViewController: NSViewController {
     private let summaryLabel = NSTextField(labelWithString: "")
     private let outline = NSOutlineView()
     private var searchWork: DispatchWorkItem?
+    /// Cancellation alone is not an identity check: an old task can finish
+    /// after `searchWork` already points at a newer, non-cancelled task.
+    private var searchGeneration = 0
 
     struct Hit {
         let line: Int
@@ -33,7 +36,19 @@ final class SearchViewController: NSViewController {
     }
     private var groups: [FileGroup] = []
 
-    func setDirectory(_ url: URL) { directory = url }
+    func setDirectory(_ url: URL) {
+        guard directory != url else { return }
+        directory = url
+        searchGeneration += 1
+        searchWork?.cancel()
+        searchWork = nil
+        groups.removeAll()
+        hitRowCache.removeAll()
+        if isViewLoaded {
+            outline.reloadData()
+            summaryLabel.stringValue = ""
+        }
+    }
 
     override func loadView() {
         let container = FlatView()
@@ -93,6 +108,7 @@ final class SearchViewController: NSViewController {
     func refreshFonts() { searchField.refreshFonts() }
 
     func releaseTransientMemory() {
+        searchGeneration += 1
         searchWork?.cancel()
         searchWork = nil
         groups.removeAll()
@@ -109,7 +125,10 @@ final class SearchViewController: NSViewController {
     @objc private func searchChanged() {
         let query = searchField.stringValue
         let options = searchField.options
+        searchGeneration += 1
+        let generation = searchGeneration
         searchWork?.cancel()
+        searchWork = nil
         guard query.count >= 2, let directory else {
             groups = []; hitRowCache.removeAll(); outline.reloadData()
             summaryLabel.stringValue = query.isEmpty ? "" : "Type at least 2 characters"
@@ -121,10 +140,18 @@ final class SearchViewController: NSViewController {
         hitRowCache.removeAll()
         outline.reloadData()
         summaryLabel.stringValue = "Searching…"
+        // Disk search cannot see edits that have not been saved yet. Snapshot
+        // modified buffers on the main thread, then let the worker use those
+        // immutable strings instead of stale disk content.
+        let bufferSnapshots = Dictionary(uniqueKeysWithValues:
+            DocumentStore.shared.modifiedTextSnapshots(in: directory).map { ($0.url, $0.text) })
         let work = DispatchWorkItem { [weak self] in
-            let found = Self.search(query: query, in: directory, options: options)
+            let found = Self.search(
+                query: query, in: directory, options: options,
+                inMemoryFiles: bufferSnapshots)
             DispatchQueue.main.async {
-                guard let self, !(self.searchWork?.isCancelled ?? true) else { return }
+                guard let self, self.searchGeneration == generation else { return }
+                self.searchWork = nil
                 self.hitRowCache.removeAll()   // stale rows from the previous query
                 self.groups = found
                 self.outline.reloadData()
@@ -171,19 +198,39 @@ final class SearchViewController: NSViewController {
     }()
 
     static func search(query: String, in directory: URL,
-                       options: SearchOptions = SearchOptions()) -> [FileGroup] {
-        let raw = ripgrepPath.map { ripgrep(rg: $0, query: query, in: directory, options: options) }
-            ?? nativeSearch(query: query, in: directory)
+                       options: SearchOptions = SearchOptions(),
+                       inMemoryFiles: [URL: String] = [:]) -> [FileGroup] {
+        guard let matcher = SearchMatcher(query: query, options: options) else { return [] }
+        let diskHits = ripgrepPath.map { ripgrep(rg: $0, query: query, in: directory, options: options) }
+            ?? nativeSearch(query: query, in: directory, options: options)
+        let snapshots: [(relative: String, text: String)] = inMemoryFiles.compactMap { url, text in
+            relativePath(for: url, in: directory).map { ($0, text) }
+        }.sorted { $0.relative < $1.relative }
+        let overridden = Set(snapshots.map(\.relative))
+        var raw: [(String, Int, String)] = []
+        raw.reserveCapacity(min(maxHits, diskHits.count + snapshots.count))
+        // Modified files take priority so a saturated disk result set cannot
+        // hide a current in-memory match. Their old disk hits are removed even
+        // when the edit deleted every occurrence.
+        for snapshot in snapshots {
+            appendMatches(
+                in: snapshot.text, relative: snapshot.relative,
+                matcher: matcher, query: query, options: options, to: &raw)
+            if raw.count >= maxHits { break }
+        }
+        if raw.count < maxHits {
+            raw.append(contentsOf: diskHits.lazy
+                .filter { !overridden.contains($0.0) }
+                .prefix(maxHits - raw.count))
+        }
         // Preserve file order, group hits.
         var order: [String] = []
         var byFile: [String: FileGroup] = [:]
-        let highlightOptions: NSString.CompareOptions =
-            options.caseSensitive ? [] : [.caseInsensitive]
         for (rel, line, text) in raw {
             let url = directory.appendingPathComponent(rel)
-            let range = (text as NSString).range(of: query, options: highlightOptions)
+            let range = matcher.firstRange(in: text)
             let hit = Hit(line: line, preview: text,
-                          matchRange: range.location == NSNotFound ? nil : range)
+                          matchRange: range)
             if let g = byFile[rel] {
                 g.hits.append(hit)
             } else {
@@ -194,11 +241,37 @@ final class SearchViewController: NSViewController {
         return order.compactMap { byFile[$0] }
     }
 
+    private static func relativePath(for url: URL, in directory: URL) -> String? {
+        let root = directory.standardizedFileURL.path
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(prefix) else { return nil }
+        return String(path.dropFirst(prefix.count))
+    }
+
+    private static func appendMatches(
+        in text: String, relative: String, matcher: SearchMatcher,
+        query: String, options: SearchOptions,
+        to output: inout [(String, Int, String)]
+    ) {
+        var line = 0
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            line += 1
+            let value = String(rawLine)
+            guard matcher.firstRange(in: value) != nil else { continue }
+            output.append((relative, line, searchPreview(value, query: query, options: options)))
+            if output.count >= maxHits { return }
+        }
+    }
+
     private static func ripgrep(rg: String, query: String, in directory: URL,
                                 options: SearchOptions) -> [(String, Int, String)] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: rg)
-        var args = ["--line-number", "--no-heading", "--color", "never", "--max-count", "80"]
+        // JSON framing keeps paths containing colons or newlines unambiguous.
+        // The previous `path:line:text` parser silently discarded valid hits.
+        var args = ["--json", "--max-count", "80",
+                    "--max-columns", "1000", "--max-columns-preview"]
         if !options.regex { args.append("--fixed-strings") }   // regex is rg's default
         args.append(options.caseSensitive ? "--case-sensitive" : "--ignore-case")
         if options.wholeWord { args.append("--word-regexp") }
@@ -207,8 +280,12 @@ final class SearchViewController: NSViewController {
         process.currentDirectoryURL = directory
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nativeSearch(query: query, in: directory) }
+        // Search errors are represented by no results; leaving an unread stderr
+        // pipe here can deadlock on a tree with many permission errors.
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch {
+            return nativeSearch(query: query, in: directory, options: options)
+        }
 
         // Read incrementally and stop once we have enough. `readDataToEndOfFile`
         // buffered ripgrep's ENTIRE output first — a common word in a big repo
@@ -225,13 +302,16 @@ final class SearchViewController: NSViewController {
             while let nl = buffer.firstIndex(of: 0x0A) {
                 let lineData = buffer[buffer.startIndex..<nl]
                 buffer.removeSubrange(buffer.startIndex...nl)
-                let line = String(decoding: lineData, as: UTF8.self)
-                let parts = line.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-                guard parts.count == 3, let no = Int(parts[1]) else { continue }
-                var rel = String(parts[0])
+                guard let object = try? JSONSerialization.jsonObject(with: Data(lineData))
+                        as? [String: Any],
+                      object["type"] as? String == "match",
+                      let payload = object["data"] as? [String: Any],
+                      var rel = jsonText(payload["path"]),
+                      let textValue = jsonText(payload["lines"]),
+                      let no = payload["line_number"] as? Int else { continue }
                 if rel.hasPrefix("./") { rel.removeFirst(2) }
-                let text = String(parts[2]).trimmingCharacters(in: .whitespaces)
-                out.append((rel, no, String(text.prefix(maxPreviewChars))))
+                let text = searchPreview(textValue, query: query, options: options)
+                out.append((rel, no, text))
                 if out.count >= maxHits { done = true; break }
             }
         }
@@ -240,32 +320,72 @@ final class SearchViewController: NSViewController {
         return out
     }
 
+    private static func jsonText(_ value: Any?) -> String? {
+        guard let object = value as? [String: Any] else { return nil }
+        if let text = object["text"] as? String { return text }
+        if let encoded = object["bytes"] as? String,
+           let data = Data(base64Encoded: encoded) {
+            return String(decoding: data, as: UTF8.self)
+        }
+        return nil
+    }
+
+    /// Keep a bounded preview while ensuring a late match remains visible.
+    private static func searchPreview(_ line: String, query: String,
+                                      options: SearchOptions) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = trimmed as NSString
+        guard source.length > maxPreviewChars else { return trimmed }
+        guard let match = SearchMatcher(query: query, options: options)?.firstRange(in: trimmed),
+              match.location >= maxPreviewChars else {
+            return source.substring(to: maxPreviewChars)
+        }
+        let requestedStart = max(0, match.location - maxPreviewChars / 3)
+        let requestedLength = min(maxPreviewChars - 1, source.length - requestedStart)
+        let safe = source.rangeOfComposedCharacterSequences(
+            for: NSRange(location: requestedStart, length: requestedLength))
+        return "…" + source.substring(with: safe)
+    }
+
     /// Result caps — the panel can't usefully show more than this, and holding
     /// every hit of a common word was the single largest memory spike measured.
     private static let maxHits = 500
     private static let maxPreviewChars = 160
+    static let maxNativeFileBytes = 2_000_000
 
     private static let skipDirs: Set<String> = [".git", "node_modules", ".build", "build",
                                                 "DerivedData", ".svn", "Pods", ".obj"]
 
-    private static func nativeSearch(query: String, in directory: URL) -> [(String, Int, String)] {
+    /// Check metadata before allocating file contents. Kept separate so the
+    /// large-file rejection is directly regression-testable.
+    static func shouldLoadForNativeSearch(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize else { return false }
+        return fileSize < maxNativeFileBytes
+    }
+
+    private static func nativeSearch(query: String, in directory: URL,
+                                     options: SearchOptions) -> [(String, Int, String)] {
         var out: [(String, Int, String)] = []
         let fm = FileManager.default
-        guard let e = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey],
+        guard let e = fm.enumerator(at: directory,
+                                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                                     options: [.skipsHiddenFiles]) else { return [] }
-        let needle = query.lowercased()
+        guard let matcher = SearchMatcher(query: query, options: options) else { return [] }
         for case let url as URL in e {
             if skipDirs.contains(url.lastPathComponent) { e.skipDescendants(); continue }
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
-                  let data = try? Data(contentsOf: url), data.count < 2_000_000,
+            guard shouldLoadForNativeSearch(url),
+                  let data = try? Data(contentsOf: url),
                   !data.prefix(1024).contains(0) else { continue }
             let rel = url.path.replacingOccurrences(of: directory.path + "/", with: "")
             var no = 0
             for raw in String(decoding: data, as: UTF8.self)
                 .split(separator: "\n", omittingEmptySubsequences: false) {
                 no += 1
-                if raw.lowercased().contains(needle) {
-                    out.append((rel, no, String(raw.trimmingCharacters(in: .whitespaces).prefix(300))))
+                if matcher.firstRange(in: String(raw)) != nil {
+                    out.append((rel, no, searchPreview(String(raw), query: query, options: options)))
                     if out.count >= maxHits { return out }
                 }
             }

@@ -81,7 +81,13 @@ final class EditorViewController: NSViewController {
         pane.repositoryRoot = repositoryRoot
         pane.onRequestSplit = { [weak self] in self?.splitEditor() }
         pane.onBecameActive = { [weak self] p in self?.setActivePane(p) }
-        pane.onDocumentSaved = { [weak self] url in self?.onDocumentSaved?(url) }
+        pane.onDocumentSaved = { [weak self] url in
+            guard let self else { return }
+            // The same document may be visible in both panes. Clear every
+            // modified marker after a manual save completes.
+            self.panes.forEach { $0.reloadTabs() }
+            self.onDocumentSaved?(url)
+        }
         pane.onDocumentEdited = { [weak self] in
             self?.panes.forEach { $0.reloadTabs() }
         }
@@ -115,10 +121,26 @@ final class EditorViewController: NSViewController {
         MarkdownRenderer.releaseParsers()
     }
 
-    /// Detach every pane's layout manager — called when the window closes.
+    /// Confirm all modified documents before a window close. URLs are
+    /// de-duplicated because the same document can be open in both panes.
+    func confirmClose() -> Bool {
+        var seen = Set<URL>()
+        for pane in panes {
+            let urls = pane.openURLs.filter { seen.insert($0).inserted }
+            guard pane.confirmClose(urls: urls) else { return false }
+        }
+        return true
+    }
+
+    /// Detach every pane's layout manager — called after confirmClose().
     func detachAllPanes() {
         panes.forEach { $0.prepareForClose() }
         MarkdownRenderer.releaseParsers()
+    }
+
+    func releaseTransientMemory() {
+        panes.forEach { $0.releaseTransientMemory() }
+        releasePreviewParsersIfIdle()
     }
 
     private func closePane(_ pane: EditorPaneViewController) {
@@ -126,6 +148,7 @@ final class EditorViewController: NSViewController {
         guard panes.count > 1, let index = panes.firstIndex(of: pane) else {
             updatePlaceholder(); return
         }
+        guard pane.confirmClose(urls: pane.openURLs) else { return }
         // Before the pane goes away, or its layout manager stays attached to
         // the document and pins it.
         pane.prepareForClose()

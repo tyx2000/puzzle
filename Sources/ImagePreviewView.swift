@@ -43,6 +43,7 @@ final class ImagePreviewView: FlatView {
 
     private var widthConstraint: NSLayoutConstraint?
     private var heightConstraint: NSLayoutConstraint?
+    private var aspectConstraint: NSLayoutConstraint?
 
     func show(image: NSImage, caption text: String) {
         imageView.image = image
@@ -54,17 +55,37 @@ final class ImagePreviewView: FlatView {
                                height: CGFloat(rep?.pixelsHigh ?? Int(image.size.height)))
         widthConstraint?.isActive = false
         heightConstraint?.isActive = false
+        aspectConstraint?.isActive = false
         // Cap at natural size; the ≤ constraints above shrink it to fit.
         let w = imageView.widthAnchor.constraint(lessThanOrEqualToConstant: max(1, pixelSize.width))
         let h = imageView.heightAnchor.constraint(lessThanOrEqualToConstant: max(1, pixelSize.height))
         // Preserve aspect ratio while scaling down.
-        imageView.addConstraint(
-            NSLayoutConstraint(item: imageView, attribute: .width, relatedBy: .equal,
-                               toItem: imageView, attribute: .height,
-                               multiplier: pixelSize.width / max(1, pixelSize.height), constant: 0))
-        w.isActive = true; h.isActive = true
-        widthConstraint = w; heightConstraint = h
+        let aspect = imageView.widthAnchor.constraint(
+            equalTo: imageView.heightAnchor,
+            multiplier: pixelSize.width / max(1, pixelSize.height))
+        NSLayoutConstraint.activate([w, h, aspect])
+        widthConstraint = w
+        heightConstraint = h
+        aspectConstraint = aspect
         needsDisplay = true
+    }
+
+    /// Release the decoded bitmap as soon as the preview is no longer visible.
+    /// The document can decode/reload it again if its tab is revisited.
+    func clear() {
+        imageView.image = nil
+        caption.stringValue = ""
+        NSLayoutConstraint.deactivate(
+            [widthConstraint, heightConstraint, aspectConstraint].compactMap { $0 })
+        widthConstraint = nil
+        heightConstraint = nil
+        aspectConstraint = nil
+        needsDisplay = true
+    }
+
+    var hasImageForTesting: Bool { imageView.image != nil }
+    var dynamicConstraintCountForTesting: Int {
+        [widthConstraint, heightConstraint, aspectConstraint].compactMap { $0 }.count
     }
 
     override func draw(_ dirtyRect: NSRect) {

@@ -7,15 +7,15 @@ final class RootViewController: NSViewController {
     let sidebar: SidebarViewController
     let editor: EditorViewController
 
-    /// Panel width is preserved across panel switches / collapses.
+    /// Panel width is preserved across panel switches.
     private let minimumSidebarWidth: CGFloat = 150
-    private var lastSidebarWidth: CGFloat = 280
+    private var lastSidebarWidth: CGFloat = 400
     /// Owns the panel width so switching panels can never change it. Dragging the
     /// divider updates its constant, so the divider still works.
     private var sidebarWidthConstraint: NSLayoutConstraint!
     private var sidebarItem: NSSplitViewItem!
     private let dividerHandle = SplitDividerHandleView()
-    private var dividerDragStartWidth: CGFloat = 280
+    private var dividerDragStartWidth: CGFloat = 400
 
     init(sidebar: SidebarViewController, editor: EditorViewController) {
         self.sidebar = sidebar
@@ -33,8 +33,7 @@ final class RootViewController: NSViewController {
         // Upper bound is 80% of the window (applied live in onDividerDrag);
         // this static cap is just a sane ceiling before the window exists.
         sidebarItem.maximumThickness = 2000
-        // The panel is always visible — clicking the active action button (or
-        // ⌘B) must not hide it.
+        // The panel is always visible; all sidebar commands select a panel.
         sidebarItem.canCollapse = false
         // The panel holds its width; the editor absorbs window resizing. With
         // `.defaultLow` the panel is the pane that yields, so it snapped back to
@@ -84,12 +83,10 @@ final class RootViewController: NSViewController {
     }
 
 
-    /// The width constraint already makes every panel identical; this simply
-    /// re-asserts it (also used after collapse/expand).
+    /// Re-assert the remembered width after switching panels.
     func preserveSidebarWidth() { applyWidth(lastSidebarWidth) }
 
     private func applyWidth(_ target: CGFloat) {
-        guard !sidebarItem.isCollapsed else { return }
         lastSidebarWidth = target
         sidebarWidthConstraint.constant = target
     }
@@ -102,14 +99,7 @@ final class RootViewController: NSViewController {
         lastSidebarWidth = width
     }
 
-    var isSidebarCollapsed: Bool { sidebarItem.isCollapsed }
-
-    /// The panel no longer collapses; this just guarantees it is visible at its
-    /// remembered width (kept so existing callers/menu items stay valid).
-    func toggleSidebar() { showSidebar() }
-
     func showSidebar() {
-        if sidebarItem.isCollapsed { sidebarItem.isCollapsed = false }
         applyWidth(max(lastSidebarWidth, minimumSidebarWidth))
     }
 }

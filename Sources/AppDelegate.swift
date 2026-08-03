@@ -247,8 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.findInFolder(_:)), keyEquivalent: "2")
         viewMenu.addItem(withTitle: "Show Git",
                          action: #selector(WorkspaceWindowController.showGit(_:)), keyEquivalent: "3")
-        viewMenu.addItem(withTitle: "Toggle Sidebar",
-                         action: #selector(WorkspaceWindowController.toggleSidebar(_:)), keyEquivalent: "b")
+        viewMenu.addItem(withTitle: "Show Sidebar",
+                         action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
         viewMenu.addItem(withTitle: "Split Editor",
                          action: #selector(WorkspaceWindowController.splitEditor(_:)), keyEquivalent: "\\")
         viewMenu.addItem(withTitle: "Markdown Preview",

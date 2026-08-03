@@ -23,7 +23,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private let tabBar = EditorTabBar()
     private var scrollView: NSScrollView!
     private var textView: PuzzleTextView!
-    private var layoutManager = NSLayoutManager()
+    private var layoutManager = FoldingLayoutManager()
     /// Empty storage used when the pane has no open file.
     private let blankStorage = NSTextStorage()
 
@@ -45,6 +45,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var editorTrailingSplit: NSLayoutConstraint?
     /// Remembered per file so toggling tabs doesn't lose the preview state.
     private var previewEnabled: Set<URL> = []
+    /// Fold identities are pane-local, but survive switching between tabs.
+    private var foldedBlocks: [URL: Set<Int>] = [:]
 
     var isPreviewVisible: Bool { markdownPreview.map { !$0.isHidden } ?? false }
 
@@ -85,6 +87,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
         // Nothing open yet — no current-line band in the empty area.
         textView.showsCurrentLineBand = false
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(documentStructureChanged(_:)),
+            name: Document.structureDidChange, object: nil)
 
         scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -214,7 +219,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func activate(index: Int) {
         guard openURLs.indices.contains(index) else { return }
         // Remember where the caret was in the outgoing document.
-        if let prev = currentURL { selections[prev] = textView.selectedRange() }
+        if let prev = currentURL {
+            selections[prev] = textView.selectedRange()
+            foldedBlocks[prev] = layoutManager.foldedBlockIdentities
+        }
 
         activeIndex = index
         let url = openURLs[index]
@@ -234,9 +242,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // Binary files show a placeholder and must not be editable — typing into
         // one and saving would destroy the file.
         // Diffs and binaries are read-only.
-        textView.isEditable = !doc.isUnsupported && !doc.isVirtual
+        textView.isEditable = !doc.isReadOnly
         textView.showsCurrentLineBand = true
         textView.diffBands = doc.diffBands
+        textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
+        layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
 
         // Pictures preview as an image instead of the text view.
         if let image = doc.image {
@@ -245,6 +255,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             imagePreview.isHidden = false
             scrollView.isHidden = true
         } else {
+            imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = false
         }
@@ -260,13 +271,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func close(index: Int) {
         guard openURLs.indices.contains(index) else { return }
-        let url = openURLs.remove(at: index)
+        let url = openURLs[index]
+        guard confirmClose(urls: [url]) else { return }
+        openURLs.remove(at: index)
         selections.removeValue(forKey: url)
         previewEnabled.remove(url)
+        foldedBlocks.removeValue(forKey: url)
         defer { onTabClosed?(url) }
         if openURLs.isEmpty {
             activeIndex = nil
-            markdownPreview?.cancelPendingUpdate()
+            markdownPreview?.clearContent()
             markdownPreview?.isHidden = true
             editorTrailingSplit?.isActive = false
             editorTrailingFull.isActive = true
@@ -275,6 +289,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             blankStorage.addLayoutManager(layoutManager)
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
+            textView.updateCodeBlocks([], resetFolds: false)
+            imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = false
             reloadTabs()
@@ -291,7 +307,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// a diff is not markdown even when it patches a .md file.
     private func isPreviewable(_ doc: Document) -> Bool {
         doc.languageSpec?.name == "markdown" && !doc.isVirtual && !doc.isUnsupported
-            && doc.image == nil
+            && doc.image == nil && doc.storage.length <= MarkdownPreviewView.maxSourceCharacters
     }
 
     func toggleMarkdownPreview() {
@@ -317,7 +333,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         if !shouldShow {
             let wasVisible = markdownPreview.map { !$0.isHidden } ?? false
-            markdownPreview?.cancelPendingUpdate()
+            markdownPreview?.clearContent()
             markdownPreview?.isHidden = true
             editorTrailingSplit?.isActive = false
             editorTrailingFull.isActive = true
@@ -356,11 +372,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard !doomed.isEmpty, openURLs.indices.contains(anchor) else { return }
         let anchorURL = openURLs[anchor]
         let doomedSet = Set(doomed)
-        var closed: [URL] = []
-        for i in doomed where openURLs.indices.contains(i) {
-            selections.removeValue(forKey: openURLs[i])
-            previewEnabled.remove(openURLs[i])
-            closed.append(openURLs[i])
+        let closed = doomed.compactMap { openURLs.indices.contains($0) ? openURLs[$0] : nil }
+        guard confirmClose(urls: closed) else { return }
+        closed.forEach {
+            selections.removeValue(forKey: $0)
+            previewEnabled.remove($0)
+            foldedBlocks.removeValue(forKey: $0)
         }
         defer { closed.forEach { onTabClosed?($0) } }
         openURLs = openURLs.enumerated()
@@ -371,12 +388,52 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func save() {
-        guard let doc = currentDocument, !doc.isUnsupported else { return }
+        guard let doc = currentDocument, !doc.isReadOnly else { return }
+        persist(doc, notify: true, presentErrors: true)
+    }
+
+    @discardableResult
+    private func persist(_ document: Document, notify: Bool,
+                         presentErrors: Bool) -> Bool {
+        guard document.isModified, !document.isReadOnly else { return true }
         do {
-            try doc.save()
+            try document.save()
             reloadTabs()
-            onDocumentSaved?(doc.url)
-        } catch { presentError(error) }
+            if notify { onDocumentSaved?(document.url) }
+            return true
+        } catch {
+            if presentErrors { self.presentError(error) }
+            return false
+        }
+    }
+
+
+    /// Ask about all modified documents before mutating tab ownership. A
+    /// successful save is the only choice that clears the modified marker;
+    /// choosing Don't Save lets DocumentStore discard the buffer once its last
+    /// pane unregisters it.
+    func confirmClose(urls: [URL]) -> Bool {
+        var seen = Set<URL>()
+        for url in urls where seen.insert(url).inserted {
+            guard let document = DocumentStore.shared.cachedDocument(for: url),
+                  document.isModified, !document.isReadOnly else { continue }
+
+            let alert = NSAlert()
+            alert.messageText = "Save changes to \(document.name)?"
+            alert.informativeText = "Your edits will be lost if you close without saving."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Don’t Save")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                guard persist(document, notify: true, presentErrors: true) else { return false }
+            case .alertSecondButtonReturn:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
     }
 
     func jumpToLine(_ line: Int) {
@@ -404,20 +461,32 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     /// Tear down asynchronous/cached state and surrender this pane's tab
-    /// ownership. Used both for a closed split and for a closing window.
+    /// ownership. Callers must run confirmClose(urls:) first.
     func prepareForClose() {
+        blameGeneration += 1
         blameWork?.cancel()
         blameWork = nil
         blameCache.removeAll()
         blameOrder.removeAll()
-        markdownPreview?.cancelPendingUpdate()
+        markdownPreview?.clearContent()
+        imagePreview?.clear()
+        textView.updateCodeBlocks([], resetFolds: false)
         detachFromDocument()
         let urls = openURLs
         openURLs.removeAll()
         activeIndex = nil
         selections.removeAll()
         previewEnabled.removeAll()
+        foldedBlocks.removeAll()
         urls.forEach { onTabClosed?($0) }
+    }
+
+    /// Release view-owned payloads that are not currently visible. Documents
+    /// themselves are handled separately by `DocumentStore`.
+    func releaseTransientMemory() {
+        if imagePreview?.isHidden != false { imagePreview?.clear() }
+        if markdownPreview?.isHidden != false { markdownPreview?.clearContent() }
+        if findBar.isHidden { findBar.clearHighlights() }
     }
 
     /// Re-apply font / line metrics after settings change.
@@ -458,12 +527,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scheduleInlineBlame()
     }
 
+    @objc private func documentStructureChanged(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              document.url == currentURL else { return }
+        textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
+    }
+
     // MARK: - Inline blame
 
     /// Project root, needed to run `git blame` in the right repository.
     var repositoryRoot: URL?
 
     private var blameWork: DispatchWorkItem?
+    private var blameGeneration = 0
     /// Blame results keyed by file + line, so revisiting a line is free.
     private var blameCache: [String: String] = [:]
     private var blameOrder: [String] = []
@@ -481,19 +557,23 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func caretLine() -> Int {
         let ns = textView.string as NSString
         let caret = min(textView.selectedRange().location, ns.length)
+        guard caret > 0 else { return 1 }
+        // At EOF without a trailing newline, probing at `caret` asks TextKit
+        // for the next (empty) line. Probe the final character instead.
+        let probe = min(caret - 1, ns.length - 1)
+        let lineStart = ns.lineRange(for: NSRange(location: probe, length: 0)).location
         var line = 1
         var index = 0
-        while index < caret {
-            let range = ns.lineRange(for: NSRange(location: index, length: 0))
-            if NSMaxRange(range) > caret { break }
-            index = NSMaxRange(range)
-            if index <= caret { line += 1 }
-            if range.length == 0 { break }
+        while index < lineStart {
+            if ns.character(at: index) == 0x0A { line += 1 }
+            index += 1
         }
         return line
     }
 
     private func scheduleInlineBlame() {
+        blameGeneration += 1
+        let generation = blameGeneration
         blameWork?.cancel()
 
         guard Settings.shared.showInlineBlame,
@@ -525,7 +605,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let work = DispatchWorkItem { [weak self] in
             let blame = GitService.blame(file: url, line: line, in: root)
             DispatchQueue.main.async {
-                guard let self, !(self.blameWork?.isCancelled ?? true) else { return }
+                guard let self, self.blameGeneration == generation else { return }
                 // The caret may have moved on while git ran.
                 guard self.currentURL == url, self.caretLine() == line else { return }
                 let text = blame?.inlineText ?? ""

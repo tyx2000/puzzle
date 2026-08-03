@@ -471,7 +471,9 @@ final class SyntaxHighlighter {
 /// Maps UTF-8 byte offsets to UTF-16 offsets. Identity for ASCII/BMP-ASCII text.
 private struct ByteMapper {
     private let identity: Bool
-    private var table: [Int: Int] = [:]
+    /// A dense Int32 table is substantially smaller than a Swift Dictionary
+    /// entry per Unicode scalar. Non-boundary byte positions remain `-1`.
+    private var table: [Int32] = []
 
     init(text: String, utf8Count: Int) {
         // If UTF-8 length equals UTF-16 length, the text is pure ASCII and
@@ -482,17 +484,18 @@ private struct ByteMapper {
         }
         identity = false
         var byte = 0, u16 = 0
-        table.reserveCapacity(text.unicodeScalars.count + 1)
+        table = [Int32](repeating: -1, count: utf8Count + 1)
         for scalar in text.unicodeScalars {
-            table[byte] = u16
+            table[byte] = Int32(u16)
             byte += UTF8.width(scalar)
             u16 += UTF16.width(scalar)
         }
-        table[byte] = u16
+        table[byte] = Int32(u16)
     }
 
     func utf16(forByte b: Int) -> Int? {
         if identity { return b }
-        return table[b]
+        guard table.indices.contains(b), table[b] >= 0 else { return nil }
+        return Int(table[b])
     }
 }

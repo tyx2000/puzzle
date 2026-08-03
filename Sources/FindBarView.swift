@@ -110,8 +110,12 @@ final class FindBarView: FlatView {
             if !options.caseSensitive { flags.insert(.caseInsensitive) }
             let pattern = options.wholeWord ? "\\b(?:\(query))\\b" : query
             guard let re = try? NSRegularExpression(pattern: pattern, options: flags) else { return }
-            re.enumerateMatches(in: haystack as String, range: NSRange(location: 0, length: haystack.length)) { m, _, _ in
-                if let r = m?.range, r.length > 0 { matches.append(r) }
+            re.enumerateMatches(
+                in: haystack as String,
+                range: NSRange(location: 0, length: haystack.length)
+            ) { m, _, _ in
+                guard let r = m?.range, r.length > 0 else { return }
+                matches.append(r)
             }
         } else {
             var opts: NSString.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
@@ -122,7 +126,9 @@ final class FindBarView: FlatView {
                                            range: NSRange(location: searchStart,
                                                           length: haystack.length - searchStart))
                 guard found.location != NSNotFound else { break }
-                if !options.wholeWord || isWholeWord(found, in: haystack) { matches.append(found) }
+                if !options.wholeWord || isWholeWord(found, in: haystack) {
+                    matches.append(found)
+                }
                 searchStart = found.location + max(1, found.length)
             }
         }
@@ -171,8 +177,11 @@ final class FindBarView: FlatView {
     }
 
     func clearHighlights() {
+        matches.removeAll(keepingCapacity: false)
+        current = -1
         textView?.searchMatches = []
         textView?.currentMatchIndex = nil
+        countLabel.stringValue = ""
     }
 
     private func updateCount() {
@@ -182,4 +191,6 @@ final class FindBarView: FlatView {
             countLabel.stringValue = "\(current + 1) of \(matches.count)"
         }
     }
+
+    var retainedMatchCountForTesting: Int { matches.count }
 }

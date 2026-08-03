@@ -34,9 +34,11 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   the whole tree/tab/panel type hierarchy). Saving re-applies live; `//` comments
   are allowed.
 - **Editor details** — active-line band centered on the text, caret sized to the
-  text (not the tall line box), no gutter separator.
+  text (not the tall line box), no gutter separator, and hover-only gutter-arrow
+  code folding that preserves source line numbers.
 - **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers.
-- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, save (⌘S).
+- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, 350ms debounced
+  auto-save, and immediate manual save (⌘S).
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
   Bash, TypeScript/JS, and Markdown, with `#eq?`/`#match?`/`#any-of?` predicate
   evaluation and a One Dark capture→color map. Adding a language is one entry in
@@ -70,7 +72,8 @@ overwrites an unrelated command with the same name.
 
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
-⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘\ split editor · ⌘G git
+⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘\ split editor · ⌘G git ·
+⌥⌘[ fold/unfold current block · ⌥⌘] unfold all
 
 ## Layout
 ```

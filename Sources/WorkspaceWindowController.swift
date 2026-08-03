@@ -12,12 +12,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private let resizeHandles = WindowResizeHandleView()
     private var root: RootViewController!
     private(set) var projectURL: URL?
+    /// One replaceable Git preview buffer per window. Giving every path/commit a
+    /// permanent synthetic URL made an inspection session grow without bound.
+    private let diffPreviewID = UUID().uuidString
 
     /// Called when the window closes, so the app can drop its reference.
     var onClose: ((WorkspaceWindowController) -> Void)?
 
-    /// Windows are staggered so a new one doesn't hide the previous.
-    private static var cascadePoint = NSPoint(x: 0, y: 0)
+    /// Initial outer-window frame: full usable display height, two-thirds of
+    /// its usable width, centered. `visibleFrame` respects the menu bar and
+    /// whichever edge currently contains the Dock.
+    static func defaultWindowFrame(in visibleFrame: NSRect) -> NSRect {
+        let width = floor(visibleFrame.width * 2 / 3)
+        return NSRect(
+            x: floor(visibleFrame.midX - width / 2),
+            y: visibleFrame.minY,
+            width: width,
+            height: visibleFrame.height)
+    }
 
     init() {
         let root = RootViewController(sidebar: sidebar, editor: editor)
@@ -50,12 +62,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             resizeHandles.trailingAnchor.constraint(equalTo: root.view.trailingAnchor),
             resizeHandles.bottomAnchor.constraint(equalTo: root.view.bottomAnchor),
         ])
-        window.setContentSize(NSSize(width: 1080, height: 720))
         window.delegate = self
         window.isReleasedWhenClosed = false
 
-        window.center()
-        Self.cascadePoint = window.cascadeTopLeft(from: Self.cascadePoint)
+        if let visibleFrame = NSScreen.main?.visibleFrame
+            ?? NSScreen.screens.first?.visibleFrame {
+            window.setFrame(Self.defaultWindowFrame(in: visibleFrame), display: false)
+        } else {
+            // Defensive fallback for the brief startup state where AppKit has
+            // not published any displays yet.
+            window.setContentSize(NSSize(width: 1080, height: 720))
+            window.center()
+        }
 
         wire()
     }
@@ -108,13 +126,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         onClose?(self)
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        editor.confirmClose()
+    }
+
     func windowDidMiniaturize(_ notification: Notification) {
         sidebar.releaseHiddenPanels()
+        editor.releaseTransientMemory()
         DocumentStore.shared.releaseTransientMemory()
     }
 
     func releaseTransientMemory() {
         sidebar.releaseHiddenPanels()
+        editor.releaseTransientMemory()
     }
 
     // MARK: - Project
@@ -148,11 +172,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             }
             // Deleted image: nothing on disk to show, fall through to the diff.
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let text = GitService.diff(for: entry, in: directory)
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let url = Self.diffURL(for: entry.path, in: directory)
+                guard let self, self.projectURL == directory else { return }
+                let url = self.diffPreviewURL(in: directory, path: entry.path)
                 // Replace any previous diff for this file so re-clicking refreshes.
                 DocumentStore.shared.setVirtualDocument(
                     url: url, text: text,
@@ -167,27 +191,50 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // For an image, show the picture as it looked in THAT commit: extract the
         // blob to a temp file so the normal image preview can decode it.
         if Self.isImage(file.path), file.status != "D" {
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let data = GitService.blob(inCommit: commit.shortHash,
-                                                 path: file.path, in: directory),
-                      !data.isEmpty else { return }
-                let name = (file.path as NSString).lastPathComponent
-                let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-                    .appendingPathComponent("puzzle-blobs/\(commit.shortHash)")
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let temp = dir.appendingPathComponent(name)
-                try? data.write(to: temp)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let blob = GitService.blob(inCommit: commit.shortHash,
+                                           path: file.path, in: directory)
+                guard case .data(let data) = blob, !data.isEmpty else {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.projectURL == directory else { return }
+                        let alert = NSAlert()
+                        alert.messageText = "Unable to open history image"
+                        switch blob {
+                        case .tooLarge(let bytes):
+                            alert.informativeText = "The image is "
+                                + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+                                + ", which exceeds Puzzle's preview limit."
+                        case .unavailable(let message):
+                            alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                        case .data:
+                            alert.informativeText = "The image blob is empty."
+                        }
+                        alert.runModal()
+                    }
+                    return
+                }
+                let temp = WorkspaceWindowController.commitBlobURL(
+                    repository: directory, commit: commit.shortHash, path: file.path)
+                do {
+                    try FileManager.default.createDirectory(
+                        at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try data.write(to: temp, options: .atomic)
+                } catch {
+                    return
+                }
                 DispatchQueue.main.async { [weak self] in
-                    self?.editor.open(url: temp)
+                    guard let self, self.projectURL == directory else { return }
+                    self.editor.open(url: temp)
                 }
             }
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let text = GitService.diff(inCommit: commit.shortHash, path: file.path, in: directory)
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let url = Self.diffURL(for: file.path, in: directory, commit: commit.shortHash)
+                guard let self, self.projectURL == directory else { return }
+                let url = self.diffPreviewURL(in: directory,
+                                              path: file.path, commit: commit.shortHash)
                 let name = (file.path as NSString).lastPathComponent
                 DocumentStore.shared.setVirtualDocument(
                     url: url, text: text, displayName: "\(name) @ \(commit.shortHash)")
@@ -196,16 +243,38 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// Synthetic URL identifying a diff tab, under a `puzzle-diff` scheme so it
-    /// can't collide with a real file on disk. A commit hash (when present)
-    /// keeps each commit's diff of the same file in its own tab.
-    static func diffURL(for path: String, in directory: URL, commit: String? = nil) -> URL {
+    /// Synthetic URL for a Git preview tab. The path identifies a Changes diff;
+    /// adding a commit identifies a History diff. Reopening the same identity
+    /// refreshes that tab, while different files/commits stay separate.
+    private func diffPreviewURL(in directory: URL, path: String,
+                                commit: String? = nil) -> URL {
         var components = URLComponents()
         components.scheme = DocumentStore.diffScheme
         components.host = ""
-        components.path = "/" + directory.path + "/" + path
-        if let commit { components.query = "commit=\(commit)" }
-        return components.url ?? directory.appendingPathComponent(path + ".diff")
+        components.path = "/" + directory.path + "/.puzzle-diff-preview"
+        components.queryItems = [
+            URLQueryItem(name: "window", value: diffPreviewID),
+            URLQueryItem(name: "path", value: path),
+            URLQueryItem(name: "commit", value: commit),
+        ]
+        return components.url ?? directory.appendingPathComponent(".puzzle-diff-preview")
+    }
+
+    /// Preserve the repository path below the per-commit temp directory. Using
+    /// only `lastPathComponent` made `assets/icon.png` collide with
+    /// `docs/icon.png`, so opening one could show the other's cached image.
+    static func commitBlobURL(repository: URL, commit: String, path: String) -> URL {
+        let repositoryKey = Data(
+            repository.standardizedFileURL.resolvingSymlinksInPath().path.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("puzzle-blobs", isDirectory: true)
+            .appendingPathComponent(repositoryKey, isDirectory: true)
+            .appendingPathComponent(commit, isDirectory: true)
+            .appendingPathComponent(path)
     }
 
     func refreshGit() {
@@ -214,10 +283,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             let split = GitService.trackedAndUntracked(in: projectURL)
             let status = GitService.status(in: projectURL)
             DispatchQueue.main.async {
-                self?.sidebar.fileTree.setStatus(modified: split.modified,
-                                                 untracked: split.untracked)
+                guard let self, self.projectURL == projectURL else { return }
+                self.sidebar.fileTree.setStatus(modified: split.modified,
+                                                untracked: split.untracked)
                 if status.isRepo {
-                    self?.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
+                    self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
                 }
             }
         }
@@ -257,7 +327,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func saveDocument(_ sender: Any?) { editor.save() }
     @objc func findInFile(_ sender: Any?) { editor.showFindBar() }
-    @objc func toggleSidebar(_ sender: Any?) { root.toggleSidebar() }
+    @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
     @objc func splitEditor(_ sender: Any?) { editor.splitEditor() }
     @objc func toggleMarkdownPreview(_ sender: Any?) { editor.toggleMarkdownPreview() }
 
@@ -278,15 +348,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.open(url: Settings.shared.ensureFileExists())
     }
 
-    /// Activity-bar routing: tapping the visible panel's button collapses the
-    /// sidebar; tapping another switches to it (revealing the sidebar if hidden).
+    /// Activity-bar routing: the sidebar is always visible; tapping an action
+    /// selects the requested panel.
     private func handleActivity(_ action: ActivityBarView.Action) {
         if action == .settings {
             openSettings()
             return
         }
-        // Tapping the button of the panel already showing used to collapse the
-        // sidebar; it now simply keeps that panel visible.
+        // Tapping an action selects its panel; the sidebar remains visible.
         root.showSidebar()
         switch action {
         case .project:  sidebar.showFiles()

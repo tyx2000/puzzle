@@ -1,0 +1,27 @@
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+
+# Swift and Xcode local output
+/.build/
+/DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Puzzle build products and compiler caches
+/.obj/
+/build/
+
+# Local Codex workspace configuration
+/.codex/
+
+# Tree-sitter sources are fetched by vendor/fetch.sh
+/vendor/tree-sitter*/
+/vendor/.swift-dl/
+/vendor/.sql-dl/

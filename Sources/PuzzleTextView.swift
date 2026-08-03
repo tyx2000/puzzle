@@ -32,6 +32,43 @@ final class PuzzleTextView: NSTextView {
         didSet { needsDisplay = true }
     }
 
+    private(set) var codeBlocks: [CodeBlock] = []
+
+    private var foldingManager: FoldingLayoutManager? {
+        layoutManager as? FoldingLayoutManager
+    }
+
+    func updateCodeBlocks(_ blocks: [CodeBlock], resetFolds: Bool) {
+        codeBlocks = blocks
+        foldingManager?.updateBlocks(blocks, resetFolds: resetFolds)
+        refreshFoldingDisplay()
+    }
+
+    func isFolded(_ block: CodeBlock) -> Bool {
+        foldingManager?.isFolded(block) ?? false
+    }
+
+    func toggleFold(_ block: CodeBlock) {
+        guard codeBlocks.contains(block) else { return }
+        if !isFolded(block) {
+            // Never leave the insertion point inside glyphs that are about to
+            // disappear. The source remains unchanged.
+            setSelectedRange(NSRange(location: block.openerLocation, length: 0))
+        }
+        foldingManager?.toggle(block)
+        refreshFoldingDisplay()
+    }
+
+    func unfoldAllCodeBlocks() {
+        foldingManager?.unfoldAll()
+        refreshFoldingDisplay()
+    }
+
+    private func refreshFoldingDisplay() {
+        needsDisplay = true
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
     /// Blame annotation for the caret's line, drawn past the end of the text.
     ///
     /// Deliberately drawn rather than inserted into the text storage: the
@@ -151,11 +188,17 @@ final class PuzzleTextView: NSTextView {
               let layoutManager, let container = textContainer else { return }
         let inset = textContainerInset
         let notSelected = NSRange(location: NSNotFound, length: 0)
+        let visibleContainerRect = visibleRect.offsetBy(dx: -inset.width, dy: -inset.height)
+        let visibleGlyphs = layoutManager.glyphRange(
+            forBoundingRect: visibleContainerRect, in: container)
+        let visibleCharacters = layoutManager.characterRange(
+            forGlyphRange: visibleGlyphs, actualGlyphRange: nil)
 
         for (index, range) in searchMatches.enumerated() {
             let clamped = NSIntersectionRange(range,
                                               NSRange(location: 0, length: (string as NSString).length))
-            guard clamped.length > 0 else { continue }
+            guard clamped.length > 0,
+                  NSIntersectionRange(clamped, visibleCharacters).length > 0 else { continue }
             let glyphRange = layoutManager.glyphRange(forCharacterRange: clamped,
                                                       actualCharacterRange: nil)
             guard glyphRange.length > 0 else { continue }
@@ -264,6 +307,30 @@ final class PuzzleTextView: NSTextView {
 
     override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
         super.drawInsertionPoint(in: caretRect(from: rect), color: color, turnedOn: flag)
+    }
+
+    /// VS Code's macOS folding shortcuts: ⌥⌘[ toggles the innermost block at
+    /// the caret, and ⌥⌘] unfolds the pane.
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains([.command, .option]),
+           let key = event.charactersIgnoringModifiers {
+            if key == "[", let block = innermostBlock(at: selectedRange().location) {
+                toggleFold(block)
+                return
+            }
+            if key == "]" {
+                unfoldAllCodeBlocks()
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    private func innermostBlock(at location: Int) -> CodeBlock? {
+        codeBlocks
+            .filter { NSLocationInRange(location, $0.fullRange) }
+            .max { $0.depth < $1.depth }
     }
 
     /// Keep the caret rect consistent when AppKit asks for it.

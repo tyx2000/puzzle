@@ -1,6 +1,6 @@
 import AppKit
 
-/// Git panel: flat Changes / History tabs, an automatically staged change list,
+/// Git panel: flat Changes / Branch / History tabs, an automatically staged change list,
 /// branch information, a commit message editor and commit controls.
 final class GitPanelViewController: NSViewController {
     var onOpenFile: ((URL) -> Void)?
@@ -15,6 +15,8 @@ final class GitPanelViewController: NSViewController {
         case commit(GitService.Commit, expanded: Bool)
         case file(GitService.CommitFile, commit: GitService.Commit)
     }
+    private var branches: [GitService.Branch] = []
+    private var remotes: [GitService.Remote] = []
     private var historyRows: [HistoryRow] = []
     /// Short hashes of commits the user has expanded.
     private var expandedCommits: Set<String> = []
@@ -38,13 +40,23 @@ final class GitPanelViewController: NSViewController {
         unpushed.contains { $0.hasPrefix(shortHash) || shortHash.hasPrefix($0) }
     }
     private var showingHistory = false
+    private var showingBranches = false
 
-    private let segmented = FlatPanelTabBar(labels: ["Changes", "History"])
+    private let segmented = FlatPanelTabBar(labels: ["Changes", "Branch", "History"])
     private let table = NSTableView()
     private let branchLabel = NSTextField(labelWithString: "")
     private let commitField = NSTextView()
+    private var commitScroll: HorizontalBorderScrollView!
     private let commitButton = NSButton()
     private let pushButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let branchToolbar = FlatView()
+    private let newBranchButton = NSButton()
+    private let remoteButton = NSButton()
+    private var branchToolbarHeight: NSLayoutConstraint!
+    private var tableTopToTabs: NSLayoutConstraint!
+    private var tableTopToBranchToolbar: NSLayoutConstraint!
+    private var tableBottomToFooter: NSLayoutConstraint!
+    private var tableBottomToContainer: NSLayoutConstraint!
     private var aheadCount = 0
     private var refreshInFlight = false
     private var refreshAgain = false
@@ -61,6 +73,8 @@ final class GitPanelViewController: NSViewController {
         entries.removeAll()
         history.removeAll()
         unpushed.removeAll()
+        branches.removeAll()
+        remotes.removeAll()
         if isViewLoaded { table.reloadData() }
     }
 
@@ -71,6 +85,28 @@ final class GitPanelViewController: NSViewController {
         segmented.selectedSegment = 0
         segmented.onChange = { [weak self] in self?.tabChanged() }
         segmented.translatesAutoresizingMaskIntoConstraints = false
+
+        branchToolbar.fillColor = Theme.panelBackground
+        branchToolbar.translatesAutoresizingMaskIntoConstraints = false
+        branchToolbar.isHidden = true
+
+        newBranchButton.title = "New Branch"
+        newBranchButton.bezelStyle = .rounded
+        newBranchButton.controlSize = .small
+        newBranchButton.font = Theme.uiFont(10.5)
+        newBranchButton.target = self
+        newBranchButton.action = #selector(newBranchAction)
+        newBranchButton.translatesAutoresizingMaskIntoConstraints = false
+
+        remoteButton.title = "Remote"
+        remoteButton.bezelStyle = .rounded
+        remoteButton.controlSize = .small
+        remoteButton.font = Theme.uiFont(10.5)
+        remoteButton.target = self
+        remoteButton.action = #selector(remoteAction)
+        remoteButton.translatesAutoresizingMaskIntoConstraints = false
+        branchToolbar.addSubview(newBranchButton)
+        branchToolbar.addSubview(remoteButton)
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row"))
         column.resizingMask = .autoresizingMask
@@ -101,7 +137,7 @@ final class GitPanelViewController: NSViewController {
         commitField.backgroundColor = Theme.activeTab
         commitField.textColor = Theme.foreground
         commitField.textContainerInset = NSSize(width: 4, height: 4)
-        let commitScroll = HorizontalBorderScrollView()
+        commitScroll = HorizontalBorderScrollView()
         commitScroll.documentView = commitField
         commitScroll.borderType = .noBorder
         commitScroll.hasVerticalScroller = true
@@ -125,19 +161,35 @@ final class GitPanelViewController: NSViewController {
         pushButton.translatesAutoresizingMaskIntoConstraints = false
         rebuildPushMenu()
 
-        [segmented, scroll, branchLabel, commitScroll,
+        [segmented, branchToolbar, scroll, branchLabel, commitScroll,
          commitButton, pushButton].forEach { container.addSubview($0) }
 
+        branchToolbarHeight = branchToolbar.heightAnchor.constraint(equalToConstant: 0)
+        tableTopToTabs = scroll.topAnchor.constraint(equalTo: segmented.bottomAnchor)
+        tableTopToBranchToolbar = scroll.topAnchor.constraint(equalTo: branchToolbar.bottomAnchor)
+        tableBottomToFooter = scroll.bottomAnchor.constraint(equalTo: branchLabel.topAnchor, constant: -6)
+        tableBottomToContainer = scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         NSLayoutConstraint.activate([
             segmented.topAnchor.constraint(equalTo: container.topAnchor),
             segmented.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             segmented.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             segmented.heightAnchor.constraint(equalToConstant: 36),
 
-            scroll.topAnchor.constraint(equalTo: segmented.bottomAnchor),
+            branchToolbar.topAnchor.constraint(equalTo: segmented.bottomAnchor),
+            branchToolbar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            branchToolbar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            branchToolbarHeight,
+            newBranchButton.leadingAnchor.constraint(equalTo: branchToolbar.leadingAnchor, constant: 8),
+            newBranchButton.centerYAnchor.constraint(equalTo: branchToolbar.centerYAnchor),
+            remoteButton.leadingAnchor.constraint(equalTo: newBranchButton.trailingAnchor, constant: 20),
+            remoteButton.trailingAnchor.constraint(equalTo: branchToolbar.trailingAnchor, constant: -8),
+            remoteButton.centerYAnchor.constraint(equalTo: branchToolbar.centerYAnchor),
+            remoteButton.widthAnchor.constraint(equalTo: newBranchButton.widthAnchor),
+
+            tableTopToTabs,
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: branchLabel.topAnchor, constant: -6),
+            tableBottomToFooter,
 
             branchLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             branchLabel.bottomAnchor.constraint(equalTo: commitScroll.topAnchor, constant: -6),
@@ -155,6 +207,8 @@ final class GitPanelViewController: NSViewController {
             commitButton.leadingAnchor.constraint(
                 greaterThanOrEqualTo: pushButton.trailingAnchor, constant: 6),
         ])
+        tableTopToBranchToolbar.isActive = false
+        tableBottomToContainer.isActive = false
         self.view = container
     }
 
@@ -167,6 +221,8 @@ final class GitPanelViewController: NSViewController {
         commitField.font = Theme.uiFont(11)
         commitButton.font = Theme.uiFont(10.5)
         pushButton.font = Theme.uiFont(10.5)
+        newBranchButton.font = Theme.uiFont(10.5)
+        remoteButton.font = Theme.uiFont(10.5)
         refresh()          // rebuilds the rows, which set their own fonts
     }
 
@@ -183,11 +239,13 @@ final class GitPanelViewController: NSViewController {
                status.entries.contains(where: {
                    $0.isUntracked || $0.worktreeStatus != " "
                }) {
-                GitService.run(["add", "-A"], in: directory)
+                GitService.stageAll(in: directory)
                 status = GitService.status(in: directory)
             }
             let log = GitService.log(in: directory, limit: 40)
             let pending = GitService.unpushedHashes(in: directory)
+            let branches = GitService.branches(in: directory)
+            let remotes = GitService.remotes(in: directory)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.refreshInFlight = false
@@ -201,6 +259,8 @@ final class GitPanelViewController: NSViewController {
                 self.entries = status.entries
                 self.history = log
                 self.unpushed = pending
+                self.branches = branches
+                self.remotes = remotes
                 self.rebuildHistoryRows()
                 // Surface the ahead-count: without it there is no sign that
                 // commits are sitting locally waiting to be pushed.
@@ -216,6 +276,7 @@ final class GitPanelViewController: NSViewController {
                     self.aheadCount = status.ahead
                     self.rebuildPushMenu()
                 }
+                self.rebuildPushMenu()
                 self.table.reloadData()
                 if self.refreshAgain {
                     self.refreshAgain = false
@@ -251,8 +312,24 @@ final class GitPanelViewController: NSViewController {
     }
 
     @objc func tabChanged() {
-        showingHistory = segmented.selectedSegment == 1
+        showingBranches = segmented.selectedSegment == 1
+        showingHistory = segmented.selectedSegment == 2
+        updateTabLayout()
         table.reloadData()
+    }
+
+    private func updateTabLayout() {
+        let branchTab = showingBranches
+        branchToolbar.isHidden = !branchTab
+        branchToolbarHeight.constant = branchTab ? 36 : 0
+        tableTopToTabs.isActive = !branchTab
+        tableTopToBranchToolbar.isActive = branchTab
+        tableBottomToFooter.isActive = !branchTab
+        tableBottomToContainer.isActive = branchTab
+        branchLabel.isHidden = branchTab
+        commitScroll.isHidden = branchTab
+        commitButton.isHidden = branchTab
+        pushButton.isHidden = branchTab
     }
 
     @objc private func commit() { performCommit(push: false) }
@@ -264,6 +341,18 @@ final class GitPanelViewController: NSViewController {
         let title = aheadCount > 0 ? "Push ↑\(aheadCount)" : "Push"
         menu.addItem(withTitle: title, action: nil, keyEquivalent: "")   // shown as the title
         menu.addItem(withTitle: title, action: #selector(pushAction), keyEquivalent: "")
+        menu.addItem(withTitle: "Commit & Push", action: #selector(commitAndPushAction),
+                     keyEquivalent: "")
+        if !remotes.isEmpty {
+            menu.addItem(.separator())
+            for remote in remotes {
+                let item = NSMenuItem(title: "Push to \(remote.name)",
+                                      action: #selector(pushToRemoteAction(_:)),
+                                      keyEquivalent: "")
+                item.representedObject = remote.name
+                menu.addItem(item)
+            }
+        }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Fetch", action: #selector(fetchAction), keyEquivalent: "")
         menu.addItem(withTitle: "Pull", action: #selector(pullAction), keyEquivalent: "")
@@ -276,20 +365,18 @@ final class GitPanelViewController: NSViewController {
             : "Push"
     }
 
-    /// Push whatever is pending.
-    ///
-    /// If a commit message is typed and there is something staged, this commits
-    /// first and then pushes. Otherwise it just pushes — demanding a commit
-    /// message when the only thing outstanding is an unpushed commit was the
-    /// old behaviour and made the button useless in exactly that case.
+    /// Push whatever is already committed locally. A commit message in the
+    /// editor must never change the meaning of the Push action.
     @objc private func pushAction() {
         guard let directory else { return }
-        let message = commitField.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !message.isEmpty && !entries.isEmpty {
-            performCommit(push: true)
-            return
-        }
         runRemote("Push") { GitService.push(in: directory) }
+    }
+
+    @objc private func commitAndPushAction() { performCommit(push: true) }
+
+    @objc private func pushToRemoteAction(_ sender: NSMenuItem) {
+        guard let directory, let name = sender.representedObject as? String else { return }
+        runRemote("Push to \(name)") { GitService.push(to: name, in: directory) }
     }
 
     @objc private func fetchAction() {
@@ -335,8 +422,6 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    /// Commit, optionally pushing afterwards. A failed push still leaves the
-    /// commit in place, so the two outcomes are reported separately.
     /// Commit, optionally pushing afterwards.
     ///
     /// Both run off the main thread: `git commit` touches the index and `git
@@ -354,7 +439,7 @@ final class GitPanelViewController: NSViewController {
         commitButton.isEnabled = false
         pushButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let commit = GitService.run(["commit", "-m", message], in: directory)
+            let commit = GitService.commit(message, in: directory)
             // A failed push still leaves the commit in place, so the two
             // outcomes are reported separately.
             var pushResult: GitService.RemoteResult?
@@ -390,6 +475,12 @@ final class GitPanelViewController: NSViewController {
         let row = table.clickedRow
         guard row >= 0, let directory else { return }
 
+        if showingBranches {
+            guard row < branches.count else { return }
+            switchBranch(branches[row], in: directory)
+            return
+        }
+
         if showingHistory {
             guard row < historyRows.count else { return }
             switch historyRows[row] {
@@ -416,7 +507,7 @@ final class GitPanelViewController: NSViewController {
     /// Expand or collapse a commit, loading its file list on first expand.
     /// Switch to the History tab programmatically.
     func showHistory() {
-        segmented.selectedSegment = 1
+        segmented.selectedSegment = 2
         tabChanged()
     }
 
@@ -435,6 +526,161 @@ final class GitPanelViewController: NSViewController {
         onOpenCommitDiff?(commit, files[fileIndex], directory)
     }
 
+    @objc private func newBranchAction() {
+        guard let directory else { return }
+        let names = branches.map(\.name)
+        guard !names.isEmpty else {
+            presentGitError(title: "Cannot create branch", message: "No base branches are available.")
+            return
+        }
+
+        let nameField = NSTextField(string: "")
+        nameField.placeholderString = "Branch name"
+        let basePopup = NSPopUpButton()
+        basePopup.addItems(withTitles: names)
+        if let current = branches.firstIndex(where: { $0.isCurrent }) {
+            basePopup.selectItem(at: current)
+        }
+        let accessory = dialogStack([
+            labeledField("Name", nameField),
+            labeledField("Base", basePopup),
+        ], width: 340)
+
+        let alert = NSAlert()
+        alert.messageText = "Create branch"
+        alert.informativeText = "The new branch will be created and checked out immediately."
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            presentGitError(title: "Invalid branch name", message: "Enter a branch name.")
+            return
+        }
+        let base = basePopup.titleOfSelectedItem ?? names[0]
+        runRemote("Create branch") { GitService.createBranch(name, from: base, in: directory) }
+    }
+
+    @objc private func remoteAction() {
+        guard let directory else { return }
+        let currentRemotes = GitService.remotes(in: directory)
+        let existing = currentRemotes.map {
+            "\($0.name)\n  Fetch: \($0.fetchURL)\n  Push:  \($0.pushURL)"
+        }.joined(separator: "\n\n")
+        let summary = NSTextField(wrappingLabelWithString:
+            existing.isEmpty ? "No remote repositories are configured." : existing)
+        summary.textColor = Theme.dimText
+
+        let nameField = NSTextField(string: currentRemotes.first?.name ?? "origin")
+        nameField.placeholderString = "Remote name"
+        let fetchField = NSTextField(string: currentRemotes.first?.fetchURL ?? "")
+        fetchField.placeholderString = "https://… or git@…"
+        let pushField = NSTextField(string: currentRemotes.first?.pushURL ?? "")
+        pushField.placeholderString = "Optional push URL"
+        let accessory = dialogStack([
+            summary,
+            labeledField("Name", nameField),
+            labeledField("Fetch", fetchField),
+            labeledField("Push", pushField),
+        ], width: 420)
+
+        let alert = NSAlert()
+        alert.messageText = "Remote repositories"
+        alert.informativeText = "Existing remotes are listed above. Save adds a new remote or updates the named remote."
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: "Save Remote")
+        alert.addButton(withTitle: "Close")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fetchURL = fetchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pushURL = pushField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !fetchURL.isEmpty else {
+            presentGitError(title: "Invalid remote", message: "Remote name and Fetch URL are required.")
+            return
+        }
+        runRemote("Save remote") {
+            GitService.saveRemote(name: name, fetchURL: fetchURL, pushURL: pushURL,
+                                  in: directory)
+        }
+    }
+
+    private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
+        guard !branch.isCurrent else { return }
+        runRemote("Switch branch") { GitService.switchBranch(branch.name, in: directory) }
+    }
+
+    private func deleteBranch(_ branch: GitService.Branch, in directory: URL) {
+        guard !branch.isCurrent else {
+            presentGitError(title: "Cannot delete branch", message: "The current branch cannot be deleted.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete branch \(branch.name)?"
+        alert.informativeText = "Only fully merged branches can be deleted."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runRemote("Delete branch") { GitService.deleteBranch(branch.name, in: directory) }
+    }
+
+    private func presentGitError(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        alert.runModal()
+    }
+
+    private func labeledField(_ label: String, _ field: NSView) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = Theme.uiFont(10.5)
+        labelField.textColor = Theme.dimText
+        labelField.translatesAutoresizingMaskIntoConstraints = false
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        row.addSubview(labelField)
+        row.addSubview(field)
+        NSLayoutConstraint.activate([
+            labelField.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            labelField.widthAnchor.constraint(equalToConstant: 48),
+            labelField.centerYAnchor.constraint(equalTo: field.centerYAnchor),
+            field.leadingAnchor.constraint(equalTo: labelField.trailingAnchor, constant: 8),
+            field.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            field.topAnchor.constraint(equalTo: row.topAnchor),
+            field.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+        ])
+        return row
+    }
+
+    private func dialogStack(_ views: [NSView], width: CGFloat) -> NSView {
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.alignment = .leading
+        stack.distribution = .fill
+        stack.translatesAutoresizingMaskIntoConstraints = true
+
+        // NSAlert lays out its accessory view from its frame, not from a loose
+        // width-only constraint. Give every row the same width, then materialize
+        // the stack's fitting height into a concrete frame before presenting it.
+        for view in views {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
+        stack.frame = NSRect(x: 0, y: 0, width: width, height: 1)
+        stack.layoutSubtreeIfNeeded()
+        stack.frame.size.height = ceil(stack.fittingSize.height)
+        stack.layoutSubtreeIfNeeded()
+        return stack
+    }
+
     private func toggleCommit(_ commit: GitService.Commit, in directory: URL) {
         let hash = commit.shortHash
         if expandedCommits.contains(hash) {
@@ -451,7 +697,8 @@ final class GitPanelViewController: NSViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let files = GitService.files(inCommit: hash, in: directory)
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.directory == directory,
+                      self.expandedCommits.contains(hash) else { return }
                 self.commitFiles[hash] = files
                 self.rebuildHistoryRows()
                 self.table.reloadData()
@@ -468,7 +715,9 @@ extension GitPanelViewController: NSTableViewDataSource {
             ?? GitRowView()
         view.identifier = id
         view.isActiveFile = false
-        if showingHistory, row < historyRows.count {
+        if showingBranches {
+            return view
+        } else if showingHistory, row < historyRows.count {
             if case .file(let file, let commit) = historyRows[row] {
                 view.isActiveFile = activeCommitFile?.commit == commit.shortHash
                     && activeCommitFile?.path == file.path
@@ -480,12 +729,14 @@ extension GitPanelViewController: NSTableViewDataSource {
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        showingHistory ? historyRows.count : entries.count
+        if showingBranches { return branches.count }
+        return showingHistory ? historyRows.count : entries.count
     }
 }
 
 extension GitPanelViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if showingBranches { return 58 }
         if showingHistory, row < historyRows.count,
            case .commit = historyRows[row] {
             let titleHeight = ceil(Theme.uiFont(11).boundingRectForFont.height)
@@ -496,6 +747,24 @@ extension GitPanelViewController: NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if showingBranches {
+            guard row < branches.count else { return nil }
+            let id = NSUserInterfaceItemIdentifier("git-branch-cell")
+            let cell = (tableView.makeView(withIdentifier: id, owner: self)
+                        as? GitBranchCell) ?? GitBranchCell()
+            cell.identifier = id
+            let branch = branches[row]
+            cell.configure(branch: branch,
+                           onSwitch: { [weak self] in
+                               guard let self, let directory = self.directory else { return }
+                               self.switchBranch(branch, in: directory)
+                           },
+                           onDelete: { [weak self] in
+                               guard let self, let directory = self.directory else { return }
+                               self.deleteBranch(branch, in: directory)
+                           })
+            return cell
+        }
         if showingHistory {
             guard row < historyRows.count else { return nil }
             switch historyRows[row] {
@@ -634,6 +903,71 @@ private final class GitChangeCell: DrawnSidebarCell {
                        width: max(0, bounds.width - 50), height: bounds.height),
             gap: 5, primaryLineBreak: .byTruncatingMiddle)
     }
+}
+
+private final class GitBranchCell: DrawnSidebarCell {
+    private let switchButton = NSButton()
+    private let deleteButton = NSButton()
+    private var onSwitch: (() -> Void)?
+    private var onDelete: (() -> Void)?
+    private var name = ""
+    private var metadata = ""
+    private var isCurrent = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        switchButton.title = "Switch"
+        switchButton.bezelStyle = .rounded
+        switchButton.controlSize = .small
+        switchButton.font = Theme.uiFont(9.5)
+        switchButton.target = self
+        switchButton.action = #selector(switchAction)
+        switchButton.translatesAutoresizingMaskIntoConstraints = false
+
+        deleteButton.title = "Delete"
+        deleteButton.bezelStyle = .rounded
+        deleteButton.controlSize = .small
+        deleteButton.font = Theme.uiFont(9.5)
+        deleteButton.target = self
+        deleteButton.action = #selector(deleteAction)
+        deleteButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(switchButton)
+        addSubview(deleteButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(branch: GitService.Branch, onSwitch: @escaping () -> Void,
+                   onDelete: @escaping () -> Void) {
+        self.onSwitch = onSwitch
+        self.onDelete = onDelete
+        name = branch.isCurrent ? "\(branch.name)  · current" : branch.name
+        metadata = "\(branch.author)  ·  \(branch.createdAt)"
+        isCurrent = branch.isCurrent
+        switchButton.isEnabled = !branch.isCurrent
+        deleteButton.isEnabled = !branch.isCurrent
+        toolTip = branch.name
+        exposeToAccessibility("Branch \(branch.name), \(metadata)")
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        deleteButton.frame = NSRect(x: bounds.width - 72, y: 19, width: 64, height: 22)
+        switchButton.frame = NSRect(x: bounds.width - 142, y: 19, width: 64, height: 22)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let content = NSRect(x: 8, y: 2, width: max(0, bounds.width - 154), height: bounds.height - 4)
+        SidebarCellDrawing.primaryAndSecondary(
+            primary: name, primaryFont: Theme.uiFont(11), primaryColor: isCurrent ? Theme.cursor : Theme.foreground,
+            secondary: metadata, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
+            in: content, gap: 5, primaryLineBreak: .byTruncatingMiddle)
+    }
+
+    @objc private func switchAction() { onSwitch?() }
+    @objc private func deleteAction() { onDelete?() }
 }
 
 /// Two-state tab strip with the same full-height selection treatment as the
