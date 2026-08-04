@@ -143,11 +143,9 @@ final class LineNumberRulerView: NSRulerView {
         let inset = textView.textContainerInset.height
         let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
-        // Match the editor's line metrics (font, line height, baseline shift) so
-        // the numbers sit on the same baseline as the code and are centered in
-        // the current-line band.
+        // Draw numbers in the complete configured code row and centre them
+        // vertically. The editor layout manager uses the same geometry.
         let para = NSMutableParagraphStyle()
-        para.setParagraphStyle(Theme.paragraphStyle())
         para.alignment = .right
         let normal: [NSAttributedString.Key: Any] =
             [.font: font, .foregroundColor: Theme.gutter, .paragraphStyle: para]
@@ -172,8 +170,12 @@ final class LineNumberRulerView: NSRulerView {
             // counter would incorrectly renumber the source after a fold.
             let lineNo = 1 + self.newlineCount(content, upTo: fragChar.location)
             let y = fragRect.minY + inset - visibleRect.minY
-            let box = NSRect(x: 0, y: y, width: numberWidth, height: fragRect.height)
-            ("\(lineNo)" as NSString).draw(in: box, withAttributes: lineNo == caretLine ? active : normal)
+            let value = "\(lineNo)" as NSString
+            let attributes = lineNo == caretLine ? active : normal
+            let textHeight = value.size(withAttributes: attributes).height
+            let box = NSRect(x: 0, y: y + (fragRect.height - textHeight) / 2,
+                             width: numberWidth, height: textHeight)
+            value.draw(in: box, withAttributes: attributes)
             if let block = foldableByLine[fragChar.location] {
                 let rowRect = NSRect(
                     x: 0, y: y,
@@ -185,13 +187,7 @@ final class LineNumberRulerView: NSRulerView {
                 self.arrowHitRects[block.identity] = hitRect
 
                 if self.hoveredBlock == block.identity {
-                    // The editor's 1.8 line height puts all extra leading above
-                    // its glyphs. Center the chevron in that same glyph box,
-                    // rather than in the taller line fragment.
-                    let natural = layoutManager.defaultLineHeight(for: font)
-                    let glyphHeight = font.ascender - font.descender
-                    let glyphTop = max(0, fragRect.height - natural)
-                    let centerY = y + glyphTop + glyphHeight / 2
+                    let centerY = y + fragRect.height / 2
                     let arrowRect = NSRect(
                         x: self.ruleThickness - 12,
                         y: centerY - 5,

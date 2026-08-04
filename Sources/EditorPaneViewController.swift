@@ -15,10 +15,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onTabClosed: ((URL) -> Void)?
     /// The markdown preview appeared or disappeared in this pane.
     var onPreviewVisibilityChanged: (() -> Void)?
+    var onTabBarHeightChanged: ((CGFloat) -> Void)?
+    /// Supplied by the editor container for synthetic file-history tabs.
+    var fileHistoryProvider: ((URL) -> FileHistoryModel?)?
 
     private(set) var openURLs: [URL] = []
     private var activeIndex: Int?
     private var selections: [URL: NSRange] = [:]
+    private var lineActivatedURLs: Set<URL> = []
+    private var suppressSelectionSideEffects = false
 
     private let tabBar = EditorTabBar()
     private var scrollView: NSScrollView!
@@ -37,6 +42,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var findBarHeight: NSLayoutConstraint!
     /// Shown instead of the text view when the active document is a picture.
     private var imagePreview: ImagePreviewView?
+    /// Shown instead of the text view for a file-history table tab.
+    private var fileHistoryView: FileHistoryView?
 
     /// Live markdown preview, shown to the right of the source.
     private var markdownPreview: MarkdownPreviewView?
@@ -82,6 +89,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                                   height: CGFloat.greatestFiniteMagnitude)
         textView.autoresizingMask = [.width]
         textView.delegate = self
+        textView.onExplicitCaretInteraction = { [weak self] in
+            guard let self, let url = self.currentURL else { return }
+            self.lineActivatedURLs.insert(url)
+            self.textView.showsCurrentLineBand = true
+        }
         // Custom find bar (the system one can't be restyled and shows a focus ring).
         textView.usesFindBar = false
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
@@ -110,6 +122,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
         tabBar.onSplit = { [weak self] in self?.onRequestSplit?() }
         tabBar.onTogglePreview = { [weak self] in self?.toggleMarkdownPreview() }
+        tabBar.onHeightChanged = { [weak self] height in
+            self?.onTabBarHeightChanged?(height)
+        }
 
         container.addSubview(tabBar)
         container.addSubview(scrollView)
@@ -174,6 +189,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return preview
     }
 
+    private func ensureFileHistoryView() -> FileHistoryView {
+        if let fileHistoryView { return fileHistoryView }
+        let history = FileHistoryView()
+        history.translatesAutoresizingMaskIntoConstraints = false
+        history.isHidden = true
+        view.addSubview(history)
+        NSLayoutConstraint.activate([
+            history.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            history.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            history.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            history.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        fileHistoryView = history
+        return history
+    }
+
     // MARK: - Find bar
 
     func showFindBar(seed: String? = nil) {
@@ -207,6 +238,54 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         activate(index: openURLs.count - 1)
     }
 
+    func pathRenamed(from oldBase: URL, to newBase: URL) {
+        let oldPath = oldBase.standardizedFileURL.path
+        let oldPrefix = oldPath.hasSuffix("/") ? oldPath : oldPath + "/"
+        var replacements: [(index: Int, old: URL, new: URL)] = []
+        for (index, url) in openURLs.enumerated() {
+            let path = url.standardizedFileURL.path
+            if path == oldPath {
+                replacements.append((index, url, newBase))
+            } else if path.hasPrefix(oldPrefix) {
+                let suffix = String(path.dropFirst(oldPrefix.count))
+                replacements.append((index, url, newBase.appendingPathComponent(suffix)))
+            }
+        }
+        guard !replacements.isEmpty else { return }
+
+        let activeWasReplaced = replacements.contains { $0.index == activeIndex }
+        if activeWasReplaced { detachFromDocument() }
+        for replacement in replacements {
+            moveState(from: replacement.old, to: replacement.new)
+            onTabClosed?(replacement.old)
+            openURLs[replacement.index] = replacement.new
+            onTabOpened?(replacement.new)
+        }
+        invalidateBlame()
+        if activeWasReplaced, let activeIndex {
+            activate(index: activeIndex)
+        } else {
+            reloadTabs()
+        }
+    }
+
+    func pathDeleted(_ base: URL) {
+        let path = base.standardizedFileURL.path
+        let prefix = path.hasSuffix("/") ? path : path + "/"
+        let matching = openURLs.indices.filter {
+            let candidate = openURLs[$0].standardizedFileURL.path
+            return candidate == path || candidate.hasPrefix(prefix)
+        }
+        for index in matching.reversed() { close(index: index) }
+    }
+
+    private func moveState(from oldURL: URL, to newURL: URL) {
+        if let value = selections.removeValue(forKey: oldURL) { selections[newURL] = value }
+        if lineActivatedURLs.remove(oldURL) != nil { lineActivatedURLs.insert(newURL) }
+        if previewEnabled.remove(oldURL) != nil { previewEnabled.insert(newURL) }
+        if let value = foldedBlocks.removeValue(forKey: oldURL) { foldedBlocks[newURL] = value }
+    }
+
     /// Point this pane's layout manager at the (possibly new) storage for `url`.
     private func rebindStorage(for url: URL) {
         let doc = DocumentStore.shared.document(for: url)
@@ -236,25 +315,39 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         let length = doc.storage.length
         let caret = NSRange(location: min(selections[url]?.location ?? 0, length), length: 0)
+        suppressSelectionSideEffects = true
         textView.setSelectedRange(caret)
+        suppressSelectionSideEffects = false
         textView.scrollRangeToVisible(caret)
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
         // Binary files show a placeholder and must not be editable — typing into
         // one and saving would destroy the file.
         // Diffs and binaries are read-only.
         textView.isEditable = !doc.isReadOnly
-        textView.showsCurrentLineBand = true
+        let lineIsActive = lineActivatedURLs.contains(url)
+        textView.showsCurrentLineBand = lineIsActive
+        if !lineIsActive { clearInlineBlameRequest() }
         textView.diffBands = doc.diffBands
         textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
         layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
 
-        // Pictures preview as an image instead of the text view.
-        if let image = doc.image {
+        // Synthetic file-history tabs use a real four-column table. Keep this
+        // check ahead of images/text so only one primary content view is shown.
+        if let historyModel = fileHistoryProvider?(url) {
+            let history = ensureFileHistoryView()
+            history.configure(historyModel)
+            history.isHidden = false
+            imagePreview?.clear()
+            imagePreview?.isHidden = true
+            scrollView.isHidden = true
+        } else if let image = doc.image {
+            fileHistoryView?.isHidden = true
             let imagePreview = ensureImagePreview()
             imagePreview.show(image: image, caption: doc.text)
             imagePreview.isHidden = false
             scrollView.isHidden = true
         } else {
+            fileHistoryView?.isHidden = true
             imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = false
@@ -267,6 +360,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.needsDisplay = true
         onActiveDocumentChanged?(url)
         onBecameActive?(self)
+        if lineIsActive { scheduleInlineBlame() }
     }
 
     func close(index: Int) {
@@ -275,6 +369,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard confirmClose(urls: [url]) else { return }
         openURLs.remove(at: index)
         selections.removeValue(forKey: url)
+        lineActivatedURLs.remove(url)
         previewEnabled.remove(url)
         foldedBlocks.removeValue(forKey: url)
         defer { onTabClosed?(url) }
@@ -292,6 +387,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             textView.updateCodeBlocks([], resetFolds: false)
             imagePreview?.clear()
             imagePreview?.isHidden = true
+            fileHistoryView?.isHidden = true
             scrollView.isHidden = false
             reloadTabs()
             onActiveDocumentChanged?(nil)
@@ -376,6 +472,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard confirmClose(urls: closed) else { return }
         closed.forEach {
             selections.removeValue(forKey: $0)
+            lineActivatedURLs.remove($0)
             previewEnabled.remove($0)
             foldedBlocks.removeValue(forKey: $0)
         }
@@ -445,9 +542,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             current += 1
         }
         let target = NSRange(location: min(location, ns.length), length: 0)
+        if let url = currentURL { lineActivatedURLs.insert(url) }
+        textView.showsCurrentLineBand = true
         textView.setSelectedRange(target)
         textView.scrollRangeToVisible(target)
         view.window?.makeFirstResponder(textView)
+        scheduleInlineBlame()
     }
 
     /// Detach this pane's layout manager from whatever buffer it shows.
@@ -476,6 +576,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         openURLs.removeAll()
         activeIndex = nil
         selections.removeAll()
+        lineActivatedURLs.removeAll()
         previewEnabled.removeAll()
         foldedBlocks.removeAll()
         urls.forEach { onTabClosed?($0) }
@@ -491,6 +592,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     /// Re-apply font / line metrics after settings change.
     func refreshDisplay() {
+        for url in openURLs {
+            HighlightService.shared.highlight(DocumentStore.shared.document(for: url))
+        }
         textView.font = Theme.editorFont()
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
         textView.needsDisplay = true
@@ -512,7 +616,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         guard let doc = currentDocument else { return }
+        if let url = currentURL { lineActivatedURLs.insert(url) }
+        textView.showsCurrentLineBand = true
         if !doc.isModified { doc.isModified = true; onDocumentEdited?() }
+        // Blame is computed from the committed file. Once the buffer changes,
+        // its line mapping is no longer authoritative; clear it immediately
+        // even when AppKit emits no accompanying selection notification.
+        clearInlineBlameRequest()
         HighlightService.shared.scheduleHighlight(doc)
         // The preview debounces internally, so this is cheap per keystroke.
         if let markdownPreview, !markdownPreview.isHidden {
@@ -521,10 +631,26 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        guard !suppressSelectionSideEffects else { return }
         if let url = currentURL { selections[url] = textView.selectedRange() }
+        guard let url = currentURL, lineActivatedURLs.contains(url) else {
+            textView.showsCurrentLineBand = false
+            textView.inlineBlame = nil
+            return
+        }
+        textView.showsCurrentLineBand = true
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         scheduleInlineBlame()
+    }
+
+    var tabBarHeight: CGFloat { tabBar.currentHeight }
+    func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
+    var hasActiveLineForTesting: Bool { textView.showsCurrentLineBand }
+    var inlineBlameForTesting: String? { textView.inlineBlame }
+    var currentLineHeightForTesting: CGFloat? {
+        layoutManager.ensureLayout(for: textView.textContainer!)
+        return textView.currentLineBandRect()?.height
     }
 
     @objc private func documentStructureChanged(_ notification: Notification) {
@@ -540,6 +666,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     private var blameWork: DispatchWorkItem?
     private var blameGeneration = 0
+    private var requestedBlameKey: String?
+    private var displayedBlameKey: String?
     /// Blame results keyed by file + line, so revisiting a line is free.
     private var blameCache: [String: String] = [:]
     private var blameOrder: [String] = []
@@ -572,35 +700,57 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func scheduleInlineBlame() {
-        blameGeneration += 1
-        let generation = blameGeneration
-        blameWork?.cancel()
-
         guard Settings.shared.showInlineBlame,
               let url = currentURL,
-              let root = repositoryRoot else {
-            textView.inlineBlame = nil
+              let root = repositoryRoot,
+              lineActivatedURLs.contains(url) else {
+            clearInlineBlameRequest()
             return
         }
         let doc = DocumentStore.shared.document(for: url)
         // A modified buffer has line numbers that no longer match what git
         // knows about, so any annotation would be attributed to the wrong line.
         guard !doc.isVirtual, !doc.isUnsupported, doc.image == nil, !doc.isModified else {
-            textView.inlineBlame = nil
+            clearInlineBlameRequest()
             return
         }
 
         let line = caretLine()
         let key = "\(url.path):\(line)"
         if let hit = blameCache[key] {
+            if requestedBlameKey != key {
+                blameGeneration += 1
+                blameWork?.cancel()
+                blameWork = nil
+                requestedBlameKey = key
+            }
             blameOrder.removeAll { $0 == key }
             blameOrder.append(key)
-            textView.inlineBlame = hit
+            let visible = hit.isEmpty ? nil : hit
+            let visibleKey = hit.isEmpty ? nil : key
+            if displayedBlameKey != visibleKey || textView.inlineBlame != visible {
+                displayedBlameKey = visibleKey
+                textView.inlineBlame = visible
+            }
             return
         }
-        // Clear immediately: showing the previous line's author while the new
-        // one loads is worse than showing nothing.
-        textView.inlineBlame = nil
+
+        // Selection notifications can arrive repeatedly for the same caret
+        // (focus changes and caret blinking included). Keep one request alive;
+        // cancelling/restarting it made the annotation visibly flash.
+        if requestedBlameKey == key, blameWork != nil { return }
+
+        blameGeneration += 1
+        let generation = blameGeneration
+        blameWork?.cancel()
+        requestedBlameKey = key
+        // A different line must not retain the previous line's author. For
+        // repeated notifications on this same line, leave the rendered value
+        // untouched so it never flashes nil between identical requests.
+        if displayedBlameKey != key {
+            displayedBlameKey = nil
+            textView.inlineBlame = nil
+        }
 
         let work = DispatchWorkItem { [weak self] in
             let blame = GitService.blame(file: url, line: line, in: root)
@@ -610,11 +760,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 guard self.currentURL == url, self.caretLine() == line else { return }
                 let text = blame?.inlineText ?? ""
                 self.cacheBlame(text, for: key)
+                self.blameWork = nil
+                self.displayedBlameKey = text.isEmpty ? nil : key
                 self.textView.inlineBlame = text.isEmpty ? nil : text
             }
         }
         blameWork = work
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func clearInlineBlameRequest() {
+        blameGeneration += 1
+        blameWork?.cancel()
+        blameWork = nil
+        requestedBlameKey = nil
+        displayedBlameKey = nil
+        textView.inlineBlame = nil
     }
 
     /// Drop cached blame for a file whose contents changed on disk.
@@ -626,6 +787,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             blameCache.removeAll()
             blameOrder.removeAll()
         }
+        requestedBlameKey = nil
         scheduleInlineBlame()
     }
 

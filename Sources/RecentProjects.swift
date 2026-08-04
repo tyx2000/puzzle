@@ -6,12 +6,21 @@ final class RecentProjects {
     static let shared = RecentProjects()
     static let didChange = Notification.Name("PuzzleRecentProjectsDidChange")
 
-    private let key = "PuzzleRecentProjects"
-    private let limit = 12
+    private let defaults: UserDefaults
+    private let key: String
+    private let limit: Int
+
+    init(defaults: UserDefaults = .standard,
+         key: String = "PuzzleRecentProjects",
+         limit: Int = 12) {
+        self.defaults = defaults
+        self.key = key
+        self.limit = limit
+    }
 
     /// Most-recent first, with entries that no longer exist filtered out.
     var urls: [URL] {
-        let paths = UserDefaults.standard.stringArray(forKey: key) ?? []
+        let paths = defaults.stringArray(forKey: key) ?? []
         var seen = Set<String>()
         return paths.compactMap { path -> URL? in
             guard !seen.contains(path) else { return nil }
@@ -25,27 +34,27 @@ final class RecentProjects {
 
     func add(_ url: URL) {
         let path = url.standardizedFileURL.path
-        var paths = UserDefaults.standard.stringArray(forKey: key) ?? []
+        var paths = defaults.stringArray(forKey: key) ?? []
         paths.removeAll { $0 == path }
         paths.insert(path, at: 0)
         if paths.count > limit { paths = Array(paths.prefix(limit)) }
-        UserDefaults.standard.set(paths, forKey: key)
+        defaults.set(paths, forKey: key)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
     /// Drop a single entry from the history.
     func remove(_ url: URL) {
         let path = url.standardizedFileURL.path
-        var paths = UserDefaults.standard.stringArray(forKey: key) ?? []
+        var paths = defaults.stringArray(forKey: key) ?? []
         let before = paths.count
         paths.removeAll { $0 == path }
         guard paths.count != before else { return }
-        UserDefaults.standard.set(paths, forKey: key)
+        defaults.set(paths, forKey: key)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
     func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
+        defaults.removeObject(forKey: key)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 

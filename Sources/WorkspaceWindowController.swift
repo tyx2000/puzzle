@@ -22,6 +22,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
+    private(set) var trafficLightTopInset = (EditorTabBar.defaultRowHeight - 14) / 2
+    private(set) var trafficLightHeight: CGFloat = 14
 
     /// Called when the window closes, so the app can drop its reference.
     var onClose: ((WorkspaceWindowController) -> Void)?
@@ -83,11 +85,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
 
         wire()
+        DispatchQueue.main.async { [weak self] in self?.updateTitlebarGeometry() }
     }
     required init?(coder: NSCoder) { fatalError() }
 
     private func wire() {
         sidebar.fileTree.onOpenFile = { [weak self] url in self?.editor.open(url: url) }
+        sidebar.fileTree.onGitHistory = { [weak self] url in self?.showFileHistory(for: url) }
+        sidebar.fileTree.onFileSystemChanged = { [weak self] in
+            self?.sidebar.refreshGitPanelIfLoaded()
+            self?.refreshGit(requireFollowUp: true)
+        }
+        sidebar.fileTree.canMutatePath = { [weak self] url in
+            self?.editor.canMutatePath(url) ?? true
+        }
+        sidebar.fileTree.onPathRenamed = { [weak self] oldURL, newURL in
+            self?.editor.pathRenamed(from: oldURL, to: newURL)
+        }
+        sidebar.fileTree.onPathDeleted = { [weak self] url in
+            self?.editor.pathDeleted(url)
+        }
         sidebar.onSearchResult = { [weak self] url, line in
             self?.editor.open(url: url)
             self?.editor.jumpToLine(line)
@@ -106,7 +123,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.editor.invalidateBlame()
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
-
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
@@ -144,6 +160,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
         DocumentStore.shared.releaseTransientMemory()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        updateTitlebarGeometry()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        updateTitlebarGeometry()
+    }
+
+    private func updateTitlebarGeometry() {
+        guard let window,
+              let closeButton = window.standardWindowButton(.closeButton) else { return }
+        window.contentView?.layoutSubtreeIfNeeded()
+        let buttonRect = closeButton.convert(closeButton.bounds, to: nil)
+        let top = max(0, window.frame.height - buttonRect.maxY)
+        let height = closeButton.bounds.height
+        guard height > 0 else { return }
+
+        trafficLightTopInset = top
+        trafficLightHeight = height
+        let fileTabHeight = top * 2 + height
+        editor.setTabRowHeight(fileTabHeight)
+        sidebar.setFileTabHeight(fileTabHeight)
     }
 
     func releaseTransientMemory() {
@@ -264,6 +304,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 DocumentStore.shared.setVirtualDocument(
                     url: url, text: text, displayName: "\(name) @ \(commit.shortHash)")
                 self.editor.open(url: url, replacingContent: true)
+            }
+        }
+    }
+
+    private func showFileHistory(for file: URL) {
+        guard let directory = projectURL else { return }
+        let rootPath = directory.standardizedFileURL.path
+        let filePath = file.standardizedFileURL.path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard filePath.hasPrefix(prefix) else { return }
+        let relative = String(filePath.dropFirst(prefix.count))
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let commits = GitService.log(file: file, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.projectURL == directory else { return }
+                let previewURL = self.diffPreviewURL(
+                    in: directory, path: relative, commit: "file-history-table")
+                self.editor.showFileHistory(FileHistoryModel(
+                    tabURL: previewURL,
+                    repository: directory,
+                    relativePath: relative,
+                    displayName: "\(file.lastPathComponent) History",
+                    commits: commits))
             }
         }
     }

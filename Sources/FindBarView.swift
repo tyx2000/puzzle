@@ -102,7 +102,17 @@ final class FindBarView: FlatView {
         matches = []
         current = -1
         defer { updateCount(); highlight() }
-        guard let tv = textView, !query.isEmpty else { return }
+        guard let tv = textView else { return }
+        guard !query.isEmpty else {
+            // The last one-character query leaves that match selected by the
+            // editor. Once the query is empty it is no longer a result, so
+            // collapse the selection as well as clearing the painted ranges.
+            let selection = tv.selectedRange()
+            if selection.length > 0 {
+                tv.setSelectedRange(NSRange(location: NSMaxRange(selection), length: 0))
+            }
+            return
+        }
         let haystack = tv.string as NSString
 
         if options.regex {

@@ -3,9 +3,13 @@ import AppKit
 /// NSTextView that paints the current-line band and keeps the caret the same
 /// height as the text rather than the whole tall line box.
 final class PuzzleTextView: NSTextView {
+    /// Programmatic selection changes (opening/switching tabs) must not look
+    /// like a user-selected line. The pane uses this callback to activate line
+    /// UI only for real pointer/keyboard interaction.
+    var onExplicitCaretInteraction: (() -> Void)?
 
     /// Find-bar matches, drawn here (rather than as temporary attributes) so the
-    /// bands are glyph-height instead of the full 1.8 line box, and so they paint
+    /// bands are glyph-height instead of the full configured code row, and so they paint
     /// *above* the current-line band instead of being hidden by it.
     var searchMatches: [NSRange] = [] { didSet { needsDisplay = true } }
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
@@ -124,9 +128,9 @@ final class PuzzleTextView: NSTextView {
         let text = "    " + blame as NSString
         let size = text.size(withAttributes: attributes)
 
-        // Vertically centre on the glyphs, not the tall line box.
-        let box = glyphBox(fragmentHeight: frag.height)
-        let y = frag.minY + box.top + (box.height - size.height) / 2
+        // `code_line_height` owns the full row. Centre the annotation in the
+        // same line fragment as the code, line number, active band and caret.
+        let y = frag.midY - size.height / 2
         let originX = x + inset.width
 
         // Whatever room is left after the code, and no less.
@@ -224,24 +228,13 @@ final class PuzzleTextView: NSTextView {
         }
     }
 
-    /// Vertical geometry of the glyphs inside a line fragment.
-    ///
-    /// `lineHeightMultiple` adds its extra leading *above* the glyphs, so the text
-    /// sits at the bottom of the line box: the space below the baseline stays at
-    /// the font's natural `lineHeight - ascender`. That makes the glyph box a pure
-    /// function of the fragment height:
-    ///
-    ///     top = fragmentHeight - naturalLineHeight
-    ///
-    /// NOTE: this used to read the baseline from `location(forGlyphAt:)`, which is
-    /// only meaningful for real glyphs. On an empty line (right after Enter) or a
-    /// control glyph it reports a fragment-absolute value instead, which put the
-    /// caret ~4pt off and made it jump when the glyph under it changed (e.g. Tab).
+    /// Vertical geometry of just the glyphs inside a line fragment. Search-match
+    /// decorations use this smaller box; row-level decorations use the complete
+    /// `code_line_height` fragment.
     private func glyphBox(fragmentHeight: CGFloat) -> (top: CGFloat, height: CGFloat) {
         let font = self.font ?? Theme.editorFont()
-        let natural = layoutManager?.defaultLineHeight(for: font)
-            ?? (font.ascender - font.descender)
-        return (fragmentHeight - natural, font.ascender - font.descender)
+        let height = font.ascender - font.descender
+        return ((fragmentHeight - height) / 2, height)
     }
 
     /// The line fragment the caret sits in, handling the trailing empty line —
@@ -269,18 +262,20 @@ final class PuzzleTextView: NSTextView {
     /// False while the pane has no open document — otherwise the empty editor
     /// would show a stray band (the "row line" in the blank area).
     var showsCurrentLineBand = true {
-        didSet { if showsCurrentLineBand != oldValue { needsDisplay = true } }
+        didSet {
+            guard showsCurrentLineBand != oldValue else { return }
+            needsDisplay = true
+        }
     }
 
     func currentLineBandRect() -> NSRect? {
         guard showsCurrentLineBand,
               selectedRanges.count == 1, selectedRange().length == 0,
               let fragment = caretLineFragment() else { return nil }
-        let box = glyphBox(fragmentHeight: fragment.height)
         return NSRect(x: 0,
-                      y: fragment.minY + box.top + textContainerInset.height,
+                      y: fragment.minY + textContainerInset.height,
                       width: max(bounds.width, textContainer?.size.width ?? bounds.width),
-                      height: box.height)
+                      height: fragment.height)
     }
 
     private func drawCurrentLineBand() {
@@ -289,18 +284,11 @@ final class PuzzleTextView: NSTextView {
         rect.fill()
     }
 
-    /// The default caret spans the whole line fragment, which with a 1.8 line
-    /// height towers over the text and above the current-line band. Shrink it to
-    /// the glyph height and center it like the text.
-    /// The caret rect for the current selection, aligned to the glyph box so it
-    /// matches the current-line band exactly on every kind of line.
+    /// The caret uses the complete configured code row, matching the active
+    /// line background exactly.
     func caretRect(from rect: NSRect) -> NSRect {
         var r = rect
-        // AppKit hands us the full line box; shrink to the glyphs. `rect.height`
-        // is the fragment height, so the same deterministic box applies.
-        let box = glyphBox(fragmentHeight: rect.height)
-        r.origin.y += box.top
-        r.size.height = box.height
+        r.size.height = Theme.lineMetrics().target
         r.size.width = 2
         return r
     }
@@ -309,9 +297,15 @@ final class PuzzleTextView: NSTextView {
         super.drawInsertionPoint(in: caretRect(from: rect), color: color, turnedOn: flag)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        onExplicitCaretInteraction?()
+        super.mouseDown(with: event)
+    }
+
     /// VS Code's macOS folding shortcuts: ⌥⌘[ toggles the innermost block at
     /// the caret, and ⌥⌘] unfolds the pane.
     override func keyDown(with event: NSEvent) {
+        onExplicitCaretInteraction?()
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers.contains([.command, .option]),
            let key = event.charactersIgnoringModifiers {

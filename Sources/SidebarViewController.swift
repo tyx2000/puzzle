@@ -23,6 +23,7 @@ final class SidebarViewController: NSViewController {
     var onGitChanged: (() -> Void)?
 
     private let containerView = NSView()
+    private var containerTopConstraint: NSLayoutConstraint!
     /// Which panel is currently visible.
     private(set) var visiblePanel: ActivityBarView.Action = .project
 
@@ -35,10 +36,11 @@ final class SidebarViewController: NSViewController {
         root.addSubview(containerView)
         root.addSubview(activityBar)
 
+        containerTopConstraint = containerView.topAnchor.constraint(
+            equalTo: root.topAnchor, constant: EditorTabBar.defaultRowHeight)
         NSLayoutConstraint.activate([
             // Match the editor's first tab row while clearing the traffic lights.
-            containerView.topAnchor.constraint(equalTo: root.topAnchor,
-                                               constant: EditorTabBar.rowHeight),
+            containerTopConstraint,
             containerView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             containerView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             containerView.bottomAnchor.constraint(equalTo: activityBar.topAnchor),
@@ -52,6 +54,12 @@ final class SidebarViewController: NSViewController {
         mount(fileTree)
         showFiles()
     }
+
+    func setFileTabHeight(_ height: CGFloat) {
+        containerTopConstraint.constant = height
+    }
+
+    var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
 
     func setDirectory(_ url: URL) {
         directory = url

@@ -11,7 +11,8 @@ final class Settings {
     var fontFamily = "Monaco"
     var fontSize: CGFloat = 12
     var fontWeight: CGFloat = 400
-    var lineHeight: CGFloat = 1.8
+    /// Exact height of one code row, in points.
+    var codeLineHeight: CGFloat = 27
     var tabSize = 4
     var showInlineBlame = true
 
@@ -19,8 +20,9 @@ final class Settings {
     var uiFontFamily = "Monaco"
     var uiFontSize: CGFloat = 12
     var uiFontWeight: CGFloat = 400
-    /// Row height in the file tree, as a multiple of the UI font's height.
-    var uiLineHeight: CGFloat = 1.45
+    /// Exact height of one file-tree row, in points.
+    var treeLineHeight: CGFloat = 22
+    private var needsAbsoluteLineHeightMigration = false
 
     static var fileURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -53,9 +55,8 @@ final class Settings {
           // Code font weight. 400 = regular, 600+ renders bold.  Default: 400
           "buffer_font_weight": \(num(fontWeight)),
 
-          // Line height as a multiple of the font's natural height.
-          // 1.0 is tight, 1.8 is airy (Zed's feel). Range 1.0–3.0.  Default: 1.8
-          "buffer_line_height": \(num(lineHeight)),
+          // Exact height of one code row in points. Range 8–200.  Default: 27
+          "code_line_height": \(num(codeLineHeight)),
 
           // Width of a tab character, in characters. Range 1–16.  Default: 4
           "tab_size": \(tabSize),
@@ -76,9 +77,8 @@ final class Settings {
           // UI font weight. 400 = regular, 600+ renders bold.  Default: 400
           "ui_font_weight": \(num(uiFontWeight)),
 
-          // File-tree row height, as a multiple of the UI font's height.
-          // 1.0 is tight, 2.0+ is airy. Range 1.0–3.0.  Default: 1.45
-          "ui_line_height": \(num(uiLineHeight))
+          // Exact height of one file-tree row in points. Range 8–200.  Default: 22
+          "tree_line_height": \(num(treeLineHeight))
         }
         """
     }
@@ -87,13 +87,17 @@ final class Settings {
     /// build that predates some options.
     private static let knownKeys = [
         "buffer_font_family", "buffer_font_size", "buffer_font_weight",
-        "buffer_line_height", "tab_size", "show_inline_blame",
-        "ui_font_family", "ui_font_size", "ui_font_weight", "ui_line_height",
+        "code_line_height",
+        "tab_size", "show_inline_blame",
+        "ui_font_family", "ui_font_size", "ui_font_weight", "tree_line_height",
     ]
 
     /// Accepted by older settings files but no longer backed by UI behavior.
     private static let retiredKeys = [
         "show_wrap_guides", "wrap_column", "show_indent_guides", "show_completion",
+        "buffer_line_height", "ui_line_height",
+        "active_code_foreground", "active_code_background",
+        "active_file_foreground", "active_file_background",
     ]
 
     /// A file written by an earlier build won't contain options added since, so
@@ -103,11 +107,17 @@ final class Settings {
         guard let text = try? String(contentsOf: Self.fileURL, encoding: .utf8) else { return }
         let missing = Self.knownKeys.filter { !text.contains("\"\($0)\"") }
         let retired = Self.retiredKeys.filter { text.contains("\"\($0)\"") }
-        guard !missing.isEmpty || !retired.isEmpty else { return }
+        guard !missing.isEmpty || !retired.isEmpty || needsAbsoluteLineHeightMigration else {
+            return
+        }
         try? contents().write(to: Self.fileURL, atomically: true, encoding: .utf8)
         var changes: [String] = []
         if !missing.isEmpty { changes.append("added \(missing.joined(separator: ", "))") }
         if !retired.isEmpty { changes.append("removed \(retired.joined(separator: ", "))") }
+        if needsAbsoluteLineHeightMigration {
+            changes.append("converted line heights to absolute points")
+            needsAbsoluteLineHeightMigration = false
+        }
         FileHandle.standardError.write(Data("puzzle: updated settings: \(changes.joined(separator: "; "))\n".utf8))
     }
 
@@ -126,6 +136,7 @@ final class Settings {
     }
 
     func load() {
+        needsAbsoluteLineHeightMigration = false
         guard let raw = try? String(contentsOf: Self.fileURL, encoding: .utf8) else { return }
         // Tolerate // comments (Zed's settings are JSONC).
         let stripped = raw.split(separator: "\n", omittingEmptySubsequences: false)
@@ -146,14 +157,29 @@ final class Settings {
         if let v = json["buffer_font_family"] as? String, !v.isEmpty { fontFamily = v }
         if let v = number("buffer_font_size"), v >= 6, v <= 72 { fontSize = v }
         if let v = number("buffer_font_weight") { fontWeight = v }
-        if let v = number("buffer_line_height"), v >= 1.0, v <= 3.0 { lineHeight = v }
+        if let v = number("code_line_height") ?? number("buffer_line_height") {
+            if v >= 8, v <= 200 {
+                codeLineHeight = v
+            } else if v >= 1, v <= 3 {
+                codeLineHeight = NSLayoutManager().defaultLineHeight(for: editorFont()) * v
+                needsAbsoluteLineHeightMigration = true
+            }
+        }
         if let v = number("tab_size"), v >= 1, v <= 16 { tabSize = Int(v) }
         if let v = json["show_inline_blame"] as? Bool { showInlineBlame = v }
 
         if let v = json["ui_font_family"] as? String, !v.isEmpty { uiFontFamily = v }
         if let v = number("ui_font_size"), v >= 8, v <= 32 { uiFontSize = v }
         if let v = number("ui_font_weight") { uiFontWeight = v }
-        if let v = number("ui_line_height"), v >= 1.0, v <= 3.0 { uiLineHeight = v }
+        if let v = number("tree_line_height") ?? number("ui_line_height") {
+            if v >= 8, v <= 200 {
+                treeLineHeight = v
+            } else if v >= 1, v <= 3 {
+                let natural = ceil(uiFont(baseline: 12).boundingRectForFont.height)
+                treeLineHeight = natural * v
+                needsAbsoluteLineHeightMigration = true
+            }
+        }
     }
 
     /// Resolve a UI font. `size` is interpreted relative to a 12pt baseline so

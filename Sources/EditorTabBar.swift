@@ -1,7 +1,7 @@
 import AppKit
 
-/// Flat file tabs. Tabs wrap onto extra 36-point rows when they do not fit; the
-/// active tab uses the same edge-to-edge background rule as the action bar.
+/// Flat file tabs. Each row follows the owning window's traffic-light geometry;
+/// tabs wrap onto rows of that same height when they do not fit.
 final class EditorTabBar: NSView {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
@@ -9,6 +9,7 @@ final class EditorTabBar: NSView {
     var onCloseRight: ((Int) -> Void)?
     var onSplit: (() -> Void)?
     var onTogglePreview: (() -> Void)?
+    var onHeightChanged: ((CGFloat) -> Void)?
 
     var splitActive = false {
         didSet { splitButton.contentTintColor = splitActive ? Theme.cursor : Theme.dimText }
@@ -36,15 +37,17 @@ final class EditorTabBar: NSView {
     private var pills: [TabPillView] = []
     private let splitButton = NSButton()
     private let previewButton = NSButton()
-    /// Shared with the sidebar's titlebar clearance so both surfaces start on
-    /// the same horizontal rhythm.
-    static let rowHeight: CGFloat = 36
+    /// Fallback until the owning window reports its traffic-light geometry.
+    static let defaultRowHeight: CGFloat = 32
+    private(set) var rowHeight: CGFloat = EditorTabBar.defaultRowHeight
     private let gap: CGFloat = 0
     private let padding: CGFloat = 0
     /// Space reserved on the right for the action buttons — grows when the
     /// markdown preview toggle is showing, so pills never slide underneath it.
     private var splitAreaWidth: CGFloat { showsPreviewToggle ? 60 : 34 }
-    private var contentHeight: CGFloat = 36
+    private var contentHeight: CGFloat = EditorTabBar.defaultRowHeight
+    private var splitButtonTop: NSLayoutConstraint!
+    private var previewButtonTop: NSLayoutConstraint!
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
@@ -64,9 +67,11 @@ final class EditorTabBar: NSView {
         splitButton.action = #selector(splitAction)
         splitButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(splitButton)
+        splitButtonTop = splitButton.topAnchor.constraint(
+            equalTo: topAnchor, constant: (rowHeight - 20) / 2)
         NSLayoutConstraint.activate([
             splitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            splitButton.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            splitButtonTop,
             splitButton.widthAnchor.constraint(equalToConstant: 22),
             splitButton.heightAnchor.constraint(equalToConstant: 20),
         ])
@@ -84,16 +89,32 @@ final class EditorTabBar: NSView {
         previewButton.isHidden = true
         previewButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(previewButton)
+        previewButtonTop = previewButton.topAnchor.constraint(
+            equalTo: topAnchor, constant: (rowHeight - 20) / 2)
         NSLayoutConstraint.activate([
             previewButton.trailingAnchor.constraint(equalTo: splitButton.leadingAnchor,
                                                     constant: -6),
-            previewButton.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            previewButtonTop,
             previewButton.widthAnchor.constraint(equalToConstant: 22),
             previewButton.heightAnchor.constraint(equalToConstant: 20),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setRowHeight(_ height: CGFloat) {
+        let resolved = max(20, height)
+        guard abs(resolved - rowHeight) > 0.5 else { return }
+        let rows = max(1, Int(round(contentHeight / rowHeight)))
+        rowHeight = resolved
+        contentHeight = CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
+        splitButtonTop.constant = (rowHeight - 20) / 2
+        previewButtonTop.constant = (rowHeight - 20) / 2
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        layoutPills()
+        onHeightChanged?(currentHeight)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         Theme.barBackground.setFill()
@@ -143,21 +164,24 @@ final class EditorTabBar: NSView {
             let width = min(pill.preferredWidth, available - padding)
             if x + width > available, x > padding {
                 x = padding
-                y += Self.rowHeight + gap
+                y += rowHeight + gap
                 rows += 1
             }
-            pill.frame = NSRect(x: x, y: y, width: width, height: Self.rowHeight)
+            pill.frame = NSRect(x: x, y: y, width: width, height: rowHeight)
             x += width + gap
         }
-        let height = padding * 2 + CGFloat(rows) * Self.rowHeight + CGFloat(rows - 1) * gap
+        let height = padding * 2 + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
         if abs(height - contentHeight) > 0.5 {
             contentHeight = height
             invalidateIntrinsicContentSize()
+            onHeightChanged?(max(rowHeight, height))
         }
     }
 
+    var currentHeight: CGFloat { max(rowHeight, contentHeight) }
+
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: max(36, contentHeight))
+        NSSize(width: NSView.noIntrinsicMetric, height: max(rowHeight, contentHeight))
     }
 
     @objc private func splitAction() { onSplit?() }

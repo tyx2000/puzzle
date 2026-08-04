@@ -393,4 +393,22 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         }
         return glyphRange.length
     }
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+        baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer,
+        forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        let metrics = Theme.lineMetrics()
+        lineFragmentRect.pointee.size.height = metrics.target
+        lineFragmentUsedRect.pointee.size.height = metrics.target
+
+        let font = Theme.editorFont()
+        let glyphHeight = font.ascender - font.descender
+        baselineOffset.pointee = (metrics.target - glyphHeight) / 2 + font.ascender
+        return true
+    }
 }

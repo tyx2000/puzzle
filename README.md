@@ -5,7 +5,8 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 
 ## Features
 - **Zed-matched theme & layout** — One Light / One Dark that follow the system
-  appearance (like Zed with no theme pinned), Monaco 12 with 1.8 line height.
+  appearance (like Zed with no theme pinned), Monaco 12 with configurable exact
+  code/tree row heights.
   Zed-style header (tabs beside the traffic lights), full-width bottom status bar
   with a left **activity bar** (project · search · git · outline · settings) and
   right branch · line/col · language, editor tabs with an active accent, compact
@@ -21,22 +22,25 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   settings) live in the sidebar's 40pt bottom action bar, whose width is the
   panel's width and stays fixed when switching panels. The active button has a
   white background; tapping the active one collapses the panel.
-- **File tabs** — flat 36-point rows that wrap when needed; active tabs use the
-  same edge-to-edge background rule as the panel action buttons.
+- **File tabs** — row height follows the window traffic lights and wraps when
+  needed; active tabs use the same edge-to-edge background rule as the panel
+  action buttons.
 - **Search panel** — results grouped per file (name + folder) with line numbers
   and the match highlighted; click a file to open it, a line to jump to it.
 - **Git panel** — flat Changes / History tabs, automatically staged changed
   files with status codes, branch, full-width commit message editor + commit.
 - **Settings** — the gear opens `~/.config/puzzle/settings.json`. Editor font:
   `buffer_font_family`, `buffer_font_size`, `buffer_font_weight`,
-  `buffer_line_height`, `tab_size`. Panel/UI
+  `code_line_height`, `tab_size`. Panel/UI
   font: `ui_font_family`, `ui_font_size`, `ui_font_weight` (`ui_font_size` scales
-  the whole tree/tab/panel type hierarchy). Saving re-applies live; `//` comments
-  are allowed.
-- **Editor details** — active-line band centered on the text, caret sized to the
-  text (not the tall line box), no gutter separator, and hover-only gutter-arrow
+  the whole tree/tab/panel type hierarchy), with `tree_line_height` controlling
+  file-tree rows. Saving re-applies live; `//` comments are allowed.
+- **Editor details** — active-line band and caret use the configured code-row
+  height, with code, line numbers and inline blame vertically centered; no gutter separator, and hover-only gutter-arrow
   code folding that preserves source line numbers.
 - **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers.
+- **Dock menu** — right-click the running app icon to open one of the ten most
+  recently used valid project folders in a new Puzzle window.
 - **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, 350ms debounced
   auto-save, and immediate manual save (⌘S).
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
@@ -94,11 +98,12 @@ with every property documented inline. Keys and defaults:
 | `buffer_font_family` | `"Monaco"` | code font in the editor |
 | `buffer_font_size` | `12` | code font size (6–72) |
 | `buffer_font_weight` | `400` | code weight; 600+ renders bold |
-| `buffer_line_height` | `1.8` | line height as a multiple of natural height (1.0–3.0) |
+| `code_line_height` | `27` | exact code-row height in points (8–200) |
 | `tab_size` | `4` | tab width in characters (1–16) |
 | `ui_font_family` | `"Monaco"` | font for tree / tabs / panels |
 | `ui_font_size` | `12` | base UI size; scales the whole panel hierarchy (8–32) |
 | `ui_font_weight` | `400` | UI weight; 600+ renders bold |
+| `tree_line_height` | `22` | exact file-tree row height in points (8–200) |
 
 ## Notes / limits
 - `NSTextView` is great for normal source files; multi-hundred-MB files are the

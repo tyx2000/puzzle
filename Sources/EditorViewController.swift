@@ -12,11 +12,14 @@ final class EditorViewController: NSViewController {
     /// editor area should simply be empty until a file is picked.
     var hasProject = false { didSet { updatePlaceholder() } }
     var onOpenRecent: ((URL) -> Void)?
+    var onTabBarHeightChanged: ((CGFloat) -> Void)?
 
     private var panes: [EditorPaneViewController] = []
     private weak var activePane: EditorPaneViewController?
     private var editorSplit: NSSplitView!
     private let welcome = WelcomeView()
+    private var tabRowHeight = EditorTabBar.defaultRowHeight
+    private var fileHistories: [URL: FileHistoryModel] = [:]
 
     var currentURL: URL? { activePane?.currentURL }
 
@@ -28,6 +31,12 @@ final class EditorViewController: NSViewController {
     }
     /// Index of the focused pane.
     var activePaneIndex: Int? { activePane.flatMap { panes.firstIndex(of: $0) } }
+
+    func setTabRowHeight(_ height: CGFloat) {
+        tabRowHeight = height
+        panes.forEach { $0.setTabRowHeight(height) }
+        onTabBarHeightChanged?(activePane?.tabBarHeight ?? height)
+    }
 
     override func loadView() {
         let container = FlatView()
@@ -78,7 +87,9 @@ final class EditorViewController: NSViewController {
     @discardableResult
     private func addPane() -> EditorPaneViewController {
         let pane = EditorPaneViewController()
+        pane.setTabRowHeight(tabRowHeight)
         pane.repositoryRoot = repositoryRoot
+        pane.fileHistoryProvider = { [weak self] url in self?.fileHistories[url] }
         pane.onRequestSplit = { [weak self] in self?.splitEditor() }
         pane.onBecameActive = { [weak self] p in self?.setActivePane(p) }
         pane.onDocumentSaved = { [weak self] url in
@@ -101,11 +112,19 @@ final class EditorViewController: NSViewController {
             guard let pane else { return }
             DocumentStore.shared.registerOpen(url, owner: pane)
         }
-        pane.onTabClosed = { [weak pane] url in
+        pane.onTabClosed = { [weak self, weak pane] url in
             guard let pane else { return }
             DocumentStore.shared.unregisterOpen(url, owner: pane)
+            guard let self else { return }
+            if !self.panes.contains(where: { $0.openURLs.contains(url) }) {
+                self.fileHistories.removeValue(forKey: url)
+            }
         }
         pane.onPreviewVisibilityChanged = { [weak self] in self?.releasePreviewParsersIfIdle() }
+        pane.onTabBarHeightChanged = { [weak self, weak pane] height in
+            guard let self, let pane, self.activePane === pane else { return }
+            self.onTabBarHeightChanged?(height)
+        }
 
         addChild(pane)
         panes.append(pane)
@@ -163,6 +182,7 @@ final class EditorViewController: NSViewController {
         guard activePane !== pane else { return }
         activePane = pane
         for p in panes { p.isActivePane = (p === pane) }
+        onTabBarHeightChanged?(pane.tabBarHeight)
         onActiveDocumentChanged?(pane.currentURL)
     }
 
@@ -194,6 +214,41 @@ final class EditorViewController: NSViewController {
     func open(url: URL, replacingContent: Bool = false) {
         (activePane ?? panes.first)?.open(url: url, replacingContent: replacingContent)
         updatePlaceholder()
+    }
+
+    func showFileHistory(_ model: FileHistoryModel) {
+        fileHistories[model.tabURL] = model
+        // A tiny virtual document gives the existing tab/document lifecycle a
+        // stable identity; the pane replaces its text area with FileHistoryView.
+        DocumentStore.shared.setVirtualDocument(
+            url: model.tabURL, text: "", displayName: model.displayName)
+        open(url: model.tabURL, replacingContent: true)
+    }
+
+    func canMutatePath(_ base: URL) -> Bool {
+        let path = base.standardizedFileURL.path
+        let prefix = path.hasSuffix("/") ? path : path + "/"
+        for pane in panes {
+            for url in pane.openURLs {
+                let candidate = url.standardizedFileURL.path
+                guard candidate == path || candidate.hasPrefix(prefix) else { continue }
+                if DocumentStore.shared.cachedDocument(for: url)?.isModified == true {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    func pathRenamed(from oldURL: URL, to newURL: URL) {
+        panes.forEach { $0.pathRenamed(from: oldURL, to: newURL) }
+        onActiveDocumentChanged?(activePane?.currentURL)
+    }
+
+    func pathDeleted(_ url: URL) {
+        panes.forEach { $0.pathDeleted(url) }
+        updatePlaceholder()
+        onActiveDocumentChanged?(activePane?.currentURL)
     }
     func save() { activePane?.save() }
 

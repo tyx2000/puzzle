@@ -3,8 +3,7 @@ import AppKit
 /// Zed-matched theme. Colors are dynamic (One Light / One Dark) and follow the
 /// system appearance, exactly like Zed does when no theme is pinned.
 /// Light values are sampled from Zed's One Light on this Mac; syntax hues are
-/// One Light / One Dark. Font + line height match this Mac's Zed settings
-/// (Monaco 12, buffer_line_height 1.8).
+/// One Light / One Dark. Font and exact row heights come from settings.json.
 enum Theme {
     private static func hex(_ v: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((v >> 16) & 0xff) / 255.0,
@@ -75,9 +74,7 @@ enum Theme {
     /// the same value so their corners read as part of the same window.
     static let cornerRadius: CGFloat = 10
 
-    // Font + metrics come from settings.json (defaults match this Mac's Zed:
-    // Monaco 12, line height 1.8).
-    static var lineHeightMultiple: CGFloat { Settings.shared.lineHeight }
+    // Font + exact row metrics come from settings.json.
 
     static func editorFont() -> NSFont {
         if let cachedFont { return cachedFont }
@@ -92,24 +89,17 @@ enum Theme {
         Settings.shared.uiFont(baseline: size)
     }
 
-    /// File-tree row height: the UI font's height times `ui_line_height`.
+    /// Exact file-tree row height in points.
     static func treeRowHeight() -> CGFloat {
-        let font = uiFont(12)
-        let natural = ceil(font.boundingRectForFont.height)
-        return max(14, ceil(natural * Settings.shared.uiLineHeight))
+        Settings.shared.treeLineHeight
     }
 
-    /// Natural vs. target line height.
-    ///
-    /// NOTE: `lineHeightMultiple` puts the extra leading *above* the glyphs, so
-    /// text sits low in the line box. We deliberately do NOT correct this with
-    /// `.baselineOffset` — that inflates the line fragment height (measured:
-    /// 28pt → 39.5pt) and would desync the gutter. Instead the current-line band
-    /// is centered on the glyphs (see PuzzleTextView).
+    /// Natural vs. target line height. The layout-manager delegate fixes every
+    /// fragment to this target and centers its baseline inside the line box.
     static func lineMetrics() -> (natural: CGFloat, target: CGFloat) {
         let font = editorFont()
         let natural = NSLayoutManager().defaultLineHeight(for: font)
-        return (natural, natural * lineHeightMultiple)
+        return (natural, Settings.shared.codeLineHeight)
     }
 
     /// Width of one character (the editor font is monospaced).
@@ -146,7 +136,9 @@ enum Theme {
     static func paragraphStyle() -> NSParagraphStyle {
         if let cachedParagraph { return cachedParagraph }
         let p = NSMutableParagraphStyle()
-        p.lineHeightMultiple = lineHeightMultiple
+        let target = lineMetrics().target
+        p.minimumLineHeight = target
+        p.maximumLineHeight = target
         p.defaultTabInterval = characterWidth() * CGFloat(Settings.shared.tabSize)
         p.tabStops = []
         let frozen = p.copy() as! NSParagraphStyle

@@ -1,10 +1,131 @@
 import AppKit
 
+private final class PendingTreePlaceholder {}
+
+private enum FileTreeRowLayout {
+    static let disclosureSize: CGFloat = 12
+    static let iconSize: CGFloat = 14
+    static let gap: CGFloat = 4
+    static let disclosureX: CGFloat = 0
+    static let iconX = disclosureX + disclosureSize + gap
+    static let titleX = iconX + iconSize + gap
+
+    static func centeredRect(x: CGFloat, size: CGFloat, in bounds: NSRect) -> NSRect {
+        NSRect(x: x, y: bounds.midY - size / 2, width: size, height: size)
+    }
+}
+
+private final class PendingTreeEdit {
+    enum Kind { case file, folder, rename }
+    let kind: Kind
+    let parent: FileNode?
+    let original: FileNode?
+    let initialName: String
+    let insertionIndex: Int
+    let placeholder = PendingTreePlaceholder()
+    var didFocus = false
+
+    init(kind: Kind, parent: FileNode?, original: FileNode?, initialName: String,
+         insertionIndex: Int = 0) {
+        self.kind = kind
+        self.parent = parent
+        self.original = original
+        self.initialName = initialName
+        self.insertionIndex = insertionIndex
+    }
+}
+
+private final class FileTreeOutlineView: NSOutlineView {
+    var contextMenuProvider: ((Int) -> NSMenu?)?
+    private var hoverTrackingArea: NSTrackingArea?
+    private(set) var hoverTrackingAreaInstallCountForTesting = 0
+    private(set) var hoveredRow = -1
+
+    /// The disclosure symbol is drawn with the file icon and title by the cell,
+    /// giving all three elements one coordinate system and one spacing rule.
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect { .zero }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard hoverTrackingArea == nil else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved,
+                      .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+        hoverTrackingAreaInstallCountForTesting += 1
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseExited(with event: NSEvent) { setHoveredRow(-1) }
+
+    override func layout() {
+        super.layout()
+        refreshHoverState()
+    }
+
+    func refreshHoverState() {
+        guard let window else {
+            setHoveredRow(-1)
+            return
+        }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    private func updateHoveredRow(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }
+
+    private func setHoveredRow(_ row: Int) {
+        let next = row >= 0 && row < numberOfRows ? row : -1
+        guard next != hoveredRow else { return }
+        let previous = hoveredRow
+        hoveredRow = next
+        if previous >= 0 {
+            (rowView(atRow: previous, makeIfNecessary: false) as? TreeRowView)?.isHovered = false
+        }
+        if next >= 0 {
+            (rowView(atRow: next, makeIfNecessary: false) as? TreeRowView)?.isHovered = true
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        return contextMenuProvider?(row(at: point))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: point)
+        if clickedRow >= 0,
+           let editor = view(atColumn: 0, row: clickedRow,
+                             makeIfNecessary: false) as? InlineTreeNameCell {
+            editor.focus(selectAll: false)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+}
+
 /// Sidebar showing the project directory as a lazy NSOutlineView tree.
 final class FileTreeViewController: NSViewController {
     var onOpenFile: ((URL) -> Void)?
+    var onGitHistory: ((URL) -> Void)?
+    var onFileSystemChanged: (() -> Void)?
+    var canMutatePath: ((URL) -> Bool)?
+    var onPathRenamed: ((URL, URL) -> Void)?
+    var onPathDeleted: ((URL) -> Void)?
 
-    private var outlineView: NSOutlineView!
+    private var outlineView: FileTreeOutlineView!
     private var root: FileNode?
     /// Relative paths (from root) that git reports as modified/untracked.
     private var dirtyPaths: Set<String> = []
@@ -15,17 +136,26 @@ final class FileTreeViewController: NSViewController {
     private var untrackedDirectories: Set<String> = []
     /// The file open in the active editor pane — gets a persistent background.
     private var activeURL: URL?
+    private var pendingEdit: PendingTreeEdit?
+    private var deferredTreeReload = false
+    private var deferredDiskRefresh = false
 
     override func loadView() {
-        outlineView = NSOutlineView()
+        outlineView = FileTreeOutlineView()
+        outlineView.contextMenuProvider = { [weak self] row in
+            self?.contextMenu(forRow: row)
+        }
         outlineView.dataSource = self
         outlineView.delegate = self
         outlineView.headerView = nil
+        outlineView.style = .plain
         outlineView.rowSizeStyle = .custom
         outlineView.usesAlternatingRowBackgroundColors = false
         outlineView.backgroundColor = Theme.panelBackground
         outlineView.indentationPerLevel = 14
-        outlineView.selectionHighlightStyle = .regular
+        // Active/hover backgrounds are drawn by TreeRowView. AppKit's native
+        // selection layer raced that tracking state and visibly flashed.
+        outlineView.selectionHighlightStyle = .none
         outlineView.target = self
         outlineView.doubleAction = #selector(handleDoubleClick)
         outlineView.action = #selector(handleClick)
@@ -41,11 +171,18 @@ final class FileTreeViewController: NSViewController {
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.panelBackground
         scrollView.scrollerKnobStyle = .light
+        // Full-size windows otherwise let NSScrollView apply titlebar safe-area
+        // insets of its own, pulling the first tree row back above our 32pt gap.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets()
 
         self.view = scrollView
     }
 
     func setRoot(_ url: URL) {
+        cancelPendingEdit()
+        deferredTreeReload = false
+        deferredDiskRefresh = false
         root = FileNode(url: url, isDirectory: true)
         outlineView.reloadData()
         if let root {
@@ -55,6 +192,11 @@ final class FileTreeViewController: NSViewController {
 
     /// Refresh from disk, keeping expansion where possible.
     func refresh() {
+        guard pendingEdit == nil else {
+            deferredTreeReload = true
+            deferredDiskRefresh = true
+            return
+        }
         root?.invalidate()
         outlineView.reloadData()
     }
@@ -84,11 +226,70 @@ final class FileTreeViewController: NSViewController {
         return scroll.contentView.bounds.intersects(outlineView.rect(ofRow: row))
     }
 
+    // MARK: - Regression-test surface
+
+    func contextMenuForTesting(row: Int) -> NSMenu? { contextMenu(forRow: row) }
+    var rowCountForTesting: Int { outlineView.numberOfRows }
+    var pendingEditRowForTesting: Int? {
+        guard let edit = pendingEdit else { return nil }
+        let item: Any = edit.original ?? edit.placeholder
+        let row = outlineView.row(forItem: item)
+        return row >= 0 ? row : nil
+    }
+    var pendingEditorVerticalCenterErrorForTesting: CGFloat? {
+        guard let row = pendingEditRowForTesting,
+              let cell = outlineView.view(atColumn: 0, row: row,
+                                          makeIfNecessary: true) as? InlineTreeNameCell else {
+            return nil
+        }
+        return cell.verticalCenterErrorForTesting
+    }
+    var pendingEditorHasIconForTesting: Bool? {
+        guard let row = pendingEditRowForTesting,
+              let cell = outlineView.view(atColumn: 0, row: row,
+                                          makeIfNecessary: true) as? InlineTreeNameCell else {
+            return nil
+        }
+        return cell.hasIconForTesting
+    }
+    var pendingEditorBackgroundForTesting: NSColor? {
+        guard let row = pendingEditRowForTesting,
+              let cell = outlineView.view(atColumn: 0, row: row,
+                                          makeIfNecessary: true) as? InlineTreeNameCell else {
+            return nil
+        }
+        return cell.backgroundColorForTesting
+    }
+    var automaticallyAdjustsInsetsForTesting: Bool {
+        (view as? NSScrollView)?.automaticallyAdjustsContentInsets ?? true
+    }
+    var hoverTrackingAreaInstallCountForTesting: Int {
+        outlineView.updateTrackingAreas()
+        return outlineView.hoverTrackingAreaInstallCountForTesting
+    }
+    var hoveredRowForTesting: Int { outlineView.hoveredRow }
+    func setHoveredRowForTesting(_ row: Int) { outlineView.setHoveredRowForTesting(row) }
+    var firstRowTopInsetInWindowForTesting: CGFloat? {
+        guard outlineView.numberOfRows > 0, let window = view.window else { return nil }
+        outlineView.layoutSubtreeIfNeeded()
+        let rect = outlineView.convert(outlineView.rect(ofRow: 0), to: nil)
+        return window.frame.height - rect.maxY
+    }
+    func titleColorForTesting(at url: URL) -> NSColor? {
+        guard let row = row(for: url) else { return nil }
+        return (outlineView.view(atColumn: 0, row: row,
+                                 makeIfNecessary: true) as? FileTreeCell)?.titleColorForTesting
+    }
+
     /// Redraw after a theme / settings change.
     func refreshAppearance() {
+        guard pendingEdit == nil else {
+            deferredTreeReload = true
+            return
+        }
         outlineView.backgroundColor = Theme.panelBackground
         outlineView.reloadData()
-        // Row heights are cached, so `ui_line_height` / `ui_font_size` changes
+        // Row heights are cached, so `tree_line_height` / `ui_font_size` changes
         // need an explicit invalidation to take effect.
         if outlineView.numberOfRows > 0 {
             outlineView.noteHeightOfRows(withIndexesChanged:
@@ -105,6 +306,10 @@ final class FileTreeViewController: NSViewController {
         untrackedPaths = untracked
         dirtyDirectories = Self.ancestors(of: modified)
         untrackedDirectories = Self.ancestors(of: untracked)
+        guard pendingEdit == nil else {
+            deferredTreeReload = true
+            return
+        }
         outlineView.reloadData()
     }
 
@@ -141,7 +346,9 @@ final class FileTreeViewController: NSViewController {
     /// Expand ancestors and select the row for `url` (keeps the tree in sync
     /// with the active editor tab). Does not trigger onOpenFile.
     func selectFile(_ url: URL) {
+        let previousURL = activeURL
         activeURL = url
+        defer { refreshActiveFilePresentation(previousURL: previousURL) }
         guard let root else { return }
         let rootPath = root.url.path
         // Files outside the project (e.g. settings.json) just clear the highlight.
@@ -162,6 +369,16 @@ final class FileTreeViewController: NSViewController {
         refreshActiveRowBackgrounds()
         // Bring the active file into view (it may be far down / newly expanded).
         outlineView.scrollRowToVisible(row)
+    }
+
+    private func refreshActiveFilePresentation(previousURL: URL?) {
+        var rows = IndexSet()
+        if let previousURL, let row = row(for: previousURL) { rows.insert(row) }
+        if let activeURL, let row = row(for: activeURL) { rows.insert(row) }
+        if !rows.isEmpty {
+            outlineView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
+        }
+        refreshActiveRowBackgrounds()
     }
 
     /// `rowViewForItem:` only runs when a row view is created, so rows that are
@@ -214,18 +431,286 @@ final class FileTreeViewController: NSViewController {
             onOpenFile?(node.url)
         }
     }
+
+    private func contextMenu(forRow row: Int) -> NSMenu? {
+        guard let node = row >= 0 ? outlineView.item(atRow: row) as? FileNode : root else {
+            return nil
+        }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let actions: [(String, Selector)] = [
+            ("New File", #selector(newFileAction(_:))),
+            ("New Folder", #selector(newFolderAction(_:))),
+            ("Rename", #selector(renameAction(_:))),
+            ("Git History", #selector(gitHistoryAction(_:))),
+            ("Delete", #selector(deleteAction(_:))),
+        ]
+        for (index, action) in actions.enumerated() {
+            if index == 2 || index == 4 { menu.addItem(.separator()) }
+            let item = NSMenuItem(title: action.0, action: action.1, keyEquivalent: "")
+            item.target = self
+            // Keep a stable path, not the node object. A git/file refresh can
+            // rebuild the whole node tree while the menu is open.
+            item.representedObject = node.url as NSURL
+            if action.0 == "Rename" || action.0 == "Delete" {
+                item.isEnabled = node !== root
+            } else if action.0 == "Git History" {
+                item.isEnabled = !node.isDirectory
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func menuNode(_ sender: Any?) -> FileNode? {
+        guard let url = (sender as? NSMenuItem)?.representedObject as? URL else { return nil }
+        return node(for: url)
+    }
+
+    private func node(for url: URL) -> FileNode? {
+        guard let root else { return nil }
+        let rootPath = root.url.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path == rootPath { return root }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        var current = root
+        for component in path.dropFirst(prefix.count).split(separator: "/") {
+            guard let child = current.children.first(where: { $0.name == String(component) }) else {
+                return nil
+            }
+            current = child
+        }
+        return current
+    }
+
+    @objc private func newFileAction(_ sender: Any?) {
+        guard let node = menuNode(sender) else { return }
+        let parent = node.isDirectory ? node : node.parent
+        guard let parent else { return }
+        beginCreate(kind: .file, parent: parent, after: node.isDirectory ? nil : node)
+    }
+
+    @objc private func newFolderAction(_ sender: Any?) {
+        guard let node = menuNode(sender) else { return }
+        let parent = node.isDirectory ? node : node.parent
+        guard let parent else { return }
+        beginCreate(kind: .folder, parent: parent, after: node.isDirectory ? nil : node)
+    }
+
+    @objc private func renameAction(_ sender: Any?) {
+        guard let node = menuNode(sender), node !== root else { return }
+        guard canMutate(node.url, verb: "rename") else { return }
+        cancelPendingEdit()
+        pendingEdit = PendingTreeEdit(kind: .rename, parent: node.parent,
+                                      original: node, initialName: node.name)
+        outlineView.reloadItem(node)
+        focusPendingEditor()
+    }
+
+    @objc private func gitHistoryAction(_ sender: Any?) {
+        guard let node = menuNode(sender), !node.isDirectory else { return }
+        onGitHistory?(node.url)
+    }
+
+    @objc private func deleteAction(_ sender: Any?) {
+        guard let node = menuNode(sender), node !== root else { return }
+        guard canMutate(node.url, verb: "delete") else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete \(node.name)?"
+        alert.informativeText = "This item will be moved to Trash."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
+            onPathDeleted?(node.url)
+            reloadAfterMutation(parent: node.parent, selecting: nil)
+        } catch {
+            presentFileError(title: "Delete failed", error: error)
+        }
+    }
+
+    private func canMutate(_ url: URL, verb: String) -> Bool {
+        guard canMutatePath?(url) != false else {
+            let alert = NSAlert()
+            alert.messageText = "Cannot \(verb) \(url.lastPathComponent)"
+            alert.informativeText = "Save or close modified files at this location first."
+            alert.runModal()
+            return false
+        }
+        return true
+    }
+
+    private func beginCreate(kind: PendingTreeEdit.Kind, parent: FileNode,
+                             after anchor: FileNode?) {
+        cancelPendingEdit()
+        // Load and expose the parent before adding the synthetic child. Using
+        // insertItems makes the edit row appear deterministically instead of
+        // relying on reloadItem to notice a changed child count.
+        outlineView.expandItem(parent)
+        var insertionIndex = 0
+        if let anchor, anchor.parent === parent,
+           let index = parent.children.firstIndex(where: { $0 === anchor }) {
+            insertionIndex = index + 1
+        }
+        pendingEdit = PendingTreeEdit(kind: kind, parent: parent,
+                                      original: nil, initialName: "",
+                                      insertionIndex: insertionIndex)
+        outlineView.insertItems(at: IndexSet(integer: insertionIndex),
+                                inParent: parent, withAnimation: [])
+        focusPendingEditor()
+    }
+
+    private func focusPendingEditor() {
+        guard let pendingEdit else { return }
+        // A context-menu action can run while AppKit is still unwinding menu
+        // tracking. Retry after menu tracking has fully restored the key view.
+        focusPendingEditor(pendingEdit, after: 0.05)
+        focusPendingEditor(pendingEdit, after: 0.25)
+    }
+
+    private func focusPendingEditor(_ pendingEdit: PendingTreeEdit,
+                                    after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak pendingEdit] in
+            guard let self, let pendingEdit, self.pendingEdit === pendingEdit,
+                  !pendingEdit.didFocus else { return }
+            self.outlineView.layoutSubtreeIfNeeded()
+            let item: Any = pendingEdit.original ?? pendingEdit.placeholder
+            let row = self.outlineView.row(forItem: item)
+            guard row >= 0 else { return }
+            self.outlineView.scrollRowToVisible(row)
+            self.outlineView.layoutSubtreeIfNeeded()
+            guard let cell = self.outlineView.view(atColumn: 0, row: row,
+                                                   makeIfNecessary: true)
+                    as? InlineTreeNameCell else { return }
+            if cell.focus(selectAll: pendingEdit.kind == .rename) {
+                pendingEdit.didFocus = true
+            }
+        }
+    }
+
+    private func cancelPendingEdit() {
+        guard let edit = pendingEdit else { return }
+        pendingEdit = nil
+        if let original = edit.original {
+            outlineView.reloadItem(original)
+        } else if let parent = edit.parent {
+            outlineView.removeItems(at: IndexSet(integer: edit.insertionIndex),
+                                    inParent: parent, withAnimation: [])
+        }
+        applyDeferredTreeReloadIfNeeded()
+    }
+
+    @discardableResult
+    private func completePendingEdit(_ rawName: String) -> Bool {
+        guard let edit = pendingEdit, let parent = edit.parent else { return false }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.validFileName(name) else {
+            presentFileError(title: "Invalid name",
+                             message: "Enter a name that does not contain ‘/’.")
+            focusPendingEditor()
+            return false
+        }
+
+        let destination = parent.url.appendingPathComponent(name,
+                                                             isDirectory: edit.kind == .folder)
+        if FileManager.default.fileExists(atPath: destination.path),
+           destination.standardizedFileURL != edit.original?.url.standardizedFileURL {
+            presentFileError(title: "Name already exists",
+                             message: "An item named \(name) already exists here.")
+            focusPendingEditor()
+            return false
+        }
+
+        do {
+            switch edit.kind {
+            case .file:
+                guard FileManager.default.createFile(atPath: destination.path,
+                                                     contents: Data()) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            case .folder:
+                try FileManager.default.createDirectory(at: destination,
+                                                        withIntermediateDirectories: false)
+            case .rename:
+                guard let original = edit.original else { return false }
+                if original.url.standardizedFileURL != destination.standardizedFileURL {
+                    try FileManager.default.moveItem(at: original.url, to: destination)
+                    onPathRenamed?(original.url, destination)
+                }
+            }
+            pendingEdit = nil
+            reloadAfterMutation(parent: parent, selecting: destination)
+            applyDeferredTreeReloadIfNeeded()
+            if edit.kind == .file { onOpenFile?(destination) }
+            return true
+        } catch {
+            presentFileError(title: "File operation failed", error: error)
+            focusPendingEditor()
+            return false
+        }
+    }
+
+    private static func validFileName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/")
+            && !name.contains("\0")
+    }
+
+    private func reloadAfterMutation(parent: FileNode?, selecting url: URL?) {
+        parent?.invalidate()
+        if let parent {
+            outlineView.reloadItem(parent, reloadChildren: true)
+            outlineView.expandItem(parent)
+        } else {
+            refresh()
+        }
+        if let url, let row = row(for: url) {
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outlineView.scrollRowToVisible(row)
+        }
+        onFileSystemChanged?()
+    }
+
+    private func applyDeferredTreeReloadIfNeeded() {
+        guard deferredTreeReload else { return }
+        let refreshDisk = deferredDiskRefresh
+        deferredTreeReload = false
+        deferredDiskRefresh = false
+        if refreshDisk { root?.invalidate() }
+        outlineView.backgroundColor = Theme.panelBackground
+        outlineView.reloadData()
+        if let root { outlineView.expandItem(root) }
+    }
+
+    private func presentFileError(title: String, error: Error) {
+        presentFileError(title: title, message: error.localizedDescription)
+    }
+
+    private func presentFileError(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
+    }
 }
 
 extension FileTreeViewController: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return root == nil ? 0 : 1 }
         guard let node = item as? FileNode, node.isDirectory else { return 0 }
-        return node.children.count
+        let extra = pendingEdit?.original == nil && pendingEdit?.parent === node ? 1 : 0
+        return node.children.count + extra
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil { return root! }
         let node = item as! FileNode
+        if let pending = pendingEdit, pending.original == nil, pending.parent === node {
+            let insertion = min(pending.insertionIndex, node.children.count)
+            if index == insertion { return pending.placeholder }
+            return node.children[index < insertion ? index : index - 1]
+        }
         return node.children[index]
     }
 
@@ -236,6 +721,47 @@ extension FileTreeViewController: NSOutlineViewDataSource {
 
 extension FileTreeViewController: NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        if let pending = pendingEdit,
+           item as AnyObject === pending.placeholder
+            || pending.original.map({ item as AnyObject === $0 }) == true {
+            let id = NSUserInterfaceItemIdentifier("inline-name")
+            let cell = (outlineView.makeView(withIdentifier: id, owner: self)
+                        as? InlineTreeNameCell) ?? InlineTreeNameCell()
+            cell.identifier = id
+            let icon: NSImage?
+            let iconColor: NSColor
+            switch pending.kind {
+            case .file:
+                icon = Theme.symbol("doc.text")
+                iconColor = Theme.dimText
+            case .folder:
+                icon = Theme.symbol("folder")
+                iconColor = Theme.folderClosed
+            case .rename:
+                if pending.original?.isDirectory == true {
+                    let expanded = pending.original.map { outlineView.isItemExpanded($0) } ?? false
+                    icon = Theme.symbol(expanded ? "folder.fill" : "folder")
+                    iconColor = expanded ? Theme.blue : Theme.folderClosed
+                } else {
+                    icon = Theme.symbol(Self.iconName(
+                        for: pending.original?.url.pathExtension ?? ""))
+                    iconColor = Theme.dimText
+                }
+            }
+            let isDirectory = pending.kind == .folder || pending.original?.isDirectory == true
+            let expanded = pending.original.map { outlineView.isItemExpanded($0) } ?? false
+            let disclosure = isDirectory
+                ? Theme.symbol(expanded ? "chevron.down" : "chevron.right", pointSize: 9)
+                : nil
+            cell.configure(value: pending.initialName,
+                           disclosure: disclosure,
+                           icon: icon, iconColor: iconColor,
+                           onSubmit: { [weak self] in
+                               self?.completePendingEdit($0) ?? false
+                           },
+                           onCancel: { [weak self] in self?.cancelPendingEdit() })
+            return cell
+        }
         guard let node = item as? FileNode else { return nil }
         let id = NSUserInterfaceItemIdentifier("cell")
         let cell: FileTreeCell
@@ -258,14 +784,20 @@ extension FileTreeViewController: NSOutlineViewDelegate {
             iconColor = Theme.dimText
         }
 
-        cell.configure(title: node.name, icon: icon, iconColor: iconColor,
-                       titleColor: statusColor(for: node) ?? Theme.foreground)
+        let expanded = node.isDirectory && outlineView.isItemExpanded(node)
+        let disclosure = node.isDirectory
+            ? Theme.symbol(expanded ? "chevron.down" : "chevron.right", pointSize: 9)
+            : nil
+        let titleColor = statusColor(for: node) ?? Theme.foreground
+        cell.configure(title: node.name, disclosure: disclosure,
+                       icon: icon, iconColor: iconColor,
+                       titleColor: titleColor)
         return cell
     }
 
-    /// Driven by `ui_font_size` × `ui_line_height` in settings.json.
+    /// Driven by the exact `tree_line_height` point value in settings.json.
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        Theme.treeRowHeight()
+        return Theme.treeRowHeight()
     }
 
     // Repaint the folder row so its icon reflects the new open/closed state.
@@ -291,6 +823,7 @@ extension FileTreeViewController: NSOutlineViewDelegate {
             ?? TreeRowView()
         row.identifier = id
         row.isActiveFile = (item as? FileNode)?.url == activeURL
+        row.isHovered = self.outlineView.hoveredRow == outlineView.row(forItem: item)
         return row
     }
 
@@ -309,13 +842,17 @@ extension FileTreeViewController: NSOutlineViewDelegate {
 
 private final class FileTreeCell: DrawnSidebarCell {
     private var title = ""
+    private var disclosure: NSImage?
     private var icon: NSImage?
     private var iconColor = NSColor.clear
     private var titleColor = NSColor.clear
+    var titleColorForTesting: NSColor { titleColor }
 
-    func configure(title: String, icon: NSImage?, iconColor: NSColor,
+    func configure(title: String, disclosure: NSImage?,
+                   icon: NSImage?, iconColor: NSColor,
                    titleColor: NSColor) {
         self.title = title
+        self.disclosure = disclosure
         self.icon = icon
         self.iconColor = iconColor
         self.titleColor = titleColor
@@ -327,21 +864,173 @@ private final class FileTreeCell: DrawnSidebarCell {
     override func draw(_ dirtyRect: NSRect) {
         let font = Theme.uiFont(12)
         let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
+        SidebarCellDrawing.image(disclosure, tint: Theme.dimText,
+                                 in: FileTreeRowLayout.centeredRect(
+                                    x: FileTreeRowLayout.disclosureX,
+                                    size: FileTreeRowLayout.disclosureSize,
+                                    in: bounds))
         SidebarCellDrawing.image(icon, tint: iconColor,
-                                 in: NSRect(x: 3, y: floor(bounds.midY - 7),
-                                            width: 14, height: 14))
+                                 in: FileTreeRowLayout.centeredRect(
+                                    x: FileTreeRowLayout.iconX,
+                                    size: FileTreeRowLayout.iconSize,
+                                    in: bounds))
         SidebarCellDrawing.text(title, font: font, color: titleColor,
                                 baseline: baseline,
-                                in: NSRect(x: 22, y: 0,
-                                           width: max(0, bounds.width - 27),
+                                in: NSRect(x: FileTreeRowLayout.titleX, y: 0,
+                                           width: max(0, bounds.width - FileTreeRowLayout.titleX - 5),
                                            height: bounds.height),
                                 lineBreak: .byTruncatingMiddle)
     }
 }
 
+private final class InlineTreeTextView: NSTextView {
+    var onResign: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        guard let font else { return }
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        textContainerInset = NSSize(
+            width: 0,
+            height: max(0, floor((bounds.height - lineHeight) / 2)))
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onResign?() }
+        return resigned
+    }
+
+    var verticalCenterError: CGFloat? {
+        guard let font else { return nil }
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        return abs((textContainerInset.height + lineHeight / 2) - bounds.midY)
+    }
+}
+
+private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
+    private let editor = InlineTreeTextView(frame: .zero)
+    private var onSubmit: ((String) -> Bool)?
+    private var onCancel: (() -> Void)?
+    private var submitting = false
+    private var cancelling = false
+    private var editingSessionStarted = false
+    private var disclosure: NSImage?
+    private var icon: NSImage?
+    private var iconColor = NSColor.clear
+
+    override var isOpaque: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        editor.isEditable = true
+        editor.isSelectable = true
+        editor.drawsBackground = false
+        editor.isRichText = false
+        editor.isVerticallyResizable = false
+        editor.isHorizontallyResizable = false
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.font = Theme.uiFont(12)
+        editor.textColor = .black
+        editor.insertionPointColor = .black
+        editor.delegate = self
+        editor.onResign = { [weak self] in self?.editorDidResign() }
+        editor.setAccessibilityLabel("File name")
+        editor.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(editor)
+        NSLayoutConstraint.activate([
+            editor.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                             constant: FileTreeRowLayout.titleX),
+            editor.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            editor.topAnchor.constraint(equalTo: topAnchor),
+            editor.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(value: String,
+                   disclosure: NSImage?,
+                   icon: NSImage?, iconColor: NSColor,
+                   onSubmit: @escaping (String) -> Bool,
+                   onCancel: @escaping () -> Void) {
+        editingSessionStarted = false
+        editor.string = value
+        editor.font = Theme.uiFont(12)
+        editor.textColor = .black
+        editor.insertionPointColor = .black
+        self.disclosure = disclosure
+        self.icon = icon
+        self.iconColor = iconColor
+        self.onSubmit = onSubmit
+        self.onCancel = onCancel
+        submitting = false
+        cancelling = false
+        editor.needsLayout = true
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill()
+        bounds.fill()
+        SidebarCellDrawing.image(disclosure, tint: Theme.dimText,
+                                 in: FileTreeRowLayout.centeredRect(
+                                    x: FileTreeRowLayout.disclosureX,
+                                    size: FileTreeRowLayout.disclosureSize,
+                                    in: bounds))
+        SidebarCellDrawing.image(icon, tint: iconColor,
+                                 in: FileTreeRowLayout.centeredRect(
+                                    x: FileTreeRowLayout.iconX,
+                                    size: FileTreeRowLayout.iconSize,
+                                    in: bounds))
+    }
+
+    @discardableResult
+    func focus(selectAll: Bool) -> Bool {
+        guard let window, window.makeFirstResponder(editor) else { return false }
+        editingSessionStarted = window.firstResponder === editor
+        let length = (editor.string as NSString).length
+        editor.setSelectedRange(selectAll
+            ? NSRange(location: 0, length: length)
+            : NSRange(location: length, length: 0))
+        return editingSessionStarted
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            submitting = true
+            if onSubmit?(editor.string) != true { submitting = false }
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            cancelling = true
+            onCancel?()
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func editorDidResign() {
+        if editingSessionStarted && !submitting && !cancelling { onCancel?() }
+        editingSessionStarted = false
+    }
+
+    var verticalCenterErrorForTesting: CGFloat? {
+        editor.layoutSubtreeIfNeeded()
+        return editor.verticalCenterError
+    }
+    var hasIconForTesting: Bool { icon != nil }
+    var backgroundColorForTesting: NSColor { .white }
+}
+
 /// Tree row with a persistent background for the file open in the active pane.
 final class TreeRowView: NSTableRowView {
     var isActiveFile = false
+    var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
 
     override func drawBackground(in dirtyRect: NSRect) {
         Theme.panelBackground.setFill()
@@ -349,16 +1038,14 @@ final class TreeRowView: NSTableRowView {
         if isActiveFile {
             Theme.activeRow.setFill()
             bounds.fill()
-        }
-    }
-
-    // Selection is conveyed by the active-file background; keep rows flat.
-    override func drawSelection(in dirtyRect: NSRect) {
-        if !isActiveFile {
+        } else if isHovered {
             Theme.hover.setFill()
             bounds.fill()
         }
     }
+
+    // Selection is conveyed by active-file/hover state; keep rows flat.
+    override func drawSelection(in dirtyRect: NSRect) {}
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

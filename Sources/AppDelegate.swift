@@ -6,8 +6,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var windows: [WorkspaceWindowController] = []
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var hasCompletedInitialActivation = false
+    private let recentProjects: RecentProjects
     /// Rebuilt each time the menu opens, so it always reflects current history.
     private let recentMenu = NSMenu(title: "Open Recent")
+
+    override convenience init() {
+        self.init(recentProjects: .shared)
+    }
+
+    init(recentProjects: RecentProjects) {
+        self.recentProjects = recentProjects
+        super.init()
+    }
 
     /// The window the menus should act on.
     private var activeController: WorkspaceWindowController? {
@@ -91,6 +101,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { makeWindow() }
         return true
+    }
+
+    /// Rebuilt on every Dock right-click so changes made by any window appear
+    /// immediately. Dock menus should stay action-focused, so they contain only
+    /// the ten newest valid projects and no remove/clear management commands.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu(title: "Recent Projects")
+        let recents = recentProjects.urls.prefix(10)
+        if recents.isEmpty {
+            let empty = NSMenuItem(title: "No Recent Projects", action: nil,
+                                   keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return menu
+        }
+        for url in recents {
+            let item = recentProjectMenuItem(for: url)
+            menu.addItem(item)
+        }
+        return menu
     }
 
     // MARK: - Windows
@@ -289,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === recentMenu else { return }
         menu.removeAllItems()
-        let recents = RecentProjects.shared.urls
+        let recents = recentProjects.urls
         if recents.isEmpty {
             let empty = NSMenuItem(title: "No Recent Projects", action: nil, keyEquivalent: "")
             empty.isEnabled = false
@@ -297,12 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         for url in recents {
-            let item = NSMenuItem(title: url.lastPathComponent,
-                                  action: #selector(openRecent(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = url
-            item.toolTip = url.path
-            menu.addItem(item)
+            menu.addItem(recentProjectMenuItem(for: url))
 
             // Hold ⌥ to remove this entry instead of opening it.
             let remove = NSMenuItem(title: "Remove “\(url.lastPathComponent)” from Recent",
@@ -319,6 +344,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(clear)
     }
 
+    private func recentProjectMenuItem(for url: URL) -> NSMenuItem {
+        let item = NSMenuItem(title: url.lastPathComponent,
+                              action: #selector(openRecent(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = url
+        item.toolTip = url.path
+        return item
+    }
+
     /// Recent projects open in a new window, leaving the current one alone.
     @objc private func openRecent(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
@@ -327,10 +361,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func removeRecent(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        RecentProjects.shared.remove(url)
+        recentProjects.remove(url)
     }
 
-    @objc private func clearRecents() { RecentProjects.shared.clear() }
+    @objc private func clearRecents() { recentProjects.clear() }
 
     @objc private func settingsChanged() {
         // Re-apply fonts/metrics to every open window.

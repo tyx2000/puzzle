@@ -582,6 +582,33 @@ enum GitService {
         return commits
     }
 
+    /// Commits that touched one file, following it across renames.
+    static func log(file: URL, in directory: URL, limit: Int = 100) -> [Commit] {
+        let root = directory.standardizedFileURL.path
+        let path = file.standardizedFileURL.path
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        guard path.hasPrefix(prefix) else { return [] }
+        let relative = String(path.dropFirst(prefix.count))
+        let format = "%h%x00%s%x00%an%x00%ad%x00%ae"
+        let result = run(["--no-pager", "log", "-z", "--follow",
+                          "--pretty=format:" + format,
+                          "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
+                          "--", relative], in: directory)
+        guard result.code == 0 else { return [] }
+        let fields = result.out.split(separator: "\0", omittingEmptySubsequences: false)
+        var commits: [Commit] = []
+        var index = 0
+        while index + 4 < fields.count {
+            commits.append(Commit(shortHash: String(fields[index]),
+                                  subject: String(fields[index + 1]),
+                                  author: String(fields[index + 2]),
+                                  absoluteDate: String(fields[index + 3]),
+                                  email: String(fields[index + 4])))
+            index += 5
+        }
+        return commits
+    }
+
     /// Unified diff for one path. Untracked files have no diff against the
     /// index, so they're rendered as an all-additions diff of the file itself.
     static func diff(for entry: Status.Entry, in directory: URL) -> String {

@@ -14,8 +14,10 @@ enum RegressionTests {
         try testRemoteConfigurationAndPushSelection()
         try testGitRepositoryMonitor()
         try testBranchListing()
+        try testDockRecentProjectsMenu()
         try testSearchMatcher()
         try testProjectSearchBackend()
+        try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
@@ -26,6 +28,8 @@ enum RegressionTests {
         try testPreviewPayloadsAreReleased()
         try testFindMatchesAreComplete()
         try testCodeBlockAnalysisAndFolding()
+        try testFileTreeContextEditing()
+        try testFileHistoryTable()
         print("Regression tests passed")
     }
 
@@ -39,6 +43,77 @@ enum RegressionTests {
             .appendingPathComponent("puzzle-\(label)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private static func sameColor(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
+        guard let lhs = lhs?.usingColorSpace(.sRGB),
+              let rhs = rhs?.usingColorSpace(.sRGB) else { return lhs == nil && rhs == nil }
+        return abs(lhs.redComponent - rhs.redComponent) < 0.002
+            && abs(lhs.greenComponent - rhs.greenComponent) < 0.002
+            && abs(lhs.blueComponent - rhs.blueComponent) < 0.002
+            && abs(lhs.alphaComponent - rhs.alphaComponent) < 0.002
+    }
+
+    private static func testDockRecentProjectsMenu() throws {
+        let directory = try temporaryDirectory("dock-recents")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let suiteName = "PuzzleRegressionDockRecents-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw Failure(description: "could not create isolated recent-project defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let recents = RecentProjects(defaults: defaults, key: "recents", limit: 12)
+
+        var projects: [URL] = []
+        for index in 0..<12 {
+            let project = directory.appendingPathComponent("project-\(index)",
+                                                            isDirectory: true)
+            try FileManager.default.createDirectory(at: project,
+                                                    withIntermediateDirectories: true)
+            projects.append(project)
+            recents.add(project)
+        }
+
+        // Invalid paths are filtered before applying the Dock's ten-item cap.
+        let missing = directory.appendingPathComponent("missing", isDirectory: true)
+        recents.add(missing)
+
+        let delegate = AppDelegate(recentProjects: recents)
+        guard let menu = delegate.applicationDockMenu(NSApplication.shared) else {
+            throw Failure(description: "applicationDockMenu returned nil")
+        }
+        try expect(menu.items.count == 10,
+                   "Dock recent-project menu did not cap valid projects at ten")
+
+        let expected = Array(projects.reversed().prefix(10))
+        for (item, url) in zip(menu.items, expected) {
+            try expect(item.title == url.lastPathComponent,
+                       "Dock recent-project menu was not newest-first")
+            try expect((item.representedObject as? URL)?.standardizedFileURL == url.standardizedFileURL,
+                       "Dock recent-project item did not retain its project URL")
+            try expect(item.target === delegate && item.action != nil,
+                       "Dock recent-project item was not wired to the app delegate")
+        }
+    }
+
+    private static func testAbsoluteRowHeights() throws {
+        let settings = Settings.shared
+        let saved = (settings.codeLineHeight, settings.treeLineHeight)
+        defer {
+            settings.codeLineHeight = saved.0
+            settings.treeLineHeight = saved.1
+            Theme.invalidateCaches()
+        }
+
+        settings.codeLineHeight = 31
+        settings.treeLineHeight = 29
+        Theme.invalidateCaches()
+
+        try expect(Theme.lineMetrics().target == 31,
+                   "code_line_height was treated as a multiplier instead of an exact row height")
+        try expect(Theme.treeRowHeight() == 29,
+                   "tree_line_height was treated as a multiplier instead of an exact row height")
     }
 
     /// More than one pipe buffer on stderr used to make GitService wait forever
@@ -138,6 +213,11 @@ enum RegressionTests {
                    "history path was not project-relative or lossless")
         try expect(GitService.log(in: project, limit: 1).first?.subject == unusualSubject,
                    "commit metadata delimiters corrupted the history subject")
+        let fileHistory = GitService.log(file: project.appendingPathComponent(renamed),
+                                         in: project)
+        try expect(fileHistory.first?.subject == unusualSubject
+                   && fileHistory.contains(where: { $0.subject == "scoped" }),
+                   "file Git history did not follow the path across its rename")
     }
 
     private static func testRemoteConfigurationAndPushSelection() throws {
@@ -464,10 +544,40 @@ enum RegressionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("live.txt")
         try "before\n".write(to: url, atomically: true, encoding: .utf8)
+        try expect(GitService.run(["init", "-q"], in: directory).code == 0,
+                   "inline-blame fixture git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: directory)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: directory)
+        try expect(GitService.commit("initial", in: directory).code == 0,
+                   "inline-blame fixture commit failed")
 
         let pane = EditorPaneViewController()
         _ = pane.view
+        pane.repositoryRoot = directory
         pane.open(url: url)
+        try expect(!pane.hasActiveLineForTesting && pane.inlineBlameForTesting == nil,
+                   "newly opened file activated the first line or inline blame")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        try expect(!pane.hasActiveLineForTesting && pane.inlineBlameForTesting == nil,
+                   "newly opened file activated the first line asynchronously")
+        pane.jumpToLine(1)
+        try expect(pane.hasActiveLineForTesting,
+                   "an explicit line jump did not activate the current-line background")
+        try expect(pane.currentLineHeightForTesting == Theme.lineMetrics().target,
+                   "active line did not use code_line_height")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        guard let stableBlame = pane.inlineBlameForTesting else {
+            throw Failure(description: "explicitly activated line did not show inline blame")
+        }
+        for _ in 0..<3 {
+            pane.textViewDidChangeSelection(
+                Notification(name: NSTextView.didChangeSelectionNotification))
+            try expect(pane.inlineBlameForTesting == stableBlame,
+                       "repeated selection notification cleared inline blame")
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        try expect(pane.inlineBlameForTesting == stableBlame,
+                   "same-line blame request flickered after its debounce")
         let store = DocumentStore.shared
         let document = store.document(for: url)
         document.storage.replaceCharacters(
@@ -512,6 +622,31 @@ enum RegressionTests {
         let frame = WorkspaceWindowController.defaultWindowFrame(in: visible)
         try expect(frame == NSRect(x: 350, y: 50, width: 1000, height: 900),
                    "default window was not full-height, two-thirds width, and centered")
+
+        let sidebar = SidebarViewController()
+        _ = sidebar.view
+        sidebar.setFileTabHeight(72)
+        try expect(sidebar.fileTreeTopInsetForTesting == 72,
+                   "file tree top inset did not follow the file-tab height")
+
+        let workspace = WorkspaceWindowController()
+        workspace.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
+        let titlebarHeight = workspace.trafficLightTopInset * 2
+            + workspace.trafficLightHeight
+        try expect(workspace.sidebar.fileTreeTopInsetForTesting == titlebarHeight,
+                   "file tree top inset did not follow traffic-light geometry")
+        try expect(workspace.editor.activePaneForTesting?.tabBarHeight == titlebarHeight,
+                   "file-tab height did not follow traffic-light geometry")
+
+        let treeRoot = try temporaryDirectory("tree-top-inset")
+        defer { try? FileManager.default.removeItem(at: treeRoot) }
+        try Data("fixture".utf8).write(to: treeRoot.appendingPathComponent("file.txt"))
+        workspace.sidebar.fileTree.setRoot(treeRoot)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let actualTop = workspace.sidebar.fileTree.firstRowTopInsetInWindowForTesting
+        try expect(actualTop.map { abs($0 - titlebarHeight) <= 0.5 } == true,
+                   "first file-tree row did not start at the 32pt file-tab boundary: "
+                    + String(describing: actualTop))
     }
 
     private static func testDocumentStoreProtectsNewBuffer() throws {
@@ -595,6 +730,18 @@ enum RegressionTests {
 
     private static func testFindMatchesAreComplete() throws {
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        textView.string = "payload and payload"
+        let clearingFindBar = FindBarView(frame: .zero)
+        clearingFindBar.attach(to: textView)
+        clearingFindBar.setQuery("payload")
+        clearingFindBar.setQuery("p")
+        try expect(textView.selectedRange().length == 1,
+                   "one-character find fixture did not select its current match")
+        clearingFindBar.setQuery("")
+        try expect(textView.searchMatches.isEmpty && textView.currentMatchIndex == nil
+                   && textView.selectedRange().length == 0,
+                   "clearing find text left the final one-character selection highlighted")
+
         textView.string = String(repeating: "a", count: 10_250)
         let findBar = FindBarView(frame: .zero)
         findBar.attach(to: textView)
@@ -604,6 +751,201 @@ enum RegressionTests {
         findBar.clearHighlights()
         try expect(findBar.retainedMatchCountForTesting == 0 && textView.searchMatches.isEmpty,
                    "closing find-in-file retained match ranges")
+    }
+
+    private static func testFileTreeContextEditing() throws {
+        let directory = try temporaryDirectory("tree-context-editing")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let anchor = directory.appendingPathComponent("anchor.txt")
+        try Data("anchor\n".utf8).write(to: anchor)
+
+        let tree = FileTreeViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = tree
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        tree.setRoot(directory)
+        tree.view.layoutSubtreeIfNeeded()
+        try expect(!tree.automaticallyAdjustsInsetsForTesting,
+                   "file-tree scroll view still applied a titlebar safe-area inset")
+
+        let initialTrackingCount = tree.hoverTrackingAreaInstallCountForTesting
+        _ = tree.hoverTrackingAreaInstallCountForTesting
+        _ = tree.hoverTrackingAreaInstallCountForTesting
+        try expect(initialTrackingCount == 1,
+                   "file-tree installed more than one hover tracking area")
+        guard let anchorRow = tree.row(for: anchor) else {
+            throw Failure(description: "anchor row missing from file tree")
+        }
+        tree.setHoveredRowForTesting(anchorRow)
+        tree.setHoveredRowForTesting(anchorRow)
+        try expect(tree.hoveredRowForTesting == anchorRow,
+                   "file-tree hover did not remain stable on the same row")
+
+        func runUI(_ seconds: TimeInterval = 0.35) {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
+        }
+
+        func menuItem(_ title: String, for url: URL) throws -> NSMenuItem {
+            guard let row = tree.row(for: url),
+                  let item = tree.contextMenuForTesting(row: row)?.item(withTitle: title) else {
+                throw Failure(description: "missing \(title) menu item for \(url.lastPathComponent)")
+            }
+            return item
+        }
+
+        func invoke(_ item: NSMenuItem) throws {
+            guard let action = item.action,
+                  NSApp.sendAction(action, to: item.target, from: item) else {
+                throw Failure(description: "menu target-action was not delivered: \(item.title)")
+            }
+            runUI()
+        }
+
+        func enter(_ value: String) throws {
+            guard let editor = window.firstResponder as? NSTextView else {
+                throw Failure(description: "inline tree editor did not receive the field editor")
+            }
+            editor.selectAll(nil)
+            editor.insertText(value, replacementRange: editor.selectedRange())
+            editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+            runUI(0.15)
+        }
+
+        let newFile = try menuItem("New File", for: anchor)
+        try invoke(newFile)
+        let anchorRowAfterInsert = tree.row(for: anchor)
+        let pendingRowAfterInsert = tree.pendingEditRowForTesting
+        try expect(pendingRowAfterInsert == (anchorRowAfterInsert ?? -2) + 1,
+                   "New File did not insert an adjacent edit row "
+                    + "(anchor=\(String(describing: anchorRowAfterInsert)), "
+                    + "pending=\(String(describing: pendingRowAfterInsert)), "
+                    + "rows=\(tree.rowCountForTesting))")
+        // File monitoring and git status can both refresh immediately after a
+        // context-menu action. Neither may destroy the active inline editor.
+        tree.refresh()
+        tree.setStatus(modified: ["anchor.txt"], untracked: [])
+        runUI(0.1)
+        try expect(tree.pendingEditRowForTesting == pendingRowAfterInsert,
+                   "tree/git refresh removed the active New File editor")
+        try expect((tree.pendingEditorVerticalCenterErrorForTesting ?? 100) <= 0.5,
+                   "inline editor text/caret was not vertically centered")
+        try expect(tree.pendingEditorHasIconForTesting == true,
+                   "New File editor did not retain a file icon")
+        try expect(sameColor(tree.pendingEditorBackgroundForTesting, .white),
+                   "New File editor did not paint the whole row white")
+        var openedAfterCreate: URL?
+        tree.onOpenFile = { openedAfterCreate = $0 }
+        try enter("created.any")
+        let created = directory.appendingPathComponent("created.any")
+        try expect(FileManager.default.fileExists(atPath: created.path),
+                   "New File target-action did not create the entered file")
+        try expect(openedAfterCreate == created,
+                   "a newly created file was not opened automatically")
+
+        try invoke(try menuItem("New Folder", for: anchor))
+        try expect(tree.pendingEditorHasIconForTesting == true
+                   && sameColor(tree.pendingEditorBackgroundForTesting, .white),
+                   "New Folder editor did not show its icon on a white row")
+        try enter("created-folder")
+        var isDirectory: ObjCBool = false
+        let folder = directory.appendingPathComponent("created-folder", isDirectory: true)
+        try expect(FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory)
+                   && isDirectory.boolValue,
+                   "New Folder target-action did not create a directory")
+
+        try invoke(try menuItem("Rename", for: folder))
+        try expect(tree.pendingEditorHasIconForTesting == true,
+                   "Rename dropped the original folder icon")
+        guard let folderRenameEditor = window.firstResponder as? NSTextView else {
+            throw Failure(description: "folder rename fixture did not focus its editor")
+        }
+        folderRenameEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        runUI(0.15)
+
+        try invoke(try menuItem("Rename", for: created))
+        try expect(tree.pendingEditRowForTesting == tree.row(for: created),
+                   "Rename did not replace the selected row with an editor")
+        try expect(tree.pendingEditorHasIconForTesting == true
+                   && sameColor(tree.pendingEditorBackgroundForTesting, .white),
+                   "Rename editor dropped the original icon or white row background")
+        try enter("renamed.any")
+        let renamed = directory.appendingPathComponent("renamed.any")
+        try expect(FileManager.default.fileExists(atPath: renamed.path)
+                   && !FileManager.default.fileExists(atPath: created.path),
+                   "Rename target-action did not move the file")
+
+        try invoke(try menuItem("New File", for: renamed))
+        guard let cancelEditor = window.firstResponder as? NSTextView else {
+            throw Failure(description: "cancel fixture did not focus the inline editor")
+        }
+        cancelEditor.insertText("cancelled.txt", replacementRange: cancelEditor.selectedRange())
+        cancelEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        runUI(0.15)
+        try expect(tree.pendingEditRowForTesting == nil
+                   && !FileManager.default.fileExists(
+                        atPath: directory.appendingPathComponent("cancelled.txt").path),
+                   "Escape did not cancel file creation")
+
+        try invoke(try menuItem("New File", for: renamed))
+        guard let blurEditor = window.firstResponder as? NSTextView else {
+            throw Failure(description: "blur fixture did not focus the inline editor")
+        }
+        blurEditor.insertText("blurred.txt", replacementRange: blurEditor.selectedRange())
+        window.makeFirstResponder(nil)
+        runUI(0.15)
+        try expect(tree.pendingEditRowForTesting == nil
+                   && !FileManager.default.fileExists(
+                        atPath: directory.appendingPathComponent("blurred.txt").path),
+                   "blur did not cancel unconfirmed file creation")
+    }
+
+    private static func testFileHistoryTable() throws {
+        let directory = try temporaryDirectory("file-history-table")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try expect(GitService.run(["init", "-q"], in: directory).code == 0,
+                   "file-history git init failed")
+        _ = GitService.run(["config", "user.name", "History Author"], in: directory)
+        _ = GitService.run(["config", "user.email", "history@example.invalid"], in: directory)
+        let file = directory.appendingPathComponent("history.txt")
+        try Data("first\n".utf8).write(to: file)
+        try expect(GitService.commit("first history entry", in: directory).code == 0,
+                   "first file-history commit failed")
+        try Data("first\nsecond\n".utf8).write(to: file)
+        try expect(GitService.commit("second history entry", in: directory).code == 0,
+                   "second file-history commit failed")
+
+        let commits = GitService.log(file: file, in: directory)
+        try expect(commits.count == 2, "file history did not return both commits")
+        let model = FileHistoryModel(
+            tabURL: URL(string: "puzzle-diff:///history-table")!,
+            repository: directory,
+            relativePath: "history.txt",
+            displayName: "history.txt History",
+            commits: commits)
+        let history = FileHistoryView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        history.configure(model)
+        try expect(history.columnTitlesForTesting == ["Commit", "Time", "Author", "Commit ID"],
+                   "file history did not expose the required four columns")
+        try expect(history.rowCountForTesting == 2,
+                   "file-history table row count did not match git log")
+
+        history.toggleRowForTesting(0)
+        let deadline = Date(timeIntervalSinceNow: 3)
+        while history.detailTextForTesting == "Loading…" && Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        try expect(history.expandedRowForTesting == 0,
+                   "clicking a file-history row did not expand it")
+        try expect(history.detailTextForTesting.contains("second"),
+                   "expanded file-history row did not load its file diff")
+        try expect(history.detailDiffBandCountForTesting > 0,
+                   "file-history detail did not reuse Changes diff colour bands")
+        history.toggleRowForTesting(0)
+        try expect(history.expandedRowForTesting == nil,
+                   "clicking the expanded history row did not collapse it")
     }
 
     private static func testCodeBlockAnalysisAndFolding() throws {

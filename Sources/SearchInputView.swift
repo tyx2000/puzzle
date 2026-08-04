@@ -17,7 +17,20 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
 
     private let field = NSTextField()
     private var toggles: [GlyphToggle] = []
+    private var optionStack: NSStackView!
+    private var fieldToOptions: NSLayoutConstraint!
+    private var fieldToEdge: NSLayoutConstraint!
     private var focused = false
+
+    /// Inline file-tree editors reuse the same chrome without search options.
+    var showsOptions = true {
+        didSet {
+            guard optionStack != nil else { return }
+            optionStack.isHidden = !showsOptions
+            fieldToOptions.isActive = showsOptions
+            fieldToEdge.isActive = !showsOptions
+        }
+    }
 
     var stringValue: String {
         get { field.stringValue }
@@ -55,19 +68,24 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         toggles[1].onToggle = { [weak self] on in self?.options.wholeWord = on }
         toggles[2].onToggle = { [weak self] on in self?.options.regex = on }
 
-        let stack = NSStackView(views: toggles)
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        optionStack = NSStackView(views: toggles)
+        optionStack.orientation = .horizontal
+        optionStack.spacing = 8
+        optionStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(optionStack)
+
+        fieldToOptions = field.trailingAnchor.constraint(
+            equalTo: optionStack.leadingAnchor, constant: -8)
+        fieldToEdge = field.trailingAnchor.constraint(
+            equalTo: trailingAnchor, constant: -10)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 30),
             field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
-            field.trailingAnchor.constraint(equalTo: stack.leadingAnchor, constant: -8),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            fieldToOptions,
+            optionStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            optionStack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -93,8 +111,17 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    func focus() {
-        window?.makeFirstResponder(field)
+    func focus(selectAll: Bool = false) {
+        guard let window else { return }
+        window.makeKey()
+        // `selectText` creates the field editor if needed. A bare
+        // makeFirstResponder call can leave focus on the window when this view
+        // has just been inserted into an outline row from a context menu.
+        field.selectText(nil)
+        if window.firstResponder !== field.currentEditor() {
+            window.makeFirstResponder(field)
+        }
+        if selectAll { field.currentEditor()?.selectAll(nil) }
     }
 
     func refreshFonts() {
