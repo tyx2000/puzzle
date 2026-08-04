@@ -10,7 +10,7 @@ struct FileHistoryModel {
     let commits: [GitService.Commit]
 }
 
-/// Four-column file commit table with a collapsible unified-diff detail pane.
+/// Four-column file commit table with a resizable unified-diff detail pane.
 final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private enum Column: String, CaseIterable {
         case message, time, author, commitID
@@ -29,18 +29,38 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
     private let tableScroll = NSScrollView()
     private let emptyLabel = NSTextField(labelWithString: "No commits found for this file.")
     private let detailContainer = FlatView()
+    private let detailResizeHandle = FileHistoryResizeHandle()
     private let detailTitle = NSTextField(labelWithString: "")
-    private let detailText = PuzzleTextView(frame: NSRect(x: 0, y: 0,
-                                                          width: 800, height: 400))
+    private let detailScroll = NSScrollView()
+    private let detailStorage: NSTextStorage
+    private let detailLayoutManager: FoldingLayoutManager
+    private let detailText: PuzzleTextView
     private var detailHeight: NSLayoutConstraint!
+    private var preferredDetailHeight: CGFloat?
     private var model: FileHistoryModel?
     private var expandedRow: Int?
     private var detailGeneration = 0
 
     override init(frame frameRect: NSRect) {
+        // Use the same explicit TextKit stack as the main editor. The detail
+        // keeps horizontal scrolling, but its layout and decorations now share
+        // one document coordinate system instead of the convenience text
+        // view's implicit, effectively unbounded setup.
+        let storage = NSTextStorage()
+        let layoutManager = FoldingLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(size: NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = false
+        layoutManager.addTextContainer(textContainer)
+        detailStorage = storage
+        detailLayoutManager = layoutManager
+        detailText = PuzzleTextView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 400),
+            textContainer: textContainer)
+
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = Theme.editorBackground.cgColor
 
         table.dataSource = self
         table.delegate = self
@@ -100,10 +120,13 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         detailContainer.isHidden = true
         addSubview(detailContainer)
 
-        let separator = FlatView()
-        separator.fillColor = Theme.border
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        detailContainer.addSubview(separator)
+        detailResizeHandle.translatesAutoresizingMaskIntoConstraints = false
+        detailResizeHandle.onDrag = { [weak self] windowPoint in
+            guard let self else { return }
+            let requested = self.convert(windowPoint, from: nil).y
+            self.preferredDetailHeight = self.applyDetailHeight(requested)
+        }
+        detailContainer.addSubview(detailResizeHandle)
 
         detailTitle.font = Theme.uiFont(12)
         detailTitle.textColor = Theme.foreground
@@ -128,11 +151,6 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         detailText.showsCurrentLineBand = false
         detailText.insertionPointColor = Theme.cursor
         detailText.selectedTextAttributes = [.backgroundColor: Theme.selection]
-        detailText.textContainer?.containerSize = NSSize(
-            width: CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude)
-        detailText.textContainer?.widthTracksTextView = false
-        let detailScroll = NSScrollView()
         detailScroll.documentView = detailText
         detailScroll.hasVerticalScroller = true
         detailScroll.hasHorizontalScroller = true
@@ -160,12 +178,12 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
             detailContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
             detailHeight,
 
-            separator.topAnchor.constraint(equalTo: detailContainer.topAnchor),
-            separator.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
-            separator.heightAnchor.constraint(equalToConstant: 1),
+            detailResizeHandle.topAnchor.constraint(equalTo: detailContainer.topAnchor),
+            detailResizeHandle.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            detailResizeHandle.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+            detailResizeHandle.heightAnchor.constraint(equalToConstant: 8),
 
-            detailTitle.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+            detailTitle.topAnchor.constraint(equalTo: detailResizeHandle.bottomAnchor, constant: 3),
             detailTitle.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 12),
             detailTitle.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -12),
             detailTitle.heightAnchor.constraint(equalToConstant: 18),
@@ -179,17 +197,40 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.editorBackground.setFill()
+        dirtyRect.fill()
+    }
+
     override func layout() {
         super.layout()
         if !detailContainer.isHidden {
-            detailHeight.constant = min(360, max(180, floor(bounds.height * 0.38)))
+            applyDetailHeight(preferredDetailHeight ?? defaultDetailHeight)
         }
+    }
+
+    private var defaultDetailHeight: CGFloat {
+        max(180, floor(bounds.height * 0.38))
+    }
+
+    private var maximumDetailHeight: CGFloat {
+        max(0, floor(bounds.height * 0.6))
+    }
+
+    @discardableResult
+    private func applyDetailHeight(_ requested: CGFloat) -> CGFloat {
+        let maximum = maximumDetailHeight
+        let minimum = min(120, maximum)
+        let resolved = min(maximum, max(minimum, requested))
+        if detailHeight.constant != resolved { detailHeight.constant = resolved }
+        return resolved
     }
 
     func configure(_ model: FileHistoryModel) {
         self.model = model
         detailGeneration += 1
         expandedRow = nil
+        preferredDetailHeight = nil
         detailContainer.isHidden = true
         detailHeight.constant = 0
         detailTitle.stringValue = ""
@@ -220,15 +261,16 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         case .author: text = commit.author
         case .commitID: text = commit.shortHash
         }
-        cell.configure(text: text,
-                       showsDisclosure: column == .message,
-                       expanded: column == .message && expandedRow == row,
-                       monospaced: column == .commitID)
+        cell.configure(text: text, monospaced: column == .commitID)
         return cell
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        FileHistoryRowView()
+        let rowView = FileHistoryRowView()
+        // The header already owns the boundary above row zero. Drawing another
+        // line there makes that edge look twice as dark.
+        rowView.drawsTopBorder = row > 0
+        return rowView
     }
 
     @objc private func rowClicked(_ sender: Any?) {
@@ -243,7 +285,6 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
             return
         }
 
-        let previouslyExpanded = expandedRow
         expandedRow = row
         detailGeneration += 1
         let generation = detailGeneration
@@ -251,11 +292,7 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         detailTitle.stringValue = "Changes in \(commit.shortHash) — \(model.relativePath)"
         setDetailText("Loading…")
         detailContainer.isHidden = false
-        detailHeight.constant = min(360, max(180, floor(max(bounds.height, 480) * 0.38)))
-        var disclosureRows = IndexSet(integer: row)
-        if let previouslyExpanded { disclosureRows.insert(previouslyExpanded) }
-        table.reloadData(forRowIndexes: disclosureRows,
-                         columnIndexes: IndexSet(integer: 0))
+        applyDetailHeight(preferredDetailHeight ?? defaultDetailHeight)
         needsLayout = true
 
         let repository = model.repository
@@ -274,14 +311,12 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
     }
 
     private func collapseDetail() {
-        guard let row = expandedRow else { return }
+        guard expandedRow != nil else { return }
         detailGeneration += 1
         expandedRow = nil
         detailContainer.isHidden = true
         detailHeight.constant = 0
         setDetailText("")
-        table.reloadData(forRowIndexes: IndexSet(integer: row),
-                         columnIndexes: IndexSet(integer: 0))
     }
 
     // MARK: - Regression-test surface
@@ -315,18 +350,10 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
 }
 
 private final class FileHistoryTableCell: NSTableCellView {
-    private let disclosure = NSImageView()
     private let label = NSTextField(labelWithString: "")
-    private var leadingWithDisclosure: NSLayoutConstraint!
-    private var leadingWithoutDisclosure: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        disclosure.imageScaling = .scaleProportionallyDown
-        disclosure.contentTintColor = Theme.dimText
-        disclosure.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(disclosure)
-
         label.textColor = Theme.foreground
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
@@ -334,15 +361,8 @@ private final class FileHistoryTableCell: NSTableCellView {
         textField = label
         addSubview(label)
 
-        leadingWithDisclosure = label.leadingAnchor.constraint(
-            equalTo: disclosure.trailingAnchor, constant: 5)
-        leadingWithoutDisclosure = label.leadingAnchor.constraint(
-            equalTo: leadingAnchor, constant: 8)
         NSLayoutConstraint.activate([
-            disclosure.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            disclosure.centerYAnchor.constraint(equalTo: centerYAnchor),
-            disclosure.widthAnchor.constraint(equalToConstant: 10),
-            disclosure.heightAnchor.constraint(equalToConstant: 10),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
         ])
@@ -350,30 +370,56 @@ private final class FileHistoryTableCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(text: String, showsDisclosure: Bool, expanded: Bool,
-                   monospaced: Bool) {
+    func configure(text: String, monospaced: Bool) {
         label.stringValue = text
         label.font = monospaced ? Theme.editorFont() : Theme.uiFont(12)
         toolTip = text
-        disclosure.isHidden = !showsDisclosure
-        disclosure.image = Theme.symbol(expanded ? "chevron.down" : "chevron.right")
-        leadingWithDisclosure.isActive = showsDisclosure
-        leadingWithoutDisclosure.isActive = !showsDisclosure
         setAccessibilityElement(true)
         setAccessibilityLabel(text)
     }
 }
 
 private final class FileHistoryRowView: NSTableRowView {
+    var drawsTopBorder = true
+
     override func drawBackground(in dirtyRect: NSRect) {
         Theme.editorBackground.setFill()
         bounds.fill()
-        Theme.border.withAlphaComponent(0.35).setFill()
-        NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: 1).fill()
+        if drawsTopBorder {
+            Theme.border.withAlphaComponent(0.35).setFill()
+            NSRect(x: bounds.minX, y: bounds.minY,
+                   width: bounds.width, height: 1).fill()
+        }
     }
 
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.activeRow.setFill()
         bounds.fill()
+    }
+}
+
+/// Eight-point hit target over a one-point divider. Dragging reports window
+/// coordinates so the owning history view can resolve its bottom-anchored
+/// detail height without duplicating state in this presentation-only view.
+private final class FileHistoryResizeHandle: NSView {
+    var onDrag: ((NSPoint) -> Void)?
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onDrag?(event.locationInWindow)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        onDrag?(event.locationInWindow)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.border.setFill()
+        NSRect(x: bounds.minX, y: floor(bounds.midY),
+               width: bounds.width, height: 1).fill()
     }
 }

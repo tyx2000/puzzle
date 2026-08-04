@@ -436,8 +436,14 @@ final class PuzzleTextView: NSTextView {
     private func drawDiffBands() {
         guard !diffBands.isEmpty, let layoutManager, let container = textContainer else { return }
         let inset = textContainerInset
-        let width = max(bounds.width, container.size.width)
         let visible = visibleRect
+        // A horizontally scrolling text container is intentionally configured
+        // with an unbounded width. Never turn that sentinel into a draw rect:
+        // enormous fills escape normal clip/layer tiling and appear fixed while
+        // the document scrolls. Use finite laid-out content/view coordinates.
+        let laidOutWidth = layoutManager.usedRect(for: container).maxX
+            + inset.width * 2
+        let width = max(bounds.width, visible.maxX, laidOutWidth)
         let length = (string as NSString).length
 
         for band in diffBands {
