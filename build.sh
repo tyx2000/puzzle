@@ -39,6 +39,8 @@ cc_obj yaml_p.o     "$V/tree-sitter-yaml/src/parser.c"                          
 cc_obj yaml_s.o     "$V/tree-sitter-yaml/src/scanner.c"                             "$V/tree-sitter-yaml/src"
 cc_obj ts_p.o       "$V/tree-sitter-typescript/typescript/src/parser.c"            "$V/tree-sitter-typescript/typescript/src"
 cc_obj ts_s.o       "$V/tree-sitter-typescript/typescript/src/scanner.c"           "$V/tree-sitter-typescript/typescript/src"
+cc_obj tsx_p.o      "$V/tree-sitter-typescript/tsx/src/parser.c"                   "$V/tree-sitter-typescript/tsx/src"
+cc_obj tsx_s.o      "$V/tree-sitter-typescript/tsx/src/scanner.c"                  "$V/tree-sitter-typescript/tsx/src"
 cc_obj md_p.o       "$V/tree-sitter-markdown/tree-sitter-markdown/src/parser.c"    "$V/tree-sitter-markdown/tree-sitter-markdown/src"
 cc_obj md_s.o       "$V/tree-sitter-markdown/tree-sitter-markdown/src/scanner.c"   "$V/tree-sitter-markdown/tree-sitter-markdown/src"
 # The inline grammar is a separate parser: the block grammar emits `inline`

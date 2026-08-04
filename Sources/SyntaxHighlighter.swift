@@ -67,9 +67,16 @@ final class SyntaxHighlighter {
                      extensions: ["yaml", "yml"],
                      queryFiles: ["yaml.scm"], makeLanguage: { tree_sitter_yaml() }),
         LanguageSpec(name: "typescript", display: "TypeScript",
-                     extensions: ["ts", "tsx", "mts", "cts", "js", "mjs", "cjs", "jsx"],
+                     extensions: ["ts", "mts", "cts"],
                      queryFiles: ["typescript.scm", "typescript_ecma.scm"],
                      makeLanguage: { tree_sitter_typescript() }),
+        // The TSX dialect is required to distinguish JSX tags from TypeScript
+        // generics. JavaScript uses it as well because React commonly ships JSX
+        // in .js/.mjs/.cjs files.
+        LanguageSpec(name: "tsx", display: "JavaScript / TSX",
+                     extensions: ["tsx", "jsx", "js", "mjs", "cjs"],
+                     queryFiles: ["typescript.scm", "typescript_ecma.scm"],
+                     makeLanguage: { tree_sitter_tsx() }),
         LanguageSpec(name: "markdown", display: "Markdown",
                      extensions: ["md", "markdown", "mdx"],
                      queryFiles: ["markdown.scm"], makeLanguage: { tree_sitter_markdown() }),
@@ -244,9 +251,12 @@ final class SyntaxHighlighter {
 
     /// Parse `text` and paint colors onto `storage` over `fullRange`.
     /// Base font/foreground/paragraph are assumed already applied by the caller.
-    func highlight(text: String, storage: NSTextStorage, fullRange: NSRange) {
+    @discardableResult
+    func highlight(text: String, storage: NSTextStorage,
+                   fullRange: NSRange) -> [JSXTagMatch] {
         let byteCount = text.utf8.count
-        guard byteCount > 0 else { return }
+        guard byteCount > 0 else { return [] }
+        var tagMatches: [JSXTagMatch] = []
         // One pass over the text, not two: `Array(text.utf8)` copied the whole
         // file and `withCString` copied it again, so a 500 KB file allocated a
         // megabyte of transient buffers on every highlight. The C string that
@@ -254,22 +264,28 @@ final class SyntaxHighlighter {
         text.withCString { cstr in
             cstr.withMemoryRebound(to: UInt8.self, capacity: byteCount) { raw in
                 let bytes = UnsafeBufferPointer(start: raw, count: byteCount)
-                highlight(text: text, bytes: bytes, cstr: cstr,
-                          storage: storage, fullRange: fullRange)
+                tagMatches = highlight(text: text, bytes: bytes, cstr: cstr,
+                                       storage: storage, fullRange: fullRange)
             }
         }
+        return tagMatches
     }
 
     private func highlight(text: String, bytes: UnsafeBufferPointer<UInt8>,
                            cstr: UnsafePointer<CChar>,
-                           storage: NSTextStorage, fullRange: NSRange) {
+                           storage: NSTextStorage,
+                           fullRange: NSRange) -> [JSXTagMatch] {
         let byteCount = bytes.count
-        guard let tree = ts_parser_parse_string(parser, nil, cstr, UInt32(byteCount)) else { return }
+        guard let tree = ts_parser_parse_string(
+            parser, nil, cstr, UInt32(byteCount)) else { return [] }
         defer { ts_tree_delete(tree) }
         let rootNode = ts_tree_root_node(tree)
 
         // byte-offset -> UTF-16 offset mapping (identity fast-path for ASCII).
         let mapper = ByteMapper(text: text, utf8Count: byteCount)
+        let tagMatches = definition.name == "tsx"
+            ? JSXTagMatcher.matches(in: rootNode, bytes: bytes, mapper: mapper)
+            : []
 
         // Collect spans, then apply so the winning capture ends up on top.
         var spans: [(range: NSRange, color: NSColor, len: Int, spec: Int, rank: Int)] = []
@@ -315,6 +331,7 @@ final class SyntaxHighlighter {
             storage.addAttribute(.foregroundColor, value: span.color, range: span.range)
         }
         storage.endEditing()
+        return tagMatches
     }
 
     // MARK: Predicate evaluation (#eq? #match? #any-of? and negations)
@@ -469,7 +486,7 @@ final class SyntaxHighlighter {
 }
 
 /// Maps UTF-8 byte offsets to UTF-16 offsets. Identity for ASCII/BMP-ASCII text.
-private struct ByteMapper {
+struct ByteMapper {
     private let identity: Bool
     /// A dense Int32 table is substantially smaller than a Swift Dictionary
     /// entry per Unicode scalar. Non-boundary byte positions remain `-1`.

@@ -5,6 +5,7 @@ import ImageIO
 /// two panes edits one buffer (Zed behavior) while each pane keeps its own tabs.
 final class Document {
     static let structureDidChange = Notification.Name("PuzzleDocumentStructureDidChange")
+    static let didReloadFromDisk = Notification.Name("PuzzleDocumentDidReloadFromDisk")
 
     private enum SaveError: LocalizedError {
         case readOnly
@@ -56,10 +57,19 @@ final class Document {
     /// Preserve the encoding that was decoded instead of silently converting a
     /// Latin-1 source file to UTF-8 on its first save.
     private var textEncoding: String.Encoding = .utf8
+    /// Wall-clock ordering for last-write-wins synchronization. File-system
+    /// modification dates are compared with the latest local text edit.
+    private(set) var lastLocalEditAt: Date?
+    private var lastKnownDiskModificationDate: Date?
+    private(set) var isApplyingExternalChange = false
     /// Full-width line tints for a diff buffer (empty for normal files).
     var diffBands: [(range: NSRange, color: NSColor)] = []
     /// Foldable blocks derived from the current source.
     private(set) var codeBlocks: [CodeBlock] = []
+    /// JSX tag pairs extracted from the same TSX parse used for highlighting.
+    /// Stored on the document so split panes share syntax metadata while each
+    /// pane independently decides which pair its caret activates.
+    private(set) var jsxTagMatches: [JSXTagMatch] = []
 
     /// Tab label override (diffs show "file.swift (diff)" / "… @ abc1234").
     private(set) var displayName: String?
@@ -78,6 +88,7 @@ final class Document {
     init(url: URL) {
         self.url = url
         self.languageSpec = SyntaxHighlighter.spec(for: url)
+        self.lastKnownDiskModificationDate = Self.modificationDate(for: url)
 
         let hasImageExtension = Self.imageExtensions.contains(url.pathExtension.lowercased())
         let byteLimit = hasImageExtension ? Self.maxImageFileBytes : Self.maxTextFileBytes
@@ -234,6 +245,7 @@ final class Document {
                               range: NSRange(location: 0, length: storage.length))
         diffBands.removeAll(keepingCapacity: false)
         codeBlocks.removeAll(keepingCapacity: false)
+        jsxTagMatches.removeAll(keepingCapacity: false)
     }
 
     func refreshCodeBlocks() {
@@ -246,6 +258,13 @@ final class Document {
         }
         guard refreshed != codeBlocks else { return }
         codeBlocks = refreshed
+        NotificationCenter.default.post(
+            name: Self.structureDidChange, object: self)
+    }
+
+    func updateJSXTagMatches(_ matches: [JSXTagMatch]) {
+        guard matches != jsxTagMatches else { return }
+        jsxTagMatches = matches
         NotificationCenter.default.post(
             name: Self.structureDidChange, object: self)
     }
@@ -283,7 +302,73 @@ final class Document {
         }
         try data.write(to: url, options: .atomic)
         textEncoding = savedEncoding
+        lastKnownDiskModificationDate = Self.modificationDate(for: url)
+        lastLocalEditAt = nil
         isModified = false
+    }
+
+    func markLocalEdit(at date: Date = Date()) {
+        guard !isApplyingExternalChange else { return }
+        if lastLocalEditAt.map({ date > $0 }) ?? true { lastLocalEditAt = date }
+        isModified = true
+    }
+
+    /// Replace the buffer when the disk write is newer than the latest local
+    /// edit. No conflict UI is involved: whichever side has the later write
+    /// time is authoritative.
+    @discardableResult
+    func reloadFromDiskIfLatest(observedAt: Date = Date()) -> Bool {
+        guard url.isFileURL, !isReadOnly else { return false }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count <= Self.maxTextFileBytes,
+              !Self.looksBinary(data),
+              let decoded = Self.decodeText(data) else { return false }
+
+        let diskDate = Self.modificationDate(for: url) ?? observedAt
+        if decoded.text == text {
+            let stateChanged = isModified || lastLocalEditAt != nil
+            lastKnownDiskModificationDate = diskDate
+            lastLocalEditAt = nil
+            isModified = false
+            textEncoding = decoded.encoding
+            return stateChanged
+        }
+
+        if let localEdit = lastLocalEditAt, diskDate < localEdit {
+            // The local buffer is newer. Remember that this older disk version
+            // has been observed; a subsequent external write gets a new date.
+            lastKnownDiskModificationDate = diskDate
+            return false
+        }
+        if let known = lastKnownDiskModificationDate,
+           diskDate < known {
+            return false
+        }
+
+        isApplyingExternalChange = true
+        storage.beginEditing()
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
+                                  with: decoded.text)
+        storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                              range: NSRange(location: 0, length: storage.length))
+        storage.endEditing()
+        isApplyingExternalChange = false
+        textEncoding = decoded.encoding
+        lastKnownDiskModificationDate = diskDate
+        lastLocalEditAt = nil
+        isModified = false
+        return true
+    }
+
+    private static func decodeText(_ data: Data) -> (text: String, encoding: String.Encoding)? {
+        if let text = String(data: data, encoding: .utf8) { return (text, .utf8) }
+        if let text = String(data: data, encoding: .isoLatin1) { return (text, .isoLatin1) }
+        return nil
+    }
+
+    private static func modificationDate(for url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate])
+            as? Date
     }
 }
 
@@ -330,6 +415,34 @@ final class DocumentStore {
                   doc.url.standardizedFileURL.path.hasPrefix(prefix) else { return nil }
             return (doc.url, doc.text)
         }
+    }
+
+    /// Reconcile cached documents touched by a coalesced FSEvents batch. An
+    /// atomic writer often reports a temporary sibling plus a directory event,
+    /// so files sharing that directory are considered candidates as well.
+    @discardableResult
+    func reloadExternalChanges(at changedURLs: [URL], observedAt: Date = Date()) -> [URL] {
+        guard !changedURLs.isEmpty else { return [] }
+        let changes = changedURLs.map { $0.standardizedFileURL }
+        var reloaded: [URL] = []
+        for document in docs.values {
+            let file = document.url.standardizedFileURL
+            let parent = file.deletingLastPathComponent()
+            let affected = changes.contains { change in
+                change == file || change == parent
+                    || change.deletingLastPathComponent() == parent
+                    || file.path.hasPrefix(change.path.hasSuffix("/")
+                        ? change.path : change.path + "/")
+            }
+            guard affected, document.reloadFromDiskIfLatest(observedAt: observedAt) else {
+                continue
+            }
+            HighlightService.shared.highlight(document)
+            NotificationCenter.default.post(name: Document.didReloadFromDisk,
+                                            object: document)
+            reloaded.append(document.url)
+        }
+        return reloaded
     }
 
     func registerOpen(_ url: URL, owner: AnyObject) {
@@ -464,6 +577,7 @@ final class HighlightService {
         doc.refreshCodeBlocks()
         // Generated diff buffers get the diff painter, not tree-sitter.
         if doc.isVirtual {
+            doc.updateJSXTagMatches([])
             doc.diffBands = DiffHighlighter.apply(to: storage)
             return
         }
@@ -472,12 +586,19 @@ final class HighlightService {
 
         // Check size and skip-conditions BEFORE materialising the grammar, so a
         // huge (or unsupported) file never pages in parser tables it won't use.
-        guard let spec = doc.languageSpec, !doc.isUnsupported else { return }
+        guard let spec = doc.languageSpec, !doc.isUnsupported else {
+            doc.updateJSXTagMatches([])
+            return
+        }
         let text = storage.string
         guard text.utf8.count <= maxBytes,
               let lang = SyntaxHighlighter.definition(for: spec),
-              let hl = highlighter(for: lang) else { return }
-        hl.highlight(text: text, storage: storage, fullRange: full)
+              let hl = highlighter(for: lang) else {
+            doc.updateJSXTagMatches([])
+            return
+        }
+        let tags = hl.highlight(text: text, storage: storage, fullRange: full)
+        doc.updateJSXTagMatches(tags)
     }
 
     /// Release parsers/queries for languages nothing has open any more. Each

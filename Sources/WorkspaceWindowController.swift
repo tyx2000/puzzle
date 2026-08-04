@@ -13,6 +13,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var root: RootViewController!
     private(set) var projectURL: URL?
     private var gitRepositoryMonitor: GitRepositoryMonitor?
+    private var workspaceFileMonitor: WorkspaceFileMonitor?
     private let gitSummaryQueue = DispatchQueue(
         label: "app.puzzle.workspace-git-summary", qos: .utility)
     private var gitRefreshGeneration = 0
@@ -146,6 +147,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
+        workspaceFileMonitor?.stop()
+        workspaceFileMonitor = nil
         // Release this window's buffers rather than leaving its layout
         // managers attached to them.
         editor.detachAllPanes()
@@ -196,6 +199,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func openProject(_ url: URL) {
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
+        workspaceFileMonitor?.stop()
+        workspaceFileMonitor = nil
         projectURL = url
         editor.hasProject = true
         editor.repositoryRoot = url
@@ -208,15 +213,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self, self.projectURL == url else { return }
             self.refreshExternalGitState()
         }
+        workspaceFileMonitor = WorkspaceFileMonitor(directory: url) { [weak self] paths, date in
+            guard let self, self.projectURL == url else { return }
+            let reloaded = DocumentStore.shared.reloadExternalChanges(
+                at: paths, observedAt: date)
+            guard !reloaded.isEmpty else { return }
+            self.sidebar.refreshGitPanelIfLoaded()
+            self.refreshGit(requireFollowUp: true)
+            reloaded.forEach { self.editor.invalidateBlame(for: $0) }
+        }
     }
 
     /// Synchronize every Git-derived surface after another process changes the
     /// repository, and when Puzzle becomes active after such a change.
     func refreshExternalGitState() {
-        guard projectURL != nil else { return }
+        guard let projectURL else { return }
+        let reloaded = DocumentStore.shared.reloadExternalChanges(at: [projectURL])
         sidebar.refreshGitPanelIfLoaded()
         refreshGit(requireFollowUp: true)
-        editor.invalidateBlame()
+        if reloaded.isEmpty {
+            editor.invalidateBlame()
+        } else {
+            reloaded.forEach { editor.invalidateBlame(for: $0) }
+        }
     }
 
     /// Show a file's git diff in the editor, coloured by DiffHighlighter.

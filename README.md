@@ -37,12 +37,15 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   file-tree rows. Saving re-applies live; `//` comments are allowed.
 - **Editor details** — active-line band and caret use the configured code-row
   height, with code, line numbers and inline blame vertically centered; no gutter separator, and hover-only gutter-arrow
-  code folding that preserves source line numbers.
+  code folding that preserves source line numbers. Matching `()`, `[]` and `{}`
+  are marked with red wave underlines at the insertion point.
 - **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers.
 - **Dock menu** — right-click the running app icon to open one of the ten most
   recently used valid project folders in a new Puzzle window.
-- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, 350ms debounced
-  auto-save, and immediate manual save (⌘S).
+- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, explicit manual
+  save (⌘S), and a close confirmation for unsaved buffers.
+- **External changes** — project files are monitored with FSEvents; disk and
+  local edits use last-write-wins ordering with no conflict prompt.
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
   Bash, TypeScript/JS, and Markdown, with `#eq?`/`#match?`/`#any-of?` predicate
   evaluation and a One Dark capture→color map. Adding a language is one entry in
@@ -77,7 +80,7 @@ overwrites an unrelated command with the same name.
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
 ⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘\ split editor · ⌘G git ·
-⌥⌘[ fold/unfold current block · ⌥⌘] unfold all
+⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line
 
 ## Layout
 ```

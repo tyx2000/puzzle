@@ -333,6 +333,10 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         foldedBlockStarts.contains(block.identity)
     }
 
+    func isCharacterHidden(at location: Int) -> Bool {
+        hiddenRanges.contains { NSLocationInRange(location, $0) }
+    }
+
     func restoreFoldedBlockIdentities(_ identities: Set<Int>) {
         let available = Set(blocks.map(\.identity))
         foldedBlockStarts = identities.intersection(available)

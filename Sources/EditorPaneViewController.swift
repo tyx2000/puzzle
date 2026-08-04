@@ -102,6 +102,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(documentStructureChanged(_:)),
             name: Document.structureDidChange, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(documentReloadedFromDisk(_:)),
+            name: Document.didReloadFromDisk, object: nil)
 
         scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -318,6 +321,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         suppressSelectionSideEffects = true
         textView.setSelectedRange(caret)
         suppressSelectionSideEffects = false
+        textView.updateJSXTagMatches(doc.jsxTagMatches)
+        textView.refreshBracketMatches()
         textView.scrollRangeToVisible(caret)
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
         // Binary files show a placeholder and must not be editable — typing into
@@ -385,6 +390,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
             textView.updateCodeBlocks([], resetFolds: false)
+            textView.updateJSXTagMatches([])
             imagePreview?.clear()
             imagePreview?.isHidden = true
             fileHistoryView?.isHidden = true
@@ -571,6 +577,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         markdownPreview?.clearContent()
         imagePreview?.clear()
         textView.updateCodeBlocks([], resetFolds: false)
+        textView.updateJSXTagMatches([])
         detachFromDocument()
         let urls = openURLs
         openURLs.removeAll()
@@ -616,14 +623,21 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         guard let doc = currentDocument else { return }
+        guard !doc.isApplyingExternalChange else { return }
         if let url = currentURL { lineActivatedURLs.insert(url) }
         textView.showsCurrentLineBand = true
-        if !doc.isModified { doc.isModified = true; onDocumentEdited?() }
+        let wasModified = doc.isModified
+        doc.markLocalEdit()
+        if !wasModified { onDocumentEdited?() }
         // Blame is computed from the committed file. Once the buffer changes,
         // its line mapping is no longer authoritative; clear it immediately
         // even when AppKit emits no accompanying selection notification.
         clearInlineBlameRequest()
+        // Parsed JSX ranges belong to the previous text revision. Remove them
+        // immediately; the debounced TSX parse publishes current ranges.
+        doc.updateJSXTagMatches([])
         HighlightService.shared.scheduleHighlight(doc)
+        textView.refreshBracketMatches()
         // The preview debounces internally, so this is cheap per keystroke.
         if let markdownPreview, !markdownPreview.isHidden {
             markdownPreview.update(source: doc.text)
@@ -632,6 +646,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func textViewDidChangeSelection(_ notification: Notification) {
         guard !suppressSelectionSideEffects else { return }
+        textView.refreshBracketMatches()
         if let url = currentURL { selections[url] = textView.selectedRange() }
         guard let url = currentURL, lineActivatedURLs.contains(url) else {
             textView.showsCurrentLineBand = false
@@ -657,6 +672,29 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let document = notification.object as? Document,
               document.url == currentURL else { return }
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
+        textView.updateJSXTagMatches(document.jsxTagMatches)
+    }
+
+    @objc private func documentReloadedFromDisk(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              openURLs.contains(document.url) else { return }
+        reloadTabs()
+        guard document.url == currentURL else { return }
+
+        let location = min(textView.selectedRange().location, document.storage.length)
+        suppressSelectionSideEffects = true
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+        suppressSelectionSideEffects = false
+        textView.undoManager?.removeAllActions()
+        clearInlineBlameRequest()
+        textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
+        textView.updateJSXTagMatches(document.jsxTagMatches)
+        textView.refreshBracketMatches()
+        textView.needsDisplay = true
+        scrollView.verticalRulerView?.needsDisplay = true
+        if let markdownPreview, !markdownPreview.isHidden {
+            markdownPreview.update(source: document.text)
+        }
     }
 
     // MARK: - Inline blame

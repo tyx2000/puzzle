@@ -1,5 +1,51 @@
 import AppKit
 
+/// View-space geometry for the active bracket pair. Keeping this independent
+/// from TextKit makes viewport continuation and same-line behavior directly
+/// regression-testable.
+struct BracketScopeGeometry {
+    let box: NSRect?
+    let polyline: [NSPoint]
+    let viewportCaps: [[NSPoint]]
+
+    static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
+                     visibleRect: NSRect) -> BracketScopeGeometry {
+        // A pair on one visual row reads best as one compact enclosure. A
+        // multiline pair uses the open-sided scope contour shown by editors
+        // such as Zed: opening row -> indentation guide -> closing row.
+        if abs(opening.midY - closing.midY) < 0.5 {
+            let union = opening.union(closing).insetBy(dx: -2, dy: -2)
+            return BracketScopeGeometry(box: union, polyline: [], viewportCaps: [])
+        }
+
+        let openingY = opening.maxY + 1
+        let closingY = closing.maxY + 1
+        let topY = min(openingY, closingY)
+        let bottomY = max(openingY, closingY)
+        let resolvedGuideX = min(guideX, opening.minX - 3, closing.minX - 3)
+        let polyline = [
+            NSPoint(x: opening.maxX + 2, y: openingY),
+            NSPoint(x: resolvedGuideX, y: openingY),
+            NSPoint(x: resolvedGuideX, y: closingY),
+            NSPoint(x: closing.maxX + 2, y: closingY),
+        ]
+
+        var caps: [[NSPoint]] = []
+        let capWidth: CGFloat = 7
+        if topY < visibleRect.minY, bottomY > visibleRect.minY {
+            let y = visibleRect.minY + 1
+            caps.append([NSPoint(x: resolvedGuideX, y: y),
+                         NSPoint(x: resolvedGuideX + capWidth, y: y)])
+        }
+        if bottomY > visibleRect.maxY, topY < visibleRect.maxY {
+            let y = visibleRect.maxY - 1
+            caps.append([NSPoint(x: resolvedGuideX, y: y),
+                         NSPoint(x: resolvedGuideX + capWidth, y: y)])
+        }
+        return BracketScopeGeometry(box: nil, polyline: polyline, viewportCaps: caps)
+    }
+}
+
 /// NSTextView that paints the current-line band and keeps the caret the same
 /// height as the text rather than the whole tall line box.
 final class PuzzleTextView: NSTextView {
@@ -13,6 +59,49 @@ final class PuzzleTextView: NSTextView {
     /// *above* the current-line band instead of being hidden by it.
     var searchMatches: [NSRange] = [] { didSet { needsDisplay = true } }
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
+
+    private(set) var bracketMatchRanges: [NSRange] = []
+    private var jsxTagMatches: [JSXTagMatch] = []
+    private(set) var activeJSXTagMatch: JSXTagMatch?
+
+    func updateJSXTagMatches(_ matches: [JSXTagMatch]) {
+        guard matches != jsxTagMatches else { return }
+        jsxTagMatches = matches
+        refreshBracketMatches()
+    }
+
+    func refreshBracketMatches() {
+        let refreshed: [NSRange]
+        let refreshedTag: JSXTagMatch?
+        if selectedRanges.count == 1, selectedRange().length == 0 {
+            refreshed = BracketMatcher.ranges(
+                in: string as NSString, caret: selectedRange().location)
+            // A delimiter immediately beside the caret is more specific than
+            // the JSX tag containing it (for example an attribute's `{...}`).
+            refreshedTag = refreshed.isEmpty
+                ? jsxTagMatch(at: selectedRange().location) : nil
+        } else {
+            refreshed = []
+            refreshedTag = nil
+        }
+        guard refreshed != bracketMatchRanges
+                || refreshedTag != activeJSXTagMatch else { return }
+        bracketMatchRanges = refreshed
+        activeJSXTagMatch = refreshedTag
+        needsDisplay = true
+    }
+
+    private func jsxTagMatch(at caret: Int) -> JSXTagMatch? {
+        jsxTagMatches.compactMap { match -> (JSXTagMatch, Int)? in
+            let containing = match.activationRanges.filter {
+                caret >= $0.location && caret <= NSMaxRange($0)
+            }
+            guard let narrowest = containing.min(by: { $0.length < $1.length }) else {
+                return nil
+            }
+            return (match, narrowest.length)
+        }.min(by: { $0.1 < $1.1 })?.0
+    }
 
     /// Bound AppKit's responsive-scrolling overdraw.
     ///
@@ -153,7 +242,188 @@ final class PuzzleTextView: NSTextView {
     // drawBackground alongside the bands.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawBracketScopeOutline()
         drawInlineBlame()
+    }
+
+    private struct BracketGlyphGeometry {
+        let glyphBox: NSRect
+        let leadingContentX: CGFloat
+    }
+
+    private func bracketGlyphGeometry(for range: NSRange) -> BracketGlyphGeometry? {
+        guard let layoutManager, let container = textContainer,
+              range.location >= 0,
+              NSMaxRange(range) <= (string as NSString).length,
+              foldingManager?.isCharacterHidden(at: range.location) != true else { return nil }
+
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        let fragment = layoutManager.lineFragmentRect(
+            forGlyphAt: glyphRange.location, effectiveRange: nil)
+        let raw = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard !raw.isEmpty else { return nil }
+
+        let inset = textContainerInset
+        let vertical = glyphBox(fragmentHeight: fragment.height)
+        let box = NSRect(x: raw.minX + inset.width,
+                         y: fragment.minY + vertical.top + inset.height,
+                         width: max(raw.width, 1), height: vertical.height)
+
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: range.location, length: 0))
+        var firstContent = line.location
+        let lineEnd = min(NSMaxRange(line), source.length)
+        while firstContent < lineEnd {
+            let character = source.character(at: firstContent)
+            if character == 0x20 || character == 0x09 {
+                firstContent += 1
+            } else {
+                break
+            }
+        }
+
+        var leadingX = box.minX
+        if firstContent < lineEnd,
+           source.character(at: firstContent) != 0x0A,
+           source.character(at: firstContent) != 0x0D {
+            let firstGlyph = layoutManager.glyphRange(
+                forCharacterRange: NSRange(location: firstContent, length: 1),
+                actualCharacterRange: nil)
+            if firstGlyph.length > 0 {
+                let firstRect = layoutManager.boundingRect(forGlyphRange: firstGlyph,
+                                                           in: container)
+                if !firstRect.isEmpty { leadingX = firstRect.minX + inset.width }
+            }
+        }
+        return BracketGlyphGeometry(glyphBox: box, leadingContentX: leadingX)
+    }
+
+    func bracketScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
+        guard bracketMatchRanges.count == 2,
+              let opening = bracketGlyphGeometry(for: bracketMatchRanges[0]),
+              let closing = bracketGlyphGeometry(for: bracketMatchRanges[1]) else { return nil }
+        let minimumGuideX = textContainerInset.width
+            + (textContainer?.lineFragmentPadding ?? 0) + 1
+        let guideX = max(minimumGuideX,
+                         min(opening.leadingContentX, closing.leadingContentX) - 3)
+        return BracketScopeGeometry.make(
+            opening: opening.glyphBox, closing: closing.glyphBox,
+            guideX: guideX, visibleRect: viewport ?? visibleRect)
+    }
+
+    private func jsxScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
+        guard let match = activeJSXTagMatch,
+              let openingAngle = bracketGlyphGeometry(for: match.openingAngleRange),
+              let closing = bracketGlyphGeometry(for: match.closingTerminatorRange) else {
+            return nil
+        }
+
+        let minimumGuideX = textContainerInset.width
+            + (textContainer?.lineFragmentPadding ?? 0) + 1
+        let guideX = max(minimumGuideX,
+                         min(openingAngle.leadingContentX,
+                             closing.leadingContentX) - 3)
+        let visible = viewport ?? visibleRect
+
+        switch match.kind {
+        case .selfClosing:
+            // Match the literal `<` and final `>`; on multiple lines this
+            // wraps the attributes between them, including a standalone `/>`.
+            return BracketScopeGeometry.make(
+                opening: openingAngle.glyphBox, closing: closing.glyphBox,
+                guideX: guideX, visibleRect: visible)
+
+        case .paired:
+            guard let openingHead = bracketGlyphGeometry(
+                for: match.openingHeadRange) else { return nil }
+            // The paired-element contour owns the complete element, including
+            // multiline attributes. Its top edge therefore starts at `<Button`
+            // (or `<UI.Button`), never at the opening tag's final `>`.
+            return BracketScopeGeometry.make(
+                opening: openingHead.glyphBox, closing: closing.glyphBox,
+                guideX: guideX, visibleRect: visible)
+        }
+    }
+
+    private func activeScopeGeometry() -> BracketScopeGeometry? {
+        if !bracketMatchRanges.isEmpty { return bracketScopeGeometry() }
+        return jsxScopeGeometry()
+    }
+
+    private func drawBracketScopeOutline() {
+        guard let geometry = activeScopeGeometry() else { return }
+        NSGraphicsContext.saveGraphicsState()
+        visibleRect.clip()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+
+        Theme.red.withAlphaComponent(0.9).setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1.5
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+
+        if let box = geometry.box {
+            path.appendRoundedRect(box, xRadius: 5, yRadius: 5)
+        } else {
+            appendRoundedPolyline(geometry.polyline, radius: 5, to: path)
+        }
+        for cap in geometry.viewportCaps where cap.count == 2 {
+            path.move(to: cap[0])
+            path.line(to: cap[1])
+        }
+        path.stroke()
+    }
+
+    /// Append a polyline whose corners use a geometric radius independent of
+    /// stroke width. `lineJoinStyle = .round` alone only rounds by roughly half
+    /// the 1.5pt stroke and is visually indistinguishable from a sharp corner.
+    private func appendRoundedPolyline(_ points: [NSPoint], radius: CGFloat,
+                                       to path: NSBezierPath) {
+        guard let first = points.first else { return }
+        guard points.count > 2 else {
+            path.move(to: first)
+            if let last = points.last, last != first { path.line(to: last) }
+            return
+        }
+
+        path.move(to: first)
+        for index in 1..<(points.count - 1) {
+            let previous = points[index - 1]
+            let corner = points[index]
+            let next = points[index + 1]
+            let incoming = NSPoint(x: corner.x - previous.x,
+                                   y: corner.y - previous.y)
+            let outgoing = NSPoint(x: next.x - corner.x,
+                                   y: next.y - corner.y)
+            let incomingLength = hypot(incoming.x, incoming.y)
+            let outgoingLength = hypot(outgoing.x, outgoing.y)
+            guard incomingLength > 0, outgoingLength > 0 else {
+                path.line(to: corner)
+                continue
+            }
+
+            let resolvedRadius = min(radius, incomingLength / 2, outgoingLength / 2)
+            let before = NSPoint(
+                x: corner.x - incoming.x / incomingLength * resolvedRadius,
+                y: corner.y - incoming.y / incomingLength * resolvedRadius)
+            let after = NSPoint(
+                x: corner.x + outgoing.x / outgoingLength * resolvedRadius,
+                y: corner.y + outgoing.y / outgoingLength * resolvedRadius)
+            path.line(to: before)
+
+            // Convert a quadratic curve with `corner` as its control point to
+            // the cubic representation exposed by NSBezierPath.
+            let control1 = NSPoint(
+                x: before.x + (corner.x - before.x) * 2 / 3,
+                y: before.y + (corner.y - before.y) * 2 / 3)
+            let control2 = NSPoint(
+                x: after.x + (corner.x - after.x) * 2 / 3,
+                y: after.y + (corner.y - after.y) * 2 / 3)
+            path.curve(to: after, controlPoint1: control1, controlPoint2: control2)
+        }
+        if let last = points.last { path.line(to: last) }
     }
 
     override func drawBackground(in rect: NSRect) {
@@ -307,6 +577,10 @@ final class PuzzleTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         onExplicitCaretInteraction?()
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 51, modifiers == [.shift] {
+            deleteCurrentLine()
+            return
+        }
         if modifiers.contains([.command, .option]),
            let key = event.charactersIgnoringModifiers {
             if key == "[", let block = innermostBlock(at: selectedRange().location) {
@@ -319,6 +593,48 @@ final class PuzzleTextView: NSTextView {
             }
         }
         super.keyDown(with: event)
+    }
+
+    /// Shift+Backspace removes the complete logical line at the insertion
+    /// point. For a final line without its own terminator, consume the previous
+    /// newline too so no empty replacement line is left behind.
+    @discardableResult
+    func deleteCurrentLine() -> Bool {
+        let source = string as NSString
+        guard source.length > 0 else { return false }
+        let caret = min(selectedRange().location, source.length)
+        var range: NSRange
+
+        if caret == source.length,
+           source.character(at: source.length - 1) == 0x0A {
+            let length = source.length >= 2
+                && source.character(at: source.length - 2) == 0x0D ? 2 : 1
+            range = NSRange(location: source.length - length, length: length)
+        } else {
+            let probe = min(caret, source.length - 1)
+            range = source.lineRange(for: NSRange(location: probe, length: 0))
+            if NSMaxRange(range) == source.length, range.location > 0 {
+                let previous = source.character(at: range.location - 1)
+                if previous == 0x0A {
+                    let prefix = range.location >= 2
+                        && source.character(at: range.location - 2) == 0x0D ? 2 : 1
+                    range.location -= prefix
+                    range.length += prefix
+                } else if previous == 0x0D {
+                    range.location -= 1
+                    range.length += 1
+                }
+            }
+        }
+
+        guard range.length > 0,
+              shouldChangeText(in: range, replacementString: "") else { return false }
+        textStorage?.replaceCharacters(in: range, with: "")
+        didChangeText()
+        setSelectedRange(NSRange(location: min(range.location, (string as NSString).length),
+                                 length: 0))
+        refreshBracketMatches()
+        return true
     }
 
     private func innermostBlock(at location: Int) -> CodeBlock? {

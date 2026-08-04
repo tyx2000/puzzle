@@ -13,6 +13,7 @@ enum RegressionTests {
         try testScopedStatusAndStaging()
         try testRemoteConfigurationAndPushSelection()
         try testGitRepositoryMonitor()
+        try testExternalFileLastWriteWins()
         try testBranchListing()
         try testDockRecentProjectsMenu()
         try testSearchMatcher()
@@ -27,6 +28,7 @@ enum RegressionTests {
         try testLargeFilesAreRejectedBeforeLoading()
         try testPreviewPayloadsAreReleased()
         try testFindMatchesAreComplete()
+        try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
@@ -114,6 +116,120 @@ enum RegressionTests {
                    "code_line_height was treated as a multiplier instead of an exact row height")
         try expect(Theme.treeRowHeight() == 29,
                    "tree_line_height was treated as a multiplier instead of an exact row height")
+    }
+
+    private static func testExternalFileLastWriteWins() throws {
+        let directory = try temporaryDirectory("external-last-write-wins")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("watched.txt")
+        try Data("initial\n".utf8).write(to: url)
+        let base = Date(timeIntervalSinceNow: -100)
+        try FileManager.default.setAttributes([.modificationDate: base],
+                                              ofItemAtPath: url.path)
+
+        let store = DocumentStore()
+        let document = store.document(for: url)
+        document.storage.setAttributedString(NSAttributedString(string: "local newest\n"))
+        document.markLocalEdit(at: base.addingTimeInterval(20))
+
+        try Data("external older\n".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: base.addingTimeInterval(10)], ofItemAtPath: url.path)
+        let ignored = store.reloadExternalChanges(
+            at: [url], observedAt: base.addingTimeInterval(25))
+        try expect(ignored.isEmpty && document.text == "local newest\n" && document.isModified,
+                   "an older disk write replaced a newer local edit")
+
+        try Data("external newest\n".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: base.addingTimeInterval(30)], ofItemAtPath: url.path)
+        let applied = store.reloadExternalChanges(
+            at: [url], observedAt: base.addingTimeInterval(31))
+        try expect(applied == [url] && document.text == "external newest\n"
+                   && !document.isModified && document.lastLocalEditAt == nil,
+                   "the newest external write did not replace the editor buffer")
+        store.release(url, stillOpen: false)
+
+        var observedPaths: [URL] = []
+        let monitor = WorkspaceFileMonitor(directory: directory) { paths, _ in
+            observedPaths.append(contentsOf: paths)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        try Data("monitor delivery\n".utf8).write(to: url, options: .atomic)
+        let deadline = Date().addingTimeInterval(3)
+        while observedPaths.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        monitor.stop()
+        try expect(observedPaths.contains(where: {
+            $0.standardizedFileURL == url.standardizedFileURL
+                || $0.standardizedFileURL == directory.standardizedFileURL
+                || $0.deletingLastPathComponent().standardizedFileURL
+                    == directory.standardizedFileURL
+        }), "workspace FSEvents monitor did not deliver an external file write")
+    }
+
+    private static func testBracketMatchingAndDeleteLine() throws {
+        let nested = "call(\"ignored )\", [value])" as NSString
+        let outer = BracketMatcher.ranges(in: nested, caret: 5)
+        try expect(outer.count == 2 && outer[0].location == 4
+                   && nested.substring(with: outer[1]) == ")",
+                   "matching brackets did not span strings and nested brackets correctly")
+        let ignored = BracketMatcher.ranges(in: "\"(not code)\"" as NSString, caret: 2)
+        try expect(ignored.isEmpty, "brackets inside a string were highlighted")
+
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        textView.string = "one\ntwo\nthree"
+        textView.setSelectedRange(NSRange(location: 5, length: 0))
+        guard let deleteEvent = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.shift],
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "\u{7f}", charactersIgnoringModifiers: "\u{7f}",
+            isARepeat: false, keyCode: 51) else {
+            throw Failure(description: "could not construct Shift+Backspace event")
+        }
+        textView.keyDown(with: deleteEvent)
+        try expect(textView.string == "one\nthree",
+                   "Shift+Backspace did not remove the caret's complete line")
+        textView.setSelectedRange(NSRange(location: textView.string.count, length: 0))
+        try expect(textView.deleteCurrentLine() && textView.string == "one",
+                   "deleting a final unterminated line left an empty line behind")
+
+        textView.string = "(value)"
+        textView.setSelectedRange(NSRange(location: 1, length: 0))
+        textView.refreshBracketMatches()
+        try expect(textView.bracketMatchRanges.map(\.location) == [0, 6],
+                   "the text view did not expose both matched-bracket outline ranges")
+        try expect(textView.bracketScopeGeometry(
+            in: NSRect(x: 0, y: 0, width: 400, height: 200))?.box != nil,
+            "TextKit did not turn a same-line bracket pair into an enclosure")
+
+        textView.string = "call(\n    value\n)"
+        textView.setSelectedRange(NSRange(location: 5, length: 0))
+        textView.refreshBracketMatches()
+        let laidOutMultiline = textView.bracketScopeGeometry(
+            in: NSRect(x: 0, y: 0, width: 400, height: 200))
+        try expect(laidOutMultiline?.box == nil
+                   && laidOutMultiline?.polyline.count == 4,
+                   "TextKit did not turn a multiline bracket pair into a scope contour")
+
+        let sameLine = BracketScopeGeometry.make(
+            opening: NSRect(x: 20, y: 10, width: 8, height: 14),
+            closing: NSRect(x: 80, y: 10, width: 8, height: 14),
+            guideX: 10, visibleRect: NSRect(x: 0, y: 0, width: 100, height: 100))
+        try expect(sameLine.box != nil && sameLine.polyline.isEmpty,
+                   "a same-line bracket pair did not produce a compact enclosure")
+
+        let multiline = BracketScopeGeometry.make(
+            opening: NSRect(x: 80, y: -30, width: 8, height: 14),
+            closing: NSRect(x: 20, y: 130, width: 8, height: 14),
+            guideX: 12, visibleRect: NSRect(x: 0, y: 0, width: 100, height: 100))
+        try expect(multiline.box == nil && multiline.polyline.count == 4,
+                   "a multiline bracket pair did not produce a scope contour")
+        try expect(multiline.viewportCaps.count == 2,
+                   "an offscreen bracket pair did not mark both viewport continuations")
+        try expect(multiline.polyline[1].x == multiline.polyline[2].x,
+                   "the scope contour's indentation guide was not vertical")
     }
 
     /// More than one pipe buffer on stderr used to make GitService wait forever

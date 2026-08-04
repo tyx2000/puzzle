@@ -3,11 +3,14 @@ import AppKit
 private final class PendingTreePlaceholder {}
 
 private enum FileTreeRowLayout {
-    static let disclosureSize: CGFloat = 12
+    /// Keep the original slot width so shrinking the chevron does not shift the
+    /// folder icon or title. Only the visible disclosure glyph becomes smaller.
+    static let disclosureSlotSize: CGFloat = 12
+    static let disclosureSize: CGFloat = 10
     static let iconSize: CGFloat = 14
     static let gap: CGFloat = 4
-    static let disclosureX: CGFloat = 0
-    static let iconX = disclosureX + disclosureSize + gap
+    static let disclosureX = (disclosureSlotSize - disclosureSize) / 2
+    static let iconX = disclosureSlotSize + gap
     static let titleX = iconX + iconSize + gap
 
     static func centeredRect(x: CGFloat, size: CGFloat, in bounds: NSRect) -> NSRect {
