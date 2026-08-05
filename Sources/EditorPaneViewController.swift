@@ -663,9 +663,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             let doc = DocumentStore.shared.document(for: url)
             let title = doc.displayName
                 ?? (doc.isVirtual ? "\(url.lastPathComponent) (diff)" : url.lastPathComponent)
-            return EditorTabBar.TabInfo(title: title, modified: doc.isModified)
+            let path = tabPath(for: url, doc: doc, fallback: title)
+            return EditorTabBar.TabInfo(title: title, modified: doc.isModified, path: path)
         }
         tabBar.reload(tabs: infos, active: activeIndex ?? -1)
+    }
+
+    /// Full file path for the tab tooltip. Diff previews live behind synthetic
+    /// URLs, so their real path is reconstructed from the URL query.
+    private func tabPath(for url: URL, doc: Document, fallback: String) -> String {
+        if !doc.isVirtual { return url.path }
+        guard url.scheme == DocumentStore.diffScheme,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let relative = components.queryItems?.first(where: { $0.name == "path" })?.value,
+              !relative.isEmpty else { return fallback }
+        let directory = (url.path as NSString).deletingLastPathComponent
+        return (directory as NSString).appendingPathComponent(relative)
     }
 
     // MARK: - NSTextViewDelegate

@@ -32,6 +32,8 @@ final class EditorTabBar: NSView {
     struct TabInfo {
         let title: String
         let modified: Bool
+        /// Full file path, shown as the tab's hover tooltip.
+        let path: String
     }
 
     private var pills: [TabPillView] = []
@@ -137,7 +139,8 @@ final class EditorTabBar: NSView {
         }
         for (index, tab) in tabs.enumerated() {
             let pill = pills[index]
-            pill.configure(title: tab.title, modified: tab.modified, active: index == active)
+            pill.configure(title: tab.title, modified: tab.modified,
+                           active: index == active, path: tab.path)
             pill.onSelect = { [weak self] in self?.onSelect?(index) }
             pill.onClose = { [weak self] in self?.onClose?(index) }
             pill.onCloseOthers = { [weak self] in self?.onCloseOthers?(index) }
@@ -220,7 +223,7 @@ final class TabPillView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(title: String, modified: Bool, active: Bool) {
+    func configure(title: String, modified: Bool, active: Bool, path: String) {
         self.active = active
         label.stringValue = modified ? "\(title) ●" : title
         label.font = Theme.uiFont(11.5)
@@ -228,6 +231,7 @@ final class TabPillView: NSView {
         // the foreground stable avoids making inactive file names look disabled.
         label.textColor = Theme.foreground
         closeButton.contentTintColor = Theme.foreground
+        toolTip = path
         needsDisplay = true
         needsLayout = true
     }
