@@ -480,9 +480,9 @@ final class GitPanelViewController: NSViewController {
         guard let directory else { return }
         // Destructive and hard to undo, so it asks first.
         let alert = NSAlert()
-        alert.messageText = "Force push?"
-        alert.informativeText = "This rewrites the remote branch. Uses --force-with-lease, "
-            + "so it will refuse if the remote has commits you haven't fetched."
+        alert.alertStyle = .warning
+        alert.messageText = "Force-push the current branch?"
+        alert.informativeText = "Repository:\n\(directory.path)\n\nThis can replace the remote branch history and make remote-only commits unreachable. Puzzle uses --force-with-lease, so Git will refuse if the remote changed since your last fetch."
         alert.addButton(withTitle: "Force Push")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -775,10 +775,12 @@ final class GitPanelViewController: NSViewController {
     private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
         guard !branch.isCurrent else { return }
         let alert = NSAlert()
-        alert.messageText = "Switch to branch \(branch.name)?"
-        alert.informativeText = branch.isRemote
-            ? "A local tracking branch will be created before switching."
-            : "The project working tree will be updated to this branch."
+        alert.alertStyle = .warning
+        alert.messageText = "Switch to “\(branch.name)”?"
+        let effect = branch.isRemote
+            ? "A local tracking branch will be created, checked out, and the files in this working tree will be replaced with that branch's versions."
+            : "The files in this working tree will be replaced with the versions from this branch. Git will refuse the switch if local changes cannot be preserved."
+        alert.informativeText = "Project:\n\(directory.path)\n\n\(effect)"
         alert.addButton(withTitle: "Switch")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -791,10 +793,11 @@ final class GitPanelViewController: NSViewController {
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Delete branch \(branch.name)?"
+        alert.alertStyle = .warning
+        alert.messageText = "Delete branch “\(branch.name)”?"
         alert.informativeText = branch.isRemote
-            ? "This deletes the branch from remote \(branch.upstreamRemote ?? "repository")."
-            : "Only fully merged local branches can be deleted."
+            ? "Remote: \(branch.upstreamRemote ?? "unknown")\nProject: \(directory.path)\n\nThis deletes the branch from the remote repository for everyone. Commits reachable only from this branch may become difficult to recover."
+            : "Project:\n\(directory.path)\n\nThis removes the local branch reference. Git permits this action only when the branch is fully merged; unmerged commits will not be deleted."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -806,6 +809,50 @@ final class GitPanelViewController: NSViewController {
         alert.messageText = title
         alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
         alert.runModal()
+    }
+
+    private func discardChanges(_ entry: GitService.Status.Entry, in directory: URL) {
+        let removesFile = GitService.discardRemovesFile(entry, in: directory)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Discard changes to “\(entry.path)”?"
+        var affected = "File:\n\(directory.appendingPathComponent(entry.path).path)"
+        if entry.code.contains("R"), let originalPath = entry.originalPath {
+            affected += "\nOriginal path:\n\(directory.appendingPathComponent(originalPath).path)"
+        }
+        let consequence = removesFile
+            ? "This file has no committed version. It will be removed from Git and moved to Trash. Puzzle cannot undo the action; recovery is possible only while the item remains in Trash."
+            : "All uncommitted changes to this file, including staged changes, will be replaced with the version in HEAD. Git cannot restore the discarded edits."
+        alert.informativeText = "\(affected)\n\n\(consequence)"
+        alert.addButton(withTitle: "Discard Changes")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let operationID = beginOperation("Discarding changes", lockCommitMessage: false) else {
+            return
+        }
+
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            let result = GitService.discard(entry, in: directory)
+            let status = result.ok ? GitService.status(in: directory) : nil
+            DispatchQueue.main.async {
+                guard self.activeOperationID == operationID else { return }
+                self.finishOperation(operationID)
+                guard self.directory == directory else { return }
+                if let status {
+                    self.applyStatus(status, in: directory)
+                    if !status.entries.contains(where: { $0.path == entry.path }) {
+                        self.activeChangesPath = nil
+                    }
+                    self.table.reloadData()
+                    self.onChanged?()
+                    self.refreshExternal()
+                } else {
+                    self.presentOperationError(title: "Discard changes failed",
+                                               message: result.message)
+                }
+            }
+        }
     }
 
     private func labeledField(_ label: String, _ field: NSView) -> NSView {
@@ -969,7 +1016,11 @@ extension GitPanelViewController: NSTableViewDelegate {
         let cell = (tableView.makeView(withIdentifier: id, owner: self)
                     as? GitChangeCell) ?? GitChangeCell()
         cell.identifier = id
-        cell.configure(entry: entries[row])
+        let entry = entries[row]
+        cell.configure(entry: entry, onDiscard: { [weak self] in
+            guard let self, let directory = self.directory else { return }
+            self.discardChanges(entry, in: directory)
+        })
         return cell
     }
 }
@@ -996,7 +1047,14 @@ private final class GitCommitCell: DrawnSidebarCell {
     override func draw(_ dirtyRect: NSRect) {
         let subjectFont = Theme.uiFont(11)
         let metaFont = Theme.uiFont(9.5)
-        let titleBand = NSRect(x: 0, y: 2, width: bounds.width, height: 18)
+        let detailFont = Theme.uiFont(9.5)
+        let titleHeight = ceil(max(subjectFont.boundingRectForFont.height,
+                                   metaFont.boundingRectForFont.height)) + 1
+        let detailHeight = ceil(detailFont.boundingRectForFont.height) + 1
+        let gap: CGFloat = 2
+        let contentHeight = titleHeight + gap + detailHeight
+        let top = floor((bounds.height - contentHeight) / 2)
+        let titleBand = NSRect(x: 0, y: top, width: bounds.width, height: titleHeight)
         let titleBaseline = SidebarCellDrawing.centeredBaseline(for: subjectFont, in: titleBand)
         // Align the chevron's visual center with the subject's cap-height, not
         // merely the row center. Commit ID and subject share this exact baseline.
@@ -1014,11 +1072,10 @@ private final class GitCommitCell: DrawnSidebarCell {
                                            width: max(0, bounds.width - 92),
                                            height: titleBand.height))
 
-        let blameFont = Theme.uiFont(9.5)
-        let blameBand = NSRect(x: 20, y: 20,
+        let blameBand = NSRect(x: 20, y: titleBand.maxY + gap,
                                width: max(0, bounds.width - 26),
-                               height: max(0, bounds.height - 21))
-        SidebarCellDrawing.text(blame, font: blameFont, color: Theme.dimText,
+                               height: detailHeight)
+        SidebarCellDrawing.text(blame, font: detailFont, color: Theme.dimText,
                                 in: blameBand)
     }
 }
@@ -1049,12 +1106,35 @@ private final class GitHistoryFileCell: DrawnSidebarCell {
 }
 
 private final class GitChangeCell: DrawnSidebarCell {
+    private let discardButton = NSButton()
     private var status = ""
     private var icon: NSImage?
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
-    func configure(entry: GitService.Status.Entry) {
+    private var onDiscard: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        discardButton.title = ""
+        discardButton.image = Theme.symbol(
+            "arrow.uturn.backward", accessibilityDescription: "Discard file changes",
+            pointSize: 11, weight: .medium)
+        discardButton.imagePosition = .imageOnly
+        discardButton.imageScaling = .scaleProportionallyDown
+        discardButton.bezelStyle = .inline
+        discardButton.isBordered = false
+        discardButton.toolTip = "Discard file changes"
+        discardButton.setAccessibilityLabel("Discard file changes")
+        discardButton.target = self
+        discardButton.action = #selector(discardAction)
+        addSubview(discardButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(entry: GitService.Status.Entry, onDiscard: @escaping () -> Void) {
+        self.onDiscard = onDiscard
         status = entry.displayCode
         statusColor = entry.isUntracked ? Theme.green : Theme.yellow
         icon = Theme.symbol(FileTreeViewController.iconName(
@@ -1064,6 +1144,13 @@ private final class GitChangeCell: DrawnSidebarCell {
         toolTip = entry.path
         exposeToAccessibility("Automatically staged \(entry.displayCode), \(entry.path)")
         needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        discardButton.frame = NSRect(x: max(0, bounds.width - 30),
+                                     y: floor((bounds.height - 24) / 2),
+                                     width: 24, height: 24)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1077,9 +1164,11 @@ private final class GitChangeCell: DrawnSidebarCell {
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
             in: NSRect(x: 44, y: 0,
-                       width: max(0, bounds.width - 50), height: bounds.height),
+                       width: max(0, bounds.width - 78), height: bounds.height),
             gap: 5, primaryLineBreak: .byTruncatingMiddle)
     }
+
+    @objc private func discardAction() { onDiscard?() }
 }
 
 private final class GitBranchCell: DrawnSidebarCell {
@@ -1194,6 +1283,7 @@ private final class GitBranchCell: DrawnSidebarCell {
 /// Two-state tab strip with the same full-height selection treatment as the
 /// bottom action bar. Native buttons preserve keyboard and VoiceOver behavior.
 private final class FlatPanelTabBar: NSView {
+    override var isFlipped: Bool { true }
     var onChange: (() -> Void)?
     var selectedSegment = 0 { didSet { updateSelection() } }
 
@@ -1255,6 +1345,7 @@ private final class FlatPanelTabBar: NSView {
 }
 
 private final class FlatPanelTabButton: NSView {
+    override var isFlipped: Bool { true }
     var onSelect: (() -> Void)?
     var title: String {
         didSet { setAccessibilityLabel(title); needsDisplay = true }

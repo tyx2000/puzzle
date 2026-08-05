@@ -53,6 +53,8 @@ final class PuzzleTextView: NSTextView {
     /// like a user-selected line. The pane uses this callback to activate line
     /// UI only for real pointer/keyboard interaction.
     var onExplicitCaretInteraction: (() -> Void)?
+    /// Return true to consume a Command-click and resolve its file/symbol.
+    var onCommandClick: ((Int) -> Bool)?
 
     /// Find-bar matches, drawn here (rather than as temporary attributes) so the
     /// bands are glyph-height instead of the full configured code row, and so they paint
@@ -574,8 +576,32 @@ final class PuzzleTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == [.command],
+           let location = commandClickCharacterIndex(for: event),
+           onCommandClick?(location) == true {
+            return
+        }
         onExplicitCaretInteraction?()
         super.mouseDown(with: event)
+    }
+
+    private func commandClickCharacterIndex(for event: NSEvent) -> Int? {
+        guard let layoutManager, let textContainer, !string.isEmpty else { return nil }
+        let local = convert(event.locationInWindow, from: nil)
+        let point = NSPoint(x: local.x - textContainerOrigin.x,
+                            y: local.y - textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        guard glyphRange.length > 0 else { return nil }
+        var fraction: CGFloat = 0
+        let glyph = layoutManager.glyphIndex(
+            for: point, in: textContainer, fractionOfDistanceThroughGlyph: &fraction)
+        guard NSLocationInRange(glyph, glyphRange) else { return nil }
+        let line = layoutManager.lineFragmentUsedRect(forGlyphAt: glyph,
+                                                       effectiveRange: nil)
+        guard point.y >= line.minY, point.y <= line.maxY,
+              point.x >= line.minX, point.x <= line.maxX + 2 else { return nil }
+        return layoutManager.characterIndexForGlyph(at: glyph)
     }
 
     /// VS Code's macOS folding shortcuts: ⌥⌘[ toggles the innermost block at

@@ -520,8 +520,10 @@ final class FileTreeViewController: NSViewController {
         guard let node = menuNode(sender), node !== root else { return }
         guard canMutate(node.url, verb: "delete") else { return }
         let alert = NSAlert()
-        alert.messageText = "Delete \(node.name)?"
-        alert.informativeText = "This item will be moved to Trash."
+        alert.alertStyle = .warning
+        alert.messageText = "Delete “\(node.name)”?"
+        let kind = node.isDirectory ? "folder and everything inside it" : "file"
+        alert.informativeText = "\(node.url.path)\n\nThe \(kind) will be moved to Trash and removed from the project. Open tabs at this path will close. Recovery is possible only while the item remains in Trash."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }

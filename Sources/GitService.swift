@@ -18,6 +18,9 @@ enum GitService {
         struct Entry {
             let code: String     // raw two-char porcelain code
             let path: String
+            /// Previous path for a porcelain rename/copy record. Paths exposed
+            /// by Status are always relative to the opened project.
+            let originalPath: String?
             var indexStatus: Character { code.first ?? " " }
             var worktreeStatus: Character { code.count > 1 ? Array(code)[1] : " " }
             var isStaged: Bool { indexStatus != " " && indexStatus != "?" }
@@ -213,11 +216,19 @@ enum GitService {
             }
             let code = String(raw.prefix(2))
             let repositoryPath = String(raw.dropFirst(3))
-            if let path = projectRelativePath(repositoryPath, prefix: prefix) {
-                entries.append(Status.Entry(code: code, path: path))
-            }
             // In -z mode a rename/copy is `XY new-path NUL old-path NUL`.
-            if code.contains("R") || code.contains("C") { index += 1 }
+            let hasOriginalPath = code.contains("R") || code.contains("C")
+            let originalPath: String?
+            if hasOriginalPath, index + 1 < records.count {
+                originalPath = projectRelativePath(String(records[index + 1]), prefix: prefix)
+            } else {
+                originalPath = nil
+            }
+            if let path = projectRelativePath(repositoryPath, prefix: prefix) {
+                entries.append(Status.Entry(code: code, path: path,
+                                            originalPath: originalPath))
+            }
+            if hasOriginalPath { index += 1 }
             index += 1
         }
         let (ahead, hasUpstream) = aheadCount(in: directory)
@@ -485,6 +496,64 @@ enum GitService {
     @discardableResult
     static func stageAll(in directory: URL) -> (out: String, err: String, code: Int32) {
         run(["add", "-A", "--", "."], in: directory)
+    }
+
+    /// Whether the change's displayed path has a version in HEAD. A newly
+    /// added file has no committed contents to restore, so discarding it means
+    /// moving the working copy to Trash after removing it from the index.
+    static func discardRemovesFile(_ entry: Status.Entry, in directory: URL) -> Bool {
+        if entry.code.contains("R"), let originalPath = entry.originalPath {
+            return run(["cat-file", "-e", "HEAD:\(repositoryRelativePath(originalPath, in: directory))"],
+                       in: directory).code != 0
+        }
+        return run(["cat-file", "-e", "HEAD:\(repositoryRelativePath(entry.path, in: directory))"],
+                   in: directory).code != 0
+    }
+
+    /// Restore one status entry to its HEAD state without touching unrelated
+    /// project files. Renames restore both names; copies and additions remove
+    /// only the newly created path. New files are moved to Trash so the action
+    /// remains recoverable outside Git.
+    static func discard(_ entry: Status.Entry, in directory: URL) -> RemoteResult {
+        let removesFile = discardRemovesFile(entry, in: directory)
+        if !removesFile {
+            var paths = [entry.path]
+            if entry.code.contains("R"), let originalPath = entry.originalPath {
+                paths.append(originalPath)
+            }
+            let result = run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + paths,
+                             in: directory)
+            guard result.code == 0 else {
+                return RemoteResult(ok: false,
+                                    message: result.err.isEmpty ? result.out : result.err)
+            }
+            return RemoteResult(ok: true, message: "Changes to \(entry.path) were discarded.")
+        }
+
+        let target = directory.appendingPathComponent(entry.path).standardizedFileURL
+        let project = directory.standardizedFileURL
+        guard target.path.hasPrefix(project.path + "/") else {
+            return RemoteResult(ok: false, message: "Refusing to discard a path outside the project.")
+        }
+
+        let unstaged = run(["rm", "--cached", "-f", "--ignore-unmatch", "--", entry.path],
+                           in: directory)
+        guard unstaged.code == 0 else {
+            return RemoteResult(ok: false,
+                                message: unstaged.err.isEmpty ? unstaged.out : unstaged.err)
+        }
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            return RemoteResult(ok: true, message: "New file \(entry.path) was removed from Git.")
+        }
+        do {
+            try FileManager.default.trashItem(at: target, resultingItemURL: nil)
+            return RemoteResult(ok: true, message: "New file \(entry.path) was moved to Trash.")
+        } catch {
+            // Put the index back the way the panel presents it if Trash failed.
+            _ = run(["add", "-A", "--", entry.path], in: directory)
+            return RemoteResult(ok: false,
+                                message: "Could not move \(entry.path) to Trash: \(error.localizedDescription)")
+        }
     }
 
     /// Stage and commit every change in the opened project. Staging at the

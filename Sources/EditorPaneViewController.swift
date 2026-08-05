@@ -24,6 +24,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var selections: [URL: NSRange] = [:]
     private var lineActivatedURLs: Set<URL> = []
     private var suppressSelectionSideEffects = false
+    private var definitionNavigationGeneration = 0
 
     private let tabBar = EditorTabBar()
     private var scrollView: NSScrollView!
@@ -93,6 +94,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             guard let self, let url = self.currentURL else { return }
             self.lineActivatedURLs.insert(url)
             self.textView.showsCurrentLineBand = true
+        }
+        textView.onCommandClick = { [weak self] location in
+            self?.navigateToDefinition(at: location) ?? false
         }
         // Custom find bar (the system one can't be restyled and shows a focus ring).
         textView.usesFindBar = false
@@ -522,8 +526,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                   document.isModified, !document.isReadOnly else { continue }
 
             let alert = NSAlert()
-            alert.messageText = "Save changes to \(document.name)?"
-            alert.informativeText = "Your edits will be lost if you close without saving."
+            alert.alertStyle = .warning
+            alert.messageText = "Save changes to “\(document.name)”?"
+            alert.informativeText = "File:\n\(document.url.path)\n\nSave writes the current editor contents to this file. Don’t Save closes the tab and permanently discards the unsaved editor contents. Cancel leaves the tab open."
             alert.addButton(withTitle: "Save")
             alert.addButton(withTitle: "Don’t Save")
             alert.addButton(withTitle: "Cancel")
@@ -554,6 +559,50 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.scrollRangeToVisible(target)
         view.window?.makeFirstResponder(textView)
         scheduleInlineBlame()
+    }
+
+    @discardableResult
+    private func navigateToDefinition(at location: Int) -> Bool {
+        guard let sourceURL = currentURL,
+              sourceURL.isFileURL,
+              let root = repositoryRoot,
+              let document = currentDocument,
+              !document.isVirtual, !document.isUnsupported, document.image == nil else {
+            return false
+        }
+        let source = textView.string
+        guard DefinitionNavigator.hasNavigableToken(in: source,
+                                                     utf16Location: location) else {
+            return false
+        }
+        definitionNavigationGeneration += 1
+        let generation = definitionNavigationGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let destination = DefinitionNavigator.resolve(
+                text: source, sourceURL: sourceURL, projectRoot: root,
+                utf16Location: location)
+            DispatchQueue.main.async {
+                guard let self, self.definitionNavigationGeneration == generation else { return }
+                guard let destination else {
+                    NSSound.beep()
+                    return
+                }
+                self.open(url: destination.url)
+                guard self.currentURL == destination.url else { return }
+                let length = self.textView.string.utf16.count
+                let target = NSRange(location: min(destination.utf16Location, length), length: 0)
+                self.selections[destination.url] = target
+                self.lineActivatedURLs.insert(destination.url)
+                self.textView.showsCurrentLineBand = true
+                self.suppressSelectionSideEffects = true
+                self.textView.setSelectedRange(target)
+                self.suppressSelectionSideEffects = false
+                self.textView.scrollRangeToVisible(target)
+                self.view.window?.makeFirstResponder(self.textView)
+                self.scheduleInlineBlame()
+            }
+        }
+        return true
     }
 
     /// Detach this pane's layout manager from whatever buffer it shows.

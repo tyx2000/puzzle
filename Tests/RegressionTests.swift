@@ -18,6 +18,7 @@ enum RegressionTests {
         try testDockRecentProjectsMenu()
         try testSearchMatcher()
         try testProjectSearchBackend()
+        try testDefinitionNavigation()
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
         try testEditorManualSave()
@@ -334,6 +335,79 @@ enum RegressionTests {
         try expect(fileHistory.first?.subject == unusualSubject
                    && fileHistory.contains(where: { $0.subject == "scoped" }),
                    "file Git history did not follow the path across its rename")
+
+        try Data("changed".utf8).write(to: project.appendingPathComponent(renamed))
+        try expect(GitService.stageAll(in: project).code == 0,
+                   "discard fixture staging failed")
+        guard let modifiedEntry = GitService.status(in: project).entries.first else {
+            throw Failure(description: "discard fixture did not produce a status entry")
+        }
+        let discarded = GitService.discard(modifiedEntry, in: project)
+        try expect(discarded.ok, "tracked file discard failed: \(discarded.message)")
+        let restoredContents = try String(contentsOf: project.appendingPathComponent(renamed),
+                                          encoding: .utf8)
+        try expect(restoredContents == "inside",
+                   "tracked file discard did not restore HEAD contents")
+
+        let secondRename = "discarded-rename.txt"
+        try expect(GitService.run(["mv", "--", renamed, secondRename], in: project).code == 0,
+                   "rename discard fixture failed")
+        guard let renameEntry = GitService.status(in: project).entries.first else {
+            throw Failure(description: "rename discard fixture did not produce a status entry")
+        }
+        try expect(renameEntry.originalPath == renamed,
+                   "porcelain rename did not retain its original path")
+        let discardedRename = GitService.discard(renameEntry, in: project)
+        try expect(discardedRename.ok, "rename discard failed: \(discardedRename.message)")
+        try expect(FileManager.default.fileExists(
+            atPath: project.appendingPathComponent(renamed).path),
+                   "rename discard did not restore the original path")
+        try expect(!FileManager.default.fileExists(
+            atPath: project.appendingPathComponent(secondRename).path),
+                   "rename discard left the renamed path behind")
+    }
+
+    private static func testDefinitionNavigation() throws {
+        let root = try temporaryDirectory("definitions")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let components = root.appendingPathComponent("components", isDirectory: true)
+        try FileManager.default.createDirectory(at: components,
+                                                withIntermediateDirectories: true)
+        let buttonURL = components.appendingPathComponent("Button.tsx")
+        let buttonText = "export function Button() { return <button /> }\n"
+        try Data(buttonText.utf8).write(to: buttonURL)
+        let appURL = root.appendingPathComponent("App.tsx")
+        let appText = """
+        import { Button } from "./components/Button"
+        const handleSubmit = () => Button()
+        function App() { return <Button onClick={handleSubmit} /> }
+        """
+        try Data(appText.utf8).write(to: appURL)
+
+        let app = appText as NSString
+        let pathClick = app.range(of: "components/Button").location + 4
+        let pathDestination = DefinitionNavigator.resolve(
+            text: appText, sourceURL: appURL, projectRoot: root,
+            utf16Location: pathClick)
+        try expect(pathDestination?.url.resolvingSymlinksInPath()
+                   == buttonURL.resolvingSymlinksInPath(),
+                   "Command-click did not resolve an extensionless import path")
+
+        let usage = app.range(of: "handleSubmit", options: .backwards).location
+        let localDestination = DefinitionNavigator.resolve(
+            text: appText, sourceURL: appURL, projectRoot: root,
+            utf16Location: usage + 2)
+        try expect(localDestination?.url == appURL
+                   && localDestination?.utf16Location == app.range(of: "handleSubmit").location,
+                   "Command-click did not prefer the local variable declaration")
+
+        let componentUsage = app.range(of: "Button", options: .backwards).location
+        let componentDestination = DefinitionNavigator.resolve(
+            text: appText, sourceURL: appURL, projectRoot: root,
+            utf16Location: componentUsage + 2)
+        try expect(componentDestination?.url.resolvingSymlinksInPath()
+                   == buttonURL.resolvingSymlinksInPath(),
+                   "Command-click did not find a component declaration in the project: \(String(describing: componentDestination))")
     }
 
     private static func testRemoteConfigurationAndPushSelection() throws {
