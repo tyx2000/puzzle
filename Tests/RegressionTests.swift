@@ -1868,6 +1868,25 @@ enum RegressionTests {
                     == .confirm(from: "the current branch", to: "topic"),
                    "an unknown current branch produced an empty prompt")
 
+        // Launching iTerm opens a window by itself, so the script must not add
+        // a second one — that was two windows per click.
+        let cold = WorkspaceWindowController.iTermScript(command: "cd /tmp",
+                                                         reusingLaunchWindow: true)
+        try expect(cold.contains("count of windows") && cold.contains("current window"),
+                   "the cold-start script does not wait for the launch window")
+        let warm = WorkspaceWindowController.iTermScript(command: "cd /tmp",
+                                                         reusingLaunchWindow: false)
+        try expect(!warm.contains("count of windows"),
+                   "the warm script waits for a window that already exists")
+        try expect(warm.components(separatedBy: "create window").count == 2,
+                   "the warm script does not create exactly one window")
+        // The cold path still has a create as its last resort, guarded by the
+        // reuse check above it.
+        try expect(cold.components(separatedBy: "create window").count == 2,
+                   "the cold script lost its fallback window")
+        try expect(cold.contains("cd /tmp") && warm.contains("cd /tmp"),
+                   "the script does not carry the command")
+
         // The terminal command is quoted, so a space or a quote in the path
         // cannot run as shell syntax.
         let quoted = WorkspaceWindowController.shellQuoted("/tmp/my project's code")
