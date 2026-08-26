@@ -4,9 +4,15 @@ import AppKit
 /// (no system focus ring), plus match count, prev/next and close.
 final class FindBarView: FlatView {
     var onClose: (() -> Void)?
+    /// The bar grew or shrank a row; the pane re-lays its content.
+    var onHeightChanged: (() -> Void)?
 
     private let input = SearchInputView()
     private let countLabel = NSTextField(labelWithString: "")
+    private let replaceInput = NSTextField()
+    private let replaceRow = NSView()
+    private let replaceToggle = NSButton()
+    private var heightConstraint: NSLayoutConstraint!
     private weak var textView: PuzzleTextView?
 
     private var matches: [NSRange] = []
@@ -44,17 +50,79 @@ final class FindBarView: FlatView {
         controls.spacing = 6
         controls.translatesAutoresizingMaskIntoConstraints = false
 
+        // The disclosure sits left of the query, where the replace row appears.
+        replaceToggle.image = NSImage(systemSymbolName: "chevron.right",
+                                      accessibilityDescription: "Toggle replace")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+        replaceToggle.isBordered = false
+        replaceToggle.bezelStyle = .regularSquare
+        replaceToggle.contentTintColor = Theme.dimText
+        replaceToggle.toolTip = "Replace"
+        replaceToggle.setAccessibilityLabel("Toggle replace")
+        replaceToggle.target = self
+        replaceToggle.action = #selector(toggleReplace)
+        replaceToggle.translatesAutoresizingMaskIntoConstraints = false
+        replaceToggle.widthAnchor.constraint(equalToConstant: 18).isActive = true
+
+        replaceInput.placeholderString = "Replace with…"
+        replaceInput.font = Theme.uiFont(12)
+        replaceInput.textColor = Theme.foreground
+        replaceInput.backgroundColor = Theme.inputBackground
+        replaceInput.isBordered = false
+        replaceInput.focusRingType = .none
+        replaceInput.drawsBackground = true
+        replaceInput.translatesAutoresizingMaskIntoConstraints = false
+
+        let replaceOne = textButton("Replace", #selector(replaceCurrent))
+        let replaceEvery = textButton("All", #selector(replaceAll))
+        let replaceControls = NSStackView(views: [replaceOne, replaceEvery])
+        replaceControls.orientation = .horizontal
+        replaceControls.spacing = 6
+        replaceControls.translatesAutoresizingMaskIntoConstraints = false
+
+        replaceRow.translatesAutoresizingMaskIntoConstraints = false
+        replaceRow.isHidden = true
+        replaceRow.addSubview(replaceInput)
+        replaceRow.addSubview(replaceControls)
+
+        addSubview(replaceToggle)
         addSubview(input)
         addSubview(controls)
+        addSubview(replaceRow)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 42)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 42),
-            input.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            input.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heightConstraint,
+            replaceToggle.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            replaceToggle.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            input.leadingAnchor.constraint(equalTo: replaceToggle.trailingAnchor, constant: 4),
+            input.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            input.heightAnchor.constraint(equalToConstant: 30),
             input.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -8),
             controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            controls.centerYAnchor.constraint(equalTo: centerYAnchor),
+            controls.centerYAnchor.constraint(equalTo: input.centerYAnchor),
             countLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
+
+            replaceRow.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 4),
+            replaceRow.leadingAnchor.constraint(equalTo: input.leadingAnchor),
+            replaceRow.trailingAnchor.constraint(equalTo: controls.trailingAnchor),
+            replaceRow.heightAnchor.constraint(equalToConstant: 28),
+
+            replaceInput.leadingAnchor.constraint(equalTo: replaceRow.leadingAnchor, constant: 6),
+            replaceInput.centerYAnchor.constraint(equalTo: replaceRow.centerYAnchor),
+            replaceInput.trailingAnchor.constraint(
+                equalTo: replaceControls.leadingAnchor, constant: -8),
+            replaceControls.trailingAnchor.constraint(equalTo: replaceRow.trailingAnchor),
+            replaceControls.centerYAnchor.constraint(equalTo: replaceRow.centerYAnchor),
         ])
+    }
+
+    private func textButton(_ title: String, _ action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = Theme.uiFont(10.5)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -100,7 +168,110 @@ final class FindBarView: FlatView {
     func refreshFonts() {
         input.refreshFonts()
         countLabel.font = Theme.uiFont(10.5)
+        replaceInput.font = Theme.uiFont(12)
+        replaceInput.backgroundColor = Theme.inputBackground
+        replaceInput.textColor = Theme.foreground
     }
+
+    // MARK: - Replace
+
+    /// Replacement text for `range`, expanding $1-style references when the
+    /// query is a regular expression so a capture can be reused.
+    func replacementText(for range: NSRange, with template: String,
+                         query: String, options: SearchOptions) -> String {
+        guard options.regex, let textView else { return template }
+        var flags: NSRegularExpression.Options = []
+        if !options.caseSensitive { flags.insert(.caseInsensitive) }
+        let pattern = options.wholeWord ? "\\b(?:\(query))\\b" : query
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: flags)
+        else { return template }
+        let haystack = textView.string as NSString
+        guard let match = expression.firstMatch(in: haystack as String, range: range)
+        else { return template }
+        return expression.replacementString(for: match, in: haystack as String,
+                                            offset: 0, template: template)
+    }
+
+    /// Replace the match the user is looking at, then move to the next one.
+    @objc private func replaceCurrent() {
+        guard let textView, current >= 0, current < matches.count else { return }
+        // Each replacement is its own ⌘Z, never merged with the typing or the
+        // replacement before it. The explicit group is what guarantees that:
+        // NSTextView otherwise groups everything in one pass of the run loop.
+        textView.breakUndoCoalescing()
+        textView.undoManager?.beginUndoGrouping()
+        defer { textView.undoManager?.endUndoGrouping() }
+        let range = matches[current]
+        let text = replacementText(for: range, with: replaceInput.stringValue,
+                                   query: input.stringValue, options: input.options)
+        guard textView.shouldChangeText(in: range, replacementString: text) else { return }
+        textView.textStorage?.replaceCharacters(in: range, with: text)
+        textView.didChangeText()
+        textView.breakUndoCoalescing()
+        // The document changed under the match list, so rebuild it and keep the
+        // caret where the replacement ended.
+        let caret = NSRange(location: range.location + (text as NSString).length, length: 0)
+        textView.setSelectedRange(caret)
+        recompute(input.stringValue, input.options)
+        step(1)
+    }
+
+    /// Replace every match as one edit, so a single ⌘Z puts them all back.
+    /// Building the whole new text and swapping it in once is what makes that
+    /// true: replacing range by range registers an undo step per match.
+    @objc private func replaceAll() {
+        guard let textView, !matches.isEmpty else { return }
+        textView.breakUndoCoalescing()
+        textView.undoManager?.beginUndoGrouping()
+        defer { textView.undoManager?.endUndoGrouping() }
+        let template = replaceInput.stringValue
+        let query = input.stringValue
+        let options = input.options
+        let result = NSMutableString(string: textView.string)
+        // Back to front, so each range still addresses the same text.
+        for range in matches.reversed() {
+            let text = replacementText(for: range, with: template,
+                                       query: query, options: options)
+            result.replaceCharacters(in: range, with: text)
+        }
+        let full = NSRange(location: 0, length: (textView.string as NSString).length)
+        let replacement = result as String
+        guard textView.shouldChangeText(in: full, replacementString: replacement) else { return }
+        textView.textStorage?.replaceCharacters(in: full, with: replacement)
+        textView.didChangeText()
+        textView.breakUndoCoalescing()
+        recompute(query, options)
+    }
+
+    /// Show or hide the replace row. Hidden by default: most finds never
+    /// replace, and the bar should not cost two rows of the editor until asked.
+    @objc func toggleReplace() {
+        setReplaceVisible(replaceRow.isHidden)
+    }
+
+    func setReplaceVisible(_ visible: Bool) {
+        guard replaceRow.isHidden == visible else { return }
+        replaceRow.isHidden = !visible
+        heightConstraint.constant = visible ? 76 : 42
+        replaceToggle.image = NSImage(
+            systemSymbolName: visible ? "chevron.down" : "chevron.right",
+            accessibilityDescription: "Toggle replace")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+        onHeightChanged?()
+        if visible { window?.makeFirstResponder(replaceInput) }
+    }
+
+    /// One row for find, two when replace is showing.
+    var preferredHeight: CGFloat { replaceRow.isHidden ? 42 : 76 }
+
+    var isReplaceVisibleForTesting: Bool { !replaceRow.isHidden }
+    func setReplacementForTesting(_ text: String) { replaceInput.stringValue = text }
+    func setOptionsForTesting(_ options: SearchOptions) {
+        input.setOptions(options)
+        recompute(input.stringValue, options)
+    }
+    func replaceCurrentForTesting() { replaceCurrent() }
+    func replaceAllForTesting() { replaceAll() }
 
     // MARK: - Matching
 
@@ -179,9 +350,23 @@ final class FindBarView: FlatView {
 
     private func select(_ index: Int) {
         guard let tv = textView, matches.indices.contains(index) else { return }
-        tv.setSelectedRange(matches[index])
+        // While the bar is on screen the selection stays put. AppKit paints an
+        // inactive selection in washed-out grey *over* the match highlight, so
+        // seeding a query from ⌘F used to grey out the very match it found.
+        // The highlight marks the current match; `finish()` moves the caret
+        // there when the bar closes.
+        if isHidden, tv.window?.firstResponder === tv {
+            tv.setSelectedRange(matches[index])
+        }
         tv.scrollRangeToVisible(matches[index])
         highlight()
+    }
+
+    /// Leave the caret on the match the user stopped at, so editing continues
+    /// from there once the bar is gone.
+    func finish() {
+        guard let textView, matches.indices.contains(current) else { return }
+        textView.setSelectedRange(matches[current])
     }
 
     /// Hand the ranges to the text view, which draws them at glyph height above

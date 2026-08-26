@@ -41,6 +41,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Empty storage used when the pane has no open file.
     private let blankStorage = NSTextStorage()
 
+    /// Index of the tab on screen, for commands that act on "the current tab".
+    var activeTabIndex: Int? { activeIndex }
+
     var currentURL: URL? { activeIndex.flatMap { openURLs.indices.contains($0) ? openURLs[$0] : nil } }
     private var currentDocument: Document? { currentURL.map { DocumentStore.shared.document(for: $0) } }
 
@@ -144,6 +147,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBar.translatesAutoresizingMaskIntoConstraints = false
         findBar.isHidden = true
         findBar.onClose = { [weak self] in self?.hideFindBar() }
+        findBar.onHeightChanged = { [weak self] in
+            guard let self else { return }
+            self.findBarHeight.constant = self.findBar.preferredHeight
+        }
         container.addSubview(findBar)
 
         diffHeader.translatesAutoresizingMaskIntoConstraints = false
@@ -244,6 +251,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: 0, length: textView.string.count))
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
+    var findBarForTesting: FindBarView { findBar }
+    var textForTesting: String { textView.string }
+    var isModifiedForTesting: Bool { currentDocument?.isModified == true }
+    func undoForTesting() { textView.undoManager?.undo() }
     var undoLevelsForTesting: Int? { textView.undoManager?.levelsOfUndo }
     func isCharacterHiddenForTesting(_ location: Int) -> Bool {
         layoutManager.isCharacterHidden(at: location)
@@ -289,15 +300,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     // MARK: - Find bar
 
-    func showFindBar(seed: String? = nil) {
+    func showFindBar(seed: String? = nil, replacing: Bool = false) {
         findBar.isHidden = false
-        findBarHeight.constant = 42
         findBar.attach(to: textView)
+        findBar.setReplaceVisible(replacing)
+        findBarHeight.constant = findBar.preferredHeight
         if let seed { findBar.setQuery(seed) }
-        findBar.focus()
+        if !replacing { findBar.focus() }
     }
 
     func hideFindBar() {
+        findBar.finish()
         findBar.clearHighlights()
         findBar.isHidden = true
         findBarHeight.constant = 0
@@ -631,15 +644,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return true
     }
 
-    func jumpToLine(_ line: Int) {
+    func jumpToLine(_ line: Int, column: Int? = nil) {
         let ns = textView.string as NSString
-        var current = 1, location = 0
+        var current = 1, location = 0, lineLength = 0
         ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
                                options: .byLines) { _, range, _, stop in
-            if current == line { location = range.location; stop.pointee = true }
+            if current == line {
+                location = range.location
+                lineLength = range.length
+                stop.pointee = true
+            }
             current += 1
         }
-        let target = NSRange(location: min(location, ns.length), length: 0)
+        // A column past the end of the line lands at its end rather than
+        // spilling into the next one.
+        let offset = column.map { min(max(0, $0 - 1), lineLength) } ?? 0
+        let target = NSRange(location: min(location + offset, ns.length), length: 0)
         if let url = currentURL { lineActivatedURLs.insert(url) }
         textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.setSelectedRange(target)

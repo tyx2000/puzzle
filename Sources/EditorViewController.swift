@@ -185,6 +185,15 @@ final class EditorViewController: NSViewController {
     }
 
     /// Split the active file into a second vertical pane with its own tabs.
+    /// Close the active pane's current tab. False when there was none to close.
+    @discardableResult
+    func closeActiveTab() -> Bool {
+        guard let pane = activePane ?? panes.first, let index = pane.activeTabIndex
+        else { return false }
+        pane.close(index: index)
+        return true
+    }
+
     func splitEditor() {
         if panes.count > 1 {
             // Already split: collapse back to a single pane.
@@ -244,10 +253,15 @@ final class EditorViewController: NSViewController {
     func save() { activePane?.save() }
 
     /// Show the in-file find bar in the focused pane, optionally pre-filled.
-    func showFindBar(seed: String? = nil) {
-        (activePane ?? panes.first)?.showFindBar(seed: seed)
+    func showFindBar(seed: String? = nil, replacing: Bool = false) {
+        (activePane ?? panes.first)?.showFindBar(seed: seed, replacing: replacing)
     }
-    func jumpToLine(_ line: Int) { activePane?.jumpToLine(line) }
+    func jumpToLine(_ line: Int, column: Int? = nil) {
+        activePane?.jumpToLine(line, column: column)
+    }
+
+    /// Whether any pane has a document to act on (⌘L has nothing to do without).
+    var hasOpenDocument: Bool { (activePane ?? panes.first)?.currentURL != nil }
 
     /// Re-apply font / line-height settings to every pane.
     func refreshDisplay() {

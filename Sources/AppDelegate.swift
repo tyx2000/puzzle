@@ -285,6 +285,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Puzzle", action: #selector(showAbout), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings…",
+                        action: #selector(WorkspaceWindowController.showSettings(_:)),
+                        keyEquivalent: ",")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Puzzle",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
@@ -300,11 +304,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recentMenu.delegate = self
         recentItem.submenu = recentMenu
         fileMenu.addItem(recentItem)
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Quick Open…",
+                         action: #selector(WorkspaceWindowController.quickOpen(_:)),
+                         keyEquivalent: "p")
+        fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Save",
                          action: #selector(WorkspaceWindowController.saveDocument(_:)), keyEquivalent: "s")
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Close Window",
-                         action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        // ⌘W closes the tab, as it does in every editor; the window needs the
+        // shift. Closing the last tab still closes the window.
+        fileMenu.addItem(withTitle: "Close Tab",
+                         action: #selector(WorkspaceWindowController.closeTab(_:)),
+                         keyEquivalent: "w")
+        let closeWindow = NSMenuItem(title: "Close Window",
+                                     action: #selector(NSWindow.performClose(_:)),
+                                     keyEquivalent: "w")
+        closeWindow.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(closeWindow)
         fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
@@ -320,6 +337,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Find in File…",
                          action: #selector(WorkspaceWindowController.findInFile(_:)), keyEquivalent: "f")
+        let replaceItem = NSMenuItem(
+            title: "Find and Replace…",
+            action: #selector(WorkspaceWindowController.findAndReplace(_:)),
+            keyEquivalent: "f")
+        replaceItem.keyEquivalentModifierMask = [.command, .option]
+        editMenu.addItem(replaceItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Go to Line…",
+                         action: #selector(WorkspaceWindowController.goToLine(_:)),
+                         keyEquivalent: "l")
+        editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Find in Folder…",
                          action: #selector(WorkspaceWindowController.findInFolder(_:)), keyEquivalent: "F")
         editMenuItem.submenu = editMenu

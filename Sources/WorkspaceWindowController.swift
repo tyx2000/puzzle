@@ -22,6 +22,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var gitSummaryDirectory: URL?
     /// Branch currently checked out, as last reported by the Git refresh.
     private var currentBranchName: String?
+    /// ⌘P's panel and the file list behind it.
+    private var palette: PalettePanel?
+    private var quickOpenIndex: [String] = []
+    private var quickOpenIndexInFlight = false
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
@@ -95,6 +99,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private func wire() {
         sidebar.fileTree.onOpenFile = { [weak self] url in self?.editor.open(url: url) }
         sidebar.fileTree.onGitHistory = { [weak self] url in self?.showFileHistory(for: url) }
+        sidebar.fileTree.onOpenInTerminal = { url in Self.openTerminal(at: url) }
         sidebar.fileTree.onFileSystemChanged = { [weak self] in
             self?.sidebar.refreshGitPanelIfLoaded()
             self?.refreshGit(requireFollowUp: true)
@@ -215,6 +220,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         workspaceFileMonitor?.stop()
         workspaceFileMonitor = nil
         projectURL = url
+        quickOpenIndex = []
+        palette?.dismiss()
         editor.hasProject = true
         editor.repositoryRoot = url
         RecentProjects.shared.add(url)
@@ -465,17 +472,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// (no iTerm, or automation not permitted).
     private func openProjectInTerminal() {
         guard let projectURL else { return }
-        let command = "cd " + Self.shellQuoted(projectURL.path)
+        Self.openTerminal(at: projectURL)
+    }
+
+    /// Open a terminal window at `directory` — the title strip and the file
+    /// tree's context menu both land here.
+    static func openTerminal(at directory: URL) {
+        let command = "cd " + shellQuoted(directory.path)
         // Launching iTerm already opens a window; asking for another on top of
         // that is what produced two. Only create one when it was running.
-        let reuseLaunchWindow = !Self.isITermRunning
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard !Self.runITermScript(command: command,
-                                       reusingLaunchWindow: reuseLaunchWindow) else { return }
+        let reuseLaunchWindow = !isITermRunning
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard !runITermScript(command: command,
+                                  reusingLaunchWindow: reuseLaunchWindow) else { return }
             DispatchQueue.main.async {
-                // `self` only gates the fallback on the window still existing.
-                guard self != nil, let terminal = Self.terminalApplication() else { return }
-                NSWorkspace.shared.open([projectURL], withApplicationAt: terminal,
+                guard let terminal = terminalApplication() else { return }
+                NSWorkspace.shared.open([directory], withApplicationAt: terminal,
                                         configuration: NSWorkspace.OpenConfiguration(),
                                         completionHandler: nil)
             }
@@ -535,6 +547,79 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     static func appleScriptQuoted(_ text: String) -> String {
         text.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    // MARK: - Quick Open / Go to Line
+
+    /// ⌘P. The file index is built off the main thread on first use and reused
+    /// until the project changes, so typing stays responsive on a big checkout.
+    @objc func quickOpen(_ sender: Any?) {
+        guard let directory = projectURL, let window else { return }
+        let panel = ensurePalette()
+        panel.configure(placeholder: "Search files by name",
+                        hint: "Type to filter · ↑↓ to choose · ↩ to open · esc to dismiss")
+        panel.onQueryChanged = { [weak self, weak panel] query in
+            guard let self, let panel else { return }
+            panel.setItems(self.quickOpenItems(matching: query))
+        }
+        panel.onAccept = { [weak self, weak panel] item in
+            panel?.dismiss()
+            guard let self, let url = item?.value else { return }
+            self.editor.open(url: url)
+        }
+        panel.setQuery("")
+        panel.setItems(quickOpenItems(matching: ""))
+        panel.present(over: window)
+        refreshQuickOpenIndex(for: directory)
+    }
+
+    /// ⌘L. Same panel, no list: a line (or `line:column`) to jump to.
+    @objc func goToLine(_ sender: Any?) {
+        guard let window, editor.hasOpenDocument else { return }
+        let panel = ensurePalette()
+        panel.configure(placeholder: "Line number",
+                        hint: "Type a line, or line:column · ↩ to jump · esc to dismiss")
+        panel.onQueryChanged = { [weak panel] _ in panel?.setItems([]) }
+        panel.onAccept = { [weak self, weak panel] _ in
+            guard let self, let panel else { return }
+            guard let target = QuickOpen.lineTarget(panel.query) else { return }
+            panel.dismiss()
+            self.editor.jumpToLine(target.line, column: target.column)
+        }
+        panel.setQuery("")
+        panel.setItems([])
+        panel.present(over: window)
+    }
+
+    private func ensurePalette() -> PalettePanel {
+        if let palette { return palette }
+        let made = PalettePanel()
+        palette = made
+        return made
+    }
+
+    private func quickOpenItems(matching query: String) -> [PalettePanel.Item] {
+        guard let directory = projectURL else { return [] }
+        return QuickOpen.matches(quickOpenIndex, query: query).map { path in
+            PalettePanel.Item(title: (path as NSString).lastPathComponent,
+                              detail: (path as NSString).deletingLastPathComponent,
+                              value: directory.appendingPathComponent(path))
+        }
+    }
+
+    private func refreshQuickOpenIndex(for directory: URL) {
+        guard !quickOpenIndexInFlight else { return }
+        quickOpenIndexInFlight = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let paths = QuickOpen.index(in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.projectURL == directory else { return }
+                self.quickOpenIndexInFlight = false
+                self.quickOpenIndex = paths
+                guard let palette = self.palette, palette.isVisible else { return }
+                palette.setItems(self.quickOpenItems(matching: palette.query))
+            }
+        }
     }
 
     // MARK: - Branch menu
@@ -732,8 +817,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func saveDocument(_ sender: Any?) { editor.save() }
     @objc func findInFile(_ sender: Any?) { editor.showFindBar() }
+    @objc func findAndReplace(_ sender: Any?) { editor.showFindBar(replacing: true) }
     @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
     @objc func splitEditor(_ sender: Any?) { editor.splitEditor() }
+
+    @objc func showSettings(_ sender: Any?) { openSettings() }
+
+    /// ⌘W. With nothing open the window itself closes, so the shortcut never
+    /// feels dead.
+    @objc func closeTab(_ sender: Any?) {
+        guard editor.closeActiveTab() else {
+            window?.performClose(sender)
+            return
+        }
+    }
     @objc func showFiles(_ sender: Any?) {
         root.showSidebar(); sidebar.showFiles(); root.preserveSidebarWidth()
     }

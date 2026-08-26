@@ -8,6 +8,9 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
     var onSubmit: ((String, SearchOptions) -> Void)?
     var onCancel: (() -> Void)?
 
+    /// Set the toggles programmatically (⌥⌘F seeding, tests).
+    func setOptions(_ newOptions: SearchOptions) { options = newOptions }
+
     private(set) var options = SearchOptions() {
         didSet {
             guard options != oldValue else { return }

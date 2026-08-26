@@ -963,26 +963,62 @@ final class PuzzleTextView: NSTextView {
             let glyphRange = layoutManager.glyphRange(forCharacterRange: clamped,
                                                       actualCharacterRange: nil)
             guard glyphRange.length > 0 else { continue }
-            (index == currentMatchIndex ? Theme.findMatchCurrent : Theme.findMatch).setFill()
+            Theme.matchOutline.setStroke()
+            let outlineWidth = index == currentMatchIndex
+                ? Theme.currentMatchOutlineWidth : Theme.matchOutlineWidth
 
             layoutManager.enumerateEnclosingRects(
                 forGlyphRange: glyphRange,
                 withinSelectedGlyphRange: notSelected,
                 in: container
-            ) { [weak self] rect, _ in
-                guard let self else { return }
-                // Match the glyph box so the band isn't the full tall line height.
+            ) { enclosing, _ in
+                // The highlight is the whole row: a glyph-height band left the
+                // configured line height showing above and below it, which read
+                // as a stripe rather than a highlighted line.
                 var eff = NSRange()
                 let frag = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location,
                                                           effectiveRange: &eff)
-                let box = self.glyphBox(fragmentHeight: frag.height)
-                var r = rect
-                r.origin.y = frag.minY + box.top
-                r.size.height = box.height
+                var r = enclosing
+                r.origin.y = frag.minY
+                r.size.height = frag.height
                 r = r.offsetBy(dx: inset.width, dy: inset.height)
-                r.fill()
+                // Inset by half the pen so the stroke lands inside the row
+                // instead of straddling the line below it.
+                let path = NSBezierPath(roundedRect: r.insetBy(dx: outlineWidth / 2,
+                                                               dy: outlineWidth / 2),
+                                        xRadius: Theme.matchCornerRadius,
+                                        yRadius: Theme.matchCornerRadius)
+                path.lineWidth = outlineWidth
+                path.stroke()
             }
         }
+    }
+
+    /// The rects `drawSearchMatches` would fill, ignoring what is on screen.
+    /// Keeps the highlight geometry checkable without a live scroll view.
+    func matchHighlightRectsForTesting() -> [NSRect] {
+        guard let layoutManager, let container = textContainer else { return [] }
+        let inset = textContainerInset
+        var rects: [NSRect] = []
+        for range in searchMatches {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: range,
+                                                  actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            var effective = NSRange()
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyphs.location,
+                                                          effectiveRange: &effective)
+            layoutManager.enumerateEnclosingRects(
+                forGlyphRange: glyphs,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: container
+            ) { enclosing, _ in
+                var rect = enclosing
+                rect.origin.y = fragment.minY
+                rect.size.height = fragment.height
+                rects.append(rect.offsetBy(dx: inset.width, dy: inset.height))
+            }
+        }
+        return rects
     }
 
     /// Vertical geometry of just the glyphs inside a line fragment. Search-match

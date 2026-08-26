@@ -10,6 +10,9 @@ final class SearchViewController: NSViewController {
     private var directory: URL?
     private let searchField = SearchInputView()
     private let summaryLabel = NSTextField(labelWithString: "")
+    /// Fills the empty result area: what this panel searches, and what the
+    /// three cryptic toggles above it mean.
+    private let placeholderLabel = NSTextField(labelWithString: "")
     private let outline = NSOutlineView()
     private var searchWork: DispatchWorkItem?
     /// Cancellation alone is not an identity check: an old task can finish
@@ -47,6 +50,7 @@ final class SearchViewController: NSViewController {
         if isViewLoaded {
             outline.reloadData()
             summaryLabel.stringValue = ""
+            updatePlaceholder(query: "", matches: nil)
         }
     }
 
@@ -86,7 +90,15 @@ final class SearchViewController: NSViewController {
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(searchField)
+        placeholderLabel.font = Theme.uiFont(11)
+        placeholderLabel.textColor = Theme.dimText
+        placeholderLabel.alignment = .center
+        placeholderLabel.maximumNumberOfLines = 0
+        placeholderLabel.lineBreakMode = .byWordWrapping
+        placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(summaryLabel)
+        container.addSubview(placeholderLabel)
+        defer { updatePlaceholder(query: "", matches: nil) }
         container.addSubview(scroll)
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
@@ -95,6 +107,12 @@ final class SearchViewController: NSViewController {
             summaryLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
             summaryLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             summaryLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            placeholderLabel.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 40),
+            placeholderLabel.leadingAnchor.constraint(
+                equalTo: container.leadingAnchor, constant: 24),
+            placeholderLabel.trailingAnchor.constraint(
+                equalTo: container.trailingAnchor, constant: -24),
+
             scroll.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -104,6 +122,30 @@ final class SearchViewController: NSViewController {
     }
 
     func focusSearchField() { searchField.focus() }
+
+    /// The results area explains itself when it has nothing to show: what the
+    /// panel does before a query, and what came back after one.
+    private func updatePlaceholder(query: String, matches: Int?) {
+        guard groups.isEmpty else {
+            placeholderLabel.isHidden = true
+            return
+        }
+        if query.isEmpty {
+            placeholderLabel.stringValue = "Search every file in this project.\n\n"
+                + "Aa  match case      wd  whole word      .*  regular expression"
+        } else if let matches, matches == 0 {
+            placeholderLabel.stringValue = "No matches for “\(query)”."
+        } else if query.count < 2 {
+            placeholderLabel.stringValue = "Keep typing — searching starts at two characters."
+        } else {
+            placeholderLabel.stringValue = ""
+        }
+        placeholderLabel.isHidden = placeholderLabel.stringValue.isEmpty
+    }
+
+    var placeholderTextForTesting: String {
+        placeholderLabel.isHidden ? "" : placeholderLabel.stringValue
+    }
 
     func refreshFonts() {
         (view as? FlatView)?.fillColor = Theme.panelBackground
@@ -143,6 +185,7 @@ final class SearchViewController: NSViewController {
         guard query.count >= 2, let directory else {
             groups = []; hitRowCache.removeAll(); outline.reloadData()
             summaryLabel.stringValue = query.isEmpty ? "" : "Type at least 2 characters"
+            updatePlaceholder(query: query, matches: nil)
             return
         }
         // Release the previous result tree before the replacement is built, so
@@ -151,6 +194,7 @@ final class SearchViewController: NSViewController {
         hitRowCache.removeAll()
         outline.reloadData()
         summaryLabel.stringValue = "Searching…"
+        updatePlaceholder(query: query, matches: nil)
         // Disk search cannot see edits that have not been saved yet. Snapshot
         // modified buffers on the main thread, then let the worker use those
         // immutable strings instead of stale disk content.
@@ -171,6 +215,7 @@ final class SearchViewController: NSViewController {
                 self.summaryLabel.stringValue = matches == 0
                     ? "No results"
                     : "\(matches) result\(matches == 1 ? "" : "s") in \(found.count) file\(found.count == 1 ? "" : "s")"
+                self.updatePlaceholder(query: query, matches: matches)
             }
         }
         searchWork = work
@@ -425,10 +470,11 @@ extension SearchViewController: NSOutlineViewDataSource {
 }
 
 extension SearchViewController: NSOutlineViewDelegate {
+    /// File rows and the code lines under them are the same kind of row as the
+    /// file tree's, so they take the same `tree_line_height` instead of each
+    /// measuring its own font.
     func outlineView(_ ov: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        // Scale with the UI font so larger `ui_font_size` isn't clipped.
-        let base = ceil(Theme.uiFont(11.5).boundingRectForFont.height)
-        return item is FileGroup ? max(24, base + 9) : max(20, base + 5)
+        Theme.treeRowHeight()
     }
 
     /// Flat selection matching the file tree's active row — the system blue
@@ -486,8 +532,12 @@ private final class SearchGroupCell: DrawnSidebarCell {
     }
 }
 
-private final class SearchHitCell: DrawnSidebarCell {
+final class SearchHitCell: DrawnSidebarCell {
     private var content = NSAttributedString()
+    private var highlightRange: NSRange?
+    /// Measuring the run costs a TextKit pass, so keep it until the row or the
+    /// panel width changes.
+    private var cachedHighlight: (width: CGFloat, rect: NSRect)?
     private let paragraph: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
@@ -512,25 +562,91 @@ private final class SearchHitCell: DrawnSidebarCell {
             .foregroundColor,
             value: Theme.dimText,
             range: NSRange(location: 1, length: (number as NSString).length))
+        // The highlight is painted behind the row rather than set as a
+        // background attribute: an attribute only covers the glyph box, which
+        // left a band of row above and below it.
         if let match = hit.matchRange,
            NSMaxRange(match) <= (hit.preview as NSString).length {
             let previewOffset = (prefix as NSString).length
-            attributed.addAttribute(
-                .backgroundColor,
-                value: Theme.searchMatch,
-                range: NSRange(location: previewOffset + match.location, length: match.length))
+            // The fill is dark enough for the row's own text colour to stay
+            // readable, so the match is not re-inked.
+            highlightRange = NSRange(location: previewOffset + match.location,
+                                     length: match.length)
+        } else {
+            highlightRange = nil
         }
         content = attributed
+        cachedHighlight = nil
         exposeToAccessibility("Line \(number): \(hit.preview)")
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let textWidth = max(0, bounds.width - 4)
+        if let box = highlightBox(width: textWidth) {
+            // An outline, not a fill: the preview keeps its own contrast and
+            // nothing is painted over the matched text.
+            Theme.matchOutline.setStroke()
+            let pen = Theme.matchOutlineWidth
+            let path = NSBezierPath(
+                roundedRect: NSRect(x: box.minX, y: 0,
+                                    width: box.width, height: bounds.height)
+                    .insetBy(dx: pen / 2, dy: pen / 2),
+                xRadius: Theme.matchCornerRadius, yRadius: Theme.matchCornerRadius)
+            path.lineWidth = pen
+            path.stroke()
+        }
         // Gutter number and source text are intentionally one attributed line:
         // tab stops and a shared baseline make vertical drift impossible.
         SidebarCellDrawing.attributedText(
             content,
-            in: NSRect(x: 0, y: 0, width: max(0, bounds.width - 4), height: bounds.height))
+            in: NSRect(x: 0, y: 0, width: textWidth, height: bounds.height))
+    }
+
+    var contentForTesting: NSAttributedString { content }
+    func highlightBoxForTesting(width: CGFloat) -> NSRect? { highlightBox(width: width) }
+
+    /// Where the matched run sits horizontally. Measured through TextKit because
+    /// the line carries tab stops for the gutter, so a substring width would be
+    /// wrong.
+    private func highlightBox(width: CGFloat) -> NSRect? {
+        guard let highlightRange, width > 0 else { return nil }
+        if let cachedHighlight, cachedHighlight.width == width { return cachedHighlight.rect }
+        let storage = NSTextStorage(attributedString: content)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        let glyphs = manager.glyphRange(forCharacterRange: highlightRange,
+                                        actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        storage.removeLayoutManager(manager)
+        guard rect.width > 0 else { return nil }
+        cachedHighlight = (width, rect)
+        return rect
+    }
+}
+
+/// Proves the highlight is painted, not attached to the glyphs: a background
+/// attribute would put the colour inside `content` instead.
+struct SearchHitCellProbe {
+    var fillsRowHeightForTesting: Bool {
+        let cell = SearchHitCell()
+        cell.frame = NSRect(x: 0, y: 0, width: 320, height: 40)
+        cell.configure(hit: SearchViewController.Hit(
+            line: 12, preview: "let value = compute()", matchRange: NSRange(location: 4, length: 5)))
+        var attributed = false
+        cell.contentForTesting.enumerateAttribute(
+            .backgroundColor,
+            in: NSRange(location: 0, length: cell.contentForTesting.length)
+        ) { value, _, _ in
+            if value != nil { attributed = true }
+        }
+        guard !attributed else { return false }
+        guard let box = cell.highlightBoxForTesting(width: 316) else { return false }
+        return box.width > 0
     }
 }
 

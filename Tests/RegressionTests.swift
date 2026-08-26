@@ -11,6 +11,9 @@ enum RegressionTests {
         _ = NSApplication.shared
         try testProcessDrain()
         try testReviewFixes()
+        try testQuickOpenAndGoToLine()
+        try testFindAndReplace()
+        try testPanelAffordances()
         try testScopedStatusAndStaging()
         try testGitIgnoreRefreshReconciliation()
         try testRemoteConfigurationAndPushSelection()
@@ -277,6 +280,259 @@ enum RegressionTests {
     /// More than one pipe buffer on stderr used to make GitService wait forever
     /// while it synchronously read stdout first.
     /// The six defects found in the whole-project review.
+    private static func testQuickOpenAndGoToLine() throws {
+        // Fuzzy ranking: initials find a long name, the file name beats the
+        // directory, and a shorter path wins a tie.
+        let paths = [
+            "Sources/EditorPaneViewController.swift",
+            "Sources/Theme.swift",
+            "Tests/RegressionTests.swift",
+            "vendor/tree-sitter/lib/src/parser.c",
+            "Sources/deep/nested/Theme.swift",
+        ]
+        try expect(QuickOpen.matches(paths, query: "epvc").first
+                    == "Sources/EditorPaneViewController.swift",
+                   "initials did not find the long name: "
+                    + "\(QuickOpen.matches(paths, query: "epvc"))")
+        try expect(QuickOpen.matches(paths, query: "theme").first == "Sources/Theme.swift",
+                   "the shorter path did not win: \(QuickOpen.matches(paths, query: "theme"))")
+        try expect(QuickOpen.matches(paths, query: "parser.c") == ["vendor/tree-sitter/lib/src/parser.c"],
+                   "an exact file name did not match alone")
+        try expect(QuickOpen.matches(paths, query: "zzz").isEmpty,
+                   "a query matching nothing still returned rows")
+        try expect(QuickOpen.matches(paths, query: "").count == paths.count,
+                   "an empty query did not list the project")
+        try expect(QuickOpen.score("Sources/Theme.swift", query: "emeht") == nil,
+                   "characters out of order matched")
+
+        // The index skips the directories nobody wants in ⌘P.
+        let directory = try temporaryDirectory("quick-open")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let nested = directory.appendingPathComponent("Sources")
+        let ignored = directory.appendingPathComponent("node_modules/pkg")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ignored, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: nested.appendingPathComponent("App.swift"))
+        try Data("x".utf8).write(to: ignored.appendingPathComponent("index.js"))
+        let index = QuickOpen.index(in: directory)
+        try expect(index == ["Sources/App.swift"],
+                   "the index picked up ignored directories: \(index)")
+
+        // Go to Line parsing.
+        try expect(QuickOpen.lineTarget("42")?.line == 42
+                    && QuickOpen.lineTarget("42")?.column == nil,
+                   "a bare line number did not parse")
+        try expect(QuickOpen.lineTarget(" 12:8 ")?.line == 12
+                    && QuickOpen.lineTarget("12:8")?.column == 8,
+                   "line:column did not parse")
+        try expect(QuickOpen.lineTarget("0") == nil && QuickOpen.lineTarget("abc") == nil
+                    && QuickOpen.lineTarget("") == nil,
+                   "a non-line query was accepted")
+
+        // The jump respects the column and clamps past the end of the line.
+        let file = directory.appendingPathComponent("lines.swift")
+        try Data("first line\nsecond line\n".utf8).write(to: file)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: file)
+        pane.jumpToLine(2, column: 8)
+        try expect(pane.caretLocationForTesting == "first line\n".count + 7,
+                   "line:column landed at \(pane.caretLocationForTesting)")
+        pane.jumpToLine(2, column: 999)
+        try expect(pane.caretLocationForTesting == "first line\nsecond line".count,
+                   "a column past the line did not clamp to its end")
+
+        // The panel keeps the keyboard contract: arrows move, Return accepts.
+        let panel = PalettePanel()
+        panel.setItems([
+            PalettePanel.Item(title: "a.swift", detail: "Sources", value: file),
+            PalettePanel.Item(title: "b.swift", detail: "Sources", value: file),
+        ])
+        try expect(panel.selectedIndexForTesting == 0, "the first row was not preselected")
+        panel.moveSelectionForTesting(by: 1)
+        try expect(panel.selectedIndexForTesting == 1, "down did not move the selection")
+        panel.moveSelectionForTesting(by: 5)
+        try expect(panel.selectedIndexForTesting == 1, "the selection ran past the last row")
+        var accepted: URL?
+        panel.onAccept = { accepted = $0?.value }
+        panel.acceptForTesting()
+        try expect(accepted == file, "Return did not hand back the highlighted row")
+    }
+
+    private static func testFindAndReplace() throws {
+        let directory = try temporaryDirectory("find-replace")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("sample.swift")
+        try Data("let a = 1\nlet b = 2\nlet c = 3\n".utf8).write(to: file)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: file)
+
+        // The replace row is out of the way until asked for, and the bar grows
+        // by exactly one row when it appears.
+        pane.showFindBar(seed: "let")
+        let bar = pane.findBarForTesting
+        try expect(!bar.isReplaceVisibleForTesting, "the replace row was showing unasked")
+        let findOnly = bar.preferredHeight
+        pane.showFindBar(seed: "let", replacing: true)
+        try expect(bar.isReplaceVisibleForTesting, "⌥⌘F did not reveal the replace row")
+        try expect(bar.preferredHeight > findOnly,
+                   "the bar did not make room for the replace row")
+
+        // Replace one: the first match changes, the rest do not.
+        bar.setReplacementForTesting("var")
+        bar.replaceCurrentForTesting()
+        try expect(pane.textForTesting == "var a = 1\nlet b = 2\nlet c = 3\n",
+                   "replace-one changed the wrong text: \(pane.textForTesting.debugDescription)")
+        try expect(pane.isModifiedForTesting, "a replacement did not dirty the document")
+
+        // Replace all: every remaining match, in one undo step. The run loop
+        // turn is what a real click provides — NSTextView groups undo per pass,
+        // so without it both replacements would land in the same group.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        bar.replaceAllForTesting()
+        try expect(pane.textForTesting == "var a = 1\nvar b = 2\nvar c = 3\n",
+                   "replace-all missed matches: \(pane.textForTesting.debugDescription)")
+        pane.undoForTesting()
+        try expect(pane.textForTesting == "var a = 1\nlet b = 2\nlet c = 3\n",
+                   "replace-all did not undo as one step: "
+                    + "\(pane.textForTesting.debugDescription)")
+
+        // A regex replacement can reuse what it captured.
+        pane.showFindBar(seed: "", replacing: true)
+        var regexOptions = SearchOptions()
+        regexOptions.regex = true
+        bar.setOptionsForTesting(regexOptions)
+        bar.setQuery("var (\\w+) = (\\d+)")
+        bar.setReplacementForTesting("let $1: Int = $2")
+        bar.replaceAllForTesting()
+        try expect(pane.textForTesting.contains("let a: Int = 1"),
+                   "a capture group was not expanded: \(pane.textForTesting.debugDescription)")
+    }
+
+    private static func testPanelAffordances() throws {
+        // Search: the empty result area says what the panel does, and what the
+        // three toggles above it mean, instead of showing a blank well.
+        let search = SearchViewController()
+        _ = search.view
+        let idle = search.placeholderTextForTesting
+        try expect(idle.contains("Search every file"),
+                   "the search panel has no empty state: \(idle.debugDescription)")
+        try expect(idle.contains("match case") && idle.contains("whole word")
+                    && idle.contains("regular expression"),
+                   "the empty state does not explain Aa / wd / .*")
+
+        // Search rows measure like the file tree's, not their own font.
+        let savedTreeHeight = Settings.shared.treeLineHeight
+        defer { Settings.shared.treeLineHeight = savedTreeHeight; Theme.invalidateCaches() }
+        Settings.shared.treeLineHeight = 31
+        Theme.invalidateCaches()
+        let outline = NSOutlineView()
+        let fileRow = search.outlineView(outline, heightOfRowByItem: NSObject())
+        try expect(fileRow == Theme.treeRowHeight() && fileRow == 31,
+                   "a search row is \(fileRow)pt against the tree's \(Theme.treeRowHeight())pt")
+
+        // The highlight is painted behind the whole row, not attached to the
+        // glyphs.
+        let cell = SearchHitCellProbe()
+        try expect(cell.fillsRowHeightForTesting,
+                   "the highlight is a glyph-height attribute again")
+        try expect(Theme.matchCornerRadius == 5,
+                   "the match highlight lost its corner radius")
+
+        func luma(_ color: NSColor) -> CGFloat {
+            guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+            return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        }
+        // Nothing is painted over the text any more, so the only requirement on
+        // the outline is that it is visible against the surfaces it is drawn on.
+        for theme in [Theme.Name.one, .ayuDark] {
+            Settings.shared.theme = theme
+            Theme.invalidateCaches()
+            let outline = luma(Theme.matchOutline)
+            try expect(abs(outline - luma(Theme.editorBackground)) > 0.1,
+                       "\(theme.rawValue): the outline does not separate from the editor")
+            try expect(abs(outline - luma(Theme.panelBackground)) > 0.1,
+                       "\(theme.rawValue): the outline does not separate from the panel")
+        }
+        Settings.shared.theme = .ayuDark
+        Theme.invalidateCaches()
+        // Stepping through matches still reads: the current one is drawn with a
+        // heavier pen, in the same colour.
+        try expect(Theme.currentMatchOutlineWidth > Theme.matchOutlineWidth,
+                   "the current match is drawn no differently from the others")
+        // In the editor the highlight is the full configured row, not the glyph
+        // box it used to be — that is what the 5pt corners are drawn on.
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        // Real documents carry the theme's paragraph style, which is what makes
+        // a line fragment the configured row height.
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: "let value = 1\nlet other = 2\n",
+            attributes: Theme.textAttributes(color: Theme.foreground)))
+        let bar = FindBarView(frame: .zero)
+        bar.attach(to: textView)
+        bar.setQuery("let")
+        let rects = textView.matchHighlightRectsForTesting()
+        try expect(rects.count == 2, "the editor highlighted \(rects.count) of 2 matches")
+        let rowHeight = Theme.lineMetrics().target
+        // The glyph box was ~14pt against a 27pt row; the fragment can round a
+        // point above the configured height, so allow for that but nothing near
+        // the old band.
+        try expect(rects.allSatisfy { $0.height >= rowHeight && $0.height <= rowHeight + 2 },
+                   "a match highlight is \(rects.map(\.height)) tall, not the \(rowHeight)pt row")
+        try expect(rects.allSatisfy { $0.width > 0 },
+                   "a match highlight has no width")
+
+
+
+        // Ayu: the current match has to stand apart from the other matches and
+        // from the selection, or ↑↓ looks like it does nothing.
+        let settings = Settings.shared
+        let savedTheme = settings.theme
+        defer { settings.theme = savedTheme; Theme.invalidateCaches() }
+        settings.theme = .ayuDark
+        Theme.invalidateCaches()
+        func luminance(_ color: NSColor) -> CGFloat {
+            guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+            return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        }
+        // Matches are outlined, so what has to hold is that the outline reads
+        // against the editor and against the selection it may sit inside.
+        try expect(abs(luminance(Theme.matchOutline) - luminance(Theme.editorBackground)) > 0.1,
+                   "the match outline is invisible on the editor background")
+        try expect(abs(luminance(Theme.matchOutline) - luminance(Theme.selection)) > 0.08,
+                   "the match outline disappears inside a selection")
+
+        // The commit box explains itself and takes ⌘↩.
+        let commit = CommitMessageTextView()
+        commit.placeholder = "Commit message  (⌘↩ to commit)"
+        var committed = 0
+        commit.onCommitShortcut = { committed += 1 }
+        guard let enter = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\r",
+            charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            throw Failure(description: "could not synthesise ⌘↩")
+        }
+        commit.keyDown(with: enter)
+        try expect(committed == 1, "⌘↩ did not commit")
+        guard let plain = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\r",
+            charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            throw Failure(description: "could not synthesise ↩")
+        }
+        commit.keyDown(with: plain)
+        try expect(committed == 1, "a plain Return committed instead of inserting a newline")
+    }
+
     private static func testReviewFixes() throws {
         // 1. Settings: a `//` inside a value must not swallow the real comment,
         //    which made the whole file unparseable and reverted every setting.
@@ -1380,8 +1636,17 @@ enum RegressionTests {
         clearingFindBar.attach(to: textView)
         clearingFindBar.setQuery("payload")
         clearingFindBar.setQuery("p")
+        // Stepping does not move the selection while the query field has focus:
+        // AppKit paints an inactive selection over the match band, so the
+        // current match would look like every other one. The band marks it, and
+        // closing the bar leaves the caret there.
+        try expect(textView.selectedRange().length == 0,
+                   "the find bar moved the selection while the editor was unfocused")
+        try expect(textView.currentMatchIndex == 0 && !textView.searchMatches.isEmpty,
+                   "the current match is not marked at all")
+        clearingFindBar.finish()
         try expect(textView.selectedRange().length == 1,
-                   "one-character find fixture did not select its current match")
+                   "closing the bar did not leave the caret on the match")
         clearingFindBar.setQuery("")
         try expect(textView.searchMatches.isEmpty && textView.currentMatchIndex == nil
                    && textView.selectedRange().length == 0,

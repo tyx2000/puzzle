@@ -76,7 +76,13 @@ enum Theme {
     /// active file in the tree
     static var activeRow: NSColor        { themed(0xdadadb, 0x2f343e, ayu: 0x232a36) }
     /// matched text in search results
-    static var searchMatch: NSColor      { themed(0xc5d5f5, 0x3a4a63, ayu: 0x4c4126) }
+    /// A match, wherever it is found: drawn as a rounded outline, never a fill.
+    /// Nothing is painted over the text, so code keeps its syntax colours and a
+    /// result row keeps its own contrast.
+    static var matchOutline: NSColor     { themed(0xb8912f, 0x8a6f22, ayu: 0x8a6f22) }
+    static let matchOutlineWidth: CGFloat = 1
+    /// The match the ↑↓ buttons are on gets the same colour, drawn heavier.
+    static let currentMatchOutlineWidth: CGFloat = 2
 
     // Text
     static var foreground: NSColor   { themed(0x383a42, 0xc8ccd4, ayu: 0xbfbdb6) }
@@ -98,8 +104,8 @@ enum Theme {
     static var diffAddedBackground: NSColor   { themed(0xe3f7e8, 0x2b3a2e, ayu: 0x18251b) }
     static var diffRemovedBackground: NSColor { themed(0xfdeaea, 0x3d2b2d, ayu: 0x2a1a1d) }
 
-    static var findMatch: NSColor        { themed(0xfaeaa6, 0x5b5333, ayu: 0x4c4126) }
-    static var findMatchCurrent: NSColor { themed(0xf5c451, 0x8a6d1f, ayu: 0x806b3e) }
+    /// Corner radius shared by every match highlight.
+    static let matchCornerRadius: CGFloat = 5
 
     // Accent hues (One Light / One Dark / Ayu Dark). These name a *hue*: the
     // panels use them for git status, links and markers, so red stays red in

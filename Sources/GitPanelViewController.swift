@@ -45,13 +45,16 @@ final class GitPanelViewController: NSViewController {
     private let segmented = FlatPanelTabBar(labels: ["Changes", "Branch", "History"])
     private let table = NSTableView()
     private let branchLabel = NSTextField(labelWithString: "")
-    private let commitField = NSTextView()
+    private let commitField = CommitMessageTextView()
     private var commitScroll: HorizontalBorderScrollView!
     private let progressShimmer = GitProgressShimmerView()
     private let commitButton = NSButton()
     /// Discards every change in the project — confirmed before it runs.
     private let discardAllButton = NSButton()
-    private let pushButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let pushButton = NSButton()
+    /// The arrow beside Push: everything that is not the common case.
+    private let pushMenuButton = NSButton()
+    private let pushMenu = NSMenu()
     private let branchToolbar = FlatView()
     private let newBranchButton = NSButton()
     private let remoteButton = NSButton()
@@ -155,6 +158,8 @@ final class GitPanelViewController: NSViewController {
 
         // Commit message box.
         commitField.font = Theme.uiFont(11)
+        commitField.placeholder = "Commit message  (⌘↩ to commit)"
+        commitField.onCommitShortcut = { [weak self] in self?.commit() }
         commitField.isRichText = false
         commitField.backgroundColor = Theme.activeTab
         commitField.textColor = Theme.foreground
@@ -186,16 +191,29 @@ final class GitPanelViewController: NSViewController {
         commitButton.action = #selector(commit)
         commitButton.translatesAutoresizingMaskIntoConstraints = false
 
-        // A pull-down, so the remote operations that belong together live in one
-        // control: the title performs Push, the menu offers the rest.
+        // Push is the common case, so it is one click on its own button; the
+        // arrow beside it holds Commit & Push, Fetch, Pull and Force Push.
         pushButton.bezelStyle = .rounded
         pushButton.controlSize = .small
         pushButton.font = Theme.uiFont(10.5)
+        pushButton.target = self
+        pushButton.action = #selector(pushAction)
         pushButton.translatesAutoresizingMaskIntoConstraints = false
+
+        pushMenuButton.bezelStyle = .rounded
+        pushMenuButton.controlSize = .small
+        pushMenuButton.image = Theme.symbol("chevron.down", pointSize: 8, weight: .medium)
+        pushMenuButton.imagePosition = .imageOnly
+        pushMenuButton.toolTip = "More Git operations"
+        pushMenuButton.setAccessibilityLabel("More Git operations")
+        pushMenuButton.target = self
+        pushMenuButton.action = #selector(showPushMenu)
+        pushMenuButton.translatesAutoresizingMaskIntoConstraints = false
         rebuildPushMenu()
 
         [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
-         commitButton, pushButton, discardAllButton].forEach { container.addSubview($0) }
+         commitButton, pushButton, pushMenuButton,
+         discardAllButton].forEach { container.addSubview($0) }
 
         branchToolbarHeight = branchToolbar.heightAnchor.constraint(equalToConstant: 0)
         tableTopToTabs = scroll.topAnchor.constraint(equalTo: segmented.bottomAnchor)
@@ -241,6 +259,10 @@ final class GitPanelViewController: NSViewController {
             // "Commit && Push" left, "Commit" right.
             pushButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             pushButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
+            pushMenuButton.leadingAnchor.constraint(
+                equalTo: pushButton.trailingAnchor, constant: 2),
+            pushMenuButton.bottomAnchor.constraint(equalTo: pushButton.bottomAnchor),
+            pushMenuButton.widthAnchor.constraint(equalToConstant: 22),
             commitButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             commitButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
 
@@ -250,7 +272,7 @@ final class GitPanelViewController: NSViewController {
             discardAllButton.bottomAnchor.constraint(
                 equalTo: container.bottomAnchor, constant: -8),
             discardAllButton.leadingAnchor.constraint(
-                greaterThanOrEqualTo: pushButton.trailingAnchor, constant: 6),
+                greaterThanOrEqualTo: pushMenuButton.trailingAnchor, constant: 6),
         ])
         tableTopToBranchToolbar.isActive = false
         tableBottomToContainer.isActive = false
@@ -445,17 +467,22 @@ final class GitPanelViewController: NSViewController {
         commitButton.isHidden = branchTab
         discardAllButton.isHidden = branchTab
         pushButton.isHidden = branchTab
+        pushMenuButton.isHidden = branchTab
     }
 
     @objc private func commit() { performCommit(push: false) }
 
     /// The pull-down's first item is its title, so the menu is rebuilt whenever
     /// the ahead-count changes.
+    @objc private func showPushMenu() {
+        let point = NSPoint(x: 0, y: pushMenuButton.bounds.maxY + 4)
+        pushMenu.popUp(positioning: nil, at: point, in: pushMenuButton)
+    }
+
     private func rebuildPushMenu() {
-        let menu = NSMenu()
-        let title = aheadCount > 0 ? "Push ↑\(aheadCount)" : "Push"
-        menu.addItem(withTitle: title, action: nil, keyEquivalent: "")   // shown as the title
-        menu.addItem(withTitle: title, action: #selector(pushAction), keyEquivalent: "")
+        pushButton.title = aheadCount > 0 ? "Push ↑\(aheadCount)" : "Push"
+        let menu = pushMenu
+        menu.removeAllItems()
         menu.addItem(withTitle: "Commit & Push", action: #selector(commitAndPushAction),
                      keyEquivalent: "")
         if !remotes.isEmpty {
@@ -474,7 +501,6 @@ final class GitPanelViewController: NSViewController {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Force Push…", action: #selector(forcePushAction), keyEquivalent: "")
         for item in menu.items { item.target = self }
-        pushButton.menu = menu
         pushButton.toolTip = aheadCount > 0
             ? "\(aheadCount) commit\(aheadCount == 1 ? "" : "s") to push"
             : "Push"
@@ -1606,5 +1632,33 @@ final class GitRowView: NSTableRowView {
     override var isEmphasized: Bool {
         get { false }        // never the blue system highlight
         set { }
+    }
+}
+
+/// The commit box. Two things a plain NSTextView does not do: show a hint while
+/// it is empty, and treat ⌘↩ as "commit" the way every Git client does.
+final class CommitMessageTextView: NSTextView {
+    var placeholder = "" { didSet { needsDisplay = true } }
+    var onCommitShortcut: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == [.command], event.keyCode == 36 || event.keyCode == 76 {
+            onCommitShortcut?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? Theme.uiFont(11),
+            .foregroundColor: Theme.dimText,
+        ]
+        let origin = NSPoint(x: textContainerInset.width + 5,
+                             y: textContainerInset.height)
+        (placeholder as NSString).draw(at: origin, withAttributes: attributes)
     }
 }

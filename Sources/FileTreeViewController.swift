@@ -123,6 +123,8 @@ private final class FileTreeOutlineView: NSOutlineView {
 final class FileTreeViewController: NSViewController {
     var onOpenFile: ((URL) -> Void)?
     var onGitHistory: ((URL) -> Void)?
+    /// Open a terminal at this folder (the window owns which terminal).
+    var onOpenInTerminal: ((URL) -> Void)?
     var onFileSystemChanged: (() -> Void)?
     var canMutatePath: ((URL) -> Bool)?
     var onPathRenamed: ((URL, URL) -> Void)?
@@ -513,11 +515,18 @@ final class FileTreeViewController: NSViewController {
             ("New File", #selector(newFileAction(_:))),
             ("New Folder", #selector(newFolderAction(_:))),
             ("Rename", #selector(renameAction(_:))),
+            ("Duplicate", #selector(duplicateAction(_:))),
+            ("Reveal in Finder", #selector(revealInFinderAction(_:))),
+            ("Copy Path", #selector(copyPathAction(_:))),
+            ("Copy Relative Path", #selector(copyRelativePathAction(_:))),
+            ("Open in Terminal", #selector(openInTerminalAction(_:))),
             ("Git History", #selector(gitHistoryAction(_:))),
             ("Delete", #selector(deleteAction(_:))),
         ]
         for (index, action) in actions.enumerated() {
-            if index == 2 || index == 4 { menu.addItem(.separator()) }
+            if index == 2 || index == 4 || index == 8 || index == 9 {
+                menu.addItem(.separator())
+            }
             let item = NSMenuItem(title: action.0, action: action.1, keyEquivalent: "")
             item.target = self
             // Keep a stable path, not the node object. A git/file refresh can
@@ -577,6 +586,62 @@ final class FileTreeViewController: NSViewController {
                                       original: node, initialName: node.name)
         outlineView.reloadItem(node)
         focusPendingEditor()
+    }
+
+    @objc private func revealInFinderAction(_ sender: Any?) {
+        guard let node = menuNode(sender) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([node.url])
+    }
+
+    @objc private func copyPathAction(_ sender: Any?) {
+        guard let node = menuNode(sender) else { return }
+        copyToPasteboard(node.url.path)
+    }
+
+    @objc private func copyRelativePathAction(_ sender: Any?) {
+        guard let node = menuNode(sender), let root else { return }
+        let rootPath = root.url.standardizedFileURL.resolvingSymlinksInPath().path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        let path = node.url.standardizedFileURL.resolvingSymlinksInPath().path
+        copyToPasteboard(path.hasPrefix(prefix)
+                         ? String(path.dropFirst(prefix.count)) : path)
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    /// A file opens a terminal in its folder — nobody wants to cd afterwards.
+    @objc private func openInTerminalAction(_ sender: Any?) {
+        guard let node = menuNode(sender) else { return }
+        let directory = node.isDirectory ? node.url : node.url.deletingLastPathComponent()
+        onOpenInTerminal?(directory)
+    }
+
+    /// `name copy.swift`, then `name copy 2.swift`, so repeating it never fails.
+    @objc private func duplicateAction(_ sender: Any?) {
+        guard let node = menuNode(sender), node !== root else { return }
+        let base = (node.name as NSString).deletingPathExtension
+        let ext = (node.name as NSString).pathExtension
+        let parent = node.url.deletingLastPathComponent()
+        var candidate = "\(base) copy"
+        var counter = 2
+        while FileManager.default.fileExists(
+            atPath: parent.appendingPathComponent(ext.isEmpty ? candidate
+                                                  : candidate + "." + ext).path) {
+            candidate = "\(base) copy \(counter)"
+            counter += 1
+        }
+        let destination = parent.appendingPathComponent(
+            ext.isEmpty ? candidate : candidate + "." + ext)
+        do {
+            try FileManager.default.copyItem(at: node.url, to: destination)
+            reloadAfterMutation(parent: node.parent, selecting: destination)
+        } catch {
+            presentFileError(title: "Duplicate failed", error: error)
+        }
     }
 
     @objc private func gitHistoryAction(_ sender: Any?) {
