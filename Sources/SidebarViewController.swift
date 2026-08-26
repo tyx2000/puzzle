@@ -118,6 +118,12 @@ final class SidebarViewController: NSViewController {
         activityBar.setSelected(.search)
         search.focusSearchField()
     }
+    /// Reveal the Git panel already switched to its Branch tab.
+    func showGitBranches() {
+        showGit()
+        gitController?.showBranchTab()
+    }
+
     func showGit() {
         let gitPanel = ensureGit()
         visiblePanel = .git

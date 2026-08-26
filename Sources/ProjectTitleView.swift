@@ -5,11 +5,16 @@ import AppKit
 /// traffic lights' centre line, and clicking it opens the project folder in
 /// Terminal.
 final class ProjectTitleView: NSView {
-    var onClick: (() -> Void)?
+    /// Clicking the project name opens the folder in a terminal.
+    var onProjectClick: (() -> Void)?
+    /// Clicking the branch name asks for the branch menu, anchored under the
+    /// branch text (the rect is in this view's coordinates).
+    var onBranchClick: ((NSRect) -> Void)?
 
     private var project = ""
     private var branch = ""
-    private var isPressed = false
+    private enum Zone { case project, branch }
+    private var pressedZone: Zone?
 
     private static let horizontalPadding: CGFloat = 8
     private static let branchGap: CGFloat = 8
@@ -34,7 +39,8 @@ final class ProjectTitleView: NSView {
         self.project = project
         self.branch = branch
         if hadProject != !project.isEmpty { window?.invalidateCursorRects(for: self) }
-        toolTip = project.isEmpty ? nil : "Open \(project) in Terminal"
+        toolTip = project.isEmpty ? nil
+            : "Click the name to open a terminal here, the branch to switch"
         setAccessibilityLabel(
             branch.isEmpty ? project : "\(project), branch \(branch)")
         setAccessibilityHelp("Opens the project folder in Terminal.")
@@ -68,19 +74,55 @@ final class ProjectTitleView: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         guard !project.isEmpty else { return }
-        addCursorRect(bounds, cursor: .pointingHand)
+        addCursorRect(projectRect(), cursor: .pointingHand)
+        if !branch.isEmpty { addCursorRect(branchRect(), cursor: .pointingHand) }
+    }
+
+    /// The two halves are separate targets, so the same text the reader sees is
+    /// exactly what they click. Both are derived from one layout pass shared
+    /// with `draw`.
+    private func layoutZones() -> (project: NSRect, branch: NSRect) {
+        let content = bounds.insetBy(dx: Self.horizontalPadding, dy: 0)
+        guard content.width > 0, !project.isEmpty else { return (.zero, .zero) }
+        let projectWidth = min(
+            ceil((project as NSString).size(withAttributes: [.font: projectFont]).width),
+            content.width)
+        let projectRect = NSRect(x: content.minX, y: content.minY,
+                                 width: projectWidth, height: content.height)
+        guard !branch.isEmpty else { return (projectRect, .zero) }
+        let branchX = projectRect.maxX + Self.branchGap
+        guard branchX < content.maxX else { return (projectRect, .zero) }
+        let branchWidth = min(
+            ceil((branch as NSString).size(withAttributes: [.font: branchFont]).width),
+            content.maxX - branchX)
+        return (projectRect, NSRect(x: branchX, y: content.minY,
+                                    width: branchWidth, height: content.height))
+    }
+
+    private func projectRect() -> NSRect { layoutZones().project }
+    private func branchRect() -> NSRect { layoutZones().branch }
+
+    private func zone(at point: NSPoint) -> Zone? {
+        let zones = layoutZones()
+        if !branch.isEmpty, zones.branch.contains(point) { return .branch }
+        if zones.project.contains(point) { return .project }
+        return nil
     }
 
     override func mouseDown(with event: NSEvent) {
         guard !project.isEmpty else { return }
-        isPressed = true
+        pressedZone = zone(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseUp(with event: NSEvent) {
-        let wasPressed = isPressed
-        isPressed = false
-        guard wasPressed, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
-        onClick?()
+        let pressed = pressedZone
+        pressedZone = nil
+        let point = convert(event.locationInWindow, from: nil)
+        guard let pressed, pressed == zone(at: point) else { return }
+        switch pressed {
+        case .project: onProjectClick?()
+        case .branch: onBranchClick?(branchRect())
+        }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -90,30 +132,29 @@ final class ProjectTitleView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard !project.isEmpty else { return }
-        let content = bounds.insetBy(dx: Self.horizontalPadding, dy: 0)
-        guard content.width > 0 else { return }
+        let zones = layoutZones()
+        guard zones.project.width > 0 else { return }
         // One shared baseline so the smaller branch text sits on the same line
         // as the project name instead of being centered on its own.
-        let baseline = SidebarCellDrawing.centeredBaseline(for: projectFont, in: content)
-        let projectWidth = min(
-            ceil((project as NSString).size(withAttributes: [.font: projectFont]).width),
-            content.width)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: projectFont, in: zones.project)
         SidebarCellDrawing.text(project, font: projectFont, color: Theme.foreground,
-                                baseline: baseline,
-                                in: NSRect(x: content.minX, y: content.minY,
-                                           width: projectWidth, height: content.height))
-        guard !branch.isEmpty else { return }
-        let branchX = content.minX + projectWidth + Self.branchGap
-        guard branchX < content.maxX else { return }
+                                baseline: baseline, in: zones.project)
+        guard zones.branch.width > 0 else { return }
         SidebarCellDrawing.text(branch, font: branchFont, color: Theme.dimText,
-                                baseline: baseline,
-                                in: NSRect(x: branchX, y: content.minY,
-                                           width: max(0, content.maxX - branchX),
-                                           height: content.height))
+                                baseline: baseline, in: zones.branch,
+                                lineBreak: .byTruncatingHead)
     }
 
     // MARK: - Regression-test surface
 
     var titleForTesting: (project: String, branch: String) { (project, branch) }
-    var hasClickHandlerForTesting: Bool { onClick != nil }
+    var hasClickHandlerForTesting: Bool { onProjectClick != nil && onBranchClick != nil }
+    var zonesForTesting: (project: NSRect, branch: NSRect) { layoutZones() }
+    func zoneNameForTesting(at point: NSPoint) -> String? {
+        switch zone(at: point) {
+        case .project: return "project"
+        case .branch: return "branch"
+        case nil: return nil
+        }
+    }
 }

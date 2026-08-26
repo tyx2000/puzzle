@@ -197,16 +197,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return controller
     }
 
-    /// ⌘N — a new window, starting at the same project as the current one so it
-    /// is immediately useful (Zed opens a new window on the same workspace).
+    /// ⌘N — an empty window: the welcome screen with recent projects and an
+    /// Open Folder button. Nothing is assumed about which project it is for.
     @objc private func newWindow(_ sender: Any?) {
-        let source = activeController
-        let controller = makeWindow()
-        if let url = source?.projectURL {
-            controller.openProject(url)
-        } else {
-            controller.openFolder(nil)
-        }
+        _ = makeWindow()
     }
 
     // MARK: - Launch arguments

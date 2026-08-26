@@ -37,6 +37,7 @@ enum RegressionTests {
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
+        try testBranchMenu()
         try testMaterialFileIcons()
         try testActivityBarUsesTextLabels()
         try testAyuDarkTheme()
@@ -1801,6 +1802,82 @@ enum RegressionTests {
                    "a normal file showed the diff header")
     }
 
+    private static func testBranchMenu() throws {
+        func branch(_ name: String, _ author: String, _ date: String,
+                    _ stamp: Int64, current: Bool = false,
+                    remote: Bool = false) -> GitService.Branch {
+            GitService.Branch(name: name, author: author, createdAt: date,
+                              createdTimestamp: stamp, isCurrent: current,
+                              isRemote: remote,
+                              upstreamRemote: remote ? "origin" : nil,
+                              upstreamBranch: remote ? name : nil)
+        }
+        // Most recent first is how GitService hands them over; the menu puts the
+        // checked-out branch at the top regardless, then caps the list.
+        var branches = (0..<15).map {
+            branch("topic-\($0)", "Author \($0)", "2026-08-\(10 + $0) 09:00", Int64(1000 - $0))
+        }
+        branches.insert(branch("main", "tyxu", "2026-07-01 12:00", 1, current: true), at: 7)
+        let entries = WorkspaceWindowController.branchMenuEntries(branches)
+        try expect(entries.count == WorkspaceWindowController.branchMenuLimit,
+                   "the menu listed \(entries.count) branches, not "
+                    + "\(WorkspaceWindowController.branchMenuLimit)")
+        try expect(entries.first?.name == "main",
+                   "the current branch is not first: \(entries.map(\.name))")
+        try expect(entries.dropFirst().map(\.name) == (0..<9).map { "topic-\($0)" },
+                   "the rest lost their recency order: \(entries.map(\.name))")
+        // A short list is not padded or truncated.
+        try expect(WorkspaceWindowController.branchMenuEntries(Array(branches.prefix(3))).count == 3,
+                   "a three-branch repo did not list all three")
+
+        // Each row carries the branch, its author and its date.
+        let title = WorkspaceWindowController.branchMenuTitle(
+            branch("release", "Ada", "2026-08-20 18:30", 900)).string
+        try expect(title.contains("release") && title.contains("Ada")
+                    && title.contains("2026-08-20 18:30"),
+                   "a menu row is missing branch, author or date: \(title.debugDescription)")
+        try expect(title.contains("\n"),
+                   "the row is not two lines: \(title.debugDescription)")
+
+        // What a click decides, before any alert is on screen: refuse with a
+        // reason, or confirm naming both ends.
+        let main = branch("main", "tyxu", "2026-07-01 12:00", 1, current: true)
+        let topic = branch("topic", "Ada", "2026-08-20 18:30", 900)
+        let danglingRemote = GitService.Branch(
+            name: "origin/HEAD", author: "Ada", createdAt: "2026-08-20 18:30",
+            createdTimestamp: 900, isCurrent: false, isRemote: true,
+            upstreamRemote: "origin", upstreamBranch: nil)
+
+        try expect(WorkspaceWindowController.branchSwitch(to: main, from: "main")
+                    == .alreadyCurrent,
+                   "switching to the checked-out branch was not refused")
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "topic")
+                    == .alreadyCurrent,
+                   "a branch matching HEAD by name was not treated as current")
+        if case .unavailable(let reason) = WorkspaceWindowController.branchSwitch(
+            to: danglingRemote, from: "main") {
+            try expect(!reason.isEmpty, "the refusal did not say why")
+        } else {
+            throw Failure(description: "a remote ref with no local name was offered as switchable")
+        }
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "main")
+                    == .confirm(from: "main", to: "topic"),
+                   "the confirmation did not name both ends")
+        // With no branch known yet the prompt still reads sensibly.
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: nil)
+                    == .confirm(from: "the current branch", to: "topic"),
+                   "an unknown current branch produced an empty prompt")
+
+        // The terminal command is quoted, so a space or a quote in the path
+        // cannot run as shell syntax.
+        let quoted = WorkspaceWindowController.shellQuoted("/tmp/my project's code")
+        try expect(quoted == "'/tmp/my project'\\''s code'",
+                   "the path was not shell-quoted: \(quoted)")
+        let escaped = WorkspaceWindowController.appleScriptQuoted("say \"hi\" \\ now")
+        try expect(escaped == "say \\\"hi\\\" \\\\ now",
+                   "the AppleScript literal was not escaped: \(escaped)")
+    }
+
     private static func testProjectTitleStrip() throws {
         let root = try temporaryDirectory("project-title")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1829,7 +1906,27 @@ enum RegressionTests {
                    "the titlebar strip did not pick up the branch: "
                     + "\(title.titleForTesting.branch)")
 
-        // Clicking the strip opens the folder in iTerm, with Terminal as the
+        // The two halves are separate targets: the name opens a terminal, the
+        // branch opens the branch menu. Measured with a short name, since a
+        // temporary directory's is long enough to consume the whole strip.
+        title.configure(project: "Puzzle", branch: "main")
+        title.layoutSubtreeIfNeeded()
+        let zones = title.zonesForTesting
+        try expect(zones.project.width > 0 && zones.branch.width > 0,
+                   "the strip did not lay out both halves: \(zones)")
+        try expect(zones.branch.minX >= zones.project.maxX,
+                   "the halves overlap: \(zones)")
+        let inProject = NSPoint(x: zones.project.midX, y: zones.project.midY)
+        let inBranch = NSPoint(x: zones.branch.midX, y: zones.branch.midY)
+        try expect(title.zoneNameForTesting(at: inProject) == "project",
+                   "the project name is not its own click target")
+        try expect(title.zoneNameForTesting(at: inBranch) == "branch",
+                   "the branch name is not its own click target")
+        try expect(title.zoneNameForTesting(
+                    at: NSPoint(x: zones.branch.maxX + 40, y: zones.branch.midY)) == nil,
+                   "empty space past the branch still counted as a click")
+
+        // Clicking the name opens the folder in iTerm, with Terminal as the
         // fallback where iTerm is not installed.
         let iTerm = URL(fileURLWithPath: "/Applications/iTerm.app")
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")

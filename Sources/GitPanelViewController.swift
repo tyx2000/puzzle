@@ -692,6 +692,13 @@ final class GitPanelViewController: NSViewController {
         onOpenDiff?(entry, directory)
     }
 
+    /// Switch to the Branch tab programmatically.
+    func showBranchTab() {
+        _ = view
+        segmented.selectedSegment = 1
+        tabChanged()
+    }
+
     /// Expand or collapse a commit, loading its file list on first expand.
     /// Switch to the History tab programmatically.
     func showHistory() {

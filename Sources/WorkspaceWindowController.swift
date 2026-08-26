@@ -20,6 +20,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var gitSummaryRefreshInFlight = false
     private var gitSummaryRefreshAgain = false
     private var gitSummaryDirectory: URL?
+    /// Branch currently checked out, as last reported by the Git refresh.
+    private var currentBranchName: String?
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
@@ -124,7 +126,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.editor.invalidateBlame()
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
-        sidebar.projectTitle.onClick = { [weak self] in self?.openProjectInTerminal() }
+        sidebar.projectTitle.onProjectClick = { [weak self] in self?.openProjectInTerminal() }
+        sidebar.projectTitle.onBranchClick = { [weak self] rect in
+            self?.showBranchMenu(from: rect)
+        }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
@@ -422,6 +427,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                    self.gitRefreshGeneration == generation {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked)
+                    self.currentBranchName = status.isRepo ? status.branch : nil
                     self.sidebar.activityBar.setChangeCount(
                         status.isRepo ? status.entries.count : 0)
                     self.sidebar.setProjectTitle(
@@ -453,13 +459,208 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         terminalBundleIDs.lazy.compactMap(lookup).first
     }
 
-    /// Open the project folder in iTerm, falling back to Terminal where iTerm
-    /// is not installed.
+    /// Open the project folder in iTerm in a window of its own. Opening a folder
+    /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
+    /// ask it for a new one by script, and keep the plain open as the fallback
+    /// (no iTerm, or automation not permitted).
     private func openProjectInTerminal() {
-        guard let projectURL, let terminal = Self.terminalApplication() else { return }
+        guard let projectURL else { return }
+        if Self.openInNewITermWindow(projectURL) { return }
+        guard let terminal = Self.terminalApplication() else { return }
         NSWorkspace.shared.open([projectURL], withApplicationAt: terminal,
                                 configuration: NSWorkspace.OpenConfiguration(),
                                 completionHandler: nil)
+    }
+
+    @discardableResult
+    static func openInNewITermWindow(_ url: URL) -> Bool {
+        guard NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.googlecode.iterm2") != nil else { return false }
+        let command = "cd " + shellQuoted(url.path)
+        let source = """
+            tell application "iTerm"
+              activate
+              set newWindow to (create window with default profile)
+              tell current session of newWindow
+                write text "\(appleScriptQuoted(command))"
+              end tell
+            end tell
+            """
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        return error == nil
+    }
+
+    /// Single-quote for the shell: everything inside is literal, and an embedded
+    /// quote is closed, escaped and reopened.
+    static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Escape for an AppleScript string literal.
+    static func appleScriptQuoted(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    // MARK: - Branch menu
+
+    /// How many branches the title-strip menu lists. Beyond this the Git panel's
+    /// Branch tab is the place to look.
+    static let branchMenuLimit = 10
+
+    /// Branches for the menu: the current one first so switching away from it is
+    /// obvious, then the most recently updated, capped at `branchMenuLimit`.
+    static func branchMenuEntries(_ branches: [GitService.Branch]) -> [GitService.Branch] {
+        let current = branches.filter(\.isCurrent)
+        let rest = branches.filter { !$0.isCurrent }
+        return Array((current + rest).prefix(branchMenuLimit))
+    }
+
+    private func showBranchMenu(from rect: NSRect) {
+        guard let directory = projectURL else { return }
+        let anchor = sidebar.projectTitle
+        gitSummaryQueue.async { [weak self] in
+            let branches = GitService.branches(in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.projectURL == directory else { return }
+                let menu = NSMenu()
+                menu.font = Theme.uiFont(11)
+                let entries = Self.branchMenuEntries(branches)
+                if entries.isEmpty {
+                    let item = NSMenuItem(title: "No branches", action: nil, keyEquivalent: "")
+                    item.isEnabled = false
+                    menu.addItem(item)
+                }
+                for branch in entries {
+                    let item = NSMenuItem(title: branch.name,
+                                          action: #selector(self.branchMenuItemSelected(_:)),
+                                          keyEquivalent: "")
+                    item.attributedTitle = Self.branchMenuTitle(branch)
+                    item.target = self
+                    item.representedObject = branch
+                    item.state = branch.isCurrent ? .on : .off
+                    menu.addItem(item)
+                }
+                if branches.count > entries.count {
+                    menu.addItem(.separator())
+                    let more = NSMenuItem(
+                        title: "\(branches.count - entries.count) more in the Git panel…",
+                        action: #selector(self.showBranchPanel), keyEquivalent: "")
+                    more.target = self
+                    menu.addItem(more)
+                }
+                // Just under the branch text, so the menu reads as its dropdown.
+                let origin = NSPoint(x: rect.minX, y: rect.maxY)
+                menu.popUp(positioning: nil, at: origin, in: anchor)
+            }
+        }
+    }
+
+    /// Two lines per item: the branch, then who last touched it and when.
+    static func branchMenuTitle(_ branch: GitService.Branch) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 1
+        let title = NSMutableAttributedString(
+            string: branch.name,
+            attributes: [.font: Theme.uiFont(11.5),
+                         .foregroundColor: Theme.foreground,
+                         .paragraphStyle: paragraph])
+        let detail = branch.author.isEmpty
+            ? branch.createdAt
+            : "\(branch.author) · \(branch.createdAt)"
+        title.append(NSAttributedString(
+            string: "\n" + detail,
+            attributes: [.font: Theme.uiFont(9.5),
+                         .foregroundColor: Theme.dimText,
+                         .paragraphStyle: paragraph]))
+        return title
+    }
+
+    @objc private func showBranchPanel() {
+        sidebar.showGit()
+        sidebar.showGitBranches()
+    }
+
+    @objc private func branchMenuItemSelected(_ sender: NSMenuItem) {
+        guard let branch = sender.representedObject as? GitService.Branch,
+              let directory = projectURL else { return }
+        switchBranch(branch, in: directory)
+    }
+
+    /// What clicking a branch in the menu should do. Kept separate from the
+    /// alerts so the rule — refuse with a reason, or confirm naming both ends —
+    /// is decided in one testable place.
+    enum BranchSwitch: Equatable {
+        case alreadyCurrent
+        case unavailable(reason: String)
+        case confirm(from: String, to: String)
+    }
+
+    static func branchSwitch(to branch: GitService.Branch,
+                             from current: String?) -> BranchSwitch {
+        if branch.isCurrent { return .alreadyCurrent }
+        if branch.isRemote, branch.upstreamBranch == nil {
+            return .unavailable(reason:
+                "This remote-tracking ref has no branch name to check out locally. "
+                    + "Create a local branch from it in the Git panel's Branch tab.")
+        }
+        if let current, current == branch.name { return .alreadyCurrent }
+        return .confirm(from: current ?? "the current branch", to: branch.name)
+    }
+
+    /// Switch to `branch`, explaining first. A switch that cannot happen says
+    /// why instead of asking; one that can names both ends before it runs.
+    private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
+        let from: String
+        switch Self.branchSwitch(to: branch, from: currentBranchName) {
+        case .alreadyCurrent:
+            presentBranchAlert(
+                title: "Already on “\(branch.name)”",
+                message: "This is the branch the working tree is already checked out to.")
+            return
+        case .unavailable(let reason):
+            presentBranchAlert(title: "Cannot switch to “\(branch.name)”", message: reason)
+            return
+        case .confirm(let source, _):
+            from = source
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Switch from “\(from)” to “\(branch.name)”?"
+        let effect = branch.isRemote
+            ? "A local tracking branch will be created, checked out, and the files in this "
+                + "working tree will be replaced with that branch's versions."
+            : "The files in this working tree will be replaced with the versions from "
+                + "“\(branch.name)”. Git will refuse the switch if local changes cannot be preserved."
+        alert.informativeText = "Project:\n\(directory.path)\n\n\(effect)"
+        alert.addButton(withTitle: "Switch")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        gitSummaryQueue.async { [weak self] in
+            let result = GitService.switchBranch(branch, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.projectURL == directory else { return }
+                if result.ok {
+                    self.refreshExternalGitState()
+                } else {
+                    // Git refused it — a dirty tree it cannot preserve, a
+                    // missing ref — so hand its own words to the user.
+                    self.presentBranchAlert(
+                        title: "Could not switch to “\(branch.name)”",
+                        message: result.message)
+                }
+            }
+        }
+    }
+
+    private func presentBranchAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        alert.runModal()
     }
 
     /// Re-apply fonts/metrics after settings.json changes.
