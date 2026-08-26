@@ -65,7 +65,14 @@ final class ActivityBarView: NSView {
         }
     }
 
-    var buttonTitlesForTesting: [String] { buttons.map(\.titleForTesting) }
+    /// Number of changed files, shown after the Git label. Zero hides it.
+    func setChangeCount(_ count: Int) {
+        guard let button = buttons.indices.contains(Action.git.rawValue)
+            ? buttons[Action.git.rawValue] : nil else { return }
+        button.badge = count > 0 ? "\(count)" : nil
+    }
+
+    var buttonTitlesForTesting: [String] { buttons.map(\.displayTitleForTesting) }
     var buttonTooltipsForTesting: [String?] { buttons.map(\.toolTip) }
 
     func setSelected(_ action: Action?) {
@@ -82,6 +89,15 @@ final class ActivityButton: NSView {
     var isSelected = false { didSet { needsDisplay = true } }
 
     private let title: String
+    /// Appended after the label, e.g. the number of changed files.
+    var badge: String? {
+        didSet {
+            guard badge != oldValue else { return }
+            setAccessibilityLabel(displayTitle)
+            needsDisplay = true
+        }
+    }
+    private var displayTitle: String { badge.map { "\(title) \($0)" } ?? title }
 
     init(title: String) {
         self.title = title
@@ -92,7 +108,7 @@ final class ActivityButton: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    var titleForTesting: String { title }
+    var displayTitleForTesting: String { displayTitle }
 
     override func draw(_ dirtyRect: NSRect) {
         if isSelected {
@@ -101,7 +117,7 @@ final class ActivityButton: NSView {
         }
         // Truncates rather than overflowing into the neighbouring slot when the
         // panel is dragged narrow.
-        SidebarCellDrawing.text(title, font: Theme.uiFont(10.5),
+        SidebarCellDrawing.text(displayTitle, font: Theme.uiFont(10.5),
                                 color: isSelected ? Theme.foreground : Theme.dimText,
                                 in: bounds.insetBy(dx: 4, dy: 0),
                                 alignment: .center)

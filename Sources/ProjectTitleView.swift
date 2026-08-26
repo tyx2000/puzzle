@@ -12,8 +12,7 @@ final class ProjectTitleView: NSView {
     private var isPressed = false
 
     private static let horizontalPadding: CGFloat = 8
-    private static let branchGap: CGFloat = 6
-    private static let branchIconWidth: CGFloat = 11
+    private static let branchGap: CGFloat = 8
 
     override var isFlipped: Bool { true }
 
@@ -57,7 +56,7 @@ final class ProjectTitleView: NSView {
         var width = ceil((project as NSString).size(
             withAttributes: [.font: projectFont]).width)
         if !branch.isEmpty {
-            width += Self.branchGap + Self.branchIconWidth + 3
+            width += Self.branchGap
                 + ceil((branch as NSString).size(withAttributes: [.font: branchFont]).width)
         }
         return NSSize(width: width + Self.horizontalPadding * 2,
@@ -104,14 +103,8 @@ final class ProjectTitleView: NSView {
                                 in: NSRect(x: content.minX, y: content.minY,
                                            width: projectWidth, height: content.height))
         guard !branch.isEmpty else { return }
-        let iconX = content.minX + projectWidth + Self.branchGap
-        let iconRect = NSRect(x: iconX,
-                              y: content.midY - Self.branchIconWidth / 2,
-                              width: Self.branchIconWidth, height: Self.branchIconWidth)
-        guard iconRect.maxX < content.maxX else { return }
-        SidebarCellDrawing.image(Theme.symbol("arrow.triangle.branch", pointSize: 10),
-                                 tint: Theme.dimText, in: iconRect)
-        let branchX = iconRect.maxX + 3
+        let branchX = content.minX + projectWidth + Self.branchGap
+        guard branchX < content.maxX else { return }
         SidebarCellDrawing.text(branch, font: branchFont, color: Theme.dimText,
                                 baseline: baseline,
                                 in: NSRect(x: branchX, y: content.minY,

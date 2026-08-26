@@ -323,6 +323,32 @@ enum RegressionTests {
         try expect(stillStaged == ["outside.txt"],
                    "commit disturbed staged changes outside the project")
 
+        // Discarding everything restores each tracked file to HEAD in one pass.
+        let firstFile = project.appendingPathComponent("bulk-one.txt")
+        let secondFile = project.appendingPathComponent("bulk-two.txt")
+        try Data("one\n".utf8).write(to: firstFile)
+        try Data("two\n".utf8).write(to: secondFile)
+        try expect(GitService.commit("bulk baseline", in: project).code == 0,
+                   "bulk baseline commit failed")
+        try Data("one edited\n".utf8).write(to: firstFile)
+        try Data("two edited\n".utf8).write(to: secondFile)
+        let dirty = GitService.status(in: project)
+        try expect(dirty.entries.count == 2,
+                   "expected two dirty files, got \(dirty.entries.map(\.path))")
+        // Neither is a new file, so nothing here goes to the Trash.
+        try expect(dirty.entries.allSatisfy { !GitService.discardRemovesFile($0, in: project) },
+                   "a tracked edit was classified as a file to remove")
+        let bulk = GitService.discardAll(dirty.entries, in: project)
+        try expect(bulk.discarded == 2 && bulk.failure == nil,
+                   "discardAll reported \(bulk)")
+        let restoredFirst = String(decoding: try Data(contentsOf: firstFile), as: UTF8.self)
+        let restoredSecond = String(decoding: try Data(contentsOf: secondFile), as: UTF8.self)
+        try expect(restoredFirst == "one\n" && restoredSecond == "two\n",
+                   "discardAll did not restore the files to HEAD: "
+                    + "\(restoredFirst.debugDescription), \(restoredSecond.debugDescription)")
+        try expect(GitService.status(in: project).entries.isEmpty,
+                   "the project still reports changes after discarding everything")
+
         // The panel may have refreshed before the user's final edit. Commit
         // must stage once more at the operation boundary so that edit is not
         // silently omitted.
@@ -1422,6 +1448,16 @@ enum RegressionTests {
         bar.layoutSubtreeIfNeeded()
         try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
+
+        // The Git label carries the live number of changed files; nothing is
+        // shown when the tree is clean.
+        bar.setChangeCount(7)
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7", "Settings"],
+                   "the change count did not reach the Git label: "
+                    + "\(bar.buttonTitlesForTesting)")
+        bar.setChangeCount(0)
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
+                   "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
                    "a text button still carries a tooltip")

@@ -49,6 +49,8 @@ final class GitPanelViewController: NSViewController {
     private var commitScroll: HorizontalBorderScrollView!
     private let progressShimmer = GitProgressShimmerView()
     private let commitButton = NSButton()
+    /// Discards every change in the project — confirmed before it runs.
+    private let discardAllButton = NSButton()
     private let pushButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let branchToolbar = FlatView()
     private let newBranchButton = NSButton()
@@ -167,6 +169,15 @@ final class GitPanelViewController: NSViewController {
         progressShimmer.translatesAutoresizingMaskIntoConstraints = false
         progressShimmer.isHidden = true
 
+        discardAllButton.title = "Discard"
+        discardAllButton.bezelStyle = .rounded
+        discardAllButton.controlSize = .small
+        discardAllButton.font = Theme.uiFont(10.5)
+        discardAllButton.target = self
+        discardAllButton.action = #selector(discardAllAction)
+        discardAllButton.setAccessibilityLabel("Discard all changes")
+        discardAllButton.translatesAutoresizingMaskIntoConstraints = false
+
         commitButton.title = "Commit"
         commitButton.bezelStyle = .rounded
         commitButton.controlSize = .small
@@ -184,7 +195,7 @@ final class GitPanelViewController: NSViewController {
         rebuildPushMenu()
 
         [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
-         commitButton, pushButton].forEach { container.addSubview($0) }
+         commitButton, pushButton, discardAllButton].forEach { container.addSubview($0) }
 
         branchToolbarHeight = branchToolbar.heightAnchor.constraint(equalToConstant: 0)
         tableTopToTabs = scroll.topAnchor.constraint(equalTo: segmented.bottomAnchor)
@@ -232,7 +243,13 @@ final class GitPanelViewController: NSViewController {
             pushButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
             commitButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             commitButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
-            commitButton.leadingAnchor.constraint(
+
+            // Discard sits just before Commit, both anchored to the right.
+            discardAllButton.trailingAnchor.constraint(
+                equalTo: commitButton.leadingAnchor, constant: -6),
+            discardAllButton.bottomAnchor.constraint(
+                equalTo: container.bottomAnchor, constant: -8),
+            discardAllButton.leadingAnchor.constraint(
                 greaterThanOrEqualTo: pushButton.trailingAnchor, constant: 6),
         ])
         tableTopToBranchToolbar.isActive = false
@@ -254,6 +271,7 @@ final class GitPanelViewController: NSViewController {
         branchLabel.font = Theme.uiFont(10.5)
         commitField.font = Theme.uiFont(11)
         commitButton.font = Theme.uiFont(10.5)
+        discardAllButton.font = Theme.uiFont(10.5)
         pushButton.font = Theme.uiFont(10.5)
         newBranchButton.font = Theme.uiFont(10.5)
         remoteButton.font = Theme.uiFont(10.5)
@@ -376,6 +394,7 @@ final class GitPanelViewController: NSViewController {
             ? "\(status.ahead) commit\(status.ahead == 1 ? "" : "s") not pushed yet"
             : nil
         segmented.setLabel("Changes (\(status.entries.count))", forSegment: 0)
+        discardAllButton.isEnabled = !status.entries.isEmpty
         aheadCount = status.ahead
         rebuildPushMenu()
     }
@@ -424,6 +443,7 @@ final class GitPanelViewController: NSViewController {
         commitScroll.isHidden = branchTab
         progressShimmer.isHidden = branchTab || activeOperationID == nil
         commitButton.isHidden = branchTab
+        discardAllButton.isHidden = branchTab
         pushButton.isHidden = branchTab
     }
 
@@ -819,6 +839,63 @@ final class GitPanelViewController: NSViewController {
         alert.runModal()
     }
 
+    @objc private func discardAllAction() {
+        guard let directory else { return }
+        discardAllChanges(in: directory)
+    }
+
+    /// Throw away every change in the project. Confirmed first, and the alert
+    /// spells out what cannot be recovered: tracked files return to HEAD, and
+    /// files Git has never seen are moved to the Trash.
+    private func discardAllChanges(in directory: URL) {
+        let entries = self.entries
+        guard !entries.isEmpty else { return }
+        let newFiles = entries.filter { GitService.discardRemovesFile($0, in: directory) }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = entries.count == 1
+            ? "Discard the 1 change in this project?"
+            : "Discard all \(entries.count) changes in this project?"
+        var detail = "Project:\n\(directory.path)\n\n"
+        detail += "Every uncommitted change, staged included, will be replaced with the "
+            + "version in HEAD. Git cannot restore the discarded edits."
+        if !newFiles.isEmpty {
+            detail += "\n\n\(newFiles.count) file\(newFiles.count == 1 ? "" : "s") "
+                + "never committed will be removed from Git and moved to Trash; "
+                + "recovery is possible only while the item remains in Trash:\n"
+            detail += newFiles.prefix(10).map { "• \($0.path)" }.joined(separator: "\n")
+            if newFiles.count > 10 { detail += "\n• …and \(newFiles.count - 10) more" }
+        }
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Discard All Changes")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let operationID = beginOperation("Discarding all changes",
+                                               lockCommitMessage: false) else { return }
+
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            let result = GitService.discardAll(entries, in: directory)
+            let status = GitService.status(in: directory)
+            DispatchQueue.main.async {
+                guard self.activeOperationID == operationID else { return }
+                self.finishOperation(operationID)
+                guard self.directory == directory else { return }
+                self.applyStatus(status, in: directory)
+                self.activeChangesPath = nil
+                self.table.reloadData()
+                self.onChanged?()
+                self.refreshExternal()
+                if let failure = result.failure {
+                    self.presentOperationError(
+                        title: "Discard all changes failed",
+                        message: "\(result.discarded) of \(entries.count) discarded.\n\(failure)")
+                }
+            }
+        }
+    }
+
     private func discardChanges(_ entry: GitService.Status.Entry, in directory: URL) {
         let removesFile = GitService.discardRemovesFile(entry, in: directory)
         let alert = NSAlert()
@@ -938,6 +1015,12 @@ final class GitPanelViewController: NSViewController {
     }
 
     // MARK: - Regression-test surface
+
+    var discardAllEnabledForTesting: Bool {
+        _ = view
+        return discardAllButton.isEnabled
+    }
+    func discardAllForTesting(in directory: URL) { discardAllChanges(in: directory) }
 
     /// The line above the commit box: project, branch and commit author.
     var statusLabelForTesting: String {

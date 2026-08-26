@@ -422,6 +422,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                    self.gitRefreshGeneration == generation {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked)
+                    self.sidebar.activityBar.setChangeCount(
+                        status.isRepo ? status.entries.count : 0)
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,
                         branch: status.isRepo ? status.branch : "")

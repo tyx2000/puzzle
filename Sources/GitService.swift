@@ -600,6 +600,20 @@ enum GitService {
                    in: directory).code != 0
     }
 
+    /// Discard every listed entry, one at a time so each keeps the single-file
+    /// semantics: tracked files return to HEAD, new files go to the Trash. Stops
+    /// at the first failure and reports it, leaving the rest untouched.
+    static func discardAll(_ entries: [Status.Entry], in directory: URL)
+        -> (discarded: Int, failure: String?) {
+        var discarded = 0
+        for entry in entries {
+            let result = discard(entry, in: directory)
+            guard result.ok else { return (discarded, result.message) }
+            discarded += 1
+        }
+        return (discarded, nil)
+    }
+
     /// Restore one status entry to its HEAD state without touching unrelated
     /// project files. Renames restore both names; copies and additions remove
     /// only the newly created path. New files are moved to Trash so the action
