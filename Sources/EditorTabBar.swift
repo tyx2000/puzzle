@@ -8,25 +8,12 @@ final class EditorTabBar: NSView {
     var onCloseOthers: ((Int) -> Void)?
     var onCloseRight: ((Int) -> Void)?
     var onSplit: (() -> Void)?
-    var onTogglePreview: (() -> Void)?
     var onHeightChanged: ((CGFloat) -> Void)?
 
     var splitActive = false {
         didSet { splitButton.contentTintColor = splitActive ? Theme.cursor : Theme.dimText }
     }
 
-    /// The preview button only makes sense for markdown, so it appears per-file.
-    var showsPreviewToggle = false {
-        didSet {
-            guard showsPreviewToggle != oldValue else { return }
-            previewButton.isHidden = !showsPreviewToggle
-            needsLayout = true
-            layoutPills()
-        }
-    }
-    var previewActive = false {
-        didSet { previewButton.contentTintColor = previewActive ? Theme.cursor : Theme.dimText }
-    }
     var paneActive = true { didSet { needsDisplay = true } }
 
     struct TabInfo {
@@ -38,18 +25,15 @@ final class EditorTabBar: NSView {
 
     private var pills: [TabPillView] = []
     private let splitButton = NSButton()
-    private let previewButton = NSButton()
     /// Fallback until the owning window reports its traffic-light geometry.
     static let defaultRowHeight: CGFloat = 32
     private(set) var rowHeight: CGFloat = EditorTabBar.defaultRowHeight
     private let gap: CGFloat = 0
     private let padding: CGFloat = 0
-    /// Space reserved on the right for the action buttons — grows when the
-    /// markdown preview toggle is showing, so pills never slide underneath it.
-    private var splitAreaWidth: CGFloat { showsPreviewToggle ? 60 : 34 }
+    /// Space reserved on the right for the split action.
+    private let splitAreaWidth: CGFloat = 34
     private var contentHeight: CGFloat = EditorTabBar.defaultRowHeight
     private var splitButtonTop: NSLayoutConstraint!
-    private var previewButtonTop: NSLayoutConstraint!
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
@@ -78,28 +62,6 @@ final class EditorTabBar: NSView {
             splitButton.heightAnchor.constraint(equalToConstant: 20),
         ])
 
-        previewButton.image = NSImage(systemSymbolName: "eye",
-                                      accessibilityDescription: "Toggle markdown preview")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        previewButton.isBordered = false
-        previewButton.bezelStyle = .regularSquare
-        previewButton.imageScaling = .scaleProportionallyDown
-        previewButton.contentTintColor = Theme.dimText
-        previewButton.toolTip = "Toggle markdown preview"
-        previewButton.target = self
-        previewButton.action = #selector(previewAction)
-        previewButton.isHidden = true
-        previewButton.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(previewButton)
-        previewButtonTop = previewButton.topAnchor.constraint(
-            equalTo: topAnchor, constant: (rowHeight - 20) / 2)
-        NSLayoutConstraint.activate([
-            previewButton.trailingAnchor.constraint(equalTo: splitButton.leadingAnchor,
-                                                    constant: -6),
-            previewButtonTop,
-            previewButton.widthAnchor.constraint(equalToConstant: 22),
-            previewButton.heightAnchor.constraint(equalToConstant: 20),
-        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -111,7 +73,6 @@ final class EditorTabBar: NSView {
         rowHeight = resolved
         contentHeight = CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
         splitButtonTop.constant = (rowHeight - 20) / 2
-        previewButtonTop.constant = (rowHeight - 20) / 2
         invalidateIntrinsicContentSize()
         needsLayout = true
         layoutPills()
@@ -188,7 +149,6 @@ final class EditorTabBar: NSView {
     }
 
     @objc private func splitAction() { onSplit?() }
-    @objc private func previewAction() { onTogglePreview?() }
 }
 
 /// One flat tab. Active = full-height background, no border or outer gap.

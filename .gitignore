@@ -23,5 +23,6 @@ xcuserdata/
 
 # Tree-sitter sources are fetched by vendor/fetch.sh
 /vendor/tree-sitter*/
+/vendor/material-icon-theme/
 /vendor/.swift-dl/
 /vendor/.sql-dl/

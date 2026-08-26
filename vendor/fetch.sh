@@ -23,6 +23,10 @@ clone https://github.com/tree-sitter-grammars/tree-sitter-xml.git  tree-sitter-x
 clone https://github.com/camdencheek/tree-sitter-dockerfile.git    tree-sitter-dockerfile
 clone https://github.com/shunsambongi/tree-sitter-gitignore.git    tree-sitter-gitignore
 
+# File-tree icons (MIT). Only icons/ and the two mapping sources are used;
+# Tools/generate-file-icons.py turns them into the bundled icon set.
+clone https://github.com/material-extensions/vscode-material-icon-theme.git material-icon-theme
+
 # tree-sitter-swift does not commit its generated parser.c; take the release
 # tarball, which ships src/parser.c + src/scanner.c.
 if [ ! -d tree-sitter-swift ]; then

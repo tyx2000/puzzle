@@ -1,5 +1,17 @@
 import AppKit
 
+/// A split view whose divider takes its colour from the theme. AppKit's default
+/// hairline is a fixed system grey, unrelated to the line the activity bar and
+/// the title band draw.
+///
+/// Only usable where Puzzle creates the split view itself (the editor panes).
+/// `NSSplitViewController` insists on building its own, and assigning over it
+/// raises inside AppKit's constraint pass, so the window's sidebar divider is
+/// painted by `SplitDividerHandleView` instead.
+final class PuzzleSplitView: NSSplitView {
+    override var dividerColor: NSColor { Theme.border }
+}
+
 /// NSSplitViewController is its own split view's delegate, so we subclass it to
 /// observe divider drags instead of replacing the delegate.
 final class PuzzleSplitViewController: NSSplitViewController {

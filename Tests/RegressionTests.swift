@@ -11,6 +11,7 @@ enum RegressionTests {
         _ = NSApplication.shared
         try testProcessDrain()
         try testScopedStatusAndStaging()
+        try testGitIgnoreRefreshReconciliation()
         try testRemoteConfigurationAndPushSelection()
         try testGitRepositoryMonitor()
         try testExternalFileLastWriteWins()
@@ -28,11 +29,20 @@ enum RegressionTests {
         try testVirtualDocumentRefreshesInPlace()
         try testLargeFilesAreRejectedBeforeLoading()
         try testPreviewPayloadsAreReleased()
+        try testMarkdownLiveEditing()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
+        try testDiffGutterUsesFileLineNumbers()
+        try testProjectTitleStrip()
+        try testMaterialFileIcons()
+        try testActivityBarUsesTextLabels()
+        try testAyuDarkTheme()
+        try testDiffHeaderStepsThroughChanges()
+        try testActiveLineSpansTheGutter()
+        try testFileOpensRouteToTheirProjectWindow()
         print("Regression tests passed")
     }
 
@@ -117,6 +127,19 @@ enum RegressionTests {
                    "code_line_height was treated as a multiplier instead of an exact row height")
         try expect(Theme.treeRowHeight() == 29,
                    "tree_line_height was treated as a multiplier instead of an exact row height")
+
+        // The Changes list is a file list like the tree's, so both rows must
+        // measure the same — height and the spacing between rows alike.
+        let tree = FileTreeViewController()
+        let git = GitPanelViewController()
+        let treeRow = tree.outlineView(NSOutlineView(), heightOfRowByItem: NSObject())
+        let gitRow = git.tableView(NSTableView(), heightOfRow: 0)
+        try expect(treeRow == 29 && gitRow == 29,
+                   "git Changes rows are \(gitRow) tall against the tree's \(treeRow); "
+                    + "both should follow tree_line_height")
+        try expect(tree.rowPitchForTesting == git.rowPitchForTesting,
+                   "git Changes rows sit at a \(git.rowPitchForTesting)pt pitch "
+                    + "against the tree's \(tree.rowPitchForTesting)pt")
     }
 
     private static func testExternalFileLastWriteWins() throws {
@@ -275,6 +298,11 @@ enum RegressionTests {
         let status = GitService.status(in: project)
         try expect(status.entries.map(\.path) == [special],
                    "status was not project-relative or lossless: \(status.entries.map(\.path))")
+        let split = GitService.trackedAndUntracked(in: status)
+        try expect(split.untracked == [special] && split.modified.isEmpty,
+                   "splitting a status snapshot lost entries: \(split)")
+        try expect(status.userName == "Puzzle Test",
+                   "status did not report git config user.name: \(status.userName)")
 
         try expect(GitService.stageAll(in: project).code == 0, "scoped staging failed")
         let staged = GitService.run(["diff", "--cached", "--name-only", "-z"], in: root)
@@ -367,6 +395,42 @@ enum RegressionTests {
                    "rename discard left the renamed path behind")
     }
 
+    private static func testGitIgnoreRefreshReconciliation() throws {
+        let directory = try temporaryDirectory("gitignore-refresh")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try expect(GitService.run(["init", "-q"], in: directory).code == 0,
+                   "gitignore fixture git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: directory)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: directory)
+
+        let tracked = directory.appendingPathComponent("tracked.log")
+        try Data("baseline\n".utf8).write(to: tracked)
+        try expect(GitService.stageAll(in: directory).code == 0,
+                   "gitignore fixture baseline staging failed")
+        try expect(GitService.commit("baseline", in: directory).code == 0,
+                   "gitignore fixture baseline commit failed")
+
+        let generated = directory.appendingPathComponent("generated.log")
+        try Data("generated\n".utf8).write(to: generated)
+        try expect(GitService.stageAll(in: directory).code == 0,
+                   "generated file was not staged before ignore edit")
+        try expect(GitService.status(in: directory).entries.contains {
+            $0.path == "generated.log" && $0.indexStatus == "A"
+        }, "gitignore fixture did not start with a staged addition")
+
+        try Data("generated.log\ntracked.log\n".utf8)
+            .write(to: directory.appendingPathComponent(".gitignore"))
+        try Data("modified but still tracked\n".utf8).write(to: tracked)
+        try expect(GitService.stageAll(in: directory).code == 0,
+                   "staging after .gitignore save failed")
+
+        let paths = GitService.status(in: directory).entries.map(\.path).sorted()
+        try expect(paths == [".gitignore", "tracked.log"],
+                   "saved .gitignore did not remove only ignored additions: \(paths)")
+        try expect(FileManager.default.fileExists(atPath: generated.path),
+                   "reconciling ignored additions deleted the working-copy file")
+    }
+
     private static func testDefinitionNavigation() throws {
         let root = try temporaryDirectory("definitions")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -386,6 +450,10 @@ enum RegressionTests {
 
         let app = appText as NSString
         let pathClick = app.range(of: "components/Button").location + 4
+        let pathHoverRange = DefinitionNavigator.targetRange(
+            in: appText, utf16Location: pathClick)
+        try expect(pathHoverRange.map { app.substring(with: $0) } == "./components/Button",
+                   "Command-hover did not identify the complete import path")
         let pathDestination = DefinitionNavigator.resolve(
             text: appText, sourceURL: appURL, projectRoot: root,
             utf16Location: pathClick)
@@ -394,6 +462,10 @@ enum RegressionTests {
                    "Command-click did not resolve an extensionless import path")
 
         let usage = app.range(of: "handleSubmit", options: .backwards).location
+        let symbolHoverRange = DefinitionNavigator.targetRange(
+            in: appText, utf16Location: usage + 2)
+        try expect(symbolHoverRange.map { app.substring(with: $0) } == "handleSubmit",
+                   "Command-hover did not identify the complete symbol")
         let localDestination = DefinitionNavigator.resolve(
             text: appText, sourceURL: appURL, projectRoot: root,
             utf16Location: usage + 2)
@@ -633,7 +705,12 @@ enum RegressionTests {
         let regex = SearchOptions(caseSensitive: true, wholeWord: false, regex: true)
         let groups = SearchViewController.search(query: "r.n", in: directory, options: regex)
         try expect(groups.count == 1 && groups[0].relative == name,
-                   "project search lost a path containing colon/newline")
+                   "project search lost a path containing colon/newline: "
+                    + "\(groups.map(\.relative))")
+        // The temporary directory is reached through a symlink (/var → /private/var),
+        // so a result whose path was built by string subtraction points nowhere.
+        try expect(FileManager.default.fileExists(atPath: groups[0].url.path),
+                   "search result URL does not exist: \(groups[0].url.path)")
         try expect(groups[0].hits.count == 1 && groups[0].hits[0].matchRange != nil,
                    "regex project-search result was not highlighted")
 
@@ -901,21 +978,245 @@ enum RegressionTests {
                    && imagePreview.dynamicConstraintCountForTesting == 0,
                    "clearing an image preview retained its bitmap or constraints")
 
-        let markdown = MarkdownPreviewView(frame: .zero)
-        markdown.update(source: "# Retained preview", immediately: true)
-        try expect(markdown.retainedSourceLengthForTesting > 0
-                   && markdown.renderedLengthForTesting > 0,
-                   "markdown preview did not render the regression fixture")
-        markdown.clearContent()
-        try expect(markdown.retainedSourceLengthForTesting == 0
-                   && markdown.renderedLengthForTesting == 0,
-                   "hidden markdown preview retained source or rendered text")
-        markdown.update(source: "late delayed render")
-        markdown.clearContent()
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.2))
-        try expect(markdown.retainedSourceLengthForTesting == 0
-                   && markdown.renderedLengthForTesting == 0,
-                   "cancelled markdown work repopulated a hidden preview")
+    }
+
+    private static func testMarkdownLiveEditing() throws {
+        let directory = try temporaryDirectory("markdown-live-editing")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("README.md")
+        let initial = "# Initial heading\n\nThis is **important** and [linked](https://example.com).\n"
+        try Data(initial.utf8).write(to: url)
+
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        pane.repositoryRoot = directory
+        pane.open(url: url)
+        let document = DocumentStore.shared.document(for: url)
+        try expect(document.storage.string == initial,
+                   "live Markdown formatting changed the editable source")
+        let headingLocation = (initial as NSString).range(of: "Initial heading").location
+        let strongLocation = (initial as NSString).range(of: "important").location
+        let linkLocation = (initial as NSString).range(of: "linked").location
+        let headingFont = document.storage.attribute(.font, at: headingLocation,
+                                                     effectiveRange: nil) as? NSFont
+        let strongFont = document.storage.attribute(.font, at: strongLocation,
+                                                    effectiveRange: nil) as? NSFont
+        let linkColor = document.storage.attribute(.foregroundColor, at: linkLocation,
+                                                   effectiveRange: nil) as? NSColor
+        let markerColor = document.storage.attribute(.foregroundColor, at: 0,
+                                                     effectiveRange: nil) as? NSColor
+        let headingStroke = document.storage.attribute(.strokeWidth, at: headingLocation,
+                                                       effectiveRange: nil) as? NSNumber
+        let strongStroke = document.storage.attribute(.strokeWidth, at: strongLocation,
+                                                      effectiveRange: nil) as? NSNumber
+        try expect(headingFont?.pointSize ?? 0 > Theme.editorFont().pointSize
+                   && (headingStroke?.doubleValue ?? 0) < 0,
+                   "Markdown heading was not formatted in the editable buffer")
+        try expect(strongFont != nil && (strongStroke?.doubleValue ?? 0) < 0,
+                   "Markdown strong emphasis was not formatted in the editable buffer")
+        try expect(sameColor(linkColor, Theme.blue),
+                   "Markdown link label was not rendered as a link")
+        try expect(sameColor(markerColor, Theme.dimText),
+                   "Markdown source marker did not visually recede")
+        let markdownLayout = FoldingLayoutManager()
+        markdownLayout.updateMarkdownSyntaxRanges(document.markdownSyntaxRanges,
+                                                   replacements: document.markdownGlyphReplacements,
+                                                   revealing: nil)
+        let linkDestination = (initial as NSString).range(of: "https://example.com").location
+        try expect(markdownLayout.isCharacterHidden(at: 0)
+                   && markdownLayout.isCharacterHidden(at: linkDestination)
+                   && !markdownLayout.isCharacterHidden(at: headingLocation),
+                   "opening Markdown did not collapse source syntax into rendered text")
+        let headingLine = (initial as NSString).lineRange(
+            for: NSRange(location: headingLocation, length: 0))
+        markdownLayout.revealMarkdownSyntax(in: headingLine)
+        try expect(!markdownLayout.isCharacterHidden(at: 0),
+                   "entering a Markdown line did not reveal its editable source markers")
+
+        let edited = """
+        ## Live heading
+
+        `payload` and *updated*
+
+        ```swift
+        let value = 1
+        ```
+
+        | Name | Value |
+        | --- | --- |
+        | Alpha \\| content &amp; text that must wrap onto multiple visual lines in a narrow table | 1 |
+
+        - [ ] Pending item
+        - [x] Completed item
+
+        Setext heading
+        ===============
+
+        > Quoted text
+        - Bullet item
+        3. Ordered item
+
+        ---
+
+        ![Diagram](diagram.png)
+
+        [Reference label][docs]
+        [docs]: https://example.com/docs
+
+            let indented = true
+
+        Escaped \\*literal\\* and <kbd>Cmd</kbd>
+
+        Hard break\\
+        next line with <hello@example.com> and https://example.com/path.
+
+        Entities: &amp; and &#169;.
+
+        A note[^detail].
+
+        [^detail]: Footnote body
+
+        <!-- hidden note -->
+
+        """
+        document.storage.replaceCharacters(
+            in: NSRange(location: 0, length: document.storage.length),
+            with: edited)
+        pane.textDidChange(Notification(name: NSText.didChangeNotification))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        try expect(document.storage.string == edited,
+                   "editing live Markdown no longer preserved its source")
+        let codeLocation = (edited as NSString).range(of: "payload").location
+        let codeBackground = document.storage.attribute(.backgroundColor, at: codeLocation,
+                                                        effectiveRange: nil) as? NSColor
+        try expect(sameColor(codeBackground, Theme.inputBackground),
+                   "Markdown edit was not formatted on the next run-loop turn")
+        try expect(document.markdownCodeBlocks.count == 2
+                   && document.markdownCodeBlocks[0].language == "swift",
+                   "fenced/indented Markdown code was not published as rendered blocks")
+        try expect(document.markdownTables.count == 1
+                   && document.markdownTables[0].columnCount == 2
+                   && document.markdownTables[0].rows.count == 2
+                   && document.markdownTables[0].rows[1].cells[0]
+                       .contains("Alpha | content & text"),
+                   "Markdown table rows and columns were not parsed for rendering")
+        try expect(pane.markdownDecorationCountsForTesting.codeBlocks == 2
+                   && pane.markdownDecorationCountsForTesting.tables == 1,
+                   "Markdown block decorations did not reach the active editor view")
+        try expect(document.markdownTasks.count == 2
+                   && !document.markdownTasks[0].checked
+                   && document.markdownTasks[1].checked
+                   && pane.markdownTaskCountForTesting == 2,
+                   "Markdown task-list markers were not published as checkboxes")
+        try expect(document.markdownLineMarkers.count == 4,
+                   "blockquote, list and footnote markers were not rendered")
+        try expect(document.markdownRules.count == 1,
+                   "thematic break was not published as a rendered rule")
+        try expect(document.markdownImages.count == 1
+                   && document.markdownImages[0].alt == "Diagram"
+                   && document.markdownImages[0].url?.lastPathComponent == "diagram.png",
+                   "standalone Markdown image was not resolved for rendering")
+        try expect(!pane.showsLineNumbersForTesting,
+                   "Markdown editor still displayed its line-number ruler")
+        try expect(!pane.hasActiveLineForTesting,
+                   "Markdown editor still displayed an active-line background")
+        try expect(document.markdownCollapsedLineRanges.count >= 3,
+                   "Markdown fence/table separator lines were not collapsed")
+        let setextLocation = (edited as NSString).range(of: "Setext heading").location
+        let setextStroke = document.storage.attribute(
+            .strokeWidth, at: setextLocation, effectiveRange: nil) as? NSNumber
+        try expect((setextStroke?.doubleValue ?? 0) < 0,
+                   "Setext heading did not receive rendered heading typography")
+        let referenceDestination = (edited as NSString).range(of: "https://example.com/docs").location
+        let escapedSlash = (edited as NSString).range(of: #"\*literal"#).location
+        let htmlOpen = (edited as NSString).range(of: "<kbd>").location
+        let hardBreak = (edited as NSString).range(of: "Hard break\\").location
+            + ("Hard break" as NSString).length
+        let htmlComment = (edited as NSString).range(of: "<!-- hidden note -->").location
+        let bareURLLocation = (edited as NSString).range(of: "https://example.com/path").location
+        let entityLocation = (edited as NSString).range(of: "Entities: &amp;").location
+            + ("Entities: " as NSString).length
+        let footnoteReference = (edited as NSString).range(of: "[^detail]").location
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(referenceDestination, $0)
+        }, "reference-link definition remained visible")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(escapedSlash, $0)
+        }, "escaped Markdown punctuation retained its source backslash")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(htmlOpen, $0)
+        }, "simple inline HTML tags were not collapsed")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(hardBreak, $0)
+        }, "hard-break source marker remained visible")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(htmlComment, $0)
+        }, "Markdown HTML comment remained visible")
+        let bareURLColor = document.storage.attribute(
+            .foregroundColor, at: bareURLLocation, effectiveRange: nil) as? NSColor
+        try expect(sameColor(bareURLColor, Theme.blue),
+                   "bare GFM URL was not rendered as a link")
+        try expect(document.markdownGlyphReplacements.contains {
+            $0.sourceRange.location == entityLocation && $0.character == 0x26
+        }, "Markdown character entity was not decoded for rendered display")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(footnoteReference, $0)
+        }, "Markdown footnote reference retained its source delimiters")
+
+        let tableLayout = FoldingLayoutManager()
+        let tableContainer = NSTextContainer(
+            size: NSSize(width: 220, height: CGFloat.greatestFiniteMagnitude))
+        tableContainer.widthTracksTextView = true
+        tableLayout.addTextContainer(tableContainer)
+        document.storage.addLayoutManager(tableLayout)
+        let tableView = PuzzleTextView(
+            frame: NSRect(x: 0, y: 0, width: 220, height: 300),
+            textContainer: tableContainer)
+        tableView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks,
+            tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers,
+            rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: nil)
+        tableLayout.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: nil)
+        let fenceLocation = (edited as NSString).range(of: "```swift").location
+        try expect(tableLayout.isMarkdownControlLineCollapsed(at: fenceLocation),
+                   "collapsed Markdown fence line would still draw a gutter number")
+        let wrappedLocation = (edited as NSString).range(of: "Alpha").location
+        let dynamicHeight = tableLayout.markdownTableRowHeightForTesting(
+            at: wrappedLocation) ?? 0
+        try expect(dynamicHeight > Theme.lineMetrics().target,
+                   "wrapped Markdown table content retained the fixed code-line height")
+        try expect(tableLayout.isCharacterHidden(at: wrappedLocation),
+                   "rendered table source still participated in ordinary text wrapping")
+        tableLayout.ensureLayout(for: tableContainer)
+        let fencedBodyLocation = (edited as NSString).range(of: "let value = 1").location
+        let fencedBodyGlyph = tableLayout.glyphIndexForCharacter(at: fencedBodyLocation)
+        let fencedBodyFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: fencedBodyGlyph, effectiveRange: nil)
+        try expect(fencedBodyFragment.height >= Theme.lineMetrics().target,
+                   "final fenced-code content row was compressed with its closing fence")
+        guard let wrappedRow = document.markdownTables[0].rows.first(where: {
+            NSLocationInRange(wrappedLocation, $0.sourceRange)
+        }) else { throw Failure(description: "wrapped table row metadata was missing") }
+        let rowAnchor = wrappedRow.lineRange.length > wrappedRow.sourceRange.length
+            ? NSMaxRange(wrappedRow.lineRange) - 1 : wrappedRow.sourceRange.location
+        let wrappedGlyph = tableLayout.glyphIndexForCharacter(at: rowAnchor)
+        let wrappedFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: wrappedGlyph, effectiveRange: nil)
+        try expect(wrappedFragment.height > Theme.lineMetrics().target,
+                   "TextKit did not apply the measured Markdown table row height")
+        document.storage.removeLayoutManager(tableLayout)
+
+        pane.prepareForClose()
+        document.isModified = false
+        DocumentStore.shared.release(url, stillOpen: false)
     }
 
     private static func testFindMatchesAreComplete() throws {
@@ -969,6 +1270,30 @@ enum RegressionTests {
         guard let anchorRow = tree.row(for: anchor) else {
             throw Failure(description: "anchor row missing from file tree")
         }
+
+        // A file created by another process is not a cached Document. The tree
+        // must still refresh immediately, and opening it must reveal/highlight
+        // the row even if its FSEvent and open request arrive together.
+        let external = directory.appendingPathComponent("external-created.toml")
+        try Data("key = true\n".utf8).write(to: external)
+        tree.selectFile(external)
+        guard let externalRow = tree.row(for: external) else {
+            throw Failure(description: "external open did not refresh the missing parent row")
+        }
+        tree.view.layoutSubtreeIfNeeded()
+        let externalIsActive = tree.activeStateForTesting(at: externalRow)
+        try expect(externalIsActive == true,
+                   "externally opened file was not highlighted in the tree "
+                    + "(activeURL=\(String(describing: tree.activeURLForTesting)), "
+                    + "rowState=\(String(describing: externalIsActive)), "
+                    + "highlightedRow=\(String(describing: tree.activeHighlightedRow)))")
+
+        let monitorOnly = directory.appendingPathComponent("monitor-created.lock")
+        try Data("lock\n".utf8).write(to: monitorOnly)
+        tree.refresh(changedURLs: [monitorOnly])
+        try expect(tree.row(for: monitorOnly) != nil,
+                   "externally created file did not appear after targeted monitor refresh")
+
         tree.setHoveredRowForTesting(anchorRow)
         tree.setHoveredRowForTesting(anchorRow)
         try expect(tree.hoveredRowForTesting == anchorRow,
@@ -1090,6 +1415,508 @@ enum RegressionTests {
                    && !FileManager.default.fileExists(
                         atPath: directory.appendingPathComponent("blurred.txt").path),
                    "blur did not cancel unconfirmed file creation")
+    }
+
+    private static func testActivityBarUsesTextLabels() throws {
+        let bar = ActivityBarView(frame: NSRect(x: 0, y: 0, width: 320, height: 40))
+        bar.layoutSubtreeIfNeeded()
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
+                   "the activity bar reads \(bar.buttonTitlesForTesting)")
+        // The label is the affordance, so nothing waits for a hover to explain it.
+        try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
+                   "a text button still carries a tooltip")
+    }
+
+    private static func testMaterialFileIcons() throws {
+        // The test binary runs outside an app bundle, so build the same icon
+        // resources build.sh bundles and point the provider at them.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let generator = root.appendingPathComponent("Tools/generate-file-icons.py")
+        guard FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("vendor/material-icon-theme").path) else {
+            FileHandle.standardError.write(Data(
+                "puzzle: skipping icon test — run vendor/fetch.sh first\n".utf8))
+            return
+        }
+        let resources = try temporaryDirectory("icons")
+        defer {
+            FileIcons.useResources(at: nil)
+            try? FileManager.default.removeItem(at: resources)
+        }
+        let python = Process()
+        python.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        python.arguments = ["python3", generator.path, resources.path]
+        python.standardOutput = FileHandle.nullDevice
+        try python.run()
+        python.waitUntilExit()
+        try expect(python.terminationStatus == 0, "the icon generator failed")
+
+        FileIcons.useResources(at: resources)
+        // Whole names beat extensions, and an unknown extension still gets the
+        // generic file icon rather than nothing.
+        try expect(FileIcons.fileIconName(for: "package.json") == "nodejs",
+                   "package.json did not get its own icon")
+        try expect(FileIcons.fileIconName(for: "Main.swift") == "swift",
+                   "a .swift file did not get the Swift icon")
+        try expect(FileIcons.fileIconName(for: "Dockerfile") == "docker",
+                   "Dockerfile did not get the Docker icon")
+        try expect(FileIcons.fileIconName(for: "notes.qqq") == "file",
+                   "an unknown extension did not fall back to the generic icon")
+        try expect(FileIcons.folderIconName(for: "Sources", expanded: false) == "folder-src",
+                   "the source folder did not get its own icon")
+        // The decoded-image cache is bounded: each icon keeps its parsed SVG
+        // alive, so browsing a tree with many file types must not accumulate
+        // them forever.
+        FileIcons.releaseTransientMemory()
+        FileIcons.maxCachedImages = 20
+        defer {
+            FileIcons.maxCachedImages = 160
+            FileIcons.releaseTransientMemory()
+        }
+        let names = ["swift", "typescript", "javascript", "python", "rust", "go",
+                     "json", "yaml", "markdown", "html", "css", "docker", "git",
+                     "image", "audio", "video", "pdf", "zip", "lock", "license",
+                     "readme", "database", "console", "java", "ruby", "php",
+                     "lua", "vue", "svelte", "sql"]
+        for name in names { _ = FileIcons.image(named: name, dark: true) }
+        try expect(FileIcons.cachedImageCountForTesting <= 20,
+                   "the icon cache grew to \(FileIcons.cachedImageCountForTesting) past its cap")
+        try expect(FileIcons.cachedImageCountForTesting > 0,
+                   "the icon cache evicted everything instead of the oldest entries")
+        // An evicted icon still resolves — eviction is a cache, not a loss.
+        try expect(FileIcons.image(named: "swift", dark: true) != nil,
+                   "an evicted icon could not be reloaded")
+        FileIcons.releaseTransientMemory()
+        try expect(FileIcons.cachedImageCountForTesting == 0,
+                   "releasing transient memory left icons behind")
+
+        try expect(FileIcons.folderIconName(for: "whatever", expanded: true) == "folder-open",
+                   "a plain folder did not use the open folder icon")
+
+        // The icons themselves must decode — a bundled SVG that AppKit cannot
+        // read would silently leave the tree blank.
+        try expect(FileIcons.image(named: "swift", dark: true) != nil,
+                   "the Swift icon did not decode")
+        let row = SidebarIcon.file(URL(fileURLWithPath: "/tmp/app.tsx"))
+        guard case .material(let name) = row else {
+            throw Failure(description: "a file row did not use a Material icon")
+        }
+        try expect(name == "react_ts", "app.tsx drew \(name)")
+
+        // Without resources every row falls back to its SF Symbol.
+        FileIcons.useResources(at: nil)
+        guard case .symbol = SidebarIcon.file(URL(fileURLWithPath: "/tmp/app.tsx")) else {
+            throw Failure(description: "rows did not fall back to SF Symbols")
+        }
+    }
+
+    private static func testAyuDarkTheme() throws {
+        let settings = Settings.shared
+        let saved = settings.theme
+        defer {
+            settings.theme = saved
+            Theme.invalidateCaches()
+        }
+
+        settings.theme = .one
+        Theme.invalidateCaches()
+        let oneBackground = Theme.editorBackground.usingColorSpace(.sRGB)
+        try expect(Theme.isDark(NSAppearance(named: .aqua)!) == false,
+                   "the default theme ignored a light system appearance")
+
+        settings.theme = .ayuDark
+        Theme.invalidateCaches()
+        try expect(Theme.isDark(NSAppearance(named: .aqua)!),
+                   "Ayu Dark did not report itself as a dark theme")
+        // Ayu's code area is the panel's surface, and its active line is the
+        // tree's active row, so the editor and the panel read as one.
+        try expect(sameColor(Theme.editorBackground, Theme.panelBackground),
+                   "the code area does not match the file-tree panel")
+        try expect(sameColor(Theme.lineHighlight, Theme.activeRow),
+                   "the active line does not match the tree's selected row")
+        // The active tab is the one surface that must stay distinct: the tab
+        // strip already uses the panel colour.
+        try expect(!sameColor(Theme.activeTab, Theme.barBackground),
+                   "the active tab vanished into the tab strip")
+        // Every panel boundary is the same 1pt line.
+        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
+                   "the sidebar/editor divider is not the shared border line")
+        try expect(sameColor(Theme.foreground, hexColor(0xbfbdb6)),
+                   "the editor foreground is not Ayu's")
+        // Types and calls swap hues between the two themes; the syntax roles
+        // exist so both stay right.
+        try expect(sameColor(Theme.syntaxType, hexColor(0x39bae6))
+                    && sameColor(Theme.syntaxFunction, hexColor(0xffb454)),
+                   "Ayu's syntax roles did not follow the theme")
+        try expect(!sameColor(Theme.editorBackground, oneBackground),
+                   "switching themes did not change the resolved colour")
+
+        settings.theme = .one
+        Theme.invalidateCaches()
+        try expect(sameColor(Theme.editorBackground, oneBackground),
+                   "switching back to One kept Ayu's background")
+        // The editor panes' split view takes the colour directly…
+        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
+                   "the editor split did not take its divider colour from the theme")
+        // …and the window's sidebar divider is painted over AppKit's hairline by
+        // the drag handle, whose line must cover exactly that hairline.
+        let handle = SplitDividerHandleView(
+            frame: NSRect(x: 0, y: 0, width: SplitDividerHandleView.hitWidth, height: 100))
+        handle.dividerThickness = 1
+        try expect(handle.paintedDividerRectForTesting
+                    == NSRect(x: SplitDividerHandleView.hitWidth / 2, y: 0,
+                              width: 1, height: 100),
+                   "the divider overlay does not sit on the split position: "
+                    + "\(handle.paintedDividerRectForTesting)")
+    }
+
+    private static func hexColor(_ value: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((value >> 16) & 0xff) / 255,
+                green: CGFloat((value >> 8) & 0xff) / 255,
+                blue: CGFloat(value & 0xff) / 255, alpha: 1)
+    }
+
+    private static func testFileOpensRouteToTheirProjectWindow() throws {
+        let root = try temporaryDirectory("open-routing")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outer = root.appendingPathComponent("outer", isDirectory: true)
+        let inner = outer.appendingPathComponent("nested", isDirectory: true)
+        let other = root.appendingPathComponent("other", isDirectory: true)
+        for directory in [outer, inner, other] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let file = inner.appendingPathComponent("deep.swift")
+        try Data("let x = 1\n".utf8).write(to: file)
+
+        // A file lands in the window that owns it, and the deepest project wins
+        // so a nested workspace keeps its own files.
+        let roots: [URL?] = [nil, other, outer, inner]
+        try expect(AppDelegate.projectIndex(owning: file, in: roots) == 3,
+                   "a file in a nested project did not pick the nested window")
+        try expect(AppDelegate.projectIndex(owning: outer.appendingPathComponent("top.swift"),
+                                            in: roots) == 2,
+                   "a file at the project root did not pick its window")
+        try expect(AppDelegate.projectIndex(owning: root.appendingPathComponent("loose.swift"),
+                                            in: roots) == nil,
+                   "a file outside every project claimed a window")
+        // A sibling whose name merely starts with the project's is not inside it.
+        let lookalike = root.appendingPathComponent("outer-extra/file.swift")
+        try expect(AppDelegate.projectIndex(owning: lookalike, in: roots) == nil,
+                   "a sibling directory sharing the project's prefix matched it")
+
+        // Re-opening a folder raises the window already showing it, symlinked
+        // temporary paths (/var → /private/var) included.
+        try expect(AppDelegate.projectIndex(matching: outer, in: roots) == 2,
+                   "re-opening a project did not find its window")
+        try expect(AppDelegate.projectIndex(
+                    matching: URL(fileURLWithPath: "/private" + outer.path), in: roots) == 2,
+                   "the same project through a symlinked path was treated as new")
+        try expect(AppDelegate.projectIndex(matching: root, in: roots) == nil,
+                   "an unopened folder matched an existing window")
+    }
+
+    private static func testActiveLineSpansTheGutter() throws {
+        let directory = try temporaryDirectory("active-line")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data("let a = 1\nlet b = 2\nlet c = 3\n".utf8).write(to: url)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: url)
+        // The band appears once the file is actually being worked in — jumping
+        // to a line is the same path a search result takes.
+        pane.jumpToLine(2)
+        pane.view.layoutSubtreeIfNeeded()
+
+        guard let ruler = pane.lineNumberRulerForTesting else {
+            throw Failure(description: "the editor has no line-number gutter")
+        }
+        guard let text = pane.currentLineBandRectForTesting,
+              let gutter = ruler.currentLineBandRect() else {
+            throw Failure(description: "no active-line band while a document is open")
+        }
+        // One row: the gutter band covers the full gutter width and lines up
+        // with the band behind the code, so nothing shows through in front of
+        // the line number.
+        try expect(gutter.minX == 0 && gutter.width == ruler.ruleThickness,
+                   "the gutter band does not span the line-number column: \(gutter)")
+        try expect(abs(gutter.height - text.height) <= 0.5,
+                   "the gutter band is \(gutter.height)pt against the code's \(text.height)pt")
+        let expectedY = text.minY - ruler.clientViewVisibleRectForTesting.minY
+        try expect(abs(gutter.minY - expectedY) <= 0.5,
+                   "the gutter band sits at \(gutter.minY), the code's row at \(expectedY)")
+
+        // Folding still hides a block's body when the document lays out on
+        // demand (source files do; Markdown and diffs keep full layout because
+        // their decorations measure ranges across the whole document).
+        do {
+            let long = directory.appendingPathComponent("folded.swift")
+            var body = "import AppKit\n\nfunc outer() {\n    let a = 1\n}\n"
+            let hidden = body.range(of: "let a = 1")!
+            let hiddenOffset = body.distance(from: body.startIndex, to: hidden.lowerBound)
+            for i in 0..<200 { body += "// filler line \(i)\n" }
+            try Data(body.utf8).write(to: long)
+            pane.open(url: long)
+            pane.view.layoutSubtreeIfNeeded()
+            try expect(!pane.isCharacterHiddenForTesting(hiddenOffset),
+                       "the block body was hidden before anything was folded")
+            pane.foldAllForTesting()
+            pane.view.layoutSubtreeIfNeeded()
+            try expect(pane.isCharacterHiddenForTesting(hiddenOffset),
+                       "folding did not hide the block body under on-demand layout")
+            try expect(pane.nonContiguousLayoutForTesting,
+                       "a source file did not get on-demand layout")
+
+            let notes = directory.appendingPathComponent("notes.md")
+            try Data("# Title\n\n```swift\nlet x = 1\n```\n".utf8).write(to: notes)
+            pane.open(url: notes)
+            pane.view.layoutSubtreeIfNeeded()
+            try expect(!pane.nonContiguousLayoutForTesting,
+                       "Markdown lost its full layout, so its decorations would "
+                        + "measure ranges that are not laid out yet")
+        }
+
+        // The undo stack is bounded, so a long session cannot accumulate every
+        // edit ever made in the window.
+        try expect(pane.undoLevelsForTesting == EditorPaneViewController.undoLevels,
+                   "undo levels are \(String(describing: pane.undoLevelsForTesting))")
+
+        // With a selection rather than a caret there is no band at all, in the
+        // gutter or behind the code.
+        pane.selectAllForTesting()
+        try expect(pane.currentLineBandRectForTesting == nil
+                    && ruler.currentLineBandRect() == nil,
+                   "a selection still painted an active-line band")
+    }
+
+    private static func testDiffHeaderStepsThroughChanges() throws {
+        let diff = """
+        diff --git a/Sources/App.swift b/Sources/App.swift
+        --- a/Sources/App.swift
+        +++ b/Sources/App.swift
+        @@ -10,4 +10,4 @@
+         context ten
+        -removed eleven
+        +added eleven
+         context twelve
+        @@ -40,3 +40,3 @@
+         context forty
+        -gone forty-one
+        +back forty-one
+        """
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+
+        let url = URL(string:
+            "puzzle-diff:///repo/.puzzle-diff-preview?window=test&path=Sources/App.swift")!
+        DocumentStore.shared.setVirtualDocument(
+            url: url, text: diff, displayName: "App.swift (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+
+        try expect(pane.diffHeaderIsVisibleForTesting,
+                   "a git diff opened without its header row")
+        try expect(pane.diffHeaderForTesting.pathForTesting == "Sources/App.swift",
+                   "the header showed \(pane.diffHeaderForTesting.pathForTesting)")
+        // Touching +/- lines are one change, so this diff holds two.
+        try expect(pane.changeBlockCountForTesting == 2,
+                   "the header counted \(pane.changeBlockCountForTesting) changes, not 2")
+        try expect(pane.diffHeaderForTesting.summaryForTesting == "2 changes",
+                   "the header summarised \(pane.diffHeaderForTesting.summaryForTesting)")
+        try expect(pane.diffHeaderForTesting.stepControlsEnabledForTesting,
+                   "the step controls were disabled on a diff that has changes")
+
+        // Stepping forward lands on each change in turn and then wraps.
+        let text = diff as NSString
+        func caretLine() -> Int {
+            let caret = pane.caretLocationForTesting
+            var line = 1
+            for i in 0..<min(caret, text.length) where text.character(at: i) == 10 { line += 1 }
+            return line
+        }
+        pane.diffHeaderForTesting.clickNextForTesting()
+        try expect(caretLine() == 6, "the first step landed on line \(caretLine()), not the -/+ pair")
+        pane.diffHeaderForTesting.clickNextForTesting()
+        try expect(caretLine() == 11, "the second step landed on line \(caretLine())")
+        pane.diffHeaderForTesting.clickNextForTesting()
+        try expect(caretLine() == 6, "stepping past the last change did not wrap")
+        pane.diffHeaderForTesting.clickPreviousForTesting()
+        try expect(caretLine() == 11, "stepping back from the first change did not wrap")
+
+        // An ordinary file has no header at all.
+        let directory = try temporaryDirectory("diff-header")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plain = directory.appendingPathComponent("plain.txt")
+        try Data("just text\n".utf8).write(to: plain)
+        pane.open(url: plain)
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(!pane.diffHeaderIsVisibleForTesting,
+                   "a normal file showed the diff header")
+    }
+
+    private static func testProjectTitleStrip() throws {
+        let root = try temporaryDirectory("project-title")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try expect(GitService.run(["init", "-q", "-b", "trunk"], in: root).code == 0,
+                   "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        try Data("fixture\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        // An unborn branch has no name to report yet; commit so `trunk` exists.
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        workspace.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification))
+
+        let title = workspace.sidebar.projectTitle
+        // The project name shows immediately; the branch arrives with Git.
+        try expect(title.titleForTesting.project == root.lastPathComponent,
+                   "the titlebar strip did not show the project name")
+        let deadline = Date().addingTimeInterval(5)
+        while title.titleForTesting.branch.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(title.titleForTesting.branch == "trunk",
+                   "the titlebar strip did not pick up the branch: "
+                    + "\(title.titleForTesting.branch)")
+
+        // Clicking the strip opens the folder in iTerm, with Terminal as the
+        // fallback where iTerm is not installed.
+        let iTerm = URL(fileURLWithPath: "/Applications/iTerm.app")
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let installed: [String: URL] = ["com.googlecode.iterm2": iTerm,
+                                        "com.apple.Terminal": terminal]
+        try expect(WorkspaceWindowController.terminalApplication { installed[$0] } == iTerm,
+                   "iTerm is installed but was not preferred")
+        try expect(WorkspaceWindowController.terminalApplication {
+                       $0 == "com.apple.Terminal" ? terminal : nil
+                   } == terminal,
+                   "without iTerm the click did not fall back to Terminal")
+        try expect(WorkspaceWindowController.terminalApplication { _ in nil } == nil,
+                   "a machine with neither terminal still resolved one")
+
+        // The window controller must have claimed the click handler, and the
+        // transparent titlebar sitting over this band must not swallow it.
+        try expect(title.hasClickHandlerForTesting,
+                   "nothing handles a click on the project/branch strip")
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let center = title.convert(NSPoint(x: title.bounds.midX, y: title.bounds.midY),
+                                   to: nil)
+        let hit = workspace.window?.contentView?.superview?.hitTest(center)
+        try expect(hit === title,
+                   "clicks on the project strip land on \(String(describing: hit)) instead")
+
+        // It sits clear of the traffic lights, inside the band the panel leaves
+        // above the file tree.
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        guard let closeButton = workspace.window?.standardWindowButton(.closeButton),
+              let zoomButton = workspace.window?.standardWindowButton(.zoomButton) else {
+            throw Failure(description: "window has no traffic lights")
+        }
+        let lightsRight = zoomButton.convert(zoomButton.bounds, to: nil).maxX
+        let stripInWindow = title.convert(title.bounds, to: nil)
+        let band = workspace.sidebar.fileTreeTopInsetForTesting
+        try expect(stripInWindow.minX > lightsRight,
+                   "the project strip overlaps the traffic lights "
+                    + "(\(stripInWindow.minX) vs \(lightsRight))")
+        let panelTop = workspace.sidebar.view.convert(
+            workspace.sidebar.view.bounds, to: nil).maxY
+        try expect(stripInWindow.maxY <= panelTop + 0.5
+                    && stripInWindow.minY >= panelTop - band - 0.5,
+                   "the project strip escaped the titlebar band")
+        // Its text has to sit on the traffic lights' centre line.
+        let buttonInWindow = closeButton.convert(closeButton.bounds, to: nil)
+        try expect(abs(stripInWindow.midY - buttonInWindow.midY) <= 0.5,
+                   "the project strip is centred at \(stripInWindow.midY) against the "
+                    + "traffic lights' \(buttonInWindow.midY)")
+        try expect(abs(stripInWindow.height - band) <= 0.5,
+                   "the project strip is \(stripInWindow.height)pt tall against the "
+                    + "\(band)pt file-tab row")
+
+        // The traffic-light band is closed off by the same 1pt line the activity
+        // bar draws, sitting exactly on the boundary with the file tree.
+        let separator = workspace.sidebar.titleSeparatorForTesting
+        try expect(sameColor(separator.fillColor, Theme.border),
+                   "the title band's line is not the shared border colour")
+        try expect(abs(separator.frame.height - 1) < 0.5,
+                   "the title band's line is \(separator.frame.height)pt tall")
+        // The panel view is not flipped, so the band's lower edge is that far
+        // down from the top of the panel.
+        let bandEdge = workspace.sidebar.view.bounds.height - band
+        try expect(abs(separator.frame.minY - bandEdge) < 0.5
+                    && separator.frame.width == workspace.sidebar.view.bounds.width,
+                   "the title band's line does not span the boundary: \(separator.frame), "
+                    + "band edge at \(bandEdge)")
+
+        // A narrow panel truncates the strip instead of pushing it off-window.
+        try expect(title.frame.maxX <= workspace.sidebar.view.bounds.width - 8 + 0.5,
+                   "the project strip overflowed the panel")
+
+        // The Git panel's own line above the commit box names the author the
+        // next commit will carry, alongside the project and branch.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        panel.setDirectory(root)
+        let labelDeadline = Date().addingTimeInterval(5)
+        while !panel.statusLabelForTesting.contains("trunk") && Date() < labelDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let label = panel.statusLabelForTesting
+        // A repo with no remote also appends "(no upstream)" after the author.
+        try expect(label.hasPrefix("\(root.lastPathComponent) / trunk / Puzzle Test"),
+                   "the commit header read \(label)")
+    }
+
+    private static func testDiffGutterUsesFileLineNumbers() throws {
+        let diff = """
+        diff --git a/a.swift b/a.swift
+        index 1111111..2222222 100644
+        --- a/a.swift
+        +++ b/a.swift
+        @@ -10,4 +10,5 @@ func f() {
+         context ten
+        -removed eleven
+        +added eleven
+        +added twelve
+         context twelve
+        @@ -40,2 +41,2 @@
+        -gone forty
+        +back forty
+         context forty-one
+        \\ No newline at end of file
+        """
+        let numbers = DiffHighlighter.lineNumbers(in: diff)
+        let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
+        try expect(numbers.count == lines.count,
+                   "diff gutter numbering lost lines: \(numbers.count) vs \(lines.count)")
+        // Headers carry no file line at all.
+        try expect(numbers[0...4].allSatisfy { $0 == nil },
+                   "diff headers were numbered instead of left blank")
+        // Body of the first hunk: context/added follow the new file, the removed
+        // line keeps the number it had in the old one.
+        try expect(Array(numbers[5...9]) == [10, 11, 11, 12, 13],
+                   "first hunk numbered \(numbers[5...9]) instead of the file's own lines")
+        // A second hunk restarts from its own header, not from where the first left off.
+        try expect(numbers[10] == nil && Array(numbers[11...13]) == [40, 41, 42],
+                   "second hunk numbered \(numbers[11...13]) instead of restarting at its header")
+        try expect(numbers[14] == nil,
+                   "the no-newline marker was given a file line number")
+
+        // An ordinary file keeps plain 1..n numbering — no diff map at all.
+        try expect(DiffHighlighter.lineNumbers(in: "let a = 1\nlet b = 2\n") == [nil, nil, nil],
+                   "non-diff text produced file line numbers")
     }
 
     private static func testFileHistoryTable() throws {

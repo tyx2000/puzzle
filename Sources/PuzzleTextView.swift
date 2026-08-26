@@ -55,6 +55,13 @@ final class PuzzleTextView: NSTextView {
     var onExplicitCaretInteraction: (() -> Void)?
     /// Return true to consume a Command-click and resolve its file/symbol.
     var onCommandClick: ((Int) -> Bool)?
+    /// `nil` means Command was released or the pointer left the text.
+    var onCommandHover: ((Int?) -> Void)?
+    private var commandHoverTrackingArea: NSTrackingArea?
+    private var commandModifierMonitor: Any?
+    private(set) var commandHoverRange: NSRange? {
+        didSet { if commandHoverRange != oldValue { needsDisplay = true } }
+    }
 
     /// Find-bar matches, drawn here (rather than as temporary attributes) so the
     /// bands are glyph-height instead of the full configured code row, and so they paint
@@ -125,6 +132,152 @@ final class PuzzleTextView: NSTextView {
     /// line of the buffer did not — the bands looked ragged.
     var diffBands: [(range: NSRange, color: NSColor)] = [] {
         didSet { needsDisplay = true }
+    }
+
+    /// File line number for each line of a diff buffer, `nil` for the headers
+    /// that belong to no line. Empty for ordinary files, which are simply
+    /// numbered from 1.
+    var diffLineNumbers: [Int?] = [] {
+        didSet { enclosingScrollView?.verticalRulerView?.needsDisplay = true }
+    }
+
+    private var markdownCodeBlocks: [MarkdownCodeBlockDecoration] = []
+    private var markdownTables: [MarkdownTableDecoration] = []
+    private var markdownTasks: [MarkdownTaskDecoration] = []
+    private var markdownLineMarkers: [MarkdownLineMarkerDecoration] = []
+    private var markdownRules: [MarkdownRuleDecoration] = []
+    private var markdownImages: [MarkdownImageDecoration] = []
+    private var markdownImageCache: [URL: NSImage] = [:]
+    private var markdownActiveSourceRange: NSRange?
+    private var measuredMarkdownTableWidth: CGFloat = -1
+
+    func updateMarkdownDecorations(codeBlocks: [MarkdownCodeBlockDecoration],
+                                   tables: [MarkdownTableDecoration],
+                                   tasks: [MarkdownTaskDecoration] = [],
+                                   lineMarkers: [MarkdownLineMarkerDecoration] = [],
+                                   rules: [MarkdownRuleDecoration] = [],
+                                   images: [MarkdownImageDecoration] = [],
+                                   activeSourceRange: NSRange?) {
+        guard codeBlocks != markdownCodeBlocks || tables != markdownTables
+                || tasks != markdownTasks
+                || lineMarkers != markdownLineMarkers
+                || rules != markdownRules
+                || images != markdownImages
+                || activeSourceRange != markdownActiveSourceRange else { return }
+        markdownCodeBlocks = codeBlocks
+        markdownTables = tables
+        markdownTasks = tasks
+        markdownLineMarkers = lineMarkers
+        markdownRules = rules
+        markdownImages = images
+        let retainedURLs = Set(images.compactMap(\.url))
+        markdownImageCache = markdownImageCache.filter { retainedURLs.contains($0.key) }
+        markdownActiveSourceRange = activeSourceRange
+        measuredMarkdownTableWidth = -1
+        updateMarkdownTableRowMetrics()
+        needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        updateMarkdownTableRowMetrics()
+    }
+
+    var markdownDecorationCountsForTesting: (codeBlocks: Int, tables: Int) {
+        (markdownCodeBlocks.count, markdownTables.count)
+    }
+    var markdownTaskCountForTesting: Int { markdownTasks.count }
+
+    private func updateMarkdownTableRowMetrics() {
+        let width = bounds.width
+        guard abs(width - measuredMarkdownTableWidth) > 0.5 else { return }
+        measuredMarkdownTableWidth = width
+        guard width > 0, !markdownTables.isEmpty || !markdownImages.isEmpty else {
+            foldingManager?.updateMarkdownTableRowMetrics([])
+            return
+        }
+        var metrics: [MarkdownTableRowMetric] = []
+        for table in markdownTables {
+            let widths = markdownTableColumnWidths(for: table)
+            for row in table.rows {
+                metrics.append(MarkdownTableRowMetric(
+                    range: row.lineRange,
+                    height: markdownTableRowHeight(row, widths: widths)))
+            }
+        }
+        for image in markdownImages {
+            metrics.append(MarkdownTableRowMetric(
+                range: image.lineRange,
+                height: markdownImageHeight(image)))
+        }
+        foldingManager?.updateMarkdownTableRowMetrics(metrics)
+        needsDisplay = true
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
+    private func markdownTableAttributes(header: Bool)
+        -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.editorFont(),
+            .foregroundColor: Theme.foreground,
+            .paragraphStyle: paragraph,
+        ]
+        if header { attributes[.strokeWidth] = -2.0 }
+        return attributes
+    }
+
+    private func markdownTableColumnWidths(for table: MarkdownTableDecoration) -> [CGFloat] {
+        let availableWidth = max(80, bounds.width - textContainerInset.width * 2)
+        var widths = Array(repeating: CGFloat(60), count: table.columnCount)
+        for row in table.rows {
+            let attributes = markdownTableAttributes(header: row.isHeader)
+            for (column, cell) in row.cells.enumerated() where column < widths.count {
+                widths[column] = max(widths[column],
+                    ceil((cell as NSString).size(withAttributes: attributes).width) + 20)
+            }
+        }
+        let preferred = widths.reduce(0, +)
+        guard preferred > availableWidth else { return widths }
+        let scale = availableWidth / preferred
+        widths = widths.map { max(40, floor($0 * scale)) }
+        let adjusted = widths.reduce(0, +)
+        if adjusted > availableWidth, let last = widths.indices.last {
+            widths[last] = max(20, widths[last] - (adjusted - availableWidth))
+        }
+        return widths
+    }
+
+    private func markdownTableRowHeight(_ row: MarkdownTableDecoration.Row,
+                                        widths: [CGFloat]) -> CGFloat {
+        let attributes = markdownTableAttributes(header: row.isHeader)
+        var contentHeight: CGFloat = 0
+        for (column, cell) in row.cells.enumerated() where column < widths.count {
+            let textWidth = max(1, widths[column] - 16)
+            let bounds = (cell as NSString).boundingRect(
+                with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes)
+            contentHeight = max(contentHeight, ceil(bounds.height))
+        }
+        return max(Theme.lineMetrics().target, contentHeight + 8)
+    }
+
+    private func markdownImage(_ decoration: MarkdownImageDecoration) -> NSImage? {
+        guard let url = decoration.url, url.isFileURL else { return nil }
+        if let cached = markdownImageCache[url] { return cached }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        markdownImageCache[url] = image
+        return image
+    }
+
+    private func markdownImageHeight(_ decoration: MarkdownImageDecoration) -> CGFloat {
+        let available = max(80, bounds.width - textContainerInset.width * 2)
+        guard let image = markdownImage(decoration), image.size.width > 0,
+              image.size.height > 0 else { return Theme.lineMetrics().target * 2 }
+        let scale = min(1, available / image.size.width, 320 / image.size.height)
+        return max(Theme.lineMetrics().target * 2, floor(image.size.height * scale) + 8)
     }
 
     private(set) var codeBlocks: [CodeBlock] = []
@@ -244,8 +397,45 @@ final class PuzzleTextView: NSTextView {
     // drawBackground alongside the bands.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawMarkdownTables(in: dirtyRect)
+        drawMarkdownImages(in: dirtyRect)
+        drawMarkdownLineMarkers(in: dirtyRect)
+        drawMarkdownTasks(in: dirtyRect)
+        drawMarkdownRules(in: dirtyRect)
+        drawMarkdownCodeLabels(in: dirtyRect)
+        drawCommandHoverUnderline()
         drawBracketScopeOutline()
         drawInlineBlame()
+    }
+
+    func setCommandHoverRange(_ range: NSRange?) {
+        commandHoverRange = range
+    }
+
+    private func drawCommandHoverUnderline() {
+        guard let range = commandHoverRange,
+              range.length > 0,
+              NSMaxRange(range) <= (string as NSString).length,
+              let layoutManager, let container = textContainer else { return }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range,
+                                                   actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return }
+        let inset = textContainerInset
+        let notSelected = NSRange(location: NSNotFound, length: 0)
+        Theme.purple.setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1.5
+        path.lineCapStyle = .round
+        layoutManager.enumerateEnclosingRects(
+            forGlyphRange: glyphRange,
+            withinSelectedGlyphRange: notSelected,
+            in: container
+        ) { rect, _ in
+            let y = floor(rect.maxY + inset.height - 0.5)
+            path.move(to: NSPoint(x: rect.minX + inset.width, y: y))
+            path.line(to: NSPoint(x: rect.maxX + inset.width, y: y))
+        }
+        path.stroke()
     }
 
     private struct BracketGlyphGeometry {
@@ -431,8 +621,297 @@ final class PuzzleTextView: NSTextView {
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         drawDiffBands()
+        drawMarkdownCodeBlocks(in: rect)
         drawCurrentLineBand()
         drawSearchMatches()
+    }
+
+    private func drawMarkdownCodeBlocks(in dirtyRect: NSRect) {
+        guard !markdownCodeBlocks.isEmpty,
+              let layoutManager, textContainer != nil else { return }
+        let inset = textContainerInset
+        for block in markdownCodeBlocks {
+            let clamped = NSIntersectionRange(
+                block.range, NSRange(location: 0, length: (string as NSString).length))
+            guard clamped.length > 0 else { continue }
+            let glyphs = layoutManager.glyphRange(
+                forCharacterRange: clamped, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            var union = NSRect.null
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphs) {
+                fragment, _, _, _, _ in union = union.union(fragment)
+            }
+            guard !union.isNull else { continue }
+            let rect = NSRect(x: inset.width,
+                              y: union.minY + inset.height,
+                              width: max(0, bounds.width - inset.width * 2),
+                              height: union.height)
+            guard rect.intersects(dirtyRect) else { continue }
+            Theme.inputBackground.setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+            path.fill()
+            Theme.border.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+
+    private func drawMarkdownCodeLabels(in dirtyRect: NSRect) {
+        guard let layoutManager else { return }
+        let inset = textContainerInset
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.uiFont(9.5), .foregroundColor: Theme.dimText,
+        ]
+        for block in markdownCodeBlocks {
+            guard let language = block.language, !language.isEmpty,
+                  block.range.length > 0 else { continue }
+            let glyph = layoutManager.glyphIndexForCharacter(at: block.range.location)
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                       effectiveRange: nil)
+            let size = (language as NSString).size(withAttributes: attributes)
+            let rect = NSRect(x: max(inset.width, bounds.width - inset.width - size.width - 6),
+                              y: line.minY + inset.height + 2,
+                              width: size.width, height: size.height)
+            guard rect.intersects(dirtyRect) else { continue }
+            (language as NSString).draw(in: rect, withAttributes: attributes)
+        }
+    }
+
+    private func drawMarkdownTables(in dirtyRect: NSRect) {
+        guard !markdownTables.isEmpty, let layoutManager else { return }
+        let inset = textContainerInset
+
+        for table in markdownTables {
+            let widths = markdownTableColumnWidths(for: table)
+            let tableWidth = min(max(80, bounds.width - inset.width * 2),
+                                 widths.reduce(0, +))
+
+            for row in table.rows {
+                if let active = markdownActiveSourceRange,
+                   NSIntersectionRange(active, row.sourceRange).length > 0 {
+                    continue
+                }
+                guard row.sourceRange.length > 0 else { continue }
+                // Rendered table source glyphs are null. Anchor geometry to the
+                // still-visible line terminator so TextKit returns the dynamic
+                // logical-row fragment rather than a zero-width null glyph run.
+                let anchor = row.lineRange.length > row.sourceRange.length
+                    ? NSMaxRange(row.lineRange) - 1 : row.sourceRange.location
+                let glyph = layoutManager.glyphIndexForCharacter(at: anchor)
+                let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                               effectiveRange: nil)
+                let rowRect = NSRect(x: inset.width,
+                                     y: fragment.minY + inset.height,
+                                     width: tableWidth, height: fragment.height)
+                guard rowRect.intersects(dirtyRect) else { continue }
+
+                // Cover the source row first, then paint the rendered cells.
+                Theme.editorBackground.setFill()
+                NSRect(x: 0, y: rowRect.minY, width: bounds.width,
+                       height: rowRect.height).fill()
+                (row.isHeader ? Theme.inputBackground : Theme.editorBackground).setFill()
+                rowRect.fill()
+
+                var x = rowRect.minX
+                for column in 0..<table.columnCount {
+                    let width = column < widths.count ? widths[column] : 60
+                    let cellRect = NSRect(x: x, y: rowRect.minY,
+                                          width: width, height: rowRect.height)
+                    let textRect = cellRect.insetBy(dx: 8, dy: 0)
+                    let cell = column < row.cells.count ? row.cells[column] : ""
+                    let attrs = markdownTableAttributes(header: row.isHeader)
+                    let measured = (cell as NSString).boundingRect(
+                        with: NSSize(width: max(1, textRect.width),
+                                     height: .greatestFiniteMagnitude),
+                        options: [.usesLineFragmentOrigin, .usesFontLeading],
+                        attributes: attrs)
+                    let verticallyCentered = NSRect(
+                        x: textRect.minX,
+                        y: textRect.midY - ceil(measured.height) / 2,
+                        width: textRect.width, height: ceil(measured.height))
+                    (cell as NSString).draw(
+                        with: verticallyCentered,
+                        options: [.usesLineFragmentOrigin, .usesFontLeading],
+                        attributes: attrs)
+                    x += width
+                }
+
+                Theme.border.setStroke()
+                let grid = NSBezierPath()
+                grid.lineWidth = 1
+                grid.appendRect(rowRect)
+                x = rowRect.minX
+                for width in widths.dropLast() {
+                    x += width
+                    grid.move(to: NSPoint(x: x, y: rowRect.minY))
+                    grid.line(to: NSPoint(x: x, y: rowRect.maxY))
+                }
+                grid.stroke()
+            }
+        }
+    }
+
+    private func drawMarkdownTasks(in dirtyRect: NSRect) {
+        guard !markdownTasks.isEmpty, let layoutManager, textContainer != nil else { return }
+        let origin = textContainerOrigin
+        for task in markdownTasks {
+            if let active = markdownActiveSourceRange,
+               NSIntersectionRange(active, task.sourceRange).length > 0 {
+                continue
+            }
+            let clamped = NSIntersectionRange(
+                task.sourceRange,
+                NSRange(location: 0, length: (string as NSString).length))
+            guard clamped.length > 0 else { continue }
+            let glyphs = layoutManager.glyphRange(
+                forCharacterRange: clamped, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            let raw = layoutManager.boundingRect(forGlyphRange: glyphs,
+                                                  in: textContainer!)
+            let fragment = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphs.location, effectiveRange: nil)
+            let cover = NSRect(x: raw.minX + origin.x,
+                               y: fragment.minY + origin.y,
+                               width: raw.width, height: fragment.height)
+            guard cover.intersects(dirtyRect) else { continue }
+
+            Theme.editorBackground.setFill()
+            cover.fill()
+            let side = min(14, max(10, fragment.height - 8))
+            let box = NSRect(x: cover.minX + 1,
+                             y: cover.midY - side / 2,
+                             width: side, height: side)
+            let outline = NSBezierPath(roundedRect: box, xRadius: 2.5, yRadius: 2.5)
+            if task.checked {
+                Theme.blue.setFill()
+                outline.fill()
+                NSColor.white.setStroke()
+                let check = NSBezierPath()
+                check.lineWidth = 1.6
+                check.lineCapStyle = .round
+                check.lineJoinStyle = .round
+                check.move(to: NSPoint(x: box.minX + side * 0.24,
+                                       y: box.midY))
+                check.line(to: NSPoint(x: box.minX + side * 0.43,
+                                       y: box.maxY - side * 0.27))
+                check.line(to: NSPoint(x: box.maxX - side * 0.20,
+                                       y: box.minY + side * 0.27))
+                check.stroke()
+            } else {
+                Theme.dimText.setStroke()
+                outline.lineWidth = 1.2
+                outline.stroke()
+            }
+        }
+    }
+
+    private func drawMarkdownLineMarkers(in dirtyRect: NSRect) {
+        guard !markdownLineMarkers.isEmpty,
+              let layoutManager, let container = textContainer else { return }
+        let origin = textContainerOrigin
+        let bulletAttributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.editorFont(), .foregroundColor: Theme.dimText,
+        ]
+        for marker in markdownLineMarkers {
+            if let active = markdownActiveSourceRange,
+               NSIntersectionRange(active, marker.sourceRange).length > 0 { continue }
+            let glyphs = layoutManager.glyphRange(
+                forCharacterRange: marker.sourceRange, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            let raw = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+            let fragment = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphs.location, effectiveRange: nil)
+            let cover = NSRect(x: raw.minX + origin.x,
+                               y: fragment.minY + origin.y,
+                               width: raw.width, height: fragment.height)
+            guard cover.intersects(dirtyRect) else { continue }
+            Theme.editorBackground.setFill()
+            cover.fill()
+            switch marker.kind {
+            case .bullet(let label):
+                let size = (label as NSString).size(withAttributes: bulletAttributes)
+                let rect = NSRect(x: max(cover.minX, cover.maxX - size.width - 3),
+                                  y: cover.midY - size.height / 2,
+                                  width: size.width, height: size.height)
+                (label as NSString).draw(in: rect, withAttributes: bulletAttributes)
+            case .quote(let depth):
+                Theme.border.setFill()
+                for level in 0..<depth {
+                    NSRect(x: cover.minX + CGFloat(level) * 4 + 1,
+                           y: cover.minY + 2,
+                           width: 2, height: max(0, cover.height - 4)).fill()
+                }
+            case .footnote(let identifier):
+                let label = "\(identifier)."
+                let size = (label as NSString).size(withAttributes: bulletAttributes)
+                let rect = NSRect(x: max(cover.minX, cover.maxX - size.width - 3),
+                                  y: cover.midY - size.height / 2,
+                                  width: size.width, height: size.height)
+                (label as NSString).draw(in: rect, withAttributes: bulletAttributes)
+            }
+        }
+    }
+
+    private func drawMarkdownRules(in dirtyRect: NSRect) {
+        guard !markdownRules.isEmpty, let layoutManager else { return }
+        let origin = textContainerOrigin
+        for rule in markdownRules {
+            guard rule.lineRange.length > 0 else { continue }
+            let anchor = NSMaxRange(rule.lineRange) - 1
+            let glyph = layoutManager.glyphIndexForCharacter(at: anchor)
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                           effectiveRange: nil)
+            let y = fragment.midY + origin.y
+            let rect = NSRect(x: origin.x + 4, y: y,
+                              width: max(0, bounds.width - origin.x * 2 - 8), height: 1)
+            guard rect.intersects(dirtyRect) else { continue }
+            Theme.border.setFill()
+            rect.fill()
+        }
+    }
+
+    private func drawMarkdownImages(in dirtyRect: NSRect) {
+        guard !markdownImages.isEmpty, let layoutManager else { return }
+        let origin = textContainerOrigin
+        let available = max(80, bounds.width - origin.x * 2)
+        for decoration in markdownImages {
+            if let active = markdownActiveSourceRange,
+               NSIntersectionRange(active, decoration.sourceRange).length > 0 { continue }
+            let anchor = decoration.lineRange.length > decoration.sourceRange.length
+                ? NSMaxRange(decoration.lineRange) - 1 : decoration.sourceRange.location
+            let glyph = layoutManager.glyphIndexForCharacter(at: anchor)
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                           effectiveRange: nil)
+            let row = NSRect(x: 0, y: fragment.minY + origin.y,
+                             width: bounds.width, height: fragment.height)
+            guard row.intersects(dirtyRect) else { continue }
+            Theme.editorBackground.setFill()
+            row.fill()
+            if let image = markdownImage(decoration), image.size.width > 0,
+               image.size.height > 0 {
+                let scale = min(1, available / image.size.width,
+                                max(1, row.height - 8) / image.size.height)
+                let size = NSSize(width: floor(image.size.width * scale),
+                                  height: floor(image.size.height * scale))
+                let rect = NSRect(x: origin.x, y: row.midY - size.height / 2,
+                                  width: size.width, height: size.height)
+                image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+                           respectFlipped: true, hints: nil)
+            } else {
+                let label = decoration.alt.isEmpty ? "Image" : decoration.alt
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: Theme.editorFont(), .foregroundColor: Theme.dimText,
+                ]
+                let icon = Theme.symbol("photo", accessibilityDescription: "Image",
+                                        pointSize: 13)
+                icon?.draw(in: NSRect(x: origin.x, y: row.midY - 7,
+                                      width: 14, height: 14))
+                (label as NSString).draw(
+                    in: NSRect(x: origin.x + 20, y: row.midY - 9,
+                               width: max(0, available - 20), height: 18),
+                    withAttributes: attributes)
+            }
+        }
     }
 
     private func drawDiffBands() {
@@ -586,9 +1065,104 @@ final class PuzzleTextView: NSTextView {
         super.mouseDown(with: event)
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard commandHoverTrackingArea == nil else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved,
+                      .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        commandHoverTrackingArea = area
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let commandModifierMonitor {
+            NSEvent.removeMonitor(commandModifierMonitor)
+            self.commandModifierMonitor = nil
+        }
+        guard window != nil else {
+            clearCommandHover()
+            return
+        }
+        // flagsChanged is normally delivered only to the first responder. A
+        // local monitor also clears/starts the underline when focus is in the
+        // sidebar or find bar while the pointer is stationary over code.
+        commandModifierMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .flagsChanged) { [weak self] event in
+                self?.handleCommandModifierChange(event)
+                return event
+            }
+    }
+
+    deinit {
+        if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateCommandHover(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateCommandHover(with: event) }
+    override func mouseExited(with event: NSEvent) { clearCommandHover() }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        handleCommandModifierChange(event)
+    }
+
+    private func handleCommandModifierChange(_ event: NSEvent) {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+              let window, window.isKeyWindow else {
+            clearCommandHover()
+            return
+        }
+        let point = window.mouseLocationOutsideOfEventStream
+        let local = convert(point, from: nil)
+        guard bounds.contains(local) else {
+            clearCommandHover()
+            return
+        }
+        updateCommandHover(atWindowPoint: point)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        guard NSEvent.modifierFlags.contains(.command), let window else { return }
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.updateCommandHover(atWindowPoint: window.mouseLocationOutsideOfEventStream)
+        }
+    }
+
+    private func updateCommandHover(with event: NSEvent) {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                .contains(.command) else {
+            clearCommandHover()
+            return
+        }
+        updateCommandHover(atWindowPoint: event.locationInWindow)
+    }
+
+    private func updateCommandHover(atWindowPoint point: NSPoint) {
+        guard let location = characterIndex(atWindowPoint: point) else {
+            clearCommandHover()
+            return
+        }
+        onCommandHover?(location)
+    }
+
+    private func clearCommandHover() {
+        onCommandHover?(nil)
+        commandHoverRange = nil
+    }
+
     private func commandClickCharacterIndex(for event: NSEvent) -> Int? {
+        characterIndex(atWindowPoint: event.locationInWindow)
+    }
+
+    private func characterIndex(atWindowPoint windowPoint: NSPoint) -> Int? {
         guard let layoutManager, let textContainer, !string.isEmpty else { return nil }
-        let local = convert(event.locationInWindow, from: nil)
+        let local = convert(windowPoint, from: nil)
         let point = NSPoint(x: local.x - textContainerOrigin.x,
                             y: local.y - textContainerOrigin.y)
         let glyphRange = layoutManager.glyphRange(for: textContainer)

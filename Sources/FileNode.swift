@@ -50,6 +50,19 @@ final class FileNode {
         loadedChildren = nil
     }
 
+    /// Re-read one loaded directory while preserving node identity for entries
+    /// that still exist. NSOutlineView keys expansion state by item identity;
+    /// replacing the complete subtree on every FSEvent collapsed unrelated
+    /// expanded folders and made active-row updates unreliable.
+    func refreshChildren() {
+        guard let existing = loadedChildren else { return }
+        let refreshed = Self.loadChildren(of: url, parent: self)
+        let reusable = Dictionary(grouping: existing) { "\($0.isDirectory):\($0.name)" }
+        loadedChildren = refreshed.map { candidate in
+            reusable["\(candidate.isDirectory):\(candidate.name)"]?.first ?? candidate
+        }
+    }
+
     /// Free this subtree's cached nodes (called when a directory collapses).
     /// Without this, expanding a big folder once kept every node alive for the
     /// life of the window even though the rows are no longer visible.

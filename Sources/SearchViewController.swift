@@ -106,6 +106,9 @@ final class SearchViewController: NSViewController {
     func focusSearchField() { searchField.focus() }
 
     func refreshFonts() {
+        (view as? FlatView)?.fillColor = Theme.panelBackground
+        outline.backgroundColor = Theme.panelBackground
+        outline.enclosingScrollView?.backgroundColor = Theme.panelBackground
         searchField.refreshFonts()
         summaryLabel.font = Theme.uiFont(10.5)
         outline.reloadData()
@@ -387,7 +390,11 @@ final class SearchViewController: NSViewController {
             guard shouldLoadForNativeSearch(url),
                   let data = try? Data(contentsOf: url),
                   !data.prefix(1024).contains(0) else { continue }
-            let rel = url.path.replacingOccurrences(of: directory.path + "/", with: "")
+            // Not a string subtraction: the enumerator hands back resolved
+            // paths (/private/var/…) while `directory` may still be the symlink
+            // (/var/…), and replacing that as a substring left "/private" glued
+            // to the front of every result.
+            guard let rel = relativePath(for: url, in: directory) else { continue }
             var no = 0
             for raw in String(decoding: data, as: UTF8.self)
                 .split(separator: "\n", omittingEmptySubsequences: false) {
@@ -455,12 +462,12 @@ extension SearchViewController: NSOutlineViewDelegate {
 }
 
 private final class SearchGroupCell: DrawnSidebarCell {
-    private var icon: NSImage?
+    private var icon: SidebarIcon?
     private var name = ""
     private var folder = ""
 
     func configure(group: SearchViewController.FileGroup) {
-        icon = Theme.symbol(FileTreeViewController.iconName(for: group.url.pathExtension))
+        icon = .file(group.url)
         name = group.name
         folder = group.folder
         toolTip = group.relative
@@ -469,9 +476,9 @@ private final class SearchGroupCell: DrawnSidebarCell {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        SidebarCellDrawing.image(icon, tint: Theme.dimText,
-                                 in: NSRect(x: 2, y: floor((bounds.height - 13) / 2),
-                                            width: 13, height: 13))
+        SidebarCellDrawing.icon(icon,
+                                in: NSRect(x: 2, y: floor((bounds.height - 13) / 2),
+                                           width: 13, height: 13))
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11.5), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(10), secondaryColor: Theme.dimText,

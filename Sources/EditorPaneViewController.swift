@@ -13,8 +13,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// A tab was closed here. The container decides whether the buffer is still
     /// open elsewhere before releasing it — a pane can't see its siblings.
     var onTabClosed: ((URL) -> Void)?
-    /// The markdown preview appeared or disappeared in this pane.
-    var onPreviewVisibilityChanged: (() -> Void)?
     var onTabBarHeightChanged: ((CGFloat) -> Void)?
     /// Supplied by the editor container for synthetic file-history tabs.
     var fileHistoryProvider: ((URL) -> FileHistoryModel?)?
@@ -25,6 +23,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var lineActivatedURLs: Set<URL> = []
     private var suppressSelectionSideEffects = false
     private var definitionNavigationGeneration = 0
+    private var definitionHoverGeneration = 0
+    private var definitionHoverWork: DispatchWorkItem?
+    private var definitionHoverURL: URL?
+    private var definitionHoverCandidateRange: NSRange?
+    private let definitionHoverQueue = DispatchQueue(
+        label: "app.puzzle.definition-hover", qos: .userInitiated)
+
+    /// How far back ⌘Z reaches. Deep enough for real editing, bounded so a long
+    /// session cannot accumulate every edit ever made.
+    static let undoLevels = 200
 
     private let tabBar = EditorTabBar()
     private var scrollView: NSScrollView!
@@ -41,22 +49,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     private let findBar = FindBarView()
     private var findBarHeight: NSLayoutConstraint!
+    /// Shown above a git diff: its file path, and the controls that step through
+    /// its changes.
+    private let diffHeader = DiffHeaderView()
+    private var diffHeaderHeight: NSLayoutConstraint!
     /// Shown instead of the text view when the active document is a picture.
     private var imagePreview: ImagePreviewView?
     /// Shown instead of the text view for a file-history table tab.
     private var fileHistoryView: FileHistoryView?
 
-    /// Live markdown preview, shown to the right of the source.
-    private var markdownPreview: MarkdownPreviewView?
-    /// Editor trailing edge: to the window edge, or to the preview's leading.
-    private var editorTrailingFull: NSLayoutConstraint!
-    private var editorTrailingSplit: NSLayoutConstraint?
-    /// Remembered per file so toggling tabs doesn't lose the preview state.
-    private var previewEnabled: Set<URL> = []
     /// Fold identities are pane-local, but survive switching between tabs.
     private var foldedBlocks: [URL: Set<Int>] = [:]
-
-    var isPreviewVisible: Bool { markdownPreview.map { !$0.isHidden } ?? false }
 
     override func loadView() {
         let container = FlatView()
@@ -93,10 +96,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.onExplicitCaretInteraction = { [weak self] in
             guard let self, let url = self.currentURL else { return }
             self.lineActivatedURLs.insert(url)
-            self.textView.showsCurrentLineBand = true
+            self.textView.showsCurrentLineBand = self.currentDocument?.languageSpec?.name
+                != "markdown"
         }
         textView.onCommandClick = { [weak self] location in
             self?.navigateToDefinition(at: location) ?? false
+        }
+        textView.onCommandHover = { [weak self] location in
+            self?.updateDefinitionHover(at: location)
         }
         // Custom find bar (the system one can't be restyled and shows a focus ring).
         textView.usesFindBar = false
@@ -128,7 +135,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.onCloseOthers = { [weak self] in self?.closeOtherTabs(around: $0) }
         tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
         tabBar.onSplit = { [weak self] in self?.onRequestSplit?() }
-        tabBar.onTogglePreview = { [weak self] in self?.toggleMarkdownPreview() }
         tabBar.onHeightChanged = { [weak self] height in
             self?.onTabBarHeightChanged?(height)
         }
@@ -140,10 +146,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBar.onClose = { [weak self] in self?.hideFindBar() }
         container.addSubview(findBar)
 
-        findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
-        editorTrailingFull = scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor)
-        editorTrailingFull.isActive = true
+        diffHeader.translatesAutoresizingMaskIntoConstraints = false
+        diffHeader.isHidden = true
+        diffHeader.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
+        diffHeader.onNext = { [weak self] in self?.stepThroughDiff(forward: true) }
+        container.addSubview(diffHeader)
 
+        findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
+        diffHeaderHeight = diffHeader.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             tabBar.topAnchor.constraint(equalTo: container.topAnchor),
             tabBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -154,14 +164,96 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             findBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             findBarHeight,
 
+            diffHeader.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            diffHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            diffHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            diffHeaderHeight,
+
             // Height follows the pills (grows when tabs wrap to a second row).
-            scrollView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            scrollView.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         self.view = container
         reloadTabs()
     }
+
+    // MARK: - Diff header
+
+    /// The repository-relative path a diff buffer was built from: the Git panel
+    /// encodes it in the preview URL, since the buffer itself is synthetic.
+    static func diffPath(for url: URL) -> String? {
+        guard url.scheme == DocumentStore.diffScheme,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        else { return nil }
+        return items.first { $0.name == "path" }?.value
+    }
+
+    private func showDiffHeader(for url: URL?) {
+        guard let url, let path = Self.diffPath(for: url) else {
+            diffHeader.isHidden = true
+            diffHeaderHeight.constant = 0
+            return
+        }
+        diffHeader.configure(path: path, changes: changeBlocks().count)
+        diffHeader.isHidden = false
+        diffHeaderHeight.constant = DiffHeaderView.height
+    }
+
+    /// Runs of consecutive added/removed lines — one "change" as a reader sees
+    /// it. The bands the diff painter already produced are exactly those lines,
+    /// in order, so touching runs are merged rather than parsed again.
+    private func changeBlocks() -> [NSRange] {
+        var blocks: [NSRange] = []
+        for band in textView.diffBands {
+            if let last = blocks.last, NSMaxRange(last) >= band.range.location {
+                blocks[blocks.count - 1] = NSUnionRange(last, band.range)
+            } else {
+                blocks.append(band.range)
+            }
+        }
+        return blocks
+    }
+
+    /// Move to the next (or previous) block of changed lines, wrapping around at
+    /// the ends the way the find bar does.
+    private func stepThroughDiff(forward: Bool) {
+        let blocks = changeBlocks()
+        guard !blocks.isEmpty else { return }
+        let caret = textView.selectedRange().location
+        let target: NSRange
+        if forward {
+            target = blocks.first { $0.location > caret } ?? blocks[0]
+        } else {
+            target = blocks.last { NSMaxRange($0) <= caret } ?? blocks[blocks.count - 1]
+        }
+        textView.setSelectedRange(NSRange(location: target.location, length: 0))
+        textView.scrollRangeToVisible(target)
+        scrollView.verticalRulerView?.needsDisplay = true
+    }
+
+    // MARK: - Regression-test surface
+
+    var diffHeaderForTesting: DiffHeaderView { diffHeader }
+    var lineNumberRulerForTesting: LineNumberRulerView? {
+        scrollView.verticalRulerView as? LineNumberRulerView
+    }
+    var currentLineBandRectForTesting: NSRect? { textView.currentLineBandRect() }
+    func selectAllForTesting() {
+        textView.setSelectedRange(NSRange(location: 0, length: textView.string.count))
+    }
+    var caretLocationForTesting: Int { textView.selectedRange().location }
+    var undoLevelsForTesting: Int? { textView.undoManager?.levelsOfUndo }
+    func isCharacterHiddenForTesting(_ location: Int) -> Bool {
+        layoutManager.isCharacterHidden(at: location)
+    }
+    var nonContiguousLayoutForTesting: Bool { layoutManager.allowsNonContiguousLayout }
+    func foldAllForTesting() {
+        textView.codeBlocks.forEach { textView.toggleFold($0) }
+    }
+    var diffHeaderIsVisibleForTesting: Bool { !diffHeader.isHidden }
+    var changeBlockCountForTesting: Int { changeBlocks().count }
 
     private func ensureImagePreview() -> ImagePreviewView {
         if let imagePreview { return imagePreview }
@@ -170,29 +262,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         preview.isHidden = true
         view.addSubview(preview)
         NSLayoutConstraint.activate([
-            preview.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            preview.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
             preview.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         imagePreview = preview
-        return preview
-    }
-
-    private func ensureMarkdownPreview() -> MarkdownPreviewView {
-        if let markdownPreview { return markdownPreview }
-        let preview = MarkdownPreviewView()
-        preview.translatesAutoresizingMaskIntoConstraints = false
-        preview.isHidden = true
-        view.addSubview(preview)
-        NSLayoutConstraint.activate([
-            preview.topAnchor.constraint(equalTo: findBar.bottomAnchor),
-            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            preview.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
-        ])
-        editorTrailingSplit = scrollView.trailingAnchor.constraint(equalTo: preview.leadingAnchor)
-        markdownPreview = preview
         return preview
     }
 
@@ -203,7 +278,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         history.isHidden = true
         view.addSubview(history)
         NSLayoutConstraint.activate([
-            history.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            history.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
             history.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             history.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             history.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -289,7 +364,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func moveState(from oldURL: URL, to newURL: URL) {
         if let value = selections.removeValue(forKey: oldURL) { selections[newURL] = value }
         if lineActivatedURLs.remove(oldURL) != nil { lineActivatedURLs.insert(newURL) }
-        if previewEnabled.remove(oldURL) != nil { previewEnabled.insert(newURL) }
         if let value = foldedBlocks.removeValue(forKey: oldURL) { foldedBlocks[newURL] = value }
     }
 
@@ -311,14 +385,30 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
 
         activeIndex = index
+        clearDefinitionHover()
         let url = openURLs[index]
         let doc = DocumentStore.shared.document(for: url)
+
+        // Lay out only what is asked for. A full layout of a multi-megabyte file
+        // cost ~34 MB of fragment storage before its first line was drawn; on
+        // demand that is ~16 MB.
+        //
+        // Not for Markdown or diffs: both decorate ranges across the whole
+        // document (code-block boxes, full-width change bands), and geometry
+        // for a range that has not been laid out yet comes back at the origin —
+        // measured, a fenced block's box landed at the top of the file.
+        layoutManager.allowsNonContiguousLayout =
+            !doc.isVirtual && doc.languageSpec?.name != "markdown"
 
         // Move this pane's layout manager onto the document's storage.
         if layoutManager.textStorage !== doc.storage {
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             doc.storage.addLayoutManager(layoutManager)
         }
+
+        // Undo records hold the replaced text, so an unbounded stack grows with
+        // every edit for as long as the window lives.
+        textView.undoManager?.levelsOfUndo = Self.undoLevels
 
         let length = doc.storage.length
         let caret = NSRange(location: min(selections[url]?.location ?? 0, length), length: 0)
@@ -335,10 +425,24 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.isEditable = !doc.isReadOnly
         let lineIsActive = lineActivatedURLs.contains(url)
         textView.showsCurrentLineBand = lineIsActive
+            && doc.languageSpec?.name != "markdown"
         if !lineIsActive { clearInlineBlameRequest() }
         textView.diffBands = doc.diffBands
+        textView.diffLineNumbers = doc.diffLineNumbers
         textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
         layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
+        let markdownReveal = markdownRevealRange(for: doc)
+        layoutManager.updateMarkdownSyntaxRanges(
+            doc.markdownSyntaxRanges,
+            collapsedLines: doc.markdownCollapsedLineRanges,
+            replacements: doc.markdownGlyphReplacements,
+            revealing: markdownReveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
+            tasks: doc.markdownTasks,
+            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
+            images: doc.markdownImages,
+            activeSourceRange: markdownReveal)
 
         // Synthetic file-history tabs use a real four-column table. Keep this
         // check ahead of images/text so only one primary content view is shown.
@@ -349,20 +453,23 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = true
+            showDiffHeader(for: nil)
         } else if let image = doc.image {
             fileHistoryView?.isHidden = true
             let imagePreview = ensureImagePreview()
             imagePreview.show(image: image, caption: doc.text)
             imagePreview.isHidden = false
             scrollView.isHidden = true
+            showDiffHeader(for: nil)
         } else {
             fileHistoryView?.isHidden = true
             imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = false
+            // Rendered Markdown reads like a document, not a source listing.
+            scrollView.rulersVisible = doc.languageSpec?.name != "markdown"
+            showDiffHeader(for: doc.diffLineNumbers.isEmpty ? nil : url)
         }
-
-        syncMarkdownPreview(for: doc, url: url, rerender: true)
 
         reloadTabs()
         scrollView.verticalRulerView?.needsDisplay = true
@@ -379,22 +486,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         openURLs.remove(at: index)
         selections.removeValue(forKey: url)
         lineActivatedURLs.remove(url)
-        previewEnabled.remove(url)
         foldedBlocks.removeValue(forKey: url)
         defer { onTabClosed?(url) }
         if openURLs.isEmpty {
             activeIndex = nil
-            markdownPreview?.clearContent()
-            markdownPreview?.isHidden = true
-            editorTrailingSplit?.isActive = false
-            editorTrailingFull.isActive = true
-            tabBar.showsPreviewToggle = false
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             blankStorage.addLayoutManager(layoutManager)
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
             textView.updateCodeBlocks([], resetFolds: false)
             textView.updateJSXTagMatches([])
+            layoutManager.updateMarkdownSyntaxRanges([], revealing: nil)
+            textView.updateMarkdownDecorations(
+                codeBlocks: [], tables: [], tasks: [], activeSourceRange: nil)
             imagePreview?.clear()
             imagePreview?.isHidden = true
             fileHistoryView?.isHidden = true
@@ -405,56 +509,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             return
         }
         activate(index: min(index, openURLs.count - 1))
-    }
-
-    // MARK: - Markdown preview
-
-    /// Whether a document can be previewed at all. Diffs and binaries can't:
-    /// a diff is not markdown even when it patches a .md file.
-    private func isPreviewable(_ doc: Document) -> Bool {
-        doc.languageSpec?.name == "markdown" && !doc.isVirtual && !doc.isUnsupported
-            && doc.image == nil && doc.storage.length <= MarkdownPreviewView.maxSourceCharacters
-    }
-
-    func toggleMarkdownPreview() {
-        guard let url = currentURL else { return }
-        let doc = DocumentStore.shared.document(for: url)
-        guard isPreviewable(doc) else { return }
-        if previewEnabled.contains(url) {
-            previewEnabled.remove(url)
-        } else {
-            previewEnabled.insert(url)
-        }
-        syncMarkdownPreview(for: doc, url: url, rerender: true)
-    }
-
-    /// Bring the preview in line with the active document: hide it entirely for
-    /// non-markdown, otherwise show it if this file had it turned on.
-    private func syncMarkdownPreview(for doc: Document, url: URL, rerender: Bool) {
-        let previewable = isPreviewable(doc)
-        tabBar.showsPreviewToggle = previewable
-
-        let shouldShow = previewable && previewEnabled.contains(url) && doc.image == nil
-        tabBar.previewActive = shouldShow
-
-        if !shouldShow {
-            let wasVisible = markdownPreview.map { !$0.isHidden } ?? false
-            markdownPreview?.clearContent()
-            markdownPreview?.isHidden = true
-            editorTrailingSplit?.isActive = false
-            editorTrailingFull.isActive = true
-            if wasVisible { onPreviewVisibilityChanged?() }
-            return
-        }
-
-        let markdownPreview = ensureMarkdownPreview()
-        let wasHidden = markdownPreview.isHidden
-        markdownPreview.isHidden = false
-        editorTrailingFull.isActive = false
-        editorTrailingSplit?.isActive = true
-        // Switching files must repaint now, not after the typing debounce.
-        if rerender { markdownPreview.update(source: doc.text, immediately: true) }
-        if wasHidden { onPreviewVisibilityChanged?() }
     }
 
     /// Close every tab except `index`.
@@ -483,7 +537,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         closed.forEach {
             selections.removeValue(forKey: $0)
             lineActivatedURLs.remove($0)
-            previewEnabled.remove($0)
             foldedBlocks.removeValue(forKey: $0)
         }
         defer { closed.forEach { onTabClosed?($0) } }
@@ -554,7 +607,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         let target = NSRange(location: min(location, ns.length), length: 0)
         if let url = currentURL { lineActivatedURLs.insert(url) }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.setSelectedRange(target)
         textView.scrollRangeToVisible(target)
         view.window?.makeFirstResponder(textView)
@@ -593,7 +646,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 let target = NSRange(location: min(destination.utf16Location, length), length: 0)
                 self.selections[destination.url] = target
                 self.lineActivatedURLs.insert(destination.url)
-                self.textView.showsCurrentLineBand = true
+                self.textView.showsCurrentLineBand = self.currentDocument?.languageSpec?.name
+                    != "markdown"
                 self.suppressSelectionSideEffects = true
                 self.textView.setSelectedRange(target)
                 self.suppressSelectionSideEffects = false
@@ -603,6 +657,62 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             }
         }
         return true
+    }
+
+    private func updateDefinitionHover(at location: Int?) {
+        guard let location,
+              let sourceURL = currentURL,
+              let root = repositoryRoot,
+              let document = currentDocument,
+              !document.isVirtual, !document.isUnsupported, document.image == nil else {
+            clearDefinitionHover()
+            return
+        }
+        let source = textView.string
+        guard let range = DefinitionNavigator.targetRange(
+            in: source, utf16Location: location) else {
+            clearDefinitionHover()
+            return
+        }
+        if definitionHoverURL == sourceURL,
+           definitionHoverCandidateRange == range { return }
+
+        definitionHoverGeneration += 1
+        let generation = definitionHoverGeneration
+        definitionHoverWork?.cancel()
+        definitionHoverURL = sourceURL
+        definitionHoverCandidateRange = range
+        textView.setCommandHoverRange(nil)
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self,
+                  let activeWork = self.definitionHoverWork,
+                  !activeWork.isCancelled,
+                  self.definitionHoverGeneration == generation else { return }
+            let destination = DefinitionNavigator.resolve(
+                text: source, sourceURL: sourceURL, projectRoot: root,
+                utf16Location: location)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.definitionHoverGeneration == generation,
+                      self.definitionHoverURL == sourceURL,
+                      self.definitionHoverCandidateRange == range else { return }
+                self.textView.setCommandHoverRange(destination == nil ? nil : range)
+            }
+        }
+        definitionHoverWork = work
+        definitionHoverQueue.asyncAfter(deadline: .now() + 0.08, execute: work)
+    }
+
+    private func clearDefinitionHover() {
+        guard definitionHoverURL != nil || definitionHoverCandidateRange != nil
+                || textView?.commandHoverRange != nil else { return }
+        definitionHoverGeneration += 1
+        definitionHoverWork?.cancel()
+        definitionHoverWork = nil
+        definitionHoverURL = nil
+        definitionHoverCandidateRange = nil
+        textView?.setCommandHoverRange(nil)
     }
 
     /// Detach this pane's layout manager from whatever buffer it shows.
@@ -618,12 +728,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Tear down asynchronous/cached state and surrender this pane's tab
     /// ownership. Callers must run confirmClose(urls:) first.
     func prepareForClose() {
+        clearDefinitionHover()
         blameGeneration += 1
         blameWork?.cancel()
         blameWork = nil
         blameCache.removeAll()
         blameOrder.removeAll()
-        markdownPreview?.clearContent()
         imagePreview?.clear()
         textView.updateCodeBlocks([], resetFolds: false)
         textView.updateJSXTagMatches([])
@@ -633,7 +743,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         activeIndex = nil
         selections.removeAll()
         lineActivatedURLs.removeAll()
-        previewEnabled.removeAll()
         foldedBlocks.removeAll()
         urls.forEach { onTabClosed?($0) }
     }
@@ -642,7 +751,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// themselves are handled separately by `DocumentStore`.
     func releaseTransientMemory() {
         if imagePreview?.isHidden != false { imagePreview?.clear() }
-        if markdownPreview?.isHidden != false { markdownPreview?.clearContent() }
         if findBar.isHidden { findBar.clearHighlights() }
     }
 
@@ -653,6 +761,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         textView.font = Theme.editorFont()
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
+        // Colours set when the views were built are captured values, so a new
+        // theme has to be pushed back into them.
+        (view as? FlatView)?.fillColor = Theme.editorBackground
+        textView.backgroundColor = Theme.editorBackground
+        textView.insertionPointColor = Theme.cursor
+        textView.selectedTextAttributes = [.backgroundColor: Theme.selection]
+        scrollView.backgroundColor = Theme.editorBackground
+        findBar.refreshAppearance()
+        diffHeader.refreshAppearance()
+        imagePreview?.refreshFonts()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         reloadTabs()
@@ -686,8 +804,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard let doc = currentDocument else { return }
         guard !doc.isApplyingExternalChange else { return }
+        clearDefinitionHover()
         if let url = currentURL { lineActivatedURLs.insert(url) }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = doc.languageSpec?.name != "markdown"
         let wasModified = doc.isModified
         doc.markLocalEdit()
         if !wasModified { onDocumentEdited?() }
@@ -699,23 +818,39 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // immediately; the debounced TSX parse publishes current ranges.
         doc.updateJSXTagMatches([])
         HighlightService.shared.scheduleHighlight(doc)
+        let reveal = markdownRevealRange(for: doc)
+        layoutManager.revealMarkdownSyntax(in: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
+            tasks: doc.markdownTasks,
+            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
+            images: doc.markdownImages,
+            activeSourceRange: reveal)
         textView.refreshBracketMatches()
-        // The preview debounces internally, so this is cheap per keystroke.
-        if let markdownPreview, !markdownPreview.isHidden {
-            markdownPreview.update(source: doc.text)
-        }
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         guard !suppressSelectionSideEffects else { return }
         textView.refreshBracketMatches()
         if let url = currentURL { selections[url] = textView.selectedRange() }
+        if let document = currentDocument {
+            let reveal = markdownRevealRange(for: document)
+            layoutManager.revealMarkdownSyntax(in: reveal)
+            textView.updateMarkdownDecorations(
+                codeBlocks: document.markdownCodeBlocks,
+                tables: document.markdownTables,
+                tasks: document.markdownTasks,
+                lineMarkers: document.markdownLineMarkers,
+                rules: document.markdownRules,
+                images: document.markdownImages,
+                activeSourceRange: reveal)
+        }
         guard let url = currentURL, lineActivatedURLs.contains(url) else {
             textView.showsCurrentLineBand = false
             textView.inlineBlame = nil
             return
         }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         scheduleInlineBlame()
@@ -725,6 +860,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
     var hasActiveLineForTesting: Bool { textView.showsCurrentLineBand }
     var inlineBlameForTesting: String? { textView.inlineBlame }
+    var markdownDecorationCountsForTesting: (codeBlocks: Int, tables: Int) {
+        textView.markdownDecorationCountsForTesting
+    }
+    var markdownTaskCountForTesting: Int { textView.markdownTaskCountForTesting }
+    var showsLineNumbersForTesting: Bool { scrollView.rulersVisible }
     var currentLineHeightForTesting: CGFloat? {
         layoutManager.ensureLayout(for: textView.textContainer!)
         return textView.currentLineBandRect()?.height
@@ -735,6 +875,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               document.url == currentURL else { return }
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
+        let reveal = markdownRevealRange(for: document)
+        layoutManager.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: reveal)
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {
@@ -751,12 +903,33 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
+        let reveal = markdownRevealRange(for: document)
+        layoutManager.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: reveal)
         textView.refreshBracketMatches()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
-        if let markdownPreview, !markdownPreview.isHidden {
-            markdownPreview.update(source: document.text)
-        }
+    }
+
+    /// Reveal source markers only on lines the user explicitly entered. Merely
+    /// opening a Markdown file leaves the document in its rendered appearance.
+    private func markdownRevealRange(for document: Document) -> NSRange? {
+        guard document.languageSpec?.name == "markdown",
+              let url = currentURL, lineActivatedURLs.contains(url) else { return nil }
+        let source = document.storage.string as NSString
+        let selection = textView.selectedRange()
+        let location = min(selection.location, source.length)
+        let length = min(selection.length, source.length - location)
+        return source.lineRange(for: NSRange(location: location, length: length))
     }
 
     // MARK: - Inline blame

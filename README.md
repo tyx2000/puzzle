@@ -5,13 +5,13 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 
 ## Features
 - **Zed-matched theme & layout** — One Light / One Dark that follow the system
-  appearance (like Zed with no theme pinned), Monaco 12 with configurable exact
-  code/tree row heights.
+  appearance (like Zed with no theme pinned), or Ayu Dark via `theme` in
+  settings.json, Monaco 12 with configurable exact code/tree row heights.
   Zed-style header (tabs beside the traffic lights), full-width bottom status bar
   with a left **activity bar** (project · search · git · outline · settings) and
   right branch · line/col · language, editor tabs with an active accent, compact
-  file tree with type icons + git-dirty markers, aligned gutter, current-line
-  highlight. Fully flat — no Liquid Glass.
+  file tree with Material Icon Theme file/folder icons + git-dirty markers,
+  aligned gutter, current-line highlight. Fully flat — no Liquid Glass.
 - **Editor split** — top-right split icon (or ⌘\) opens a second vertical pane
   with its **own independent tab strip**. Panes share document buffers via
   `DocumentStore`, so the same file open in both panes edits one buffer (Zed
@@ -58,10 +58,20 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 ```bash
 ./build.sh
 ```
-On first run this clones the tree-sitter runtime + grammars into `vendor/`
-(via `vendor/fetch.sh`), compiles them to cached objects in `.obj/`, links them
-into the Swift build, and bundles the highlight queries. Requires the Xcode
+On first run this clones the tree-sitter runtime + grammars, and the Material
+Icon Theme, into `vendor/` (via `vendor/fetch.sh`), compiles the grammars to
+cached objects in `.obj/`, links them into the Swift build, and bundles the
+highlight queries plus the file-tree icons (`Tools/generate-file-icons.py`). Requires the Xcode
 command-line tools; targets macOS 13+.
+
+## Install
+```bash
+./build.sh release        # optimised build
+./Tools/install.sh        # copy to /Applications + install the `pz` command
+```
+`install.sh` falls back to `~/Applications` when `/Applications` is not
+writable, and puts `pz` in the first writable directory on your login shell's
+PATH. Installing is optional — the app also runs straight out of `build/`.
 
 ## Run
 ```bash
@@ -87,7 +97,7 @@ overwrites an unrelated command with the same name.
 Sources/            Swift (Theme, workspace, tabs, tree, search, git, highlighter)
 Sources/ts_bridge.h C bridging header for the tree-sitter API
 Queries/            supplemental highlight queries (TS/JS ecma)
-Tools/makeicon.swift draws the app icon (puzzle pieces) -> AppIcon.icns
+Tools/makeicon.swift masks Tools/appicon.jpg into AppIcon.icns
 vendor/             tree-sitter runtime + grammars (fetched)
 build.sh            compiles C + Swift, builds the icon, bundles queries, signs
 ```
@@ -107,6 +117,7 @@ with every property documented inline. Keys and defaults:
 | `ui_font_size` | `12` | base UI size; scales the whole panel hierarchy (8–32) |
 | `ui_font_weight` | `400` | UI weight; 600+ renders bold |
 | `tree_line_height` | `22` | exact file-tree row height in points (8–200) |
+| `theme` | `"one"` | colour theme: `"one"` (One Light/Dark, follows the system) or `"ayu-dark"` |
 
 ## Notes / limits
 - `NSTextView` is great for normal source files; multi-hundred-MB files are the

@@ -34,6 +34,9 @@ enum GitService {
         var branch: String
         var entries: [Entry]
         var isRepo: Bool
+        /// `git config user.name` — who the next commit will be authored by.
+        /// Empty when the repository (and the global config) name nobody.
+        var userName: String = ""
         /// Commits on this branch that the upstream doesn't have yet.
         var ahead: Int = 0
         /// False when the branch tracks nothing — then "unpushed" is meaningless.
@@ -78,13 +81,27 @@ enum GitService {
                 result.code)
     }
 
+    /// Git commands such as `check-ignore --stdin -z` need lossless path input;
+    /// arguments alone cannot request NUL-delimited output for arbitrary names.
+    @discardableResult
+    static func run(_ args: [String], input: Data,
+                    in directory: URL) -> (out: String, err: String, code: Int32) {
+        let result = runProcess(executable: URL(fileURLWithPath: "/usr/bin/env"),
+                                arguments: ["git"] + args, in: directory,
+                                stdin: input)
+        return (String(decoding: result.stdout, as: UTF8.self),
+                String(decoding: result.stderr, as: UTF8.self),
+                result.code)
+    }
+
     /// Run a process while draining both output streams concurrently.
     ///
     /// Reading stdout to EOF before touching stderr can deadlock when the child
     /// fills stderr's finite pipe buffer. Git writes progress, hook output and
     /// remote diagnostics to stderr, so this is reachable during normal use.
     static func runProcess(executable: URL, arguments: [String],
-                           in directory: URL, stdoutLimit: Int? = nil) -> ProcessResult {
+                           in directory: URL, stdoutLimit: Int? = nil,
+                           stdin: Data? = nil) -> ProcessResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -93,11 +110,20 @@ enum GitService {
         let outPipe = Pipe(), errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
+        let inputPipe = stdin.map { _ in Pipe() }
+        if let inputPipe { process.standardInput = inputPipe }
         do {
             try process.run()
         } catch {
             return ProcessResult(stdout: Data(), stderr: Data("\(error)".utf8), code: -1,
                                  stdoutTruncated: false)
+        }
+
+        if let stdin, let inputPipe {
+            DispatchQueue.global(qos: .utility).async {
+                try? inputPipe.fileHandleForWriting.write(contentsOf: stdin)
+                try? inputPipe.fileHandleForWriting.close()
+            }
         }
 
         let stdout = PipeCapture()
@@ -233,7 +259,17 @@ enum GitService {
         }
         let (ahead, hasUpstream) = aheadCount(in: directory)
         return Status(branch: branch.isEmpty ? "detached" : branch, entries: entries,
-                      isRepo: true, ahead: ahead, hasUpstream: hasUpstream)
+                      isRepo: true, userName: configuredUserName(in: directory),
+                      ahead: ahead, hasUpstream: hasUpstream)
+    }
+
+    /// The name commits made here will carry: the repository's `user.name` if it
+    /// sets one, otherwise whatever the global config resolves to. Empty when
+    /// Git has no name configured at all, in which case committing would fail.
+    static func configuredUserName(in directory: URL) -> String {
+        let result = run(["config", "--get", "user.name"], in: directory)
+        guard result.code == 0 else { return "" }
+        return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// How many commits are ahead of the tracking branch, and whether there is
@@ -493,9 +529,63 @@ enum GitService {
 
     /// Stage every change inside the opened project, without reaching into
     /// sibling paths when the project is a subfolder of a larger repository.
+    ///
+    /// A file that was staged while untracked remains in the index after a
+    /// later .gitignore edit. Reconcile those newly-added paths after `git add`
+    /// so saving .gitignore immediately has the behavior users expect. Existing
+    /// tracked files are deliberately retained: Git ignore rules never untrack
+    /// committed content.
     @discardableResult
     static func stageAll(in directory: URL) -> (out: String, err: String, code: Int32) {
-        run(["add", "-A", "--", "."], in: directory)
+        let staged = run(["add", "-A", "--", "."], in: directory)
+        guard staged.code == 0 else { return staged }
+        let reconciled = unstageIgnoredAdditions(in: directory)
+        return reconciled.code == 0 ? staged : reconciled
+    }
+
+    /// Remove only index entries whose status is Added and whose working-copy
+    /// path now matches the active ignore rules. `git rm --cached` leaves the
+    /// file on disk; `-f` is safe here because the A-status filter proves there
+    /// is no version in HEAD to lose.
+    @discardableResult
+    static func unstageIgnoredAdditions(in directory: URL,
+                                        status snapshot: Status? = nil)
+        -> (out: String, err: String, code: Int32) {
+        let additions = (snapshot ?? status(in: directory)).entries
+            .filter { $0.indexStatus == "A" }
+            .map(\.path)
+        guard !additions.isEmpty else { return ("", "", 0) }
+
+        var ignored: [String] = []
+        // Keep command lines bounded for generated repositories with thousands
+        // of staged additions.
+        for start in stride(from: 0, to: additions.count, by: 200) {
+            let end = min(additions.count, start + 200)
+            let paths = Array(additions[start..<end])
+            let input = Data((paths.joined(separator: "\0") + "\0").utf8)
+            let checked = run(["check-ignore", "--no-index", "--stdin", "-z"],
+                              input: input, in: directory)
+            // check-ignore uses exit 1 to mean "no paths matched".
+            guard checked.code == 0 || checked.code == 1 else { return checked }
+            ignored.append(contentsOf: checked.out
+                .split(separator: "\0", omittingEmptySubsequences: true)
+                .map(String.init))
+        }
+        guard !ignored.isEmpty else { return ("", "", 0) }
+
+        var output = ""
+        var errors = ""
+        for start in stride(from: 0, to: ignored.count, by: 200) {
+            let end = min(ignored.count, start + 200)
+            let removed = run(["rm", "--cached", "-q", "-f", "--ignore-unmatch", "--"]
+                              + Array(ignored[start..<end]), in: directory)
+            output += removed.out
+            errors += removed.err
+            guard removed.code == 0 else {
+                return (output, errors, removed.code)
+            }
+        }
+        return (output, errors, 0)
     }
 
     /// Whether the change's displayed path has a version in HEAD. A newly
@@ -803,9 +893,10 @@ enum GitService {
 
     /// Changed paths split by kind, for colouring the file tree the way git
     /// itself distinguishes them: new files read differently from edited ones.
-    static func trackedAndUntracked(in directory: URL) -> (modified: Set<String>,
-                                                           untracked: Set<String>) {
-        let s = status(in: directory)
+    /// Split an existing snapshot rather than running `git status` again — the
+    /// window needs both this and the snapshot itself on every refresh.
+    static func trackedAndUntracked(in s: Status) -> (modified: Set<String>,
+                                                      untracked: Set<String>) {
         var modified: Set<String> = []
         var untracked: Set<String> = []
         for entry in s.entries {

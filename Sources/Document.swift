@@ -64,12 +64,26 @@ final class Document {
     private(set) var isApplyingExternalChange = false
     /// Full-width line tints for a diff buffer (empty for normal files).
     var diffBands: [(range: NSRange, color: NSColor)] = []
+    /// Per-line file line numbers for a diff buffer, so the gutter numbers the
+    /// change as it sits in the file rather than counting the diff from 1.
+    var diffLineNumbers: [Int?] = []
     /// Foldable blocks derived from the current source.
     private(set) var codeBlocks: [CodeBlock] = []
     /// JSX tag pairs extracted from the same TSX parse used for highlighting.
     /// Stored on the document so split panes share syntax metadata while each
     /// pane independently decides which pair its caret activates.
     private(set) var jsxTagMatches: [JSXTagMatch] = []
+    /// Markdown syntax characters retained in storage but collapsed by each
+    /// pane's layout manager when their line is not being edited.
+    private(set) var markdownSyntaxRanges: [NSRange] = []
+    private(set) var markdownCollapsedLineRanges: [NSRange] = []
+    private(set) var markdownCodeBlocks: [MarkdownCodeBlockDecoration] = []
+    private(set) var markdownTables: [MarkdownTableDecoration] = []
+    private(set) var markdownTasks: [MarkdownTaskDecoration] = []
+    private(set) var markdownLineMarkers: [MarkdownLineMarkerDecoration] = []
+    private(set) var markdownRules: [MarkdownRuleDecoration] = []
+    private(set) var markdownImages: [MarkdownImageDecoration] = []
+    private(set) var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
 
     /// Tab label override (diffs show "file.swift (diff)" / "… @ abc1234").
     private(set) var displayName: String?
@@ -244,6 +258,7 @@ final class Document {
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
         diffBands.removeAll(keepingCapacity: false)
+        diffLineNumbers.removeAll(keepingCapacity: false)
         codeBlocks.removeAll(keepingCapacity: false)
         jsxTagMatches.removeAll(keepingCapacity: false)
     }
@@ -265,6 +280,29 @@ final class Document {
     func updateJSXTagMatches(_ matches: [JSXTagMatch]) {
         guard matches != jsxTagMatches else { return }
         jsxTagMatches = matches
+        NotificationCenter.default.post(
+            name: Self.structureDidChange, object: self)
+    }
+
+    func updateMarkdownPresentation(_ presentation: MarkdownPresentation) {
+        guard presentation.hiddenSyntaxRanges != markdownSyntaxRanges
+                || presentation.collapsedLineRanges != markdownCollapsedLineRanges
+                || presentation.codeBlocks != markdownCodeBlocks
+                || presentation.tables != markdownTables
+                || presentation.tasks != markdownTasks
+                || presentation.lineMarkers != markdownLineMarkers
+                || presentation.rules != markdownRules
+                || presentation.images != markdownImages
+                || presentation.glyphReplacements != markdownGlyphReplacements else { return }
+        markdownSyntaxRanges = presentation.hiddenSyntaxRanges
+        markdownCollapsedLineRanges = presentation.collapsedLineRanges
+        markdownCodeBlocks = presentation.codeBlocks
+        markdownTables = presentation.tables
+        markdownTasks = presentation.tasks
+        markdownLineMarkers = presentation.lineMarkers
+        markdownRules = presentation.rules
+        markdownImages = presentation.images
+        markdownGlyphReplacements = presentation.glyphReplacements
         NotificationCenter.default.post(
             name: Self.structureDidChange, object: self)
     }
@@ -578,7 +616,9 @@ final class HighlightService {
         // Generated diff buffers get the diff painter, not tree-sitter.
         if doc.isVirtual {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             doc.diffBands = DiffHighlighter.apply(to: storage)
+            doc.diffLineNumbers = DiffHighlighter.lineNumbers(in: storage.string)
             return
         }
         let full = NSRange(location: 0, length: storage.length)
@@ -588,16 +628,29 @@ final class HighlightService {
         // huge (or unsupported) file never pages in parser tables it won't use.
         guard let spec = doc.languageSpec, !doc.isUnsupported else {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
         let text = storage.string
-        guard text.utf8.count <= maxBytes,
-              let lang = SyntaxHighlighter.definition(for: spec),
-              let hl = highlighter(for: lang) else {
+        guard text.utf8.count <= maxBytes else {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
-        let tags = hl.highlight(text: text, storage: storage, fullRange: full)
+        let tags: [JSXTagMatch]
+        if let lang = SyntaxHighlighter.definition(for: spec),
+           let hl = highlighter(for: lang) {
+            tags = hl.highlight(text: text, storage: storage, fullRange: full)
+        } else {
+            tags = []
+        }
+        if spec.name == "markdown" {
+            doc.updateMarkdownPresentation(
+                MarkdownLiveStyler.apply(text: text, to: storage,
+                                         documentURL: doc.url))
+        } else {
+            doc.updateMarkdownPresentation(MarkdownPresentation())
+        }
         doc.updateJSXTagMatches(tags)
     }
 
@@ -623,6 +676,10 @@ final class HighlightService {
             self.pending[doc.url] = nil
         }
         pending[doc.url] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        // Markdown is formatted in-place, so publish its visual syntax on the
+        // next run-loop turn. Other grammars retain the typing debounce because
+        // their full tree-sitter parse has no visible read/edit mode transition.
+        let delay = doc.languageSpec?.name == "markdown" ? 0 : 0.18
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }

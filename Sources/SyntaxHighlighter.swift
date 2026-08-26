@@ -430,29 +430,32 @@ final class SyntaxHighlighter {
 
     // MARK: Capture name -> color
 
-    private static let colorMap: [String: NSColor] = [
+    /// Rebuilt on demand rather than stored: the colours differ per theme, and a
+    /// theme change evicts every cached highlighter, so this is consulted only
+    /// while compiling a query.
+    private static var colorMap: [String: NSColor] { [
         "comment": Theme.comment,
-        "keyword": Theme.purple,
+        "keyword": Theme.syntaxKeyword,
         "string": Theme.green,
         "string.escape": Theme.cyan,
         "string.special": Theme.cyan,
         "string.special.key": Theme.red,
         "escape": Theme.cyan,
-        "number": Theme.orange,
-        "boolean": Theme.orange,
-        "constant": Theme.orange,
-        "constant.builtin": Theme.orange,
-        "type": Theme.yellow,
-        "type.builtin": Theme.yellow,
-        "constructor": Theme.yellow,
-        "function": Theme.blue,
-        "function.method": Theme.blue,
-        "function.builtin": Theme.blue,
+        "number": Theme.syntaxConstant,
+        "boolean": Theme.syntaxConstant,
+        "constant": Theme.syntaxConstant,
+        "constant.builtin": Theme.syntaxConstant,
+        "type": Theme.syntaxType,
+        "type.builtin": Theme.syntaxType,
+        "constructor": Theme.syntaxType,
+        "function": Theme.syntaxFunction,
+        "function.method": Theme.syntaxFunction,
+        "function.builtin": Theme.syntaxFunction,
         "property": Theme.red,
-        "attribute": Theme.orange,
+        "attribute": Theme.yellow,
         "label": Theme.red,
         "tag": Theme.red,
-        "variable.parameter": Theme.orange,
+        "variable.parameter": Theme.syntaxConstant,
         "variable.builtin": Theme.red,
         "operator": Theme.cyan,
         "punctuation": Theme.punct,
@@ -466,13 +469,13 @@ final class SyntaxHighlighter {
         // HTML / CSS / Swift additions
         "tag.error": Theme.red,
         "character": Theme.cyan,          // character.special
-        "charset": Theme.purple,          // CSS at-rules read as keywords
-        "import": Theme.purple,
-        "keyframes": Theme.purple,
-        "media": Theme.purple,
-        "namespace": Theme.purple,
-        "supports": Theme.purple,
-    ]
+        "charset": Theme.syntaxKeyword,   // CSS at-rules read as keywords
+        "import": Theme.syntaxKeyword,
+        "keyframes": Theme.syntaxKeyword,
+        "media": Theme.syntaxKeyword,
+        "namespace": Theme.syntaxKeyword,
+        "supports": Theme.syntaxKeyword,
+    ] }
 
     static func color(for capture: String) -> NSColor? {
         // Try progressively shorter dotted prefixes.

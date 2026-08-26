@@ -42,7 +42,7 @@ final class EditorViewController: NSViewController {
         let container = FlatView()
         container.fillColor = Theme.editorBackground
 
-        editorSplit = NSSplitView()
+        editorSplit = PuzzleSplitView()
         editorSplit.isVertical = true
         editorSplit.dividerStyle = .thin
         editorSplit.translatesAutoresizingMaskIntoConstraints = false
@@ -120,7 +120,6 @@ final class EditorViewController: NSViewController {
                 self.fileHistories.removeValue(forKey: url)
             }
         }
-        pane.onPreviewVisibilityChanged = { [weak self] in self?.releasePreviewParsersIfIdle() }
         pane.onTabBarHeightChanged = { [weak self, weak pane] height in
             guard let self, let pane, self.activePane === pane else { return }
             self.onTabBarHeightChanged?(height)
@@ -132,12 +131,6 @@ final class EditorViewController: NSViewController {
         setActivePane(pane)
         updatePlaceholder()
         return pane
-    }
-
-    /// Markdown parsers are per-process; free them once no pane shows a preview.
-    private func releasePreviewParsersIfIdle() {
-        guard !panes.contains(where: { $0.isPreviewVisible }) else { return }
-        MarkdownRenderer.releaseParsers()
     }
 
     /// Confirm all modified documents before a window close. URLs are
@@ -154,12 +147,10 @@ final class EditorViewController: NSViewController {
     /// Detach every pane's layout manager — called after confirmClose().
     func detachAllPanes() {
         panes.forEach { $0.prepareForClose() }
-        MarkdownRenderer.releaseParsers()
     }
 
     func releaseTransientMemory() {
         panes.forEach { $0.releaseTransientMemory() }
-        releasePreviewParsersIfIdle()
     }
 
     private func closePane(_ pane: EditorPaneViewController) {
@@ -251,8 +242,6 @@ final class EditorViewController: NSViewController {
         onActiveDocumentChanged?(activePane?.currentURL)
     }
     func save() { activePane?.save() }
-
-    func toggleMarkdownPreview() { activePane?.toggleMarkdownPreview() }
 
     /// Show the in-file find bar in the focused pane, optionally pre-filled.
     func showFindBar(seed: String? = nil) {

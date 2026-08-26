@@ -22,6 +22,10 @@ final class Settings {
     var uiFontWeight: CGFloat = 400
     /// Exact height of one file-tree row, in points.
     var treeLineHeight: CGFloat = 22
+
+    /// Which palette paints the app. `.one` follows the system light/dark.
+    var theme: Theme.Name = .one
+
     private var needsAbsoluteLineHeightMigration = false
 
     static var fileURL: URL {
@@ -78,7 +82,13 @@ final class Settings {
           "ui_font_weight": \(num(uiFontWeight)),
 
           // Exact height of one file-tree row in points. Range 8–200.  Default: 22
-          "tree_line_height": \(num(treeLineHeight))
+          "tree_line_height": \(num(treeLineHeight)),
+
+          // ── Colours ────────────────────────────────────────────────────────────
+
+          // Colour theme. "one" is One Light / One Dark following the system
+          // appearance; "ayu-dark" pins the Ayu Dark palette.  Default: "one"
+          "theme": "\(theme.rawValue)"
         }
         """
     }
@@ -90,6 +100,7 @@ final class Settings {
         "code_line_height",
         "tab_size", "show_inline_blame",
         "ui_font_family", "ui_font_size", "ui_font_weight", "tree_line_height",
+        "theme",
     ]
 
     /// Accepted by older settings files but no longer backed by UI behavior.
@@ -171,6 +182,9 @@ final class Settings {
         if let v = json["ui_font_family"] as? String, !v.isEmpty { uiFontFamily = v }
         if let v = number("ui_font_size"), v >= 8, v <= 32 { uiFontSize = v }
         if let v = number("ui_font_weight") { uiFontWeight = v }
+        if let v = json["theme"] as? String, let name = Theme.Name(rawValue: v) {
+            theme = name
+        }
         if let v = number("tree_line_height") ?? number("ui_line_height") {
             if v >= 8, v <= 200 {
                 treeLineHeight = v

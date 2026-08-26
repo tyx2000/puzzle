@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.shared.load()
+        Theme.applyAppearance()
         LauncherInstaller.installIfNeeded()
         // A settings.json written by an older build lacks options added since;
         // rewrite it with the full documented set, keeping the user's values.
@@ -67,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         source.setEventHandler { [weak self] in
             self?.windows.forEach { $0.releaseTransientMemory() }
             DocumentStore.shared.releaseTransientMemory()
-            MarkdownRenderer.releaseParsers()
+            FileIcons.releaseTransientMemory()
         }
         source.resume()
         memoryPressureSource = source
@@ -82,19 +83,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { continue }
             let url = URL(fileURLWithPath: path)
-            // Reuse an empty welcome window rather than stacking another on top.
-            let target = windows.first { !$0.hasProject } ?? makeWindow()
             if isDir.boolValue {
-                target.openProject(url)
+                // The project may already be open: raise that window instead of
+                // stacking a second copy of the same workspace.
+                let target = window(showingProject: url)
+                    ?? windows.first { !$0.hasProject }
+                    ?? makeWindow()
+                if target.projectURL == nil { target.openProject(url) }
+                target.window?.makeKeyAndOrderFront(nil)
             } else {
-                target.openProject(url.deletingLastPathComponent())
+                // A file inside an open project becomes a tab there. Each window
+                // carries its own editor, tree and Git state, so spawning one per
+                // file cost ~60 MB a time and split the project across windows.
+                let target = window(containing: url)
+                    ?? windows.first { !$0.hasProject }
+                    ?? makeWindow()
+                if target.projectURL == nil {
+                    target.openProject(url.deletingLastPathComponent())
+                }
                 target.editor.open(url: url)
+                target.window?.makeKeyAndOrderFront(nil)
             }
-            target.window?.makeKeyAndOrderFront(nil)
             handled = true
         }
         NSApp.activate(ignoringOtherApps: true)
         sender.reply(toOpenOrPrint: handled ? .success : .failure)
+    }
+
+    /// The window whose project is exactly this folder.
+    func window(showingProject url: URL) -> WorkspaceWindowController? {
+        Self.projectIndex(matching: url, in: windows.map(\.projectURL)).map { windows[$0] }
+    }
+
+    /// The window whose project contains this file.
+    func window(containing file: URL) -> WorkspaceWindowController? {
+        Self.projectIndex(owning: file, in: windows.map(\.projectURL)).map { windows[$0] }
+    }
+
+    /// Paths are compared symlink-resolved: `/tmp/x` and `/private/tmp/x` are
+    /// the same project, and a plain string prefix would miss that.
+    private static func normalized(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// Which open project is exactly this folder.
+    static func projectIndex(matching folder: URL, in roots: [URL?]) -> Int? {
+        let target = normalized(folder)
+        return roots.firstIndex { $0.map(normalized) == target }
+    }
+
+    /// Which open project contains this file — the deepest one wins, so a file
+    /// inside a nested workspace lands in that workspace rather than its parent.
+    static func projectIndex(owning file: URL, in roots: [URL?]) -> Int? {
+        let path = normalized(file)
+        return roots.enumerated()
+            .compactMap { index, root -> (Int, Int)? in
+                guard let root else { return nil }
+                let rootPath = normalized(root)
+                let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+                guard path.hasPrefix(prefix) else { return nil }
+                return (index, rootPath.count)
+            }
+            .max { $0.1 < $1.1 }?.0
     }
 
     /// Clicking the dock icon with no windows open makes a fresh one.
@@ -293,9 +343,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
         viewMenu.addItem(withTitle: "Split Editor",
                          action: #selector(WorkspaceWindowController.splitEditor(_:)), keyEquivalent: "\\")
-        viewMenu.addItem(withTitle: "Markdown Preview",
-                         action: #selector(WorkspaceWindowController.toggleMarkdownPreview(_:)),
-                         keyEquivalent: "p").keyEquivalentModifierMask = [.command, .shift]
         viewMenuItem.submenu = viewMenu
 
         let windowMenuItem = NSMenuItem()
@@ -367,6 +414,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func clearRecents() { recentProjects.clear() }
 
     @objc private func settingsChanged() {
+        // A new theme changes the colours baked into each cached highlighter's
+        // capture table, and AppKit's own controls follow a pinned theme.
+        Theme.applyAppearance()
+        HighlightService.shared.evictUnused(keeping: [])
         // Re-apply fonts/metrics to every open window.
         DocumentStore.shared.reapplyDisplaySettings()
         windows.forEach { $0.refreshDisplay() }

@@ -6,6 +6,9 @@ import AppKit
 final class SidebarViewController: NSViewController {
     let fileTree = FileTreeViewController()
     let activityBar = ActivityBarView()
+    /// Project name + branch beside the traffic lights (the panel owns that
+    /// strip of the titlebar because it is the view underneath it).
+    let projectTitle = ProjectTitleView()
 
     // Search and Git each own an outline/table view, scroll view, controls and
     // (for Git) another NSTextView. Most windows never show both panels, so do
@@ -23,7 +26,11 @@ final class SidebarViewController: NSViewController {
     var onGitChanged: (() -> Void)?
 
     private let containerView = NSView()
+    /// The 1pt line under the traffic-light band — the same boundary the
+    /// activity bar draws at the bottom of the panel.
+    private let titleSeparator = FlatView()
     private var containerTopConstraint: NSLayoutConstraint!
+    private var projectTitleLeadingConstraint: NSLayoutConstraint!
     /// Which panel is currently visible.
     private(set) var visiblePanel: ActivityBarView.Action = .project
 
@@ -33,14 +40,36 @@ final class SidebarViewController: NSViewController {
 
         containerView.translatesAutoresizingMaskIntoConstraints = false
         activityBar.translatesAutoresizingMaskIntoConstraints = false
+        projectTitle.translatesAutoresizingMaskIntoConstraints = false
+        titleSeparator.translatesAutoresizingMaskIntoConstraints = false
+        titleSeparator.fillColor = Theme.border
         root.addSubview(containerView)
         root.addSubview(activityBar)
+        root.addSubview(projectTitle)
+        root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
             equalTo: root.topAnchor, constant: EditorTabBar.defaultRowHeight)
+        // Sits in the band the panel leaves empty for the traffic lights; the
+        // window controller supplies the real inset once AppKit has laid the
+        // buttons out.
+        projectTitleLeadingConstraint = projectTitle.leadingAnchor.constraint(
+            equalTo: root.leadingAnchor, constant: 78)
         NSLayoutConstraint.activate([
             // Match the editor's first tab row while clearing the traffic lights.
             containerTopConstraint,
+            projectTitleLeadingConstraint,
+            // The strip is exactly the file-tab band, so its text sits on the
+            // traffic lights' centre line.
+            projectTitle.topAnchor.constraint(equalTo: root.topAnchor),
+            projectTitle.bottomAnchor.constraint(equalTo: containerView.topAnchor),
+            projectTitle.trailingAnchor.constraint(
+                lessThanOrEqualTo: root.trailingAnchor, constant: -8),
+            titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
+            titleSeparator.heightAnchor.constraint(equalToConstant: 1),
+
             containerView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             containerView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             containerView.bottomAnchor.constraint(equalTo: activityBar.topAnchor),
@@ -59,7 +88,17 @@ final class SidebarViewController: NSViewController {
         containerTopConstraint.constant = height
     }
 
+    /// Start the project/branch strip after the actual traffic lights.
+    func setTitlebarLeadingInset(_ inset: CGFloat) {
+        projectTitleLeadingConstraint.constant = inset
+    }
+
+    func setProjectTitle(project: String, branch: String) {
+        projectTitle.configure(project: project, branch: branch)
+    }
+
     var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
+    var titleSeparatorForTesting: FlatView { titleSeparator }
 
     func setDirectory(_ url: URL) {
         directory = url
@@ -88,6 +127,10 @@ final class SidebarViewController: NSViewController {
 
     /// Re-apply the UI font (`ui_font_*`) across every panel in the sidebar.
     func refreshFonts() {
+        (view as? FlatView)?.fillColor = Theme.panelBackground
+        titleSeparator.fillColor = Theme.border
+        activityBar.refreshAppearance()
+        projectTitle.refreshAppearance()
         fileTree.refreshAppearance()
         searchController?.refreshFonts()
         gitController?.refreshFonts()

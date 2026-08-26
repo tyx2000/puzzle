@@ -33,15 +33,15 @@ enum DefinitionNavigator {
         let location = min(max(0, utf16Location), source.length - 1)
 
         if let reference = pathReference(in: source, at: location),
-           let destination = resolvePath(reference, from: sourceURL,
+           let destination = resolvePath(reference.value, from: sourceURL,
                                          projectRoot: projectRoot) {
             return destination
         }
 
-        guard let symbol = symbol(at: location, in: source), symbol.count > 1 else {
+        guard let symbol = symbol(at: location, in: source), symbol.value.count > 1 else {
             return nil
         }
-        if let range = bestDeclaration(of: symbol, in: text, near: location) {
+        if let range = bestDeclaration(of: symbol.value, in: text, near: location) {
             return Destination(url: sourceURL, utf16Location: range.location)
         }
 
@@ -59,7 +59,7 @@ enum DefinitionNavigator {
             guard let values = try? candidate.resourceValues(forKeys: [.fileSizeKey]),
                   (values.fileSize ?? 0) <= 2 * 1024 * 1024,
                   let candidateText = try? String(contentsOf: candidate, encoding: .utf8),
-                  let range = bestDeclaration(of: symbol, in: candidateText, near: nil) else {
+                  let range = bestDeclaration(of: symbol.value, in: candidateText, near: nil) else {
                 continue
             }
             return Destination(url: candidate, utf16Location: range.location)
@@ -75,7 +75,19 @@ enum DefinitionNavigator {
             || symbol(at: location, in: source) != nil
     }
 
-    private static func pathReference(in text: NSString, at location: Int) -> String? {
+    /// Exact source range painted while Command is held. Resolution still runs
+    /// before the range becomes visible, so ordinary identifiers never claim
+    /// to be links merely because they look like one.
+    static func targetRange(in text: String, utf16Location: Int) -> NSRange? {
+        let source = text as NSString
+        guard source.length > 0 else { return nil }
+        let location = min(max(0, utf16Location), source.length - 1)
+        return pathReference(in: source, at: location)?.range
+            ?? symbol(at: location, in: source)?.range
+    }
+
+    private static func pathReference(in text: NSString, at location: Int)
+        -> (value: String, range: NSRange)? {
         let line = text.lineRange(for: NSRange(location: location, length: 0))
         let lineText = text.substring(with: line) as NSString
         let local = location - line.location
@@ -89,8 +101,9 @@ enum DefinitionNavigator {
             var right = max(local, left + 1)
             while right < lineText.length, lineText.character(at: right) != scalar { right += 1 }
             if right < lineText.length, left < local, local <= right {
-                return lineText.substring(with: NSRange(location: left + 1,
-                                                        length: right - left - 1))
+                let range = NSRange(location: line.location + left + 1,
+                                    length: right - left - 1)
+                return (text.substring(with: range), range)
             }
         }
 
@@ -108,7 +121,7 @@ enum DefinitionNavigator {
         guard right > left else { return nil }
         let candidate = text.substring(with: NSRange(location: left, length: right - left))
         return candidate.contains("/") || (candidate as NSString).pathExtension.count > 0
-            ? candidate : nil
+            ? (candidate, NSRange(location: left, length: right - left)) : nil
     }
 
     private static func resolvePath(_ rawReference: String, from sourceURL: URL,
@@ -169,7 +182,8 @@ enum DefinitionNavigator {
         return result
     }
 
-    private static func symbol(at location: Int, in text: NSString) -> String? {
+    private static func symbol(at location: Int, in text: NSString)
+        -> (value: String, range: NSRange)? {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_$"))
         var left = location
         if let scalar = UnicodeScalar(text.character(at: left)), !allowed.contains(scalar), left > 0 {
@@ -185,7 +199,7 @@ enum DefinitionNavigator {
         guard right > left else { return nil }
         let value = text.substring(with: NSRange(location: left, length: right - left))
         guard value.first?.isNumber != true else { return nil }
-        return value
+        return (value, NSRange(location: left, length: right - left))
     }
 
     private static func bestDeclaration(of symbol: String, in text: String,

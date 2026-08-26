@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 /// A visual/foldable source block. Locations are UTF-16 offsets so they can be
 /// passed directly to TextKit without converting from Swift String indices.
@@ -302,9 +303,19 @@ enum CodeBlockAnalyzer {
 
 /// TextKit-1 folding is pane-local: null glyphs collapse display without
 /// deleting or attributing the shared document storage.
+struct MarkdownTableRowMetric: Equatable {
+    let range: NSRange
+    let height: CGFloat
+}
+
 final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     private var blocks: [CodeBlock] = []
     private(set) var foldedBlockStarts = Set<Int>()
+    private var markdownSyntaxRanges: [NSRange] = []
+    private var markdownCollapsedLineRanges: [NSRange] = []
+    private var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
+    private var revealedMarkdownRange: NSRange?
+    private var markdownTableRowMetrics: [MarkdownTableRowMetric] = []
 
     var foldedBlockIdentities: Set<Int> { foldedBlockStarts }
 
@@ -334,7 +345,47 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     }
 
     func isCharacterHidden(at location: Int) -> Bool {
-        hiddenRanges.contains { NSLocationInRange(location, $0) }
+        foldedRanges.contains { NSLocationInRange(location, $0) }
+            || (revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
+                && contains(location, in: markdownSyntaxRanges))
+    }
+
+    func isMarkdownControlLineCollapsed(at location: Int) -> Bool {
+        revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
+            && contains(location, in: markdownCollapsedLineRanges)
+    }
+
+    func updateMarkdownSyntaxRanges(_ ranges: [NSRange],
+                                    collapsedLines: [NSRange] = [],
+                                    replacements: [MarkdownGlyphReplacement] = [],
+                                    revealing range: NSRange?) {
+        guard ranges != markdownSyntaxRanges
+                || collapsedLines != markdownCollapsedLineRanges
+                || replacements != markdownGlyphReplacements
+                || range != revealedMarkdownRange else { return }
+        markdownSyntaxRanges = ranges
+        markdownCollapsedLineRanges = collapsedLines
+        markdownGlyphReplacements = replacements
+        revealedMarkdownRange = range
+        invalidateHiddenGlyphs()
+    }
+
+    func revealMarkdownSyntax(in range: NSRange?) {
+        guard range != revealedMarkdownRange else { return }
+        revealedMarkdownRange = range
+        invalidateHiddenGlyphs()
+    }
+
+    func updateMarkdownTableRowMetrics(_ metrics: [MarkdownTableRowMetric]) {
+        guard metrics != markdownTableRowMetrics else { return }
+        markdownTableRowMetrics = metrics
+        guard let storage = textStorage else { return }
+        invalidateLayout(forCharacterRange: NSRange(location: 0, length: storage.length),
+                         actualCharacterRange: nil)
+    }
+
+    func markdownTableRowHeightForTesting(at location: Int) -> CGFloat? {
+        markdownTableRowMetrics.first { NSLocationInRange(location, $0.range) }?.height
     }
 
     func restoreFoldedBlockIdentities(_ identities: Set<Int>) {
@@ -356,11 +407,15 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         invalidateFoldedGlyphs()
     }
 
-    private var hiddenRanges: [NSRange] {
+    private var foldedRanges: [NSRange] {
         blocks.compactMap { foldedBlockStarts.contains($0.identity) ? $0.hiddenRange : nil }
     }
 
     private func invalidateFoldedGlyphs() {
+        invalidateHiddenGlyphs()
+    }
+
+    private func invalidateHiddenGlyphs() {
         guard let storage = textStorage else { return }
         let full = NSRange(location: 0, length: storage.length)
         invalidateGlyphs(forCharacterRange: full, changeInLength: 0,
@@ -376,26 +431,84 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         font aFont: NSFont,
         forGlyphRange glyphRange: NSRange
     ) -> Int {
-        let hidden = hiddenRanges
-        guard !hidden.isEmpty else { return 0 }
+        let folded = foldedRanges
+        guard !folded.isEmpty || !markdownSyntaxRanges.isEmpty
+                || !markdownGlyphReplacements.isEmpty else { return 0 }
+        var modifiedGlyphs = Array(
+            UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
         var modified = Array(
             UnsafeBufferPointer(start: props, count: glyphRange.length))
         var changed = false
         for offset in 0..<glyphRange.length {
             let character = charIndexes[offset]
-            if hidden.contains(where: { NSLocationInRange(character, $0) }) {
+            let foldedCharacter = folded.contains { NSLocationInRange(character, $0) }
+            let markdownCharacter = revealedMarkdownRange.map {
+                NSLocationInRange(character, $0)
+            } != true && contains(character, in: markdownSyntaxRanges)
+            if foldedCharacter || markdownCharacter {
                 modified[offset].insert(.null)
                 changed = true
+            } else if revealedMarkdownRange.map({ NSLocationInRange(character, $0) }) != true,
+                      let replacement = markdownReplacement(containing: character) {
+                if character == replacement.sourceRange.location {
+                    var unicode = UniChar(replacement.character)
+                    var glyph: CGGlyph = 0
+                    if CTFontGetGlyphsForCharacters(aFont, &unicode, &glyph, 1), glyph != 0 {
+                        modifiedGlyphs[offset] = glyph
+                        modified[offset].remove(.null)
+                        changed = true
+                    }
+                } else {
+                    modified[offset].insert(.null)
+                    changed = true
+                }
             }
         }
         guard changed else { return 0 }
         modified.withUnsafeBufferPointer {
             layoutManager.setGlyphs(
-                glyphs, properties: $0.baseAddress!,
+                modifiedGlyphs, properties: $0.baseAddress!,
                 characterIndexes: charIndexes, font: aFont,
                 forGlyphRange: glyphRange)
         }
         return glyphRange.length
+    }
+
+    /// Markdown ranges are sorted and non-overlapping, so lookup stays
+    /// logarithmic even in long documentation files.
+    private func contains(_ location: Int, in ranges: [NSRange]) -> Bool {
+        var lower = 0
+        var upper = ranges.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            let range = ranges[middle]
+            if location < range.location {
+                upper = middle
+            } else if location >= NSMaxRange(range) {
+                lower = middle + 1
+            } else {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func markdownReplacement(containing location: Int)
+        -> MarkdownGlyphReplacement? {
+        var lower = 0
+        var upper = markdownGlyphReplacements.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            let replacement = markdownGlyphReplacements[middle]
+            if location < replacement.sourceRange.location {
+                upper = middle
+            } else if location >= NSMaxRange(replacement.sourceRange) {
+                lower = middle + 1
+            } else {
+                return replacement
+            }
+        }
+        return nil
     }
 
     func layoutManager(
@@ -406,6 +519,41 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         in textContainer: NSTextContainer,
         forGlyphRange glyphRange: NSRange
     ) -> Bool {
+        if glyphRange.length > 0 {
+            let firstCharacter = characterIndexForGlyph(at: glyphRange.location)
+            let lastCharacter = characterIndexForGlyph(
+                at: NSMaxRange(glyphRange) - 1)
+            let characterRange = NSRange(
+                location: min(firstCharacter, lastCharacter),
+                length: abs(lastCharacter - firstCharacter) + 1)
+            // A null-glyph Markdown control line can be coalesced into the same
+            // TextKit fragment as the preceding line terminator. Intersection
+            // testing therefore compresses the preceding visible content line
+            // to 1pt, most visibly on the final row of a fenced code block.
+            // Classify the fragment by its first non-newline source character.
+            let representative = firstContentCharacter(in: characterRange)
+            let isRevealed = revealedMarkdownRange.map {
+                NSLocationInRange(representative, $0)
+            } == true
+            if !isRevealed && contains(representative,
+                                       in: markdownCollapsedLineRanges) {
+                lineFragmentRect.pointee.size.height = 1
+                lineFragmentUsedRect.pointee.size.height = 1
+                baselineOffset.pointee = 0
+                return true
+            }
+            if !isRevealed,
+               let metric = markdownTableRowMetrics.first(where: {
+                   NSLocationInRange(representative, $0.range)
+               }) {
+                let height = max(Theme.lineMetrics().target, metric.height)
+                lineFragmentRect.pointee.size.height = height
+                lineFragmentUsedRect.pointee.size.height = height
+                baselineOffset.pointee = (height - Theme.lineMetrics().natural) / 2
+                    + Theme.editorFont().ascender
+                return true
+            }
+        }
         let metrics = Theme.lineMetrics()
         lineFragmentRect.pointee.size.height = metrics.target
         lineFragmentUsedRect.pointee.size.height = metrics.target
@@ -414,5 +562,20 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         let glyphHeight = font.ascender - font.descender
         baselineOffset.pointee = (metrics.target - glyphHeight) / 2 + font.ascender
         return true
+    }
+
+    private func firstContentCharacter(in range: NSRange) -> Int {
+        guard let storage = textStorage, storage.length > 0 else {
+            return range.location
+        }
+        let source = storage.string as NSString
+        let end = min(NSMaxRange(range), source.length)
+        var location = min(range.location, max(0, source.length - 1))
+        while location < end {
+            let character = source.character(at: location)
+            if character != 0x0A && character != 0x0D { return location }
+            location += 1
+        }
+        return min(range.location, max(0, source.length - 1))
     }
 }

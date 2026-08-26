@@ -204,6 +204,44 @@ final class FileTreeViewController: NSViewController {
         outlineView.reloadData()
     }
 
+    /// Refresh only directories touched by external filesystem events. Existing
+    /// nodes keep their identity, so expanded folders and hover state survive.
+    func refresh(changedURLs: [URL]) {
+        guard let root, !changedURLs.isEmpty else { return }
+        guard pendingEdit == nil else {
+            deferredTreeReload = true
+            deferredDiskRefresh = true
+            return
+        }
+
+        let rootPath = root.url.standardizedFileURL.path
+        let rootPrefix = rootPath + "/"
+        var affected: [FileNode] = []
+        var seen = Set<ObjectIdentifier>()
+        for changedURL in changedURLs {
+            let changed = changedURL.standardizedFileURL
+            guard changed.path == rootPath || changed.path.hasPrefix(rootPrefix) else { continue }
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: changed.path,
+                                                        isDirectory: &isDirectory)
+            var candidate = exists && isDirectory.boolValue
+                ? changed : changed.deletingLastPathComponent()
+            while candidate.path == rootPath || candidate.path.hasPrefix(rootPrefix) {
+                if let node = node(for: candidate), node.isDirectory {
+                    let id = ObjectIdentifier(node)
+                    if seen.insert(id).inserted { affected.append(node) }
+                    break
+                }
+                guard candidate.path != rootPath else { break }
+                candidate.deleteLastPathComponent()
+            }
+        }
+        guard !affected.isEmpty else { return }
+        affected.forEach { $0.refreshChildren() }
+        affected.forEach { outlineView.reloadItem($0, reloadChildren: true) }
+        refreshActiveRowBackgrounds()
+    }
+
     /// Row index currently painted as the active file (nil if none on screen).
     var activeHighlightedRow: Int? {
         var found: Int?
@@ -212,11 +250,17 @@ final class FileTreeViewController: NSViewController {
         }
         return found
     }
+    var activeURLForTesting: URL? { activeURL }
+    func activeStateForTesting(at row: Int) -> Bool? {
+        (outlineView.rowView(atRow: row, makeIfNecessary: true) as? TreeRowView)?.isActiveFile
+    }
 
     /// Row index for a URL, or nil if not currently displayed.
     func row(for url: URL) -> Int? {
+        let target = url.standardizedFileURL
         for index in 0..<outlineView.numberOfRows {
-            if let node = outlineView.item(atRow: index) as? FileNode, node.url == url {
+            if let node = outlineView.item(atRow: index) as? FileNode,
+               node.url.standardizedFileURL == target {
                 return index
             }
         }
@@ -231,6 +275,12 @@ final class FileTreeViewController: NSViewController {
 
     // MARK: - Regression-test surface
 
+    /// Distance from one file row to the next: its height plus the gap AppKit
+    /// leaves between rows. Compared against the git panel's.
+    var rowPitchForTesting: CGFloat {
+        _ = view
+        return Theme.treeRowHeight() + outlineView.intercellSpacing.height
+    }
     func contextMenuForTesting(row: Int) -> NSMenu? { contextMenu(forRow: row) }
     var rowCountForTesting: Int { outlineView.numberOfRows }
     var pendingEditRowForTesting: Int? {
@@ -350,28 +400,45 @@ final class FileTreeViewController: NSViewController {
     /// with the active editor tab). Does not trigger onOpenFile.
     func selectFile(_ url: URL) {
         let previousURL = activeURL
-        activeURL = url
+        activeURL = url.standardizedFileURL
         defer { refreshActiveFilePresentation(previousURL: previousURL) }
         guard let root else { return }
-        let rootPath = root.url.path
+        let rootPath = root.url.standardizedFileURL.path
+        let target = url.standardizedFileURL
+        let prefix = rootPath + "/"
         // Files outside the project (e.g. settings.json) just clear the highlight.
-        guard url.path.hasPrefix(rootPath) else { refreshActiveRowBackgrounds(); return }
+        guard target.path.hasPrefix(prefix) else { refreshActiveRowBackgrounds(); return }
+        _ = revealAndSelect(target, below: root, rootPath: rootPath)
+    }
+
+    @discardableResult
+    private func revealAndSelect(_ url: URL, below root: FileNode,
+                                 rootPath: String) -> Bool {
         outlineView.expandItem(root)
         var current = root
         let relative = url.path.dropFirst(rootPath.count)
         for comp in relative.split(separator: "/") {
-            guard let child = current.children.first(where: { $0.name == String(comp) }) else {
-                refreshActiveRowBackgrounds(); return
+            let name = String(comp)
+            var child = current.children.first(where: { $0.name == name })
+            if child == nil {
+                // The open request can beat the FSEvent for a newly created
+                // file. Refresh only the missing item's parent, preserving all
+                // other node identities and expansion state.
+                current.refreshChildren()
+                outlineView.reloadItem(current, reloadChildren: true)
+                child = current.children.first(where: { $0.name == name })
             }
+            guard let child else { return false }
             if child.isDirectory { outlineView.expandItem(child) }
             current = child
         }
         let row = outlineView.row(forItem: current)
-        guard row >= 0 else { outlineView.reloadData(); return }
+        guard row >= 0 else { return false }
         outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         refreshActiveRowBackgrounds()
         // Bring the active file into view (it may be far down / newly expanded).
         outlineView.scrollRowToVisible(row)
+        return true
     }
 
     private func refreshActiveFilePresentation(previousURL: URL?) {
@@ -390,7 +457,8 @@ final class FileTreeViewController: NSViewController {
         outlineView.enumerateAvailableRowViews { view, rowIndex in
             guard let rowView = view as? TreeRowView else { return }
             let node = self.outlineView.item(atRow: rowIndex) as? FileNode
-            let isActive = node != nil && node!.url == self.activeURL
+            let isActive = node != nil
+                && node!.url.standardizedFileURL == self.activeURL
             if rowView.isActiveFile != isActive {
                 rowView.isActiveFile = isActive
             }
@@ -733,24 +801,22 @@ extension FileTreeViewController: NSOutlineViewDelegate {
             let cell = (outlineView.makeView(withIdentifier: id, owner: self)
                         as? InlineTreeNameCell) ?? InlineTreeNameCell()
             cell.identifier = id
-            let icon: NSImage?
-            let iconColor: NSColor
+            let icon: SidebarIcon
             switch pending.kind {
             case .file:
-                icon = Theme.symbol("doc.text")
-                iconColor = Theme.dimText
+                icon = .newItem(folder: false)
             case .folder:
-                icon = Theme.symbol("folder")
-                iconColor = Theme.folderClosed
+                icon = .newItem(folder: true)
             case .rename:
-                if pending.original?.isDirectory == true {
-                    let expanded = pending.original.map { outlineView.isItemExpanded($0) } ?? false
-                    icon = Theme.symbol(expanded ? "folder.fill" : "folder")
-                    iconColor = expanded ? Theme.blue : Theme.folderClosed
+                // A rename keeps the row's own icon, so the file being renamed
+                // stays recognisable while its name is being typed over.
+                if let original = pending.original {
+                    let expanded = outlineView.isItemExpanded(original)
+                    icon = original.isDirectory
+                        ? .folder(original.url, expanded: expanded)
+                        : .file(original.url)
                 } else {
-                    icon = Theme.symbol(Self.iconName(
-                        for: pending.original?.url.pathExtension ?? ""))
-                    iconColor = Theme.dimText
+                    icon = .newItem(folder: false)
                 }
             }
             let isDirectory = pending.kind == .folder || pending.original?.isDirectory == true
@@ -760,7 +826,7 @@ extension FileTreeViewController: NSOutlineViewDelegate {
                 : nil
             cell.configure(value: pending.initialName,
                            disclosure: disclosure,
-                           icon: icon, iconColor: iconColor,
+                           icon: icon,
                            onSubmit: { [weak self] in
                                self?.completePendingEdit($0) ?? false
                            },
@@ -777,17 +843,11 @@ extension FileTreeViewController: NSOutlineViewDelegate {
             cell.identifier = id
         }
 
-        // Directories show open/closed state through both icon and colour.
-        let icon: NSImage?
-        let iconColor: NSColor
-        if node.isDirectory {
-            let expanded = outlineView.isItemExpanded(node)
-            icon = Theme.symbol(expanded ? "folder.fill" : "folder")
-            iconColor = expanded ? Theme.blue : Theme.folderClosed
-        } else {
-            icon = Theme.symbol(Self.iconName(for: node.url.pathExtension))
-            iconColor = Theme.dimText
-        }
+        // Directories show open/closed state through the icon as well as the
+        // disclosure triangle.
+        let icon: SidebarIcon = node.isDirectory
+            ? .folder(node.url, expanded: outlineView.isItemExpanded(node))
+            : .file(node.url)
 
         let expanded = node.isDirectory && outlineView.isItemExpanded(node)
         let disclosure = node.isDirectory
@@ -795,7 +855,7 @@ extension FileTreeViewController: NSOutlineViewDelegate {
             : nil
         let titleColor = statusColor(for: node) ?? Theme.foreground
         cell.configure(title: node.name, disclosure: disclosure,
-                       icon: icon, iconColor: iconColor,
+                       icon: icon,
                        titleColor: titleColor)
         return cell
     }
@@ -827,7 +887,7 @@ extension FileTreeViewController: NSOutlineViewDelegate {
         let row = (outlineView.makeView(withIdentifier: id, owner: self) as? TreeRowView)
             ?? TreeRowView()
         row.identifier = id
-        row.isActiveFile = (item as? FileNode)?.url == activeURL
+        row.isActiveFile = (item as? FileNode)?.url.standardizedFileURL == activeURL
         row.isHovered = self.outlineView.hoveredRow == outlineView.row(forItem: item)
         return row
     }
@@ -848,18 +908,17 @@ extension FileTreeViewController: NSOutlineViewDelegate {
 private final class FileTreeCell: DrawnSidebarCell {
     private var title = ""
     private var disclosure: NSImage?
-    private var icon: NSImage?
-    private var iconColor = NSColor.clear
+    private var icon: SidebarIcon?
     private var titleColor = NSColor.clear
     var titleColorForTesting: NSColor { titleColor }
+    var iconForTesting: SidebarIcon? { icon }
 
     func configure(title: String, disclosure: NSImage?,
-                   icon: NSImage?, iconColor: NSColor,
+                   icon: SidebarIcon?,
                    titleColor: NSColor) {
         self.title = title
         self.disclosure = disclosure
         self.icon = icon
-        self.iconColor = iconColor
         self.titleColor = titleColor
         toolTip = title
         exposeToAccessibility(title)
@@ -874,8 +933,8 @@ private final class FileTreeCell: DrawnSidebarCell {
                                     x: FileTreeRowLayout.disclosureX,
                                     size: FileTreeRowLayout.disclosureSize,
                                     in: bounds))
-        SidebarCellDrawing.image(icon, tint: iconColor,
-                                 in: FileTreeRowLayout.centeredRect(
+        SidebarCellDrawing.icon(icon,
+                                in: FileTreeRowLayout.centeredRect(
                                     x: FileTreeRowLayout.iconX,
                                     size: FileTreeRowLayout.iconSize,
                                     in: bounds))
@@ -921,8 +980,7 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     private var cancelling = false
     private var editingSessionStarted = false
     private var disclosure: NSImage?
-    private var icon: NSImage?
-    private var iconColor = NSColor.clear
+    private var icon: SidebarIcon?
 
     override var isOpaque: Bool { true }
 
@@ -957,7 +1015,7 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
 
     func configure(value: String,
                    disclosure: NSImage?,
-                   icon: NSImage?, iconColor: NSColor,
+                   icon: SidebarIcon?,
                    onSubmit: @escaping (String) -> Bool,
                    onCancel: @escaping () -> Void) {
         editingSessionStarted = false
@@ -967,7 +1025,6 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         editor.insertionPointColor = .black
         self.disclosure = disclosure
         self.icon = icon
-        self.iconColor = iconColor
         self.onSubmit = onSubmit
         self.onCancel = onCancel
         submitting = false
@@ -984,8 +1041,8 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
                                     x: FileTreeRowLayout.disclosureX,
                                     size: FileTreeRowLayout.disclosureSize,
                                     in: bounds))
-        SidebarCellDrawing.image(icon, tint: iconColor,
-                                 in: FileTreeRowLayout.centeredRect(
+        SidebarCellDrawing.icon(icon,
+                                in: FileTreeRowLayout.centeredRect(
                                     x: FileTreeRowLayout.iconX,
                                     size: FileTreeRowLayout.iconSize,
                                     in: bounds))

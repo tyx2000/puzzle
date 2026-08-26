@@ -14,8 +14,8 @@ MODE="${1:-fast}"
 if [ "$MODE" = "release" ]; then SWIFT_OPT="-O"; else SWIFT_OPT="-Onone"; fi
 echo "==> Mode: $MODE ($SWIFT_OPT)"
 
-if [ ! -d "$V/tree-sitter" ]; then
-  echo "==> Fetching tree-sitter + grammars"
+if [ ! -d "$V/tree-sitter" ] || [ ! -d "$V/material-icon-theme" ]; then
+  echo "==> Fetching tree-sitter + grammars + icons"
   "$V/fetch.sh"
 fi
 
@@ -75,14 +75,16 @@ echo "==> Cleaning app bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/queries"
 
-# App icon: generated once from Tools/makeicon.swift, then cached.
+# App icon: generated once from Tools/makeicon.swift + Tools/appicon.jpg,
+# then cached.
 ICNS="$OBJ/AppIcon.icns"
-if [ ! -f "$ICNS" ] || [ "$ROOT/Tools/makeicon.swift" -nt "$ICNS" ]; then
+if [ ! -f "$ICNS" ] || [ "$ROOT/Tools/makeicon.swift" -nt "$ICNS" ] \
+   || [ "$ROOT/Tools/appicon.jpg" -nt "$ICNS" ]; then
   echo "==> Generating app icon"
   swiftc -Onone -sdk "$SDK" -target "$TARGET" -framework AppKit \
     "$ROOT/Tools/makeicon.swift" -o "$OBJ/makeicon" 2>/dev/null
   rm -rf "$OBJ/AppIcon.iconset"
-  "$OBJ/makeicon" "$OBJ/AppIcon.iconset" >/dev/null
+  "$OBJ/makeicon" "$OBJ/AppIcon.iconset" "$ROOT/Tools/appicon.jpg" >/dev/null
   iconutil -c icns "$OBJ/AppIcon.iconset" -o "$ICNS"
 fi
 cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
@@ -120,6 +122,9 @@ cp "$V/tree-sitter-sql/queries/highlights.scm"                              "$AP
 cp "$V/tree-sitter-dockerfile/queries/highlights.scm"                       "$APP/Contents/Resources/queries/dockerfile.scm"
 # gitignore ships no highlight query upstream; ours lives in Queries/.
 cp "$ROOT/Queries/gitignore.scm"                                            "$APP/Contents/Resources/queries/gitignore.scm"
+
+echo "==> Bundling file-tree icons"
+python3 "$ROOT/Tools/generate-file-icons.py" "$APP/Contents/Resources"
 
 echo "==> Bundling the pz command-line launcher"
 mkdir -p "$APP/Contents/Resources/bin"

@@ -332,6 +332,7 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
         guard let storage = detailText.textStorage else {
             detailText.string = text
             detailText.diffBands = []
+            detailText.diffLineNumbers = []
             return
         }
         storage.setAttributedString(NSAttributedString(string: text))
@@ -339,10 +340,12 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
             // Exactly the same foreground colours and full-width added/removed
             // bands used by Changes diff tabs.
             detailText.diffBands = DiffHighlighter.apply(to: storage)
+            detailText.diffLineNumbers = DiffHighlighter.lineNumbers(in: storage.string)
         } else {
             let full = NSRange(location: 0, length: storage.length)
             storage.setAttributes(Theme.textAttributes(color: Theme.foreground), range: full)
             detailText.diffBands = []
+            detailText.diffLineNumbers = []
         }
         detailText.needsDisplay = true
         detailText.enclosingScrollView?.verticalRulerView?.needsDisplay = true

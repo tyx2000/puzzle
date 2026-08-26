@@ -8,6 +8,9 @@ final class SplitDividerHandleView: NSView {
 
     var onDragBegan: (() -> Void)?
     var onDrag: ((CGFloat) -> Void)?
+    /// Width of the hairline this view paints over — AppKit's own divider,
+    /// which has no colour API. Set from the split view's `dividerThickness`.
+    var dividerThickness: CGFloat = 1 { didSet { needsDisplay = true } }
     private var initialMouseX: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
@@ -18,6 +21,24 @@ final class SplitDividerHandleView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The handle straddles the divider, so painting its middle column replaces
+    /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
+    /// activity bar and the title band draw.
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.border.setFill()
+        NSRect(x: bounds.midX, y: 0,
+               width: dividerThickness, height: bounds.height).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    var paintedDividerRectForTesting: NSRect {
+        NSRect(x: bounds.midX, y: 0, width: dividerThickness, height: bounds.height)
+    }
 
     override func resetCursorRects() {
         super.resetCursorRects()

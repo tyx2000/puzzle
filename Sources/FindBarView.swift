@@ -12,6 +12,12 @@ final class FindBarView: FlatView {
     private var matches: [NSRange] = []
     private var current = -1
 
+    /// Re-read the theme colour captured when the bar was built.
+    func refreshAppearance() {
+        fillColor = Theme.barBackground
+        needsDisplay = true
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         fillColor = Theme.barBackground

@@ -80,6 +80,70 @@ enum DiffHighlighter {
         return bands
     }
 
+    /// Map every line of a unified diff to the file line number it stands for:
+    /// context and added lines carry their number in the new file, removed lines
+    /// the number they had in the old one. Headers, and the "\ No newline"
+    /// marker, belong to no file line and stay blank in the gutter.
+    ///
+    /// The result is indexed by zero-based buffer line, so the gutter can look a
+    /// line up directly instead of counting hunks itself.
+    static func lineNumbers(in text: String) -> [Int?] {
+        var numbers: [Int?] = []
+        var oldNext = 0
+        var newNext = 0
+        var inHunk = false
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.hasPrefix("@@") {
+                if let start = hunkStart(line) {
+                    oldNext = start.old
+                    newNext = start.new
+                    inHunk = true
+                } else {
+                    inHunk = false
+                }
+                numbers.append(nil)
+                continue
+            }
+            // Inside a hunk the first character decides the line's fate, and
+            // only there: a body line reading "+++ x" is an addition, not the
+            // file header `kind(of:)` would call it.
+            guard inHunk, let first = line.first else {
+                inHunk = false
+                numbers.append(nil)
+                continue
+            }
+            switch first {
+            case "+":
+                numbers.append(newNext)
+                newNext += 1
+            case "-":
+                numbers.append(oldNext)
+                oldNext += 1
+            case " ":
+                numbers.append(newNext)
+                newNext += 1
+                oldNext += 1
+            case "\\":  // "\ No newline at end of file"
+                numbers.append(nil)
+            default:      // next file's header — the hunk is over
+                inHunk = false
+                numbers.append(nil)
+            }
+        }
+        return numbers
+    }
+
+    /// First old/new line of a hunk header, e.g. `@@ -12,7 +14,9 @@ func f()`.
+    private static func hunkStart(_ line: String) -> (old: Int, new: Int)? {
+        let parts = line.split(separator: " ")
+        guard parts.count >= 3,
+              parts[1].hasPrefix("-"), parts[2].hasPrefix("+"),
+              let old = Int(parts[1].dropFirst().prefix { $0 != "," }),
+              let new = Int(parts[2].dropFirst().prefix { $0 != "," }) else { return nil }
+        return (old, new)
+    }
+
     /// Counts for the tab subtitle / status line.
     static func stats(in text: String) -> (added: Int, removed: Int) {
         var added = 0, removed = 0

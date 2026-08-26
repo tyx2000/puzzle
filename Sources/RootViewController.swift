@@ -67,6 +67,7 @@ final class RootViewController: NSViewController {
             guard let self else { return }
             self.resizeSidebar(to: self.dividerDragStartWidth + deltaX)
         }
+        dividerHandle.dividerThickness = split.splitView.dividerThickness
         root.addSubview(dividerHandle, positioned: .above, relativeTo: splitView)
         NSLayoutConstraint.activate([
             splitView.topAnchor.constraint(equalTo: root.topAnchor),
@@ -82,6 +83,12 @@ final class RootViewController: NSViewController {
 
     }
 
+
+    /// Repaint the themed divider after a theme change.
+    func refreshAppearance() {
+        dividerHandle.dividerThickness = split.splitView.dividerThickness
+        dividerHandle.needsDisplay = true
+    }
 
     /// Re-assert the remembered width after switching panels.
     func preserveSidebarWidth() { applyWidth(lastSidebarWidth) }

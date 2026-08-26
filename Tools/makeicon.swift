@@ -1,69 +1,50 @@
 import AppKit
 
-// Puzzle's app icon: a white rounded-square badge with black "Puzz" wordmark.
-// Emits an .iconset which build.sh turns into AppIcon.icns.
+// Puzzle's app icon: the artwork in Tools/appicon.jpg, unchanged, behind the
+// standard macOS rounded-square mask. Emits an .iconset which build.sh turns
+// into AppIcon.icns.
 
-let outDir = URL(fileURLWithPath: CommandLine.arguments[1])   // …/AppIcon.iconset
+let arguments = CommandLine.arguments
+guard arguments.count >= 3 else {
+    FileHandle.standardError.write(Data("usage: makeicon <iconset-dir> <artwork>\n".utf8))
+    exit(2)
+}
+let outDir = URL(fileURLWithPath: arguments[1])   // …/AppIcon.iconset
+let artworkURL = URL(fileURLWithPath: arguments[2])
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+
+guard let artwork = NSImage(contentsOf: artworkURL) else {
+    FileHandle.standardError.write(Data("makeicon: cannot read \(artworkURL.path)\n".utf8))
+    exit(1)
+}
 
 func drawIcon(size: CGFloat) -> NSImage {
     let image = NSImage(size: NSSize(width: size, height: size))
     image.lockFocus()
     NSGraphicsContext.current?.cgContext.setAllowsAntialiasing(true)
+    NSGraphicsContext.current?.imageInterpolation = .high
 
     let full = NSRect(x: 0, y: 0, width: size, height: size)
     NSColor.clear.setFill()
     full.fill()
 
-    // White rounded-square badge (macOS icon shape).
+    // macOS icon shape: the artwork is inset from the canvas and its corners are
+    // rounded. Everything inside the mask is the original picture, untouched —
+    // scaled to fill so a square source keeps its framing.
     let inset = size * 0.055
-    let badge = NSBezierPath(roundedRect: full.insetBy(dx: inset, dy: inset),
-                             xRadius: size * 0.225, yRadius: size * 0.225)
-    NSColor.white.setFill()
-    badge.fill()
-    // Hairline edge so the icon still reads against a white background.
-    NSColor(white: 0.82, alpha: 1).setStroke()
-    badge.lineWidth = max(1, size * 0.006)
-    badge.stroke()
-
-    // "Puzz" in black SF Rounded, at natural proportions — no vertical stretch,
-    // so the letterforms keep their real shape. The word is wide, so its width
-    // is what sets the size; the remaining top/bottom space just centres it.
-    let text = "Puzz" as NSString
-    let badgeSide = size - inset * 2
-    let margin = badgeSide * 0.07
-    let available = badgeSide - margin * 2
-
-    func roundedFont(ofSize pt: CGFloat) -> NSFont {
-        let base = NSFont.systemFont(ofSize: pt, weight: .bold)
-        if let d = base.fontDescriptor.withDesign(.rounded),
-           let f = NSFont(descriptor: d, size: pt) {
-            return f
-        }
-        return base   // older macOS: fall back to the standard face
-    }
-
-    let probePt: CGFloat = 100
-    let probe = roundedFont(ofSize: probePt)
-    let probeWidth = text.size(withAttributes: [.font: probe]).width
-    let font = roundedFont(ofSize: probePt * (available / probeWidth))
-
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
-
-    // Centre on the true INK bounds, not the advance width / line box: the
-    // advance carries a trailing side-bearing, which pushed the word ~10px left
-    // of centre, and the line box carries leading the glyphs never use.
-    let line = CTLineCreateWithAttributedString(
-        NSAttributedString(string: text as String, attributes: attrs))
-    let ink = CTLineGetImageBounds(line, NSGraphicsContext.current!.cgContext)
-
-    // Origin that lands the ink box exactly in the middle of the canvas.
-    // CTLine ink is measured from the BASELINE, but `draw(at:)` takes the
-    // bottom-left of the LINE BOX — the baseline sits |descender| above that,
-    // so the descender has to be added back or the word rides ~76px high.
-    let origin = NSPoint(x: (size - ink.width) / 2 - ink.minX,
-                         y: size / 2 - ink.midY + font.descender)
-    text.draw(at: origin, withAttributes: attrs)
+    let badge = full.insetBy(dx: inset, dy: inset)
+    let mask = NSBezierPath(roundedRect: badge,
+                            xRadius: size * 0.225, yRadius: size * 0.225)
+    NSGraphicsContext.saveGraphicsState()
+    mask.addClip()
+    let source = artwork.size
+    let scale = max(badge.width / max(1, source.width), badge.height / max(1, source.height))
+    let drawn = NSSize(width: source.width * scale, height: source.height * scale)
+    artwork.draw(in: NSRect(x: badge.midX - drawn.width / 2,
+                            y: badge.midY - drawn.height / 2,
+                            width: drawn.width, height: drawn.height),
+                 from: .zero, operation: .sourceOver, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
 
     image.unlockFocus()
     return image

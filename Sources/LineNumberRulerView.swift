@@ -157,6 +157,15 @@ final class LineNumberRulerView: NSRulerView {
         let visibleRect = textView.visibleRect
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
 
+        // The active line is one row across the whole editor, so the gutter
+        // paints the same band behind its number. The rect comes from the text
+        // view so the two can never drift apart.
+        if let band = currentLineBandRect(in: visibleRect) {
+            Theme.lineHighlight.setFill()
+            band.fill()
+        }
+
+        let diffNumbers = textView.diffLineNumbers
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
             .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
         let numberWidth = ruleThickness - 14
@@ -165,17 +174,34 @@ final class LineNumberRulerView: NSRulerView {
             let isLineStart = fragChar.location == 0
                 || content.character(at: fragChar.location - 1) == 10
             guard isLineStart else { return }  // skip wrapped continuations
+            // Markdown fence and table-separator source lines are collapsed to
+            // layout control rows. Drawing their numbers into a 1pt fragment
+            // stacked labels on top of the adjacent real lines.
+            if let manager = layoutManager as? FoldingLayoutManager,
+               manager.isMarkdownControlLineCollapsed(at: fragChar.location) {
+                return
+            }
             // Derive the source line from this fragment's character location.
             // Folded glyphs may skip many hard lines, so incrementing a visual
             // counter would incorrectly renumber the source after a fold.
             let lineNo = 1 + self.newlineCount(content, upTo: fragChar.location)
             let y = fragRect.minY + inset - visibleRect.minY
-            let value = "\(lineNo)" as NSString
-            let attributes = lineNo == caretLine ? active : normal
-            let textHeight = value.size(withAttributes: attributes).height
-            let box = NSRect(x: 0, y: y + (fragRect.height - textHeight) / 2,
-                             width: numberWidth, height: textHeight)
-            value.draw(in: box, withAttributes: attributes)
+            // A diff buffer numbers its lines as they sit in the file, and
+            // leaves the headers between hunks blank.
+            let shown: Int?
+            if diffNumbers.isEmpty {
+                shown = lineNo
+            } else {
+                shown = lineNo <= diffNumbers.count ? diffNumbers[lineNo - 1] : nil
+            }
+            if let shown {
+                let value = "\(shown)" as NSString
+                let attributes = lineNo == caretLine ? active : normal
+                let textHeight = value.size(withAttributes: attributes).height
+                let box = NSRect(x: 0, y: y + (fragRect.height - textHeight) / 2,
+                                 width: numberWidth, height: textHeight)
+                value.draw(in: box, withAttributes: attributes)
+            }
             if let block = foldableByLine[fragChar.location] {
                 let rowRect = NSRect(
                     x: 0, y: y,
@@ -200,6 +226,15 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
+    /// The active-line band as it falls inside the gutter, or nil when the text
+    /// view is not showing one (no document, a selection rather than a caret).
+    func currentLineBandRect(in visibleRect: NSRect? = nil) -> NSRect? {
+        guard let textView, let band = textView.currentLineBandRect() else { return nil }
+        let visible = visibleRect ?? textView.visibleRect
+        return NSRect(x: 0, y: band.minY - visible.minY,
+                      width: ruleThickness, height: band.height)
+    }
+
     private func drawFoldArrow(in rect: NSRect, folded: Bool) {
         let path = NSBezierPath()
         path.lineWidth = 1.15
@@ -222,6 +257,8 @@ final class LineNumberRulerView: NSRulerView {
         Theme.gutterActive.setStroke()
         path.stroke()
     }
+
+    var clientViewVisibleRectForTesting: NSRect { textView?.visibleRect ?? .zero }
 
     private func newlineCount(_ s: NSString, upTo location: Int) -> Int {
         guard location > 0 else { return 0 }

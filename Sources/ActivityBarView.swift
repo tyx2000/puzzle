@@ -14,6 +14,12 @@ final class ActivityBarView: NSView {
 
     private var buttons: [ActivityButton] = []
 
+    /// Repaint after a theme change (the bar draws straight from the theme).
+    func refreshAppearance() {
+        needsDisplay = true
+        subviews.forEach { $0.needsDisplay = true }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         Theme.activityBar.setFill()
         bounds.fill()
@@ -30,14 +36,14 @@ final class ActivityBarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        let specs: [(Action, String, String)] = [
-            (.project, "sidebar.left", "Project panel"),
-            (.search, "magnifyingglass", "Search"),
-            (.git, "arrow.triangle.branch", "Git"),
-            (.settings, "gearshape", "Settings"),
+        let specs: [(Action, title: String)] = [
+            (.project, "Files"),
+            (.search, "Search"),
+            (.git, "Git"),
+            (.settings, "Settings"),
         ]
-        buttons = specs.map { action, symbol, tip in
-            let b = ActivityButton(symbol: symbol, tip: tip)
+        buttons = specs.map { action, title in
+            let b = ActivityButton(title: title)
             b.onClick = { [weak self] in self?.onAction?(action) }
             addSubview(b)
             return b
@@ -59,6 +65,9 @@ final class ActivityBarView: NSView {
         }
     }
 
+    var buttonTitlesForTesting: [String] { buttons.map(\.titleForTesting) }
+    var buttonTooltipsForTesting: [String?] { buttons.map(\.toolTip) }
+
     func setSelected(_ action: Action?) {
         for (i, b) in buttons.enumerated() {
             b.isSelected = (action?.rawValue == i)
@@ -66,47 +75,42 @@ final class ActivityBarView: NSView {
     }
 }
 
-/// Flat icon button with an edge-to-edge background when selected.
+/// Flat text button with an edge-to-edge background when selected. The label is
+/// the whole affordance, so there is no tooltip to explain an icon.
 final class ActivityButton: NSView {
     var onClick: (() -> Void)?
-    var isSelected = false { didSet { needsDisplay = true; updateTint() } }
+    var isSelected = false { didSet { needsDisplay = true } }
 
-    private let imageView = NSImageView()
+    private let title: String
 
-    init(symbol: String, tip: String) {
+    init(title: String) {
+        self.title = title
         super.init(frame: .zero)
-        imageView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        imageView.imageScaling = .scaleProportionallyDown
-        addSubview(imageView)
-        toolTip = tip
-        updateTint()
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private func updateTint() {
-        imageView.contentTintColor = isSelected ? Theme.foreground : Theme.dimText
-    }
-
-    override func layout() {
-        super.layout()
-        // Icon stays a fixed size, centered in the (wider) clickable slot.
-        let size: CGFloat = 16
-        imageView.frame = NSRect(x: (bounds.width - size) / 2,
-                                 y: (bounds.height - size) / 2,
-                                 width: size, height: size)
-    }
+    var titleForTesting: String { title }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard isSelected else { return }
-        Theme.activeTab.setFill()   // white in light, editor bg in dark
-        bounds.fill()
+        if isSelected {
+            Theme.activeTab.setFill()   // white in light, editor bg in dark
+            bounds.fill()
+        }
+        // Truncates rather than overflowing into the neighbouring slot when the
+        // panel is dragged narrow.
+        SidebarCellDrawing.text(title, font: Theme.uiFont(10.5),
+                                color: isSelected ? Theme.foreground : Theme.dimText,
+                                in: bounds.insetBy(dx: 4, dy: 0),
+                                alignment: .center)
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateTint(); needsDisplay = true
+        needsDisplay = true
     }
 }

@@ -124,6 +124,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.editor.invalidateBlame()
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
+        sidebar.projectTitle.onClick = { [weak self] in self?.openProjectInTerminal() }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
@@ -163,6 +164,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
         DocumentStore.shared.releaseTransientMemory()
+        // Nothing is drawing file rows while the window is in the Dock.
+        FileIcons.releaseTransientMemory()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -187,6 +190,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         let fileTabHeight = top * 2 + height
         editor.setTabRowHeight(fileTabHeight)
         sidebar.setFileTabHeight(fileTabHeight)
+        // The project/branch strip starts after the last traffic light rather
+        // than at a guessed offset — the buttons move with the system metrics.
+        let lastButton = window.standardWindowButton(.zoomButton) ?? closeButton
+        let trailing = lastButton.convert(lastButton.bounds, to: nil).maxX
+        sidebar.setTitlebarLeadingInset(trailing + 10)
     }
 
     func releaseTransientMemory() {
@@ -207,6 +215,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         RecentProjects.shared.add(url)
         sidebar.fileTree.setRoot(url)
         sidebar.setDirectory(url)
+        // Show the name straight away; the branch follows the Git refresh.
+        sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
         window?.title = url.lastPathComponent
         refreshGit()
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
@@ -217,7 +227,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self, self.projectURL == url else { return }
             let reloaded = DocumentStore.shared.reloadExternalChanges(
                 at: paths, observedAt: date)
-            guard !reloaded.isEmpty else { return }
+            // New/deleted files are not cached Documents, but still need an
+            // immediate tree refresh. Previously this happened only when an
+            // already-open buffer was reloaded, while Git Changes refreshed
+            // independently and appeared ahead of the tree.
+            self.sidebar.fileTree.refresh(changedURLs: paths)
             self.sidebar.refreshGitPanelIfLoaded()
             self.refreshGit(requireFollowUp: true)
             reloaded.forEach { self.editor.invalidateBlame(for: $0) }
@@ -229,6 +243,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func refreshExternalGitState() {
         guard let projectURL else { return }
         let reloaded = DocumentStore.shared.reloadExternalChanges(at: [projectURL])
+        sidebar.fileTree.refresh(changedURLs: [projectURL])
         sidebar.refreshGitPanelIfLoaded()
         refreshGit(requireFollowUp: true)
         if reloaded.isEmpty {
@@ -397,8 +412,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         gitRefreshGeneration += 1
         let generation = gitRefreshGeneration
         gitSummaryQueue.async { [weak self] in
-            let split = GitService.trackedAndUntracked(in: projectURL)
             let status = GitService.status(in: projectURL)
+            let split = GitService.trackedAndUntracked(in: status)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.gitSummaryRefreshInFlight = false
@@ -407,6 +422,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                    self.gitRefreshGeneration == generation {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked)
+                    self.sidebar.setProjectTitle(
+                        project: projectURL.lastPathComponent,
+                        branch: status.isRepo ? status.branch : "")
                     if status.isRepo {
                         self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
                     }
@@ -419,10 +437,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Terminals tried, in order, when the project/branch strip beside the
+    /// traffic lights is clicked.
+    static let terminalBundleIDs = ["com.googlecode.iterm2", "com.apple.Terminal"]
+
+    /// The first of those that is installed. Injectable so the preference order
+    /// stays testable on a machine with or without iTerm.
+    static func terminalApplication(
+        lookup: (String) -> URL? = {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+        }
+    ) -> URL? {
+        terminalBundleIDs.lazy.compactMap(lookup).first
+    }
+
+    /// Open the project folder in iTerm, falling back to Terminal where iTerm
+    /// is not installed.
+    private func openProjectInTerminal() {
+        guard let projectURL, let terminal = Self.terminalApplication() else { return }
+        NSWorkspace.shared.open([projectURL], withApplicationAt: terminal,
+                                configuration: NSWorkspace.OpenConfiguration(),
+                                completionHandler: nil)
+    }
+
     /// Re-apply fonts/metrics after settings.json changes.
     func refreshDisplay() {
         editor.refreshDisplay()
         sidebar.refreshFonts()
+        root.refreshAppearance()
     }
 
     // MARK: - Menu actions (reached via the responder chain)
@@ -455,8 +497,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     @objc func findInFile(_ sender: Any?) { editor.showFindBar() }
     @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
     @objc func splitEditor(_ sender: Any?) { editor.splitEditor() }
-    @objc func toggleMarkdownPreview(_ sender: Any?) { editor.toggleMarkdownPreview() }
-
     @objc func showFiles(_ sender: Any?) {
         root.showSidebar(); sidebar.showFiles(); root.preserveSidebarWidth()
     }

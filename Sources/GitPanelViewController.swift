@@ -244,6 +244,12 @@ final class GitPanelViewController: NSViewController {
 
     /// Re-apply the UI font after a settings change.
     func refreshFonts() {
+        (view as? FlatView)?.fillColor = Theme.panelBackground
+        branchToolbar.fillColor = Theme.panelBackground
+        table.backgroundColor = Theme.panelBackground
+        table.enclosingScrollView?.backgroundColor = Theme.panelBackground
+        commitField.backgroundColor = Theme.activeTab
+        commitScroll.backgroundColor = Theme.activeTab
         segmented.refreshAppearance()
         branchLabel.font = Theme.uiFont(10.5)
         commitField.font = Theme.uiFont(11)
@@ -289,7 +295,7 @@ final class GitPanelViewController: NSViewController {
             var status = GitService.status(in: directory)
             if status.isRepo,
                status.entries.contains(where: {
-                   $0.isUntracked || $0.worktreeStatus != " "
+                   $0.isUntracked || $0.worktreeStatus != " " || $0.indexStatus == "A"
                }) {
                 GitService.stageAll(in: directory)
                 status = GitService.status(in: directory)
@@ -361,6 +367,8 @@ final class GitPanelViewController: NSViewController {
     private func applyStatus(_ status: GitService.Status, in directory: URL) {
         entries = status.entries
         var label = "\(directory.lastPathComponent) / \(status.branch)"
+        // Who the next commit will be authored by, straight from git config.
+        if !status.userName.isEmpty { label += " / \(status.userName)" }
         if status.ahead > 0 { label += "  ↑\(status.ahead)" }
         else if status.isRepo && !status.hasUpstream { label += "  (no upstream)" }
         branchLabel.stringValue = status.isRepo ? label : "not a git repository"
@@ -929,6 +937,20 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
+    // MARK: - Regression-test surface
+
+    /// The line above the commit box: project, branch and commit author.
+    var statusLabelForTesting: String {
+        _ = view
+        return branchLabel.stringValue
+    }
+
+    /// Distance from one file row to the next: its height plus the gap AppKit
+    /// leaves between rows. Compared against the file tree's.
+    var rowPitchForTesting: CGFloat {
+        _ = view
+        return Theme.treeRowHeight() + table.intercellSpacing.height
+    }
 }
 
 extension GitPanelViewController: NSTableViewDataSource {
@@ -966,8 +988,10 @@ extension GitPanelViewController: NSTableViewDelegate {
             let infoHeight = ceil(Theme.uiFont(9.5).boundingRectForFont.height)
             return max(38, titleHeight + infoHeight + 7)
         }
-        let fontHeight = ceil(Theme.uiFont(11).boundingRectForFont.height)
-        return max(22, fontHeight + 6)
+        // File rows — Changes entries and the files inside an expanded commit —
+        // are the same kind of row as the file tree's, so they take the same
+        // `tree_line_height` instead of measuring their own font.
+        return Theme.treeRowHeight()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1108,7 +1132,7 @@ private final class GitHistoryFileCell: DrawnSidebarCell {
 private final class GitChangeCell: DrawnSidebarCell {
     private let discardButton = NSButton()
     private var status = ""
-    private var icon: NSImage?
+    private var icon: SidebarIcon?
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
@@ -1137,8 +1161,7 @@ private final class GitChangeCell: DrawnSidebarCell {
         self.onDiscard = onDiscard
         status = entry.displayCode
         statusColor = entry.isUntracked ? Theme.green : Theme.yellow
-        icon = Theme.symbol(FileTreeViewController.iconName(
-            for: (entry.path as NSString).pathExtension))
+        icon = .file(URL(fileURLWithPath: entry.path))
         name = (entry.path as NSString).lastPathComponent
         folder = (entry.path as NSString).deletingLastPathComponent
         toolTip = entry.path
@@ -1148,18 +1171,20 @@ private final class GitChangeCell: DrawnSidebarCell {
 
     override func layout() {
         super.layout()
-        discardButton.frame = NSRect(x: max(0, bounds.width - 30),
-                                     y: floor((bounds.height - 24) / 2),
-                                     width: 24, height: 24)
+        // A small tree_line_height can leave the row shorter than the button.
+        let side = min(24, floor(bounds.height))
+        discardButton.frame = NSRect(x: max(0, bounds.width - 6 - side),
+                                     y: floor((bounds.height - side) / 2),
+                                     width: side, height: side)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
                                 in: NSRect(x: 6, y: 0, width: 18, height: bounds.height),
                                 alignment: .center)
-        SidebarCellDrawing.image(icon, tint: Theme.dimText,
-                                 in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
-                                            width: 13, height: 13))
+        SidebarCellDrawing.icon(icon,
+                                in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
+                                           width: 13, height: 13))
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
