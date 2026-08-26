@@ -1449,15 +1449,16 @@ enum RegressionTests {
         try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
 
-        // The Git label carries the live number of changed files; nothing is
-        // shown when the tree is clean.
+        // The Git label carries the live changed-file count in the same form as
+        // the panel's own "Changes (7)" tab, a clean tree included.
         bar.setChangeCount(7)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7", "Settings"],
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git (7)", "Settings"],
                    "the change count did not reach the Git label: "
                     + "\(bar.buttonTitlesForTesting)")
         bar.setChangeCount(0)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
-                   "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git (0)", "Settings"],
+                   "a clean tree dropped the count instead of showing (0): "
+                    + "\(bar.buttonTitlesForTesting)")
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
                    "a text button still carries a tooltip")

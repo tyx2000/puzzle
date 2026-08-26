@@ -65,11 +65,12 @@ final class ActivityBarView: NSView {
         }
     }
 
-    /// Number of changed files, shown after the Git label. Zero hides it.
+    /// Number of changed files, shown after the Git label in the same form the
+    /// panel's own tab uses — "Changes (3)" there, "Git (3)" here.
     func setChangeCount(_ count: Int) {
         guard let button = buttons.indices.contains(Action.git.rawValue)
             ? buttons[Action.git.rawValue] : nil else { return }
-        button.badge = count > 0 ? "\(count)" : nil
+        button.badge = "(\(count))"
     }
 
     var buttonTitlesForTesting: [String] { buttons.map(\.displayTitleForTesting) }
