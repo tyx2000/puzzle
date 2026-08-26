@@ -50,6 +50,9 @@ enum FileIcons {
         manifestStorage = nil
         lightVariants = []
         cache.removeAll(keepingCapacity: false)
+        // Must go with the cache it indexes: stale keys would absorb every
+        // eviction and the size cap would stop holding.
+        lastUsed.removeAll(keepingCapacity: false)
     }
 
     /// True when Puzzle has its icon resources; the tree keeps its SF Symbols
@@ -132,4 +135,5 @@ enum FileIcons {
     }
 
     static var cachedImageCountForTesting: Int { cache.count }
+    static var lastUsedCountForTesting: Int { lastUsed.count }
 }

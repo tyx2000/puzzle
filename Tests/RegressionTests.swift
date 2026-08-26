@@ -10,6 +10,7 @@ enum RegressionTests {
     static func main() throws {
         _ = NSApplication.shared
         try testProcessDrain()
+        try testReviewFixes()
         try testScopedStatusAndStaging()
         try testGitIgnoreRefreshReconciliation()
         try testRemoteConfigurationAndPushSelection()
@@ -165,14 +166,30 @@ enum RegressionTests {
         try expect(ignored.isEmpty && document.text == "local newest\n" && document.isModified,
                    "an older disk write replaced a newer local edit")
 
+        // A newer file on disk no longer overrules unsaved edits: the buffer is
+        // the only copy of what the user typed, so the write is recorded as a
+        // conflict and resolved at save time instead of silently applied.
         try Data("external newest\n".utf8).write(to: url)
         try FileManager.default.setAttributes(
             [.modificationDate: base.addingTimeInterval(30)], ofItemAtPath: url.path)
         let applied = store.reloadExternalChanges(
             at: [url], observedAt: base.addingTimeInterval(31))
-        try expect(applied == [url] && document.text == "external newest\n"
-                   && !document.isModified && document.lastLocalEditAt == nil,
-                   "the newest external write did not replace the editor buffer")
+        try expect(applied.isEmpty && document.text == "local newest\n"
+                    && document.isModified && document.hasDiskConflict,
+                   "a newer external write discarded unsaved edits")
+
+        // Once the buffer has no unsaved edits, the newer file does win.
+        document.discardEditsAndReloadFromDisk()
+        try expect(document.text == "external newest\n" && !document.isModified
+                    && document.lastLocalEditAt == nil && !document.hasDiskConflict,
+                   "taking the disk version did not replace the buffer")
+        try Data("external newer still\n".utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: base.addingTimeInterval(40)], ofItemAtPath: url.path)
+        let clean = store.reloadExternalChanges(
+            at: [url], observedAt: base.addingTimeInterval(41))
+        try expect(clean == [url] && document.text == "external newer still\n",
+                   "an unmodified buffer did not follow the file on disk")
         store.release(url, stillOpen: false)
 
         var observedPaths: [URL] = []
@@ -259,6 +276,116 @@ enum RegressionTests {
 
     /// More than one pipe buffer on stderr used to make GitService wait forever
     /// while it synchronously read stdout first.
+    /// The six defects found in the whole-project review.
+    private static func testReviewFixes() throws {
+        // 1. Settings: a `//` inside a value must not swallow the real comment,
+        //    which made the whole file unparseable and reverted every setting.
+        let jsonc = """
+        {
+          // leading comment
+          "ui_font_family": "Iosevka // Term",   // my font
+          "theme": "ayu-dark",
+          "buffer_font_size": 13 // trailing
+        }
+        """
+        let stripped = Settings.strippingComments(jsonc)
+        guard let data = stripped.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure(description: "settings with a // inside a string did not parse: "
+                            + stripped.debugDescription)
+        }
+        try expect(parsed["ui_font_family"] as? String == "Iosevka // Term",
+                   "the value lost its slashes: \(String(describing: parsed["ui_font_family"]))")
+        try expect(parsed["theme"] as? String == "ayu-dark", "a later key was dropped")
+        try expect((parsed["buffer_font_size"] as? NSNumber)?.intValue == 13,
+                   "a trailing comment was not stripped")
+        // An escaped quote must not end the string early.
+        let escaped = Settings.strippingComments("{\"a\": \"q\\\" // x\"} // gone")
+        try expect(escaped.contains("q\\\" // x") && !escaped.contains("gone"),
+                   "escape handling is wrong: \(escaped.debugDescription)")
+
+        // 2. A case-only rename is the same file, not a name clash.
+        let directory = try temporaryDirectory("review-fixes")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lower = directory.appendingPathComponent("readme.md")
+        try Data("hello\n".utf8).write(to: lower)
+        let upper = directory.appendingPathComponent("README.md")
+        let tree = FileTreeViewController()
+        _ = tree.view          // setRoot drives the outline view
+        tree.setRoot(directory)
+        try expect(tree.renameForTesting(lower, to: "README.md"),
+                   "a case-only rename was refused")
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { !$0.hasPrefix(".") }
+        try expect(names == ["README.md"],
+                   "the case-only rename left \(names) behind")
+        let renamedText = String(decoding: try Data(contentsOf: upper), as: UTF8.self)
+        try expect(renamedText == "hello\n",
+                   "the renamed file lost its contents: \(renamedText.debugDescription)")
+
+        // 3. An external write never replaces unsaved edits.
+        let edited = directory.appendingPathComponent("edited.txt")
+        try Data("on disk\n".utf8).write(to: edited)
+        let store = DocumentStore()
+        let doc = store.document(for: edited)
+        doc.storage.replaceCharacters(in: NSRange(location: 0, length: doc.storage.length),
+                                      with: "my unsaved work\n")
+        doc.markLocalEdit()
+        try expect(doc.isModified, "the test edit did not mark the buffer modified")
+        // Someone else writes a newer version.
+        RunLoop.main.run(until: Date().addingTimeInterval(1.1))
+        try Data("theirs\n".utf8).write(to: edited)
+        _ = store.reloadExternalChanges(at: [edited])
+        try expect(doc.text == "my unsaved work\n",
+                   "an external write discarded unsaved edits: \(doc.text.debugDescription)")
+        try expect(doc.hasDiskConflict, "the conflict was not recorded for the save prompt")
+        // Taking the disk version is explicit, and then it does replace.
+        doc.discardEditsAndReloadFromDisk()
+        try expect(doc.text == "theirs\n" && !doc.hasDiskConflict,
+                   "an explicit reload did not take the file on disk")
+
+        // 4. Folds survive an edit above them.
+        let manager = FoldingLayoutManager()
+        let storage = NSTextStorage(string: "func a() {\n  body\n}\nfunc b() {\n  body\n}\n")
+        storage.addLayoutManager(manager)
+        let blocks = CodeBlockAnalyzer.analyze(storage.string, language: "swift")
+        guard let second = blocks.sorted(by: { $0.openerLocation < $1.openerLocation }).last else {
+            throw Failure(description: "the fixture produced no foldable blocks")
+        }
+        manager.updateBlocks(blocks, resetFolds: true)
+        manager.toggle(second)
+        try expect(manager.foldedBlockIdentities.contains(second.identity),
+                   "the block did not fold")
+        let inserted = "// a new line\n"
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: inserted)
+        let shifted = CodeBlockAnalyzer.analyze(storage.string, language: "swift")
+        manager.updateBlocks(shifted, resetFolds: false)
+        try expect(manager.foldedBlockIdentities
+                    == [second.identity + (inserted as NSString).length],
+                   "typing above a folded block lost the fold: "
+                    + "\(manager.foldedBlockIdentities)")
+        storage.removeLayoutManager(manager)
+
+        // 5. Network git calls are bounded; local ones are not.
+        try expect(GitService.networkTimeout > 0,
+                   "network git operations have no ceiling")
+        let slow = GitService.runProcess(
+            executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"],
+            in: directory, timeout: 1)
+        try expect(slow.code != 0,
+                   "a process past its timeout reported success")
+        try expect(String(decoding: slow.stderr, as: UTF8.self).contains("gave up"),
+                   "the timeout did not say what happened")
+
+        // 6. Repointing the icon resources resets the LRU bookkeeping with it.
+        FileIcons.useResources(at: directory)
+        try expect(FileIcons.cachedImageCountForTesting == 0,
+                   "the icon cache survived a resource switch")
+        try expect(FileIcons.lastUsedCountForTesting == 0,
+                   "the LRU table kept stale keys, which would absorb evictions")
+        FileIcons.useResources(at: nil)
+    }
+
     private static func testProcessDrain() throws {
         let directory = try temporaryDirectory("pipes")
         defer { try? FileManager.default.removeItem(at: directory) }

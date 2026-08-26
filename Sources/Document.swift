@@ -321,6 +321,36 @@ final class Document {
         return max(total, 1024)
     }
 
+    /// True when the file changed underneath an edited buffer. Puzzle keeps the
+    /// buffer (the edits exist nowhere else) and asks at save time.
+    private(set) var hasDiskConflict = false
+
+    /// The file changed on disk while this buffer had unsaved edits.
+    static let didDetectDiskConflict = Notification.Name("PuzzleDocumentDiskConflict")
+
+    /// Whoever is about to save has told the user and got an answer.
+    func resolveDiskConflict() { hasDiskConflict = false }
+
+    /// Throw the buffer away and take what is on disk. Only ever called after
+    /// the user has been asked, since it destroys their unsaved edits.
+    @discardableResult
+    func discardEditsAndReloadFromDisk() -> Bool {
+        isModified = false
+        lastLocalEditAt = nil
+        hasDiskConflict = false
+        lastKnownDiskModificationDate = nil
+        return reloadFromDiskIfLatest()
+    }
+
+    /// Has the file changed since this buffer last read or wrote it? Checked at
+    /// save time so a write cannot silently discard someone else's newer file.
+    var diskChangedSinceLastSync: Bool {
+        guard url.isFileURL, !isVirtual else { return false }
+        guard let diskDate = Self.modificationDate(for: url) else { return false }
+        guard let known = lastKnownDiskModificationDate else { return false }
+        return diskDate > known
+    }
+
     func save() throws {
         guard !isReadOnly else { throw SaveError.readOnly }
         // Keep the source encoding whenever the edited text can represent it.
@@ -343,6 +373,7 @@ final class Document {
         lastKnownDiskModificationDate = Self.modificationDate(for: url)
         lastLocalEditAt = nil
         isModified = false
+        hasDiskConflict = false
     }
 
     func markLocalEdit(at date: Date = Date()) {
@@ -372,6 +403,16 @@ final class Document {
             return stateChanged
         }
 
+        // Unsaved edits are the only copy that exists, so an external write
+        // never replaces them. Record the conflict instead: the buffer keeps
+        // what the user typed, and saving asks before overwriting the newer
+        // file on disk.
+        if isModified {
+            hasDiskConflict = true
+            lastKnownDiskModificationDate = diskDate
+            NotificationCenter.default.post(name: Document.didDetectDiskConflict, object: self)
+            return false
+        }
         if let localEdit = lastLocalEditAt, diskDate < localEdit {
             // The local buffer is newer. Remember that this older disk version
             // has been observed; a subsequent external write gets a new date.
@@ -395,6 +436,7 @@ final class Document {
         lastKnownDiskModificationDate = diskDate
         lastLocalEditAt = nil
         isModified = false
+        hasDiskConflict = false
         return true
     }
 

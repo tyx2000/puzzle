@@ -556,6 +556,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func persist(_ document: Document, notify: Bool,
                          presentErrors: Bool) -> Bool {
         guard document.isModified, !document.isReadOnly else { return true }
+        // Something else wrote this file while it was being edited. Saving would
+        // replace their version; reloading would replace the user's edits. Only
+        // the user can choose, so ask before either.
+        if document.hasDiskConflict || document.diskChangedSinceLastSync {
+            guard presentErrors else { return false }
+            switch resolveDiskConflict(for: document) {
+            case .overwrite: document.resolveDiskConflict()
+            case .reload:
+                document.discardEditsAndReloadFromDisk()
+                reloadTabs()
+                return true
+            case .cancel: return false
+            }
+        }
         do {
             try document.save()
             reloadTabs()
@@ -567,6 +581,26 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
     }
 
+
+    private enum DiskConflictChoice { case overwrite, reload, cancel }
+
+    private func resolveDiskConflict(for document: Document) -> DiskConflictChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(document.name)” changed on disk since you started editing"
+        alert.informativeText = "File:\n\(document.url.path)\n\n"
+            + "Saving replaces the version on disk with what is in this editor. "
+            + "Reloading replaces what is in this editor with the version on disk, "
+            + "discarding your unsaved edits. Neither can be undone."
+        alert.addButton(withTitle: "Save Anyway")
+        alert.addButton(withTitle: "Reload from Disk")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .overwrite
+        case .alertSecondButtonReturn: return .reload
+        default: return .cancel
+        }
+    }
 
     /// Ask about all modified documents before mutating tab ownership. A
     /// successful save is the only choice that clears the modified marker;

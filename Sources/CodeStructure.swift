@@ -394,6 +394,31 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         invalidateFoldedGlyphs()
     }
 
+    /// A folded block is remembered by the character offset of its opener, and
+    /// every edit before it moves that offset. Shift the remembered offsets by
+    /// the same delta here, or the fold silently opens on the next reanalysis —
+    /// and can re-attach to whatever block now starts at the old offset.
+    override func processEditing(for textStorage: NSTextStorage,
+                                 edited editMask: NSTextStorageEditActions,
+                                 range newCharRange: NSRange,
+                                 changeInLength delta: Int,
+                                 invalidatedRange invalidatedCharRange: NSRange) {
+        super.processEditing(for: textStorage, edited: editMask, range: newCharRange,
+                             changeInLength: delta,
+                             invalidatedRange: invalidatedCharRange)
+        guard editMask.contains(.editedCharacters), delta != 0,
+              !foldedBlockStarts.isEmpty else { return }
+        let editStart = newCharRange.location
+        let removedEnd = editStart + max(0, (newCharRange.length - delta))
+        foldedBlockStarts = Set(foldedBlockStarts.compactMap { start in
+            if start < editStart { return start }
+            // An opener inside the replaced text is gone; dropping it is right,
+            // and keeping a shifted ghost would fold an unrelated block.
+            if start < removedEnd { return nil }
+            return start + delta
+        })
+    }
+
     func toggle(_ block: CodeBlock) {
         if foldedBlockStarts.remove(block.identity) == nil {
             foldedBlockStarts.insert(block.identity)

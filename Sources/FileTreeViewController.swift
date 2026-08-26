@@ -688,8 +688,11 @@ final class FileTreeViewController: NSViewController {
 
         let destination = parent.url.appendingPathComponent(name,
                                                              isDirectory: edit.kind == .folder)
+        // On a case-insensitive volume `fileExists` matches the item being
+        // renamed, so compare file identity rather than paths: otherwise
+        // Readme.md -> README.md reports a clash with itself.
         if FileManager.default.fileExists(atPath: destination.path),
-           destination.standardizedFileURL != edit.original?.url.standardizedFileURL {
+           !Self.isSameFile(destination, edit.original?.url) {
             presentFileError(title: "Name already exists",
                              message: "An item named \(name) already exists here.")
             focusPendingEditor()
@@ -709,7 +712,7 @@ final class FileTreeViewController: NSViewController {
             case .rename:
                 guard let original = edit.original else { return false }
                 if original.url.standardizedFileURL != destination.standardizedFileURL {
-                    try FileManager.default.moveItem(at: original.url, to: destination)
+                    try Self.move(original.url, to: destination)
                     onPathRenamed?(original.url, destination)
                 }
             }
@@ -723,6 +726,50 @@ final class FileTreeViewController: NSViewController {
             focusPendingEditor()
             return false
         }
+    }
+
+    /// Same item on disk, whatever the path spelling — the only reliable test
+    /// on a case-insensitive volume.
+    private static func isSameFile(_ lhs: URL, _ rhs: URL?) -> Bool {
+        guard let rhs else { return false }
+        if lhs.standardizedFileURL == rhs.standardizedFileURL { return true }
+        guard let left = try? lhs.resourceValues(forKeys: [.fileResourceIdentifierKey])
+                .fileResourceIdentifier,
+              let right = try? rhs.resourceValues(forKeys: [.fileResourceIdentifierKey])
+                .fileResourceIdentifier else { return false }
+        return left.isEqual(right)
+    }
+
+    /// `moveItem` refuses a rename that only changes case on a case-insensitive
+    /// volume, because the destination "already exists" — it is the same file.
+    /// Go through a temporary name in that case.
+    private static func move(_ source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: destination.path), isSameFile(destination, source) else {
+            try fm.moveItem(at: source, to: destination)
+            return
+        }
+        let staging = destination.deletingLastPathComponent()
+            .appendingPathComponent(".puzzle-rename-\(UUID().uuidString)")
+        try fm.moveItem(at: source, to: staging)
+        do {
+            try fm.moveItem(at: staging, to: destination)
+        } catch {
+            // Put it back rather than leaving the file under a hidden name.
+            try? fm.moveItem(at: staging, to: source)
+            throw error
+        }
+    }
+
+    /// Rename through the same path the inline editor uses.
+    @discardableResult
+    func renameForTesting(_ url: URL, to name: String) -> Bool {
+        _ = view
+        guard let node = self.node(for: url) else { return false }
+        cancelPendingEdit()
+        pendingEdit = PendingTreeEdit(kind: .rename, parent: node.parent,
+                                      original: node, initialName: node.name)
+        return completePendingEdit(name)
     }
 
     private static func validFileName(_ name: String) -> Bool {

@@ -73,9 +73,11 @@ enum GitService {
     }
 
     @discardableResult
-    static func run(_ args: [String], in directory: URL) -> (out: String, err: String, code: Int32) {
+    static func run(_ args: [String], in directory: URL,
+                    timeout: TimeInterval? = nil) -> (out: String, err: String, code: Int32) {
         let result = runProcess(executable: URL(fileURLWithPath: "/usr/bin/env"),
-                                arguments: ["git"] + args, in: directory)
+                                arguments: ["git"] + args, in: directory,
+                                timeout: timeout)
         return (String(decoding: result.stdout, as: UTF8.self),
                 String(decoding: result.stderr, as: UTF8.self),
                 result.code)
@@ -101,11 +103,20 @@ enum GitService {
     /// remote diagnostics to stderr, so this is reachable during normal use.
     static func runProcess(executable: URL, arguments: [String],
                            in directory: URL, stdoutLimit: Int? = nil,
-                           stdin: Data? = nil) -> ProcessResult {
+                           stdin: Data? = nil,
+                           timeout: TimeInterval? = nil) -> ProcessResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = directory
+        // Git must never sit waiting for input Puzzle cannot deliver: with no
+        // terminal it would block the serial Git queue, and the panel's
+        // single-operation gate would refuse everything after it.
+        var environment = ProcessInfo.processInfo.environment
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
+        environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
+        process.environment = environment
 
         let outPipe = Pipe(), errPipe = Pipe()
         process.standardOutput = outPipe
@@ -155,8 +166,33 @@ enum GitService {
             }
             readers.leave()
         }
+        var timedOut = false
+        if let timeout {
+            // A stalled transfer (a dropped VPN mid-push) would otherwise hang
+            // this call, and with it every later Git action, until Puzzle quits.
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                timedOut = true
+                process.terminate()
+                let killDeadline = Date().addingTimeInterval(2)
+                while process.isRunning, Date() < killDeadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
         process.waitUntilExit()
         readers.wait()
+        if timedOut {
+            let note = Data("\ngit gave up after \(Int(timeout ?? 0))s with no result.\n".utf8)
+            return ProcessResult(stdout: stdout.data, stderr: stderr.data + note,
+                                 code: process.terminationStatus == 0 ? -1
+                                     : process.terminationStatus,
+                                 stdoutTruncated: stdout.truncated)
+        }
         return ProcessResult(stdout: stdout.data, stderr: stderr.data,
                              code: process.terminationStatus,
                              stdoutTruncated: stdout.truncated)
@@ -476,9 +512,14 @@ enum GitService {
         return remote(args, in: directory, verb: "Push")
     }
 
+    /// Anything that talks to a server. Local work has no ceiling — a big
+    /// commit is slow but always progressing — while a network stall is
+    /// indistinguishable from a hang, so those calls get one.
+    static let networkTimeout: TimeInterval = 300
+
     private static func remote(_ args: [String], in directory: URL,
                                verb: String) -> RemoteResult {
-        let result = run(args, in: directory)
+        let result = run(args, in: directory, timeout: networkTimeout)
         if result.code == 0 {
             let text = (result.out + result.err).trimmingCharacters(in: .whitespacesAndNewlines)
             return RemoteResult(ok: true, message: text.isEmpty ? "\(verb) succeeded." : text)

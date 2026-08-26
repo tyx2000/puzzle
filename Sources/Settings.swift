@@ -146,21 +146,59 @@ final class Settings {
         return url
     }
 
+    /// Strip `//` comments (Zed's settings are JSONC) without touching slashes
+    /// inside string values. Scanning per character is what makes a line like
+    ///
+    ///     "ui_font_family": "Iosevka // Term",   // my font
+    ///
+    /// work: the first `//` sits inside the string, only the second ends the
+    /// line. Giving up on such a line left the trailing comment in place and
+    /// made the whole file unparseable, which silently reverted every setting.
+    static func strippingComments(_ raw: String) -> String {
+        raw.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String(strippingComment(in: $0)) }
+            .joined(separator: "\n")
+    }
+
+    /// JSON strings never span lines, so the string state starts fresh on each.
+    private static func strippingComment(in line: Substring) -> Substring {
+        var inString = false
+        var escaped = false
+        var previousWasSlash = false
+        var index = line.startIndex
+        while index < line.endIndex {
+            let character = line[index]
+            if inString {
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == "\"" { inString = false }
+            } else if character == "\"" {
+                inString = true
+                previousWasSlash = false
+            } else if character == "/" {
+                if previousWasSlash { return line[line.startIndex..<line.index(before: index)] }
+                previousWasSlash = true
+            } else {
+                previousWasSlash = false
+            }
+            index = line.index(after: index)
+        }
+        return line
+    }
+
     func load() {
         needsAbsoluteLineHeightMigration = false
         guard let raw = try? String(contentsOf: Self.fileURL, encoding: .utf8) else { return }
-        // Tolerate // comments (Zed's settings are JSONC).
-        let stripped = raw.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in
-                guard let idx = line.range(of: "//") else { return String(line) }
-                // Don't strip inside a string literal.
-                let before = line[line.startIndex..<idx.lowerBound]
-                return before.filter { $0 == "\"" }.count % 2 == 0 ? String(before) : String(line)
-            }
-            .joined(separator: "\n")
-
+        let stripped = Self.strippingComments(raw)
         guard let data = stripped.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let json = object as? [String: Any] else {
+            // Silently keeping the defaults hides a typo: the whole file is
+            // ignored and every setting appears to have been forgotten.
+            FileHandle.standardError.write(Data(
+                "puzzle: \(Self.fileURL.path) is not valid JSON; keeping current settings\n".utf8))
+            return
+        }
 
         func number(_ key: String) -> CGFloat? {
             (json[key] as? NSNumber).map { CGFloat($0.doubleValue) }
