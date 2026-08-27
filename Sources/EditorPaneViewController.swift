@@ -134,6 +134,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.editorBackground
         let ruler = LineNumberRulerView(textView: textView)
+        ruler.lineIndexProvider = { [weak self] in self?.currentDocument?.lineIndex }
         ruler.onChangeClicked = { [weak self] change, rect in
             self?.showGitChange(change, from: rect)
         }
@@ -360,6 +361,29 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: 0, length: textView.string.count))
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
+    func refreshBracketMatchesForTesting() { textView.refreshBracketMatches() }
+    func insertTextForTesting(_ text: String) {
+        textView.insertText(text, replacementRange: textView.selectedRange())
+    }
+    func setCaretForTesting(_ location: Int) {
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+    }
+    func scrollToForTesting(_ location: Int) {
+        textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+    }
+    func lineIndexForTesting() -> LineIndex? { currentDocument?.lineIndex }
+    func disableWrappingForTesting() {
+        textView.isHorizontallyResizable = true
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                              height: CGFloat.greatestFiniteMagnitude)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
+    }
+    func visibleGlyphRangeForTesting() -> NSRange {
+        guard let container = textView.textContainer else { return NSRange() }
+        return layoutManager.glyphRange(forBoundingRect: textView.visibleRect, in: container)
+    }
     var findBarForTesting: FindBarView { findBar }
     var textForTesting: String { textView.string }
     var isModifiedForTesting: Bool { currentDocument?.isModified == true }
@@ -763,21 +787,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func jumpToLine(_ line: Int, column: Int? = nil) {
-        let ns = textView.string as NSString
-        var current = 1, location = 0, lineLength = 0
-        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
-                               options: .byLines) { _, range, _, stop in
-            if current == line {
-                location = range.location
-                lineLength = range.length
-                stop.pointee = true
-            }
-            current += 1
-        }
+        // Through the document's line index: enumerating by lines walked the
+        // whole file, which on a minified bundle — one line, megabytes long —
+        // stalled every jump for hundreds of milliseconds.
+        let length = textView.textStorage?.length ?? 0
+        guard let index = currentDocument?.lineIndex else { return }
+        let location = index.start(ofLine: line)
+        let nextLine = line + 1 <= index.lineCount ? index.start(ofLine: line + 1) : length
+        let lineLength = max(0, nextLine - location - (nextLine > location ? 1 : 0))
         // A column past the end of the line lands at its end rather than
         // spilling into the next one.
         let offset = column.map { min(max(0, $0 - 1), lineLength) } ?? 0
-        let target = NSRange(location: min(location + offset, ns.length), length: 0)
+        let target = NSRange(location: min(location + offset, length), length: 0)
         if let url = currentURL { lineActivatedURLs.insert(url) }
         textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.setSelectedRange(target)

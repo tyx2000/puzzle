@@ -37,6 +37,8 @@ enum RegressionTests {
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
+        try testLineIndexTracksEdits()
+        try testMinifiedFilesOpenBounded()
         try testFileTreeSurvivesReentrantReload()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
@@ -1710,6 +1712,146 @@ enum RegressionTests {
 
     /// The file tree must survive AppKit asking about rows the model has moved
     /// on from — the crash a file-system event caused mid-reload.
+    /// The line index is kept in step with edits rather than rebuilt, so it has
+    /// to agree with a rebuild after every possible edit.
+    private static func testLineIndexTracksEdits() throws {
+        let storage = NSTextStorage(string: "one\ntwo\nthree\nfour\n")
+        var index = LineIndex(storage.string)
+        var generator = SystemRandomNumberGenerator()
+        let fragments = ["x", "\n", "hello\nworld", "", "\n\n", "a\nb\nc", "  ", "é\n😀\n"]
+
+        for step in 0..<300 {
+            let length = storage.length
+            let location = length == 0 ? 0 : Int.random(in: 0...length, using: &generator)
+            let removable = length - location
+            let removed = removable == 0 ? 0 : Int.random(in: 0...min(removable, 12),
+                                                          using: &generator)
+            let inserted = fragments.randomElement(using: &generator)!
+            let range = NSRange(location: location, length: removed)
+
+            storage.beginEditing()
+            storage.replaceCharacters(in: range, with: inserted)
+            storage.endEditing()
+            let insertedLength = (inserted as NSString).length
+            index.apply(editedRange: NSRange(location: location, length: insertedLength),
+                        delta: insertedLength - removed,
+                        text: storage.mutableString)
+
+            let rebuilt = LineIndex(storage.string)
+            try expect(index.starts == rebuilt.starts,
+                       "step \(step): incremental index drifted.\n"
+                        + "edit at \(location) removed \(removed) inserted "
+                        + "\(inserted.debugDescription)\n"
+                        + "incremental \(index.starts)\nrebuilt     \(rebuilt.starts)")
+            try expect(index.length == rebuilt.length,
+                       "step \(step): length \(index.length) vs \(rebuilt.length)")
+        }
+
+        // The gutter reads the live index, not a copy taken when the file was
+        // opened, or the numbers freeze at their state before the first edit.
+        do {
+            let directory = try temporaryDirectory("gutter-index")
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let file = directory.appendingPathComponent("lines.swift")
+            try Data("let a = 1\nlet b = 2\nlet c = 3\n".utf8).write(to: file)
+            let pane = EditorPaneViewController()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentViewController = pane
+            defer { window.close() }
+            pane.open(url: file)
+            pane.view.layoutSubtreeIfNeeded()
+            guard let ruler = pane.lineNumberRulerForTesting,
+                  let before = ruler.lineIndexProvider?() else {
+                throw Failure(description: "the gutter has no line index")
+            }
+            try expect(before.line(at: 10) == 2, "second line is not line 2")
+            pane.setCaretForTesting(0)
+            pane.insertTextForTesting("// header\n")
+            guard let after = ruler.lineIndexProvider?() else {
+                throw Failure(description: "the gutter lost its index after an edit")
+            }
+            try expect(after.line(at: 20) == 3,
+                       "the gutter still numbers lines as they were before the edit")
+        }
+
+        // And the lookups it exists for.
+        let text = "alpha\nbeta\n\ngamma"
+        let lookup = LineIndex(text)
+        try expect(lookup.line(at: 0) == 1 && lookup.line(at: 5) == 1,
+                   "the first line's own newline belongs to it")
+        try expect(lookup.line(at: 6) == 2 && lookup.line(at: 11) == 3
+                    && lookup.line(at: 12) == 4,
+                   "an empty line is still a line")
+        try expect(lookup.line(at: 9_999) == lookup.lineCount,
+                   "an offset past the end did not clamp to the last line")
+
+        // A document keeps its index in step through the text storage itself.
+        let directory = try temporaryDirectory("line-index-doc")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("sample.txt")
+        try Data("a\nb\nc\n".utf8).write(to: file)
+        let document = DocumentStore().document(for: file)
+        try expect(document.lineIndex.lineCount == 4, "loaded with the wrong line count")
+        document.storage.beginEditing()
+        document.storage.replaceCharacters(in: NSRange(location: 2, length: 0), with: "x\ny\n")
+        document.storage.endEditing()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        try expect(document.lineIndex.starts == LineIndex(document.storage.string).starts,
+                   "the document's index did not follow an edit to its storage")
+    }
+
+    /// A minified file (a bundle, a source map) is one line of megabytes, which
+    /// TextKit lays out as a single unit — 2.5 seconds of frozen UI, measured.
+    private static func testMinifiedFilesOpenBounded() throws {
+        let directory = try temporaryDirectory("minified")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var body = "{\"version\":3,\"mappings\":\""
+        body += String(repeating: "AAAA,CAAC;", count: 300_000)
+        body += "\"}"
+        let map = directory.appendingPathComponent("bundle.js.map")
+        try Data(body.utf8).write(to: map)
+
+        let store = DocumentStore()
+        let document = store.document(for: map)
+        try expect(document.isMinifiedPreview,
+                   "a 3 MB single-line file was opened in full")
+        try expect(document.isReadOnly,
+                   "a truncated buffer is editable, so saving would destroy the file")
+        try expect(document.storage.length < Document.minifiedPreviewLength + 2_000,
+                   "the preview is \(document.storage.length) characters, not bounded")
+        try expect(document.text.contains("minified"),
+                   "the preview does not say why it is truncated")
+
+        // A normal file, even a wide one, is untouched.
+        let source = directory.appendingPathComponent("normal.swift")
+        let line = String(repeating: "x", count: 300)
+        let text = (1...200).map { "let value\($0) = \"\(line)\"" }.joined(separator: "\n")
+        try Data(text.utf8).write(to: source)
+        let normal = store.document(for: source)
+        try expect(!normal.isMinifiedPreview && !normal.isReadOnly,
+                   "an ordinary file was treated as minified")
+        try expect(normal.text == text, "an ordinary file was altered on load")
+
+        // The byte scan the guard relies on.
+        try expect(Document.longestLineLength(in: Data("ab\ncdef\ng".utf8)) == 4,
+                   "the longest line was measured wrong")
+        try expect(Document.longestLineLength(in: Data("no newline".utf8)) == 10,
+                   "a file without a trailing newline measured wrong")
+
+        // Line lookups are what replaced the per-character scans.
+        let index = LineIndex("one\ntwo\nthree" as NSString)
+        try expect(index.lineCount == 3, "counted \(index.lineCount) lines")
+        try expect(index.line(at: 0) == 1 && index.line(at: 4) == 2 && index.line(at: 12) == 3,
+                   "offsets map to the wrong lines")
+        try expect(index.start(ofLine: 2) == 4 && index.start(ofLine: 3) == 8,
+                   "line starts are wrong: \(index.starts)")
+        try expect(index.start(ofLine: 99) == index.length,
+                   "a line past the end did not clamp")
+        try expect(index.longestLine == 5, "longest line is \(index.longestLine)")
+    }
+
     private static func testFileTreeSurvivesReentrantReload() throws {
         let directory = try temporaryDirectory("tree-reentrancy")
         defer { try? FileManager.default.removeItem(at: directory) }

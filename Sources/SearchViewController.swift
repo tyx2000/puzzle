@@ -38,6 +38,10 @@ final class SearchViewController: NSViewController {
         var name: String { (relative as NSString).lastPathComponent }
     }
     private var groups: [FileGroup] = []
+    /// Stands in for a row that has gone away between AppKit asking how many
+    /// there are and which one. Never part of the results, so AppKit cannot
+    /// walk into it.
+    private let staleRow = NSObject()
 
     func setDirectory(_ url: URL) {
         guard directory != url else { return }
@@ -478,9 +482,18 @@ extension SearchViewController: NSOutlineViewDataSource {
         return 0
     }
     func outlineView(_ ov: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return groups[index] }
-        return rows(for: item as! FileGroup)[index]
+        // A data source must never trap: a search finishing between AppKit
+        // asking how many children there are and which one it wants leaves the
+        // index pointing past the new results.
+        if item == nil {
+            return groups.indices.contains(index) ? groups[index] : staleRow
+        }
+        guard let group = item as? FileGroup else { return staleRow }
+        let children = rows(for: group)
+        return children.indices.contains(index) ? children[index] : staleRow
     }
+
+
     func outlineView(_ ov: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? FileGroup) != nil
     }

@@ -62,6 +62,44 @@ final class Document {
     private(set) var lastLocalEditAt: Date?
     private var lastKnownDiskModificationDate: Date?
     private(set) var isApplyingExternalChange = false
+    /// Line starts, rebuilt lazily after an edit. Anything that needs to turn
+    /// an offset into a line number goes through this.
+    var lineIndex: LineIndex {
+        if let cached = cachedLineIndex, cached.length == storage.length { return cached }
+        let built = LineIndex(storage.string)
+        cachedLineIndex = built
+        return built
+    }
+    private var cachedLineIndex: LineIndex?
+
+    /// Called wherever the text changes wholesale. The length check above is a
+    /// backstop: an edit that keeps the length can still move a newline.
+    func invalidateLineIndex() { cachedLineIndex = nil }
+
+    /// Fold one edit into the cached index. Called from the storage's own
+    /// `didProcessEditing`, so the next reader — usually the gutter, on the
+    /// very next draw — does not pay for a rebuild.
+    func lineIndexApply(editedRange: NSRange, delta: Int) {
+        guard cachedLineIndex != nil else { return }
+        cachedLineIndex?.apply(editedRange: editedRange, delta: delta,
+                               text: storage.mutableString)
+    }
+
+    /// Every edit to the buffer, wherever it came from — typing, a paste, a
+    /// refreshed diff — reaches the index through here.
+    private func observeStorageEdits() {
+        storageObserver = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification,
+            object: storage, queue: .main) { [weak self] notification in
+            guard let self,
+                  let storage = notification.object as? NSTextStorage,
+                  storage.editedMask.contains(.editedCharacters) else { return }
+            self.lineIndexApply(editedRange: storage.editedRange,
+                                delta: storage.changeInLength)
+        }
+    }
+    private var storageObserver: NSObjectProtocol?
+
     /// Full-width line tints for a diff buffer (empty for normal files).
     var diffBands: [(range: NSRange, color: NSColor)] = []
     /// Per-line file line numbers for a diff buffer, so the gutter numbers the
@@ -89,7 +127,12 @@ final class Document {
     private(set) var displayName: String?
 
     /// Build an in-memory document (used for git diffs).
+    deinit {
+        if let storageObserver { NotificationCenter.default.removeObserver(storageObserver) }
+    }
+
     init(virtualURL: URL, text: String, displayName: String? = nil) {
+        defer { observeStorageEdits() }
         self.url = virtualURL
         self.languageSpec = nil
         self.isVirtual = true
@@ -100,6 +143,7 @@ final class Document {
     }
 
     init(url: URL) {
+        defer { observeStorageEdits() }
         self.url = url
         self.languageSpec = SyntaxHighlighter.spec(for: url)
         self.lastKnownDiskModificationDate = Self.modificationDate(for: url)
@@ -168,9 +212,64 @@ final class Document {
             isUnsupported = true
             text = Self.unsupportedMessage(for: url, byteCount: data.count)
         }
-        storage = NSTextStorage(string: text)
+        // One enormous line — a source map, a minified bundle — is laid out by
+        // TextKit as a single unit: 2.5 seconds of frozen main thread for a 5 MB
+        // map, measured. Show a bounded prefix instead, read-only so the rest of
+        // the file can never be lost by saving what is on screen.
+        let longestLine = Self.longestLineLength(in: data)
+        if longestLine > Self.maxDisplayLineLength, data.count > Self.minifiedPreviewLength {
+            isUnsupported = true
+            isMinifiedPreview = true
+            let prefix = String(text.prefix(Self.minifiedPreviewLength))
+            storage = NSTextStorage(string: Self.minifiedMessage(
+                for: url, byteCount: data.count, longestLine: longestLine) + prefix)
+        } else {
+            storage = NSTextStorage(string: text)
+        }
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
+    }
+
+    /// Past this, a single line stops being something TextKit can lay out
+    /// interactively.
+    static let maxDisplayLineLength = 20_000
+    /// How much of such a file is worth showing.
+    static let minifiedPreviewLength = 200_000
+    /// True when only a prefix is on screen.
+    private(set) var isMinifiedPreview = false
+
+    /// Longest run between newlines, straight off the bytes: a newline byte
+    /// cannot appear inside a UTF-8 sequence, so this needs no decoding and
+    /// costs a few milliseconds on a file that takes half a second to bridge.
+    static func longestLineLength(in data: Data) -> Int {
+        var longest = 0
+        var current = 0
+        data.withUnsafeBytes { raw in
+            for byte in raw {
+                if byte == 0x0A {
+                    longest = max(longest, current)
+                    current = 0
+                } else {
+                    current += 1
+                }
+            }
+        }
+        return max(longest, current)
+    }
+
+    private static func minifiedMessage(for url: URL, byteCount: Int,
+                                        longestLine: Int) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+        let lines = NumberFormatter.localizedString(
+            from: NSNumber(value: longestLine), number: .decimal)
+        return """
+            \(url.lastPathComponent) · \(size) · longest line \(lines) characters
+
+            This file is minified: laying it out in full would freeze the editor,
+            so the first \(Self.minifiedPreviewLength / 1000) KB is shown and the
+            buffer is read-only. The file on disk is untouched.
+
+            """
     }
 
     /// A NUL byte in the first 8 KB is the classic "this is binary" signal —
@@ -257,6 +356,7 @@ final class Document {
         storage.setAttributedString(NSAttributedString(string: text))
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
+        invalidateLineIndex()
         diffBands.removeAll(keepingCapacity: false)
         diffLineNumbers.removeAll(keepingCapacity: false)
         codeBlocks.removeAll(keepingCapacity: false)
@@ -377,6 +477,7 @@ final class Document {
     }
 
     func markLocalEdit(at date: Date = Date()) {
+        invalidateLineIndex()
         guard !isApplyingExternalChange else { return }
         if lastLocalEditAt.map({ date > $0 }) ?? true { lastLocalEditAt = date }
         isModified = true
@@ -432,6 +533,7 @@ final class Document {
                               range: NSRange(location: 0, length: storage.length))
         storage.endEditing()
         isApplyingExternalChange = false
+        invalidateLineIndex()
         textEncoding = decoded.encoding
         lastKnownDiskModificationDate = diskDate
         lastLocalEditAt = nil

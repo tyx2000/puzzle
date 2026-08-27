@@ -123,6 +123,7 @@ extension SideBySideDiffView: NSTableViewDataSource, NSTableViewDelegate {
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? SideBySideRowCell)
             ?? SideBySideRowCell()
         cell.identifier = id
+        guard rows.indices.contains(row) else { return cell }
         cell.configure(rows[row], isCurrent: row == currentRow)
         return cell
     }

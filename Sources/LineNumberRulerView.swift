@@ -201,7 +201,11 @@ final class LineNumberRulerView: NSRulerView {
         let active: [NSAttributedString.Key: Any] =
             [.font: font, .foregroundColor: Theme.gutterActive, .paragraphStyle: para]
 
-        let caretLine = 1 + newlineCount(content, upTo: min(textView.selectedRange().location, content.length))
+        // Line numbers come from the document's index. Counting newlines here
+        // was O(file) per visible row — every gutter draw walked the whole
+        // buffer dozens of times.
+        let index = lineIndexProvider?() ?? LineIndex(content)
+        let caretLine = index.line(at: min(textView.selectedRange().location, content.length))
 
         let visibleRect = textView.visibleRect
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
@@ -234,7 +238,7 @@ final class LineNumberRulerView: NSRulerView {
             // Derive the source line from this fragment's character location.
             // Folded glyphs may skip many hard lines, so incrementing a visual
             // counter would incorrectly renumber the source after a fold.
-            let lineNo = 1 + self.newlineCount(content, upTo: fragChar.location)
+            let lineNo = index.line(at: fragChar.location)
             let y = fragRect.minY + inset - visibleRect.minY
             // A diff buffer numbers its lines as they sit in the file, and
             // leaves the headers between hunks blank.
@@ -345,6 +349,11 @@ final class LineNumberRulerView: NSRulerView {
         onChangeClicked?(change, NSRect(x: 0, y: 0, width: ruleThickness, height: 20))
         return true
     }
+
+    /// Asked for on each draw rather than handed over once: the document's
+    /// index changes with every edit, and a copy taken at open time would
+    /// number the lines as they were before the user started typing.
+    var lineIndexProvider: (() -> LineIndex?)?
 
     private func newlineCount(_ s: NSString, upTo location: Int) -> Int {
         guard location > 0 else { return 0 }

@@ -209,6 +209,7 @@ extension PalettePanel: NSTableViewDataSource, NSTableViewDelegate {
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? PaletteRowCell)
             ?? PaletteRowCell()
         cell.identifier = id
+        guard items.indices.contains(row) else { return cell }
         cell.configure(items[row], selected: row == selection)
         return cell
     }
