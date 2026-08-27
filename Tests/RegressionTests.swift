@@ -37,6 +37,7 @@ enum RegressionTests {
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
+        try testFileTreeSurvivesReentrantReload()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
@@ -1705,6 +1706,61 @@ enum RegressionTests {
         findBar.clearHighlights()
         try expect(findBar.retainedMatchCountForTesting == 0 && textView.searchMatches.isEmpty,
                    "closing find-in-file retained match ranges")
+    }
+
+    /// The file tree must survive AppKit asking about rows the model has moved
+    /// on from — the crash a file-system event caused mid-reload.
+    private static func testFileTreeSurvivesReentrantReload() throws {
+        let directory = try temporaryDirectory("tree-reentrancy")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = directory.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for index in 1...5 {
+            try Data("x\n".utf8).write(to: folder.appendingPathComponent("file\(index).txt"))
+        }
+
+        let tree = FileTreeViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = tree
+        defer { window.close() }
+        tree.setRoot(directory)
+        tree.view.layoutSubtreeIfNeeded()
+        guard let folderRow = tree.row(for: folder) else {
+            throw Failure(description: "the folder is missing from the tree")
+        }
+        tree.expandRowForTesting(folderRow)
+        tree.view.layoutSubtreeIfNeeded()
+
+        guard let node = tree.nodeForTesting(at: folderRow) else {
+            throw Failure(description: "no node behind the folder row")
+        }
+        let children = tree.outlineView(tree.outlineViewForTesting,
+                                        numberOfChildrenOfItem: node)
+        try expect(children == 5, "expected five children, got \(children)")
+
+        // Everything disappears underneath AppKit, which then asks for a child
+        // it was told about a moment ago. Before, this trapped on the subscript.
+        for index in 1...5 {
+            try FileManager.default.removeItem(at: folder.appendingPathComponent("file\(index).txt"))
+        }
+        node.releaseChildrenForTesting()
+        let stale = tree.outlineView(tree.outlineViewForTesting, child: 4, ofItem: node)
+        try expect(!(stale is FileNode) || (stale as? FileNode) !== node,
+                   "a stale child resolved to its own parent, which AppKit walks forever")
+
+        // The expand notification must not reload inside AppKit's own reload:
+        // it schedules the work instead.
+        let before = tree.reloadCountForTesting
+        NotificationCenter.default.post(
+            name: NSOutlineView.itemDidExpandNotification,
+            object: tree.outlineViewForTesting,
+            userInfo: ["NSObject": node])
+        try expect(tree.reloadCountForTesting == before,
+                   "expanding reloaded the row from inside AppKit's notification")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        try expect(tree.reloadCountForTesting > before,
+                   "the deferred reload never happened")
     }
 
     private static func testFileTreeContextEditing() throws {

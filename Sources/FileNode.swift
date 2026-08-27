@@ -66,6 +66,8 @@ final class FileNode {
     /// Free this subtree's cached nodes (called when a directory collapses).
     /// Without this, expanding a big folder once kept every node alive for the
     /// life of the window even though the rows are no longer visible.
+    func releaseChildrenForTesting() { releaseChildren() }
+
     func releaseChildren() {
         guard let kids = loadedChildren else { return }
         for k in kids { k.releaseChildren() }

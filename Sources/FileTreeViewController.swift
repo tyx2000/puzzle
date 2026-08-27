@@ -143,6 +143,10 @@ final class FileTreeViewController: NSViewController {
     private var activeURL: URL?
     private var pendingEdit: PendingTreeEdit?
     private var deferredTreeReload = false
+    private var treeResyncScheduled = false
+    /// Stands in for a child that has gone away between AppKit asking how many
+    /// there are and which one. Never part of the tree, so it cannot recurse.
+    private let staleChild = PendingTreePlaceholder()
     private var deferredDiskRefresh = false
 
     override func loadView() {
@@ -285,6 +289,15 @@ final class FileTreeViewController: NSViewController {
     }
     func contextMenuForTesting(row: Int) -> NSMenu? { contextMenu(forRow: row) }
     var rowCountForTesting: Int { outlineView.numberOfRows }
+    var outlineViewForTesting: NSOutlineView { outlineView }
+    func nodeForTesting(at row: Int) -> FileNode? { outlineView.item(atRow: row) as? FileNode }
+    func expandRowForTesting(_ row: Int) {
+        guard let item = outlineView.item(atRow: row) else { return }
+        outlineView.expandItem(item)
+    }
+    /// Counts `reloadItem` calls, so a test can tell a deferred reload from one
+    /// that happened inside AppKit's own.
+    private(set) var reloadCountForTesting = 0
     var pendingEditRowForTesting: Int? {
         guard let edit = pendingEdit else { return nil }
         let item: Any = edit.original ?? edit.placeholder
@@ -889,14 +902,36 @@ extension FileTreeViewController: NSOutlineViewDataSource {
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return root! }
-        let node = item as! FileNode
+        if item == nil { return root ?? staleChild }
+        guard let node = item as? FileNode else { return staleChild }
+        var wanted = index
         if let pending = pendingEdit, pending.original == nil, pending.parent === node {
             let insertion = min(pending.insertionIndex, node.children.count)
             if index == insertion { return pending.placeholder }
-            return node.children[index < insertion ? index : index - 1]
+            wanted = index < insertion ? index : index - 1
         }
-        return node.children[index]
+        // A data source must never trap. AppKit can ask for a child the model
+        // has already dropped — a file-system refresh landing mid-reload — and
+        // dying on the subscript is the worst possible answer. Hand back a
+        // placeholder and put the tree back in step on the next turn.
+        guard node.children.indices.contains(wanted) else {
+            scheduleTreeResync()
+            return staleChild
+        }
+        return node.children[wanted]
+    }
+
+    /// Rebuild once the current AppKit traversal is over.
+    private func scheduleTreeResync() {
+        guard !treeResyncScheduled else { return }
+        treeResyncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.treeResyncScheduled = false
+            guard self.isViewLoaded, self.pendingEdit == nil else { return }
+            self.outlineView.reloadData()
+            self.refreshActiveRowBackgrounds()
+        }
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -986,12 +1021,22 @@ extension FileTreeViewController: NSOutlineViewDelegate {
     }
     private func reloadRow(from notification: Notification) {
         guard let item = notification.userInfo?["NSObject"] else { return }
-        // Collapsing frees the subtree's cached nodes.
-        if let node = item as? FileNode, !outlineView.isItemExpanded(node) {
-            node.releaseChildren()
+        // AppKit posts expand/collapse from *inside* `reloadItem(_:reloadChildren:)`.
+        // Reloading again here re-enters that call while its row bookkeeping is
+        // half built, and the data source is then asked for children the model
+        // no longer has — an index-out-of-range crash, reproduced from a file
+        // system event arriving while a folder was being re-expanded. Freeing
+        // the collapsed subtree has the same problem: it mutates the model
+        // AppKit is walking. Both wait until AppKit has finished.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isViewLoaded else { return }
+            if let node = item as? FileNode, !self.outlineView.isItemExpanded(node) {
+                node.releaseChildren()
+            }
+            self.reloadCountForTesting += 1
+            self.outlineView.reloadItem(item)
+            self.refreshActiveRowBackgrounds()
         }
-        outlineView.reloadItem(item)
-        refreshActiveRowBackgrounds()
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
