@@ -41,6 +41,10 @@ final class GitPanelViewController: NSViewController {
     }
     private var showingHistory = false
     private var showingBranches = false
+    /// False once everything local is on the remote, which is when Push has
+    /// nothing left to do.
+    private var pushIsPossible: Bool { aheadCount > 0 || !hasUpstream }
+    private var hasUpstream = true
     /// What the table was last built from, so a refresh that changes nothing
     /// does not rebuild the rows out from under a click.
     private var renderedEntries: [GitService.Status.Entry] = []
@@ -57,9 +61,11 @@ final class GitPanelViewController: NSViewController {
     private let commitButton = NSButton()
     /// Discards every change in the project — confirmed before it runs.
     private let discardAllButton = NSButton()
-    private let pushButton = NSButton()
+    /// Push and its menu are one control with two targets: a segmented control
+    /// draws them joined, and AppKit routes the label to the action and the
+    /// chevron to the menu attached to that segment.
+    private let pushControl = SplitActionButton()
     /// The arrow beside Push: everything that is not the common case.
-    private let pushMenuButton = NSButton()
     private let pushMenu = NSMenu()
     private let branchToolbar = FlatView()
     private let newBranchButton = NSButton()
@@ -199,26 +205,15 @@ final class GitPanelViewController: NSViewController {
 
         // Push is the common case, so it is one click on its own button; the
         // arrow beside it holds Commit & Push, Fetch, Pull and Force Push.
-        pushButton.bezelStyle = .rounded
-        pushButton.controlSize = .small
-        pushButton.font = Theme.uiFont(10.5)
-        pushButton.target = self
-        pushButton.action = #selector(pushAction)
-        pushButton.translatesAutoresizingMaskIntoConstraints = false
-
-        pushMenuButton.bezelStyle = .rounded
-        pushMenuButton.controlSize = .small
-        pushMenuButton.image = Theme.symbol("chevron.down", pointSize: 8, weight: .medium)
-        pushMenuButton.imagePosition = .imageOnly
-        pushMenuButton.toolTip = "More Git operations"
-        pushMenuButton.setAccessibilityLabel("More Git operations")
-        pushMenuButton.target = self
-        pushMenuButton.action = #selector(showPushMenu)
-        pushMenuButton.translatesAutoresizingMaskIntoConstraints = false
+        pushControl.title = "Push"
+        pushControl.toolTip = "Push the current branch"
+        pushControl.setAccessibilityLabel("Push")
+        pushControl.onPrimary = { [weak self] in self?.pushAction() }
+        pushControl.translatesAutoresizingMaskIntoConstraints = false
         rebuildPushMenu()
 
         [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
-         commitButton, pushButton, pushMenuButton,
+         commitButton, pushControl,
          discardAllButton].forEach { container.addSubview($0) }
 
         branchToolbarHeight = branchToolbar.heightAnchor.constraint(equalToConstant: 0)
@@ -262,13 +257,9 @@ final class GitPanelViewController: NSViewController {
             progressShimmer.trailingAnchor.constraint(equalTo: commitScroll.trailingAnchor),
             progressShimmer.heightAnchor.constraint(equalToConstant: 3),
 
-            // "Commit && Push" left, "Commit" right.
-            pushButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            pushButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
-            pushMenuButton.leadingAnchor.constraint(
-                equalTo: pushButton.trailingAnchor, constant: 2),
-            pushMenuButton.bottomAnchor.constraint(equalTo: pushButton.bottomAnchor),
-            pushMenuButton.widthAnchor.constraint(equalToConstant: 22),
+            // Push (with its menu) left, "Commit" right.
+            pushControl.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            pushControl.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
             commitButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             commitButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
 
@@ -278,7 +269,7 @@ final class GitPanelViewController: NSViewController {
             discardAllButton.bottomAnchor.constraint(
                 equalTo: container.bottomAnchor, constant: -8),
             discardAllButton.leadingAnchor.constraint(
-                greaterThanOrEqualTo: pushMenuButton.trailingAnchor, constant: 6),
+                greaterThanOrEqualTo: pushControl.trailingAnchor, constant: 6),
         ])
         tableTopToBranchToolbar.isActive = false
         tableBottomToContainer.isActive = false
@@ -300,7 +291,7 @@ final class GitPanelViewController: NSViewController {
         commitField.font = Theme.uiFont(11)
         commitButton.font = Theme.uiFont(10.5)
         discardAllButton.font = Theme.uiFont(10.5)
-        pushButton.font = Theme.uiFont(10.5)
+        pushControl.invalidateIntrinsicContentSize()
         newBranchButton.font = Theme.uiFont(10.5)
         remoteButton.font = Theme.uiFont(10.5)
         table.reloadData()
@@ -451,15 +442,18 @@ final class GitPanelViewController: NSViewController {
         var label = "\(directory.lastPathComponent) / \(status.branch)"
         // Who the next commit will be authored by, straight from git config.
         if !status.userName.isEmpty { label += " / \(status.userName)" }
-        if status.ahead > 0 { label += "  ↑\(status.ahead)" }
-        else if status.isRepo && !status.hasUpstream { label += "  (no upstream)" }
+        // What is waiting to be pushed belongs on the Push button, not here.
+        if status.isRepo, !status.hasUpstream { label += "  (no upstream)" }
         branchLabel.stringValue = status.isRepo ? label : "not a git repository"
         branchLabel.toolTip = status.ahead > 0
             ? "\(status.ahead) commit\(status.ahead == 1 ? "" : "s") not pushed yet"
             : nil
-        segmented.setLabel("Changes (\(status.entries.count))", forSegment: 0)
+        segmented.setLabel("Changes",
+                           badge: status.entries.isEmpty ? "" : "\(status.entries.count)",
+                           forSegment: 0)
         discardAllButton.isEnabled = !status.entries.isEmpty
         aheadCount = status.ahead
+        hasUpstream = status.hasUpstream
         rebuildPushMenu()
     }
 
@@ -508,21 +502,19 @@ final class GitPanelViewController: NSViewController {
         progressShimmer.isHidden = branchTab || activeOperationID == nil
         commitButton.isHidden = branchTab
         discardAllButton.isHidden = branchTab
-        pushButton.isHidden = branchTab
-        pushMenuButton.isHidden = branchTab
+        pushControl.isHidden = branchTab
     }
 
     @objc private func commit() { performCommit(push: false) }
 
-    /// The pull-down's first item is its title, so the menu is rebuilt whenever
-    /// the ahead-count changes.
-    @objc private func showPushMenu() {
-        let point = NSPoint(x: 0, y: pushMenuButton.bounds.maxY + 4)
-        pushMenu.popUp(positioning: nil, at: point, in: pushMenuButton)
-    }
-
     private func rebuildPushMenu() {
-        pushButton.title = aheadCount > 0 ? "Push ↑\(aheadCount)" : "Push"
+        // How much is waiting rides on the button as a badge, the same shape
+        // the Changes tab and the activity bar use for their counts.
+        pushControl.badge = aheadCount > 0 ? "\(aheadCount)" : ""
+        // Nothing to push means nothing the control can do — including its
+        // menu, which is all push variants. A branch with no upstream is the
+        // exception: pushing is exactly what sets one up.
+        pushControl.isEnabled = pushIsPossible
         let menu = pushMenu
         menu.removeAllItems()
         menu.addItem(withTitle: "Commit & Push", action: #selector(commitAndPushAction),
@@ -543,9 +535,10 @@ final class GitPanelViewController: NSViewController {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Force Push…", action: #selector(forcePushAction), keyEquivalent: "")
         for item in menu.items { item.target = self }
-        pushButton.toolTip = aheadCount > 0
+        pushControl.actionMenu = menu
+        pushControl.toolTip = aheadCount > 0
             ? "\(aheadCount) commit\(aheadCount == 1 ? "" : "s") to push"
-            : "Push"
+            : "Push the current branch"
     }
 
     /// Push whatever is already committed locally. A commit message in the
@@ -688,7 +681,7 @@ final class GitPanelViewController: NSViewController {
         activeOperationID = id
         operationLocksMessage = lockCommitMessage
         commitButton.isEnabled = false
-        pushButton.isEnabled = false
+        pushControl.isEnabled = false
         newBranchButton.isEnabled = false
         remoteButton.isEnabled = false
         table.isEnabled = false
@@ -707,7 +700,7 @@ final class GitPanelViewController: NSViewController {
         guard activeOperationID == id else { return }
         activeOperationID = nil
         commitButton.isEnabled = true
-        pushButton.isEnabled = true
+        pushControl.isEnabled = pushIsPossible
         newBranchButton.isEnabled = true
         remoteButton.isEnabled = true
         table.isEnabled = true
@@ -1108,6 +1101,43 @@ final class GitPanelViewController: NSViewController {
     func discardAllForTesting(in directory: URL) { discardAllChanges(in: directory) }
 
     /// The line above the commit box: project, branch and commit author.
+    /// Push's label, its menu, and the tab's own count — the three places a
+    /// number is allowed to appear.
+    var pushLabelForTesting: String {
+        _ = view
+        return pushControl.title
+    }
+    var pushBadgeForTesting: String {
+        _ = view
+        return pushControl.badge
+    }
+    var pushEnabledForTesting: Bool {
+        _ = view
+        return pushControl.isEnabled
+    }
+    func clickPushForTesting() -> Bool {
+        _ = view
+        return pushControl.clickPrimaryForTesting()
+    }
+    var pushMenuItemCountForTesting: Int {
+        _ = view
+        return pushControl.actionMenu?.items.count ?? 0
+    }
+    var pushSegmentFramesForTesting: (label: NSRect, chevron: NSRect) {
+        _ = view
+        pushControl.layoutSubtreeIfNeeded()
+        let halves = pushControl.halvesForTesting
+        return (halves.primary, halves.menu)
+    }
+    var changesTabLabelForTesting: String {
+        _ = view
+        return segmented.labelForTesting(at: 0)
+    }
+    var changesTabBadgeForTesting: String {
+        _ = view
+        return segmented.badgeForTesting(at: 0)
+    }
+
     var statusLabelForTesting: String {
         _ = view
         return branchLabel.stringValue
@@ -1561,16 +1591,23 @@ private final class FlatPanelTabBar: NSView {
         bounds.fill()
     }
 
-    func setLabel(_ label: String, forSegment index: Int) {
+    func setLabel(_ label: String, badge: String = "", forSegment index: Int) {
         guard buttons.indices.contains(index) else { return }
         buttons[index].title = label
-        buttons[index].setAccessibilityLabel(label)
+        buttons[index].badge = badge
         buttons[index].needsDisplay = true
     }
 
     func refreshAppearance() {
         needsDisplay = true
         buttons.forEach { $0.needsDisplay = true }
+    }
+
+    func labelForTesting(at index: Int) -> String {
+        buttons.indices.contains(index) ? buttons[index].title : ""
+    }
+    func badgeForTesting(at index: Int) -> String {
+        buttons.indices.contains(index) ? buttons[index].badge : ""
     }
 
     private func updateSelection() {
@@ -1590,8 +1627,17 @@ private final class FlatPanelTabButton: NSView {
     override var isFlipped: Bool { true }
     var onSelect: (() -> Void)?
     var title: String {
-        didSet { setAccessibilityLabel(title); needsDisplay = true }
+        didSet { setAccessibilityLabel(accessibilityText); needsDisplay = true }
     }
+    /// Count shown as a pill after the title. Empty hides it.
+    var badge = "" {
+        didSet {
+            guard badge != oldValue else { return }
+            setAccessibilityLabel(accessibilityText)
+            needsDisplay = true
+        }
+    }
+    private var accessibilityText: String { badge.isEmpty ? title : "\(title), \(badge)" }
     var isSelected = false {
         didSet {
             setAccessibilityValue(isSelected)
@@ -1615,9 +1661,21 @@ private final class FlatPanelTabButton: NSView {
             Theme.activeTab.setFill()
             bounds.fill()
         }
-        SidebarCellDrawing.text(title, font: Theme.uiFont(11),
-                                color: isSelected ? Theme.foreground : Theme.dimText,
-                                in: bounds, alignment: .center)
+        let font = Theme.uiFont(11)
+        let ink = isSelected ? Theme.foreground : Theme.dimText
+        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: font]).width)
+        let badgeSize = SidebarCellDrawing.Badge.size(badge, labelFont: font)
+        let total = titleWidth + (badgeSize.width > 0
+                                    ? SidebarCellDrawing.Badge.gap + badgeSize.width : 0)
+        let start = max(0, (bounds.width - total) / 2)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
+        SidebarCellDrawing.text(title, font: font, color: ink, baseline: baseline,
+                                in: NSRect(x: start, y: 0,
+                                           width: titleWidth, height: bounds.height))
+        SidebarCellDrawing.Badge.draw(
+            badge, at: start + titleWidth + SidebarCellDrawing.Badge.gap,
+            baseline: baseline, labelFont: font,
+            background: Theme.activeRow, foreground: Theme.foreground)
     }
 
     override func mouseDown(with event: NSEvent) {

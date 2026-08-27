@@ -66,11 +66,12 @@ final class ActivityBarView: NSView {
     }
 
     /// Number of changed files, shown after the Git label in the same form the
-    /// panel's own tab uses — "Changes (3)" there, "Git (3)" here.
+    /// panel's own tab uses — "Changes (3)" there, "Git (3)" here. Nothing to
+    /// commit means nothing to say, so a clean tree drops the count entirely.
     func setChangeCount(_ count: Int) {
         guard let button = buttons.indices.contains(Action.git.rawValue)
             ? buttons[Action.git.rawValue] : nil else { return }
-        button.badge = "(\(count))"
+        button.badge = count > 0 ? "\(count)" : nil
     }
 
     var buttonTitlesForTesting: [String] { buttons.map(\.displayTitleForTesting) }
@@ -116,12 +117,27 @@ final class ActivityButton: NSView {
             Theme.activeTab.setFill()   // white in light, editor bg in dark
             bounds.fill()
         }
-        // Truncates rather than overflowing into the neighbouring slot when the
-        // panel is dragged narrow.
-        SidebarCellDrawing.text(displayTitle, font: Theme.uiFont(10.5),
-                                color: isSelected ? Theme.foreground : Theme.dimText,
-                                in: bounds.insetBy(dx: 4, dy: 0),
-                                alignment: .center)
+        // Label and badge are centred as one unit, and the badge sits on the
+        // label's own line. Truncates rather than overflowing into the
+        // neighbouring slot when the panel is dragged narrow.
+        let font = Theme.uiFont(10.5)
+        let ink = isSelected ? Theme.foreground : Theme.dimText
+        let content = bounds.insetBy(dx: 4, dy: 0)
+        let badgeSize = SidebarCellDrawing.Badge.size(badge ?? "", labelFont: font)
+        let titleWidth = min(ceil((title as NSString).size(withAttributes: [.font: font]).width),
+                             max(0, content.width - badgeSize.width
+                                    - (badgeSize.width > 0 ? SidebarCellDrawing.Badge.gap : 0)))
+        let total = titleWidth + (badgeSize.width > 0
+                                    ? SidebarCellDrawing.Badge.gap + badgeSize.width : 0)
+        let start = content.minX + max(0, (content.width - total) / 2)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: content)
+        SidebarCellDrawing.text(title, font: font, color: ink, baseline: baseline,
+                                in: NSRect(x: start, y: content.minY,
+                                           width: titleWidth, height: content.height))
+        SidebarCellDrawing.Badge.draw(
+            badge ?? "", at: start + titleWidth + SidebarCellDrawing.Badge.gap,
+            baseline: baseline, labelFont: font,
+            background: Theme.activeRow, foreground: Theme.foreground)
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }

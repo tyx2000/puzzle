@@ -101,6 +101,55 @@ enum SidebarCellDrawing {
 
     /// Draw a row's icon. Material icons carry their own colours, so they are
     /// blitted untouched; SF Symbols are templates and take a tint.
+    /// A count badge: a filled pill just wide enough for its digits, sitting on
+    /// the same line as the label it follows.
+    enum Badge {
+        /// Room around the digits. Measured against their cap-height rather than
+        /// the font's line box, which carries leading a circle does not need.
+        static let horizontalPadding: CGFloat = 5
+        static let verticalPadding: CGFloat = 4
+        static let minimumDiameter: CGFloat = 16
+        /// Gap between the label and its badge.
+        static let gap: CGFloat = 6
+
+        static func font(for labelFont: NSFont) -> NSFont {
+            Theme.uiFont(max(9, labelFont.pointSize - 1.5))
+        }
+
+        /// Always a circle: the diameter is whichever of the digits' width or
+        /// height needs more room, so "9" and "128" are both round.
+        static func size(_ value: String, labelFont: NSFont) -> NSSize {
+            guard !value.isEmpty else { return .zero }
+            let badgeFont = font(for: labelFont)
+            let width = ceil((value as NSString).size(withAttributes: [.font: badgeFont]).width)
+            let capHeight = ceil(badgeFont.capHeight)
+            let diameter = max(minimumDiameter,
+                               max(width + horizontalPadding * 2,
+                                   capHeight + verticalPadding * 2))
+            return NSSize(width: diameter, height: diameter)
+        }
+
+        /// `baseline` is the label's own, so the pill lines up with the text
+        /// rather than with whatever box the caller happens to be drawing in.
+        static func draw(_ value: String, at x: CGFloat, baseline: CGFloat,
+                         labelFont: NSFont, background: NSColor, foreground: NSColor) {
+            guard !value.isEmpty else { return }
+            let badgeFont = font(for: labelFont)
+            let size = size(value, labelFont: labelFont)
+            // Centred on the label's cap-height, which is what the eye reads as
+            // the line the text sits on.
+            let centre = baseline - labelFont.capHeight / 2
+            let rect = NSRect(x: x, y: centre - size.height / 2,
+                              width: size.width, height: size.height)
+            background.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: size.height / 2,
+                         yRadius: size.height / 2).fill()
+            let badgeBaseline = centeredBaseline(for: badgeFont, in: rect)
+            text(value, font: badgeFont, color: foreground,
+                 baseline: badgeBaseline, in: rect, alignment: .center)
+        }
+    }
+
     static func icon(_ icon: SidebarIcon?, in rect: NSRect) {
         switch icon {
         case .material(let name):

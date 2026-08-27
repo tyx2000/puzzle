@@ -50,6 +50,7 @@ enum RegressionTests {
         try testThemeIsReadyBeforeAnyView()
         try testGutterMarksUncommittedChanges()
         try testChangesRowsSurviveRefreshes()
+        try testGitPanelCounters()
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
@@ -1886,15 +1887,15 @@ enum RegressionTests {
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
 
         // The Git label carries the live changed-file count in the same form as
-        // the panel's own "Changes (7)" tab, a clean tree included.
+        // the panel's own "Changes (7)" tab. A clean tree has nothing to say, so
+        // the count disappears rather than reading "(0)".
         bar.setChangeCount(7)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git (7)", "Settings"],
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7", "Settings"],
                    "the change count did not reach the Git label: "
                     + "\(bar.buttonTitlesForTesting)")
         bar.setChangeCount(0)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git (0)", "Settings"],
-                   "a clean tree dropped the count instead of showing (0): "
-                    + "\(bar.buttonTitlesForTesting)")
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
+                   "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
                    "a text button still carries a tooltip")
@@ -2166,6 +2167,102 @@ enum RegressionTests {
         try expect(pane.currentLineBandRectForTesting == nil
                     && ruler.currentLineBandRect() == nil,
                    "a selection still painted an active-line band")
+    }
+
+    /// Counts appear only where there is something to count, and Push reads as
+    /// one control with two targets.
+    private static func testGitPanelCounters() throws {
+        let directory = try temporaryDirectory("git-counters")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let panel = GitPanelViewController()
+        _ = panel.view
+        let bar = ActivityBarView(frame: NSRect(x: 0, y: 0, width: 320, height: 40))
+
+        func entry(_ path: String) -> GitService.Status.Entry {
+            GitService.Status.Entry(code: " M", path: path, originalPath: nil)
+        }
+        func status(entries: [GitService.Status.Entry], ahead: Int) -> GitService.Status {
+            GitService.Status(branch: "main", entries: entries, isRepo: true,
+                              userName: "T", ahead: ahead, hasUpstream: true)
+        }
+
+        // Work to do: both places count it, and Push says how much is waiting.
+        panel.applyStatusForTesting(status(entries: [entry("a.swift"), entry("b.swift")],
+                                           ahead: 3), in: directory)
+        bar.setChangeCount(2)
+        // The number is a badge beside the label, not part of its text.
+        try expect(panel.changesTabLabelForTesting == "Changes"
+                    && panel.changesTabBadgeForTesting == "2",
+                   "the tab reads \(panel.changesTabLabelForTesting) "
+                    + "/ \(panel.changesTabBadgeForTesting)")
+        try expect(bar.buttonTitlesForTesting[2] == "Git 2",
+                   "the activity bar reads \(bar.buttonTitlesForTesting[2])")
+        try expect(panel.pushLabelForTesting == "Push" && panel.pushBadgeForTesting == "3",
+                   "Push reads \(panel.pushLabelForTesting) / \(panel.pushBadgeForTesting)")
+        // The count belongs to Push, not to the line above the commit box.
+        // (the project name is a temporary directory, so match the shapes the
+        // count would take rather than the digit itself)
+        try expect(!panel.statusLabelForTesting.contains("↑")
+                    && !panel.statusLabelForTesting.contains("(3)"),
+                   "the commit header still carries the push count: "
+                    + panel.statusLabelForTesting)
+
+        // Nothing to do: no "(0)" anywhere.
+        panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
+        bar.setChangeCount(0)
+        try expect(panel.changesTabBadgeForTesting.isEmpty,
+                   "the tab shows a zero badge: \(panel.changesTabBadgeForTesting)")
+        try expect(bar.buttonTitlesForTesting[2] == "Git",
+                   "the activity bar shows a zero: \(bar.buttonTitlesForTesting[2])")
+        try expect(panel.pushBadgeForTesting.isEmpty,
+                   "Push shows a zero badge: \(panel.pushBadgeForTesting)")
+
+        // A badge is a circle on the label's own line, growing to hold its
+        // digits rather than stretching into a pill.
+        let labelFont = Theme.uiFont(10.5)
+        let single = SidebarCellDrawing.Badge.size("3", labelFont: labelFont)
+        let double = SidebarCellDrawing.Badge.size("12", labelFont: labelFont)
+        let triple = SidebarCellDrawing.Badge.size("128", labelFont: labelFont)
+        for (value, size) in [("3", single), ("12", double), ("128", triple)] {
+            try expect(size.width == size.height,
+                       "the \(value) badge is not round: \(size)")
+        }
+        try expect(single.width >= SidebarCellDrawing.Badge.minimumDiameter,
+                   "a one-digit badge collapses: \(single)")
+        try expect(triple.width > single.width,
+                   "the badge does not grow with its digits: \(single) vs \(triple)")
+        try expect(double.width >= single.width,
+                   "a two-digit badge is smaller than a one-digit one: "
+                    + "\(single) vs \(double)")
+        try expect(SidebarCellDrawing.Badge.size("", labelFont: labelFont) == .zero,
+                   "an empty badge still takes room")
+
+        // Nothing to push: the whole control is inert, menu included, and a
+        // click on it does nothing.
+        try expect(!panel.pushEnabledForTesting,
+                   "Push is still live with nothing to push")
+        try expect(!panel.clickPushForTesting(),
+                   "clicking a disabled Push still acted")
+        // Something to push, or a branch with no upstream to push to: live again.
+        panel.applyStatusForTesting(status(entries: [], ahead: 1), in: directory)
+        try expect(panel.pushEnabledForTesting, "Push is dead with a commit waiting")
+        panel.applyStatusForTesting(
+            GitService.Status(branch: "main", entries: [], isRepo: true, userName: "T",
+                              ahead: 0, hasUpstream: false), in: directory)
+        try expect(panel.pushEnabledForTesting,
+                   "Push is dead on a branch that has no upstream yet, which is "
+                    + "exactly when pushing sets one up")
+        panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
+
+        // One control, two targets: the label pushes, the chevron carries the
+        // menu, and they touch.
+        let frames = panel.pushSegmentFramesForTesting
+        try expect(frames.label.width > frames.chevron.width,
+                   "the chevron is not the smaller half: \(frames)")
+        try expect(abs(frames.label.maxX - frames.chevron.minX) < 0.5,
+                   "the two halves are not joined: \(frames)")
+        try expect(panel.pushMenuItemCountForTesting > 0,
+                   "the chevron has no menu attached")
     }
 
     /// The side-by-side diff mode behind the header's rightmost button.
