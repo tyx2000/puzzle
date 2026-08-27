@@ -87,6 +87,9 @@ final class ActivityBarView: NSView {
 /// Flat text button with an edge-to-edge background when selected. The label is
 /// the whole affordance, so there is no tooltip to explain an icon.
 final class ActivityButton: NSView {
+    /// Flipped like every other drawn view here, so the shared text and badge
+    /// drawing lands where it does everywhere else.
+    override var isFlipped: Bool { true }
     var onClick: (() -> Void)?
     var isSelected = false { didSet { needsDisplay = true } }
 

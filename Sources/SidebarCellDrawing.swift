@@ -46,7 +46,10 @@ enum SidebarCellDrawing {
     /// value for adjacent labels with different font sizes so their glyphs sit
     /// on one line instead of each label being centered independently.
     static func centeredBaseline(for font: NSFont, in rect: NSRect) -> CGFloat {
-        // Rounded to a half point — a whole device pixel on a 2x display.
+        // These helpers assume a flipped view, which every drawn view in Puzzle
+        // is; an unflipped host lands its text somewhere else entirely.
+        //
+        // Rounded to a half point: a whole device pixel on a 2x display.
         // Flooring biased every label up to a full point above the centre,
         // which showed up against the traffic lights in the title band.
         ((rect.midY + font.capHeight / 2) * 2).rounded() / 2
@@ -101,11 +104,18 @@ enum SidebarCellDrawing {
 
     /// Draw a row's icon. Material icons carry their own colours, so they are
     /// blitted untouched; SF Symbols are templates and take a tint.
-    /// A count badge: a filled pill just wide enough for its digits, sitting on
-    /// the same line as the label it follows.
+    /// A count badge: a filled circle with its digits centred, sitting on the
+    /// same line as the label it follows.
+    ///
+    /// The circle is placed by its centre and the digits are rendered through an
+    /// offscreen image, so the badge lands identically in flipped views (the
+    /// sidebar cells) and unflipped ones (the activity bar). Deriving the
+    /// position from a text baseline instead had it drawn on three different
+    /// lines depending on the host.
     enum Badge {
-        /// Room around the digits. Measured against their cap-height rather than
-        /// the font's line box, which carries leading a circle does not need.
+        /// Room around the digits, measured against their cap-height rather
+        /// than the font's line box, which carries leading a circle does not
+        /// need.
         static let horizontalPadding: CGFloat = 5
         static let verticalPadding: CGFloat = 4
         static let minimumDiameter: CGFloat = 16
@@ -129,24 +139,48 @@ enum SidebarCellDrawing {
             return NSSize(width: diameter, height: diameter)
         }
 
-        /// `baseline` is the label's own, so the pill lines up with the text
-        /// rather than with whatever box the caller happens to be drawing in.
+        /// Centred on the label's cap-height — the line the eye reads the text
+        /// as sitting on — rather than on its line box, which carries ascender
+        /// and descender room the digits and the label never use.
         static func draw(_ value: String, at x: CGFloat, baseline: CGFloat,
                          labelFont: NSFont, background: NSColor, foreground: NSColor) {
             guard !value.isEmpty else { return }
-            let badgeFont = font(for: labelFont)
             let size = size(value, labelFont: labelFont)
-            // Centred on the label's cap-height, which is what the eye reads as
-            // the line the text sits on.
-            let centre = baseline - labelFont.capHeight / 2
-            let rect = NSRect(x: x, y: centre - size.height / 2,
+            let centreY = baseline - labelFont.capHeight / 2
+            let rect = NSRect(x: x, y: (centreY - size.height / 2).rounded(),
                               width: size.width, height: size.height)
-            background.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: size.height / 2,
-                         yRadius: size.height / 2).fill()
-            let badgeBaseline = centeredBaseline(for: badgeFont, in: rect)
-            text(value, font: badgeFont, color: foreground,
-                 baseline: badgeBaseline, in: rect, alignment: .center)
+            image(value, labelFont: labelFont, background: background,
+                  foreground: foreground)?.draw(in: rect)
+        }
+
+        /// The badge as an image: drawn in its own flipped space, so the digits
+        /// are centred by construction and the result composites the same way
+        /// whatever the host view does.
+        static func image(_ value: String, labelFont: NSFont,
+                          background: NSColor, foreground: NSColor) -> NSImage? {
+            guard !value.isEmpty else { return nil }
+            let size = size(value, labelFont: labelFont)
+            let badgeFont = font(for: labelFont)
+            return NSImage(size: size, flipped: true) { rect in
+                background.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: badgeFont, .foregroundColor: foreground,
+                ]
+                let text = value as NSString
+                // Centre the digits on their ink, not on the line box: the box
+                // carries ascender and descender room the digits never use.
+                let measured = text.size(withAttributes: attributes)
+                let capHeight = badgeFont.capHeight
+                // `draw(at:)` puts the line box's top-left at the point, so the
+                // cap sits `ascender - capHeight` below it. Rounded to a half
+                // point, which is a whole device pixel at 2x.
+                let origin = NSPoint(
+                    x: ((rect.midX - measured.width / 2) * 2).rounded() / 2,
+                    y: ((rect.midY - badgeFont.ascender + capHeight / 2) * 2).rounded() / 2)
+                text.draw(at: origin, withAttributes: attributes)
+                return true
+            }
         }
     }
 

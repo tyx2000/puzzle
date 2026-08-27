@@ -2237,6 +2237,39 @@ enum RegressionTests {
         try expect(SidebarCellDrawing.Badge.size("", labelFont: labelFont) == .zero,
                    "an empty badge still takes room")
 
+        // The digits sit in the middle of the circle, both ways. Measured off
+        // the rendered badge rather than trusted to the font metrics.
+        for value in ["1", "12", "128"] {
+            guard let image = SidebarCellDrawing.Badge.image(
+                    value, labelFont: labelFont,
+                    background: .white, foreground: .black),
+                  let data = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: data) else {
+                throw Failure(description: "the \(value) badge did not render")
+            }
+            var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
+            for y in 0..<rep.pixelsHigh {
+                for x in 0..<rep.pixelsWide {
+                    guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                          colour.brightnessComponent < 0.5, colour.alphaComponent > 0.5
+                    else { continue }
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+            try expect(maxX >= minX && maxY >= minY,
+                       "the \(value) badge drew no digits")
+            let inkCentre = (x: Double(minX + maxX) / 2, y: Double(minY + maxY) / 2)
+            let centre = (x: Double(rep.pixelsWide - 1) / 2, y: Double(rep.pixelsHigh - 1) / 2)
+            // Within a device pixel at 2x, which is half a point.
+            try expect(abs(inkCentre.x - centre.x) <= 1.5,
+                       "the \(value) digits are off-centre horizontally: "
+                        + "\(inkCentre.x) vs \(centre.x)")
+            try expect(abs(inkCentre.y - centre.y) <= 1.5,
+                       "the \(value) digits are off-centre vertically: "
+                        + "\(inkCentre.y) vs \(centre.y)")
+        }
+
         // Nothing to push: the whole control is inert, menu included, and a
         // click on it does nothing.
         try expect(!panel.pushEnabledForTesting,
