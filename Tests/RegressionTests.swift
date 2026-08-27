@@ -2499,23 +2499,16 @@ enum RegressionTests {
                    "Push is still live with nothing to push")
         try expect(!panel.clickPushForTesting(),
                    "clicking a disabled Push still acted")
-        // …but its menu is not, because that is when fetch and pull matter.
-        try expect(panel.pushMenuEnabledForTesting,
-                   "the menu went dead with nothing to push, taking fetch and pull with it")
-        try expect(panel.pushMenuItemEnabledForTesting("Fetch") == true,
-                   "Fetch is disabled with nothing to push")
-        try expect(panel.pushMenuItemEnabledForTesting("Pull") == true,
-                   "Pull is disabled with nothing to push")
-        try expect(panel.pushMenuItemEnabledForTesting("Commit & Push") == false,
-                   "Commit & Push is offered with nothing to commit")
+        // There is no menu any more: Push is the whole control.
+        try expect(panel.pushBadgeForTesting.isEmpty,
+                   "a count is shown with nothing to push")
 
-        // Uncommitted work: Commit & Push comes alive even though Push is not.
+        // Uncommitted work does not wake Push: those changes are not pushable
+        // until they are committed.
         panel.applyStatusForTesting(status(entries: [entry("a.swift")], ahead: 0),
                                     in: directory)
         try expect(!panel.pushEnabledForTesting,
                    "Push woke up on uncommitted changes, which it cannot send")
-        try expect(panel.pushMenuItemEnabledForTesting("Commit & Push") == true,
-                   "Commit & Push is disabled with changes waiting to be committed")
         panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
         // Something to push, or a branch with no upstream to push to: live again.
         panel.applyStatusForTesting(status(entries: [], ahead: 1), in: directory)
@@ -2528,15 +2521,22 @@ enum RegressionTests {
                     + "exactly when pushing sets one up")
         panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
 
-        // One control, two targets: the label pushes, the chevron carries the
-        // menu, and they touch.
-        let frames = panel.pushSegmentFramesForTesting
-        try expect(frames.label.width > frames.chevron.width,
-                   "the chevron is not the smaller half: \(frames)")
-        try expect(abs(frames.label.maxX - frames.chevron.minX) < 0.5,
-                   "the two halves are not joined: \(frames)")
-        try expect(panel.pushMenuItemCountForTesting > 0,
-                   "the chevron has no menu attached")
+        // The button sizes itself around its label and badge.
+        let button = BadgeButton()
+        button.title = "Push"
+        let bare = button.intrinsicContentSize
+        button.badge = "12"
+        let badged = button.intrinsicContentSize
+        try expect(badged.width > bare.width,
+                   "the badge takes no room: \(bare) vs \(badged)")
+        try expect(badged.height == BadgeButton.height,
+                   "the button changed height for its badge: \(badged)")
+        var clicks = 0
+        button.onClick = { clicks += 1 }
+        try expect(button.clickForTesting() && clicks == 1, "the button did not act")
+        button.isEnabled = false
+        try expect(!button.clickForTesting() && clicks == 1,
+                   "a disabled button still acted")
     }
 
     /// The side-by-side diff mode behind the header's rightmost button.

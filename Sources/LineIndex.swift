@@ -25,7 +25,7 @@ struct LineIndex {
         // Making it contiguous once is cheaper than paying that on every byte.
         var contiguous = text
         contiguous.makeContiguousUTF8()
-        var utf8 = contiguous.utf8
+        let utf8 = contiguous.utf8
         let scanned: Void? = utf8.withContiguousStorageIfAvailable { buffer in
             for byte in buffer {
                 // Continuation bytes carry no UTF-16 unit of their own.

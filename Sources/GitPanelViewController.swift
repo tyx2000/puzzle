@@ -64,9 +64,8 @@ final class GitPanelViewController: NSViewController {
     /// Push and its menu are one control with two targets: a segmented control
     /// draws them joined, and AppKit routes the label to the action and the
     /// chevron to the menu attached to that segment.
-    private let pushControl = SplitActionButton()
+    private let pushControl = BadgeButton()
     /// The arrow beside Push: everything that is not the common case.
-    private let pushMenu = NSMenu()
     private let branchToolbar = FlatView()
     private let newBranchButton = NSButton()
     private let remoteButton = NSButton()
@@ -97,7 +96,7 @@ final class GitPanelViewController: NSViewController {
         if isViewLoaded {
             branchLabel.stringValue = "Loading Git status…"
             segmented.setLabel("Changes", forSegment: 0)
-            rebuildPushMenu()
+            refreshPushButton()
             table.reloadData()
         }
         refresh()
@@ -208,9 +207,9 @@ final class GitPanelViewController: NSViewController {
         pushControl.title = "Push"
         pushControl.toolTip = "Push the current branch"
         pushControl.setAccessibilityLabel("Push")
-        pushControl.onPrimary = { [weak self] in self?.pushAction() }
+        pushControl.onClick = { [weak self] in self?.pushAction() }
         pushControl.translatesAutoresizingMaskIntoConstraints = false
-        rebuildPushMenu()
+        refreshPushButton()
 
         [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
          commitButton, pushControl,
@@ -350,7 +349,7 @@ final class GitPanelViewController: NSViewController {
                 DispatchQueue.main.async {
                     guard self.directory == directory else { return }
                     self.remotes = remotes
-                    self.rebuildPushMenu()
+                    self.refreshPushButton()
                 }
             }
             let loadBranches = {
@@ -454,7 +453,7 @@ final class GitPanelViewController: NSViewController {
         discardAllButton.isEnabled = !status.entries.isEmpty
         aheadCount = status.ahead
         hasUpstream = status.hasUpstream
-        rebuildPushMenu()
+        refreshPushButton()
     }
 
     /// Colour for a commit file's status letter (A added, M modified, D deleted).
@@ -507,95 +506,22 @@ final class GitPanelViewController: NSViewController {
 
     @objc private func commit() { performCommit(push: false) }
 
-    private func rebuildPushMenu() {
-        // How much is waiting rides on the button as a badge, the same shape
-        // the Changes tab and the activity bar use for their counts.
+    /// How much is waiting rides on the button as a badge, the same shape the
+    /// Changes tab and the activity bar use for their counts.
+    private func refreshPushButton() {
         pushControl.badge = aheadCount > 0 ? "\(aheadCount)" : ""
-        // Nothing to push disables the button itself, but not its menu: fetch
-        // and pull are exactly what you reach for when you are up to date, and
-        // "Commit & Push" works whenever there is something to commit. A branch
-        // with no upstream can always push — that is what sets one up.
-        pushControl.isPrimaryEnabled = pushIsPossible
-        pushControl.isMenuEnabled = true
-        let menu = pushMenu
-        // Each item says for itself whether it can run; AppKit's automatic
-        // enabling would grey them all out, since the panel is the target.
-        menu.autoenablesItems = false
-        menu.removeAllItems()
-        let commitAndPush = NSMenuItem(title: "Commit & Push",
-                                       action: #selector(commitAndPushAction),
-                                       keyEquivalent: "")
-        commitAndPush.isEnabled = !entries.isEmpty
-        menu.addItem(commitAndPush)
-        if !remotes.isEmpty {
-            menu.addItem(.separator())
-            for remote in remotes {
-                let item = NSMenuItem(title: "Push to \(remote.name)",
-                                      action: #selector(pushToRemoteAction(_:)),
-                                      keyEquivalent: "")
-                item.representedObject = remote.name
-                // Pushing to a named remote is a push: same condition.
-                item.isEnabled = pushIsPossible
-                menu.addItem(item)
-            }
-        }
-        menu.addItem(.separator())
-        // Fetch and pull ask the remote what *it* has, so they are useful
-        // precisely when there is nothing local to push.
-        let fetch = NSMenuItem(title: "Fetch", action: #selector(fetchAction), keyEquivalent: "")
-        let pull = NSMenuItem(title: "Pull", action: #selector(pullAction), keyEquivalent: "")
-        fetch.isEnabled = true
-        pull.isEnabled = hasUpstream
-        menu.addItem(fetch)
-        menu.addItem(pull)
-        menu.addItem(.separator())
-        let force = NSMenuItem(title: "Force Push…", action: #selector(forcePushAction),
-                               keyEquivalent: "")
-        // Rewriting the remote branch needs one to rewrite.
-        force.isEnabled = hasUpstream
-        menu.addItem(force)
-        for item in menu.items { item.target = self }
-        pushControl.actionMenu = menu
+        // Nothing to push, nothing to do. A branch with no upstream is the
+        // exception: pushing is what sets one up.
+        pushControl.isEnabled = pushIsPossible
         pushControl.toolTip = aheadCount > 0
             ? "\(aheadCount) commit\(aheadCount == 1 ? "" : "s") to push"
             : "Push the current branch"
+        pushControl.invalidateIntrinsicContentSize()
     }
 
-    /// Push whatever is already committed locally. A commit message in the
-    /// editor must never change the meaning of the Push action.
     @objc private func pushAction() {
         guard let directory else { return }
         runRemote("Push") { GitService.push(in: directory) }
-    }
-
-    @objc private func commitAndPushAction() { performCommit(push: true) }
-
-    @objc private func pushToRemoteAction(_ sender: NSMenuItem) {
-        guard let directory, let name = sender.representedObject as? String else { return }
-        runRemote("Push to \(name)") { GitService.push(to: name, in: directory) }
-    }
-
-    @objc private func fetchAction() {
-        guard let directory else { return }
-        runRemote("Fetch") { GitService.fetch(in: directory) }
-    }
-
-    @objc private func pullAction() {
-        guard let directory else { return }
-        runRemote("Pull") { GitService.pull(in: directory) }
-    }
-
-    @objc private func forcePushAction() {
-        guard let directory else { return }
-        // Destructive and hard to undo, so it asks first.
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Force-push the current branch?"
-        alert.informativeText = "Repository:\n\(directory.path)\n\nThis can replace the remote branch history and make remote-only commits unreachable. Puzzle uses --force-with-lease, so Git will refuse if the remote changed since your last fetch."
-        alert.addButton(withTitle: "Force Push")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        runRemote("Force push") { GitService.forcePush(in: directory) }
     }
 
     /// Run a remote operation on the panel's serial Git queue and report the
@@ -701,8 +627,7 @@ final class GitPanelViewController: NSViewController {
         activeOperationID = id
         operationLocksMessage = lockCommitMessage
         commitButton.isEnabled = false
-        pushControl.isPrimaryEnabled = false
-        pushControl.isMenuEnabled = false
+        pushControl.isEnabled = false
         newBranchButton.isEnabled = false
         remoteButton.isEnabled = false
         table.isEnabled = false
@@ -721,8 +646,7 @@ final class GitPanelViewController: NSViewController {
         guard activeOperationID == id else { return }
         activeOperationID = nil
         commitButton.isEnabled = true
-        pushControl.isPrimaryEnabled = pushIsPossible
-        pushControl.isMenuEnabled = true
+        pushControl.isEnabled = pushIsPossible
         newBranchButton.isEnabled = true
         remoteButton.isEnabled = true
         table.isEnabled = true
@@ -1135,29 +1059,11 @@ final class GitPanelViewController: NSViewController {
     }
     var pushEnabledForTesting: Bool {
         _ = view
-        return pushControl.isPrimaryEnabled
-    }
-    var pushMenuEnabledForTesting: Bool {
-        _ = view
-        return pushControl.menuIsReachableForTesting
-    }
-    func pushMenuItemEnabledForTesting(_ title: String) -> Bool? {
-        _ = view
-        return pushControl.actionMenu?.items.first { $0.title == title }?.isEnabled
+        return pushControl.isEnabled
     }
     func clickPushForTesting() -> Bool {
         _ = view
-        return pushControl.clickPrimaryForTesting()
-    }
-    var pushMenuItemCountForTesting: Int {
-        _ = view
-        return pushControl.actionMenu?.items.count ?? 0
-    }
-    var pushSegmentFramesForTesting: (label: NSRect, chevron: NSRect) {
-        _ = view
-        pushControl.layoutSubtreeIfNeeded()
-        let halves = pushControl.halvesForTesting
-        return (halves.primary, halves.menu)
+        return pushControl.clickForTesting()
     }
     var changesTabLabelForTesting: String {
         _ = view

@@ -222,7 +222,6 @@ final class LineNumberRulerView: NSRulerView {
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
             .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
         let numbers = Self.numberColumn
-        let numberWidth = numbers.end
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
             let fragChar = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
             let isLineStart = fragChar.location == 0
