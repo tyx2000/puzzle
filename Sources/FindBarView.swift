@@ -17,6 +17,12 @@ final class FindBarView: FlatView {
 
     private var matches: [NSRange] = []
     private var current = -1
+    /// Matches found, including the ones past `maxRetainedMatches`.
+    private var totalMatches = 0
+    /// A single letter in a large file matches tens of thousands of times, and
+    /// every one of them is a range held for as long as the query stands. Past
+    /// this the count keeps counting but the ranges are not kept.
+    static let maxRetainedMatches = 20_000
 
     /// Re-read the theme colour captured when the bar was built.
     func refreshAppearance() {
@@ -277,6 +283,7 @@ final class FindBarView: FlatView {
 
     private func recompute(_ query: String, _ options: SearchOptions) {
         matches = []
+        totalMatches = 0
         current = -1
         defer { updateCount(); highlight() }
         guard let tv = textView else { return }
@@ -300,9 +307,12 @@ final class FindBarView: FlatView {
             re.enumerateMatches(
                 in: haystack as String,
                 range: NSRange(location: 0, length: haystack.length)
-            ) { m, _, _ in
+            ) { m, _, stop in
                 guard let r = m?.range, r.length > 0 else { return }
+                totalMatches += 1
+                guard matches.count < Self.maxRetainedMatches else { return }
                 matches.append(r)
+                _ = stop
             }
         } else {
             var opts: NSString.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
@@ -314,7 +324,8 @@ final class FindBarView: FlatView {
                                                           length: haystack.length - searchStart))
                 guard found.location != NSNotFound else { break }
                 if !options.wholeWord || isWholeWord(found, in: haystack) {
-                    matches.append(found)
+                    totalMatches += 1
+                    if matches.count < Self.maxRetainedMatches { matches.append(found) }
                 }
                 searchStart = found.location + max(1, found.length)
             }
@@ -379,6 +390,7 @@ final class FindBarView: FlatView {
 
     func clearHighlights() {
         matches.removeAll(keepingCapacity: false)
+        totalMatches = 0
         current = -1
         textView?.searchMatches = []
         textView?.currentMatchIndex = nil
@@ -388,10 +400,14 @@ final class FindBarView: FlatView {
     private func updateCount() {
         if matches.isEmpty {
             countLabel.stringValue = input.stringValue.isEmpty ? "" : "No results"
+        } else if totalMatches > matches.count {
+            // Say so rather than reporting the cap as the truth.
+            countLabel.stringValue = "\(current + 1) of \(matches.count) (\(totalMatches) found)"
         } else {
             countLabel.stringValue = "\(current + 1) of \(matches.count)"
         }
     }
 
     var retainedMatchCountForTesting: Int { matches.count }
+    var totalMatchCountForTesting: Int { totalMatches }
 }

@@ -15,7 +15,7 @@ enum GitService {
     }
 
     struct Status {
-        struct Entry {
+        struct Entry: Equatable {
             let code: String     // raw two-char porcelain code
             let path: String
             /// Previous path for a porcelain rename/copy record. Paths exposed

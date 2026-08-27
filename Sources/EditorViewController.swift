@@ -80,6 +80,9 @@ final class EditorViewController: NSViewController {
     }
 
     /// Blame is keyed by file and line; a commit or checkout invalidates it.
+    /// Re-read the uncommitted-change marks in every pane.
+    func refreshGitLineChanges() { panes.forEach { $0.refreshGitLineChanges() } }
+
     func invalidateBlame(for url: URL? = nil) {
         panes.forEach { $0.invalidateBlame(for: url) }
     }

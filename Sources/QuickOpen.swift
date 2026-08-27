@@ -20,17 +20,28 @@ enum QuickOpen {
         let root = directory.standardizedFileURL.resolvingSymlinksInPath().path
         let prefix = root.hasSuffix("/") ? root : root + "/"
         var paths: [String] = []
-        for case let url as URL in walker {
-            if skipDirectories.contains(url.lastPathComponent) {
-                walker.skipDescendants()
-                continue
+        // Each step hands back a URL with cached resource values attached, and
+        // the standardising below makes more of them. Without a pool per file
+        // the whole walk piles up before anything is released — measured at
+        // ~1 KB per file, which is most of what the index appeared to cost.
+        var done = false
+        while !done {
+            autoreleasepool {
+                guard let url = walker.nextObject() as? URL else {
+                    done = true
+                    return
+                }
+                if skipDirectories.contains(url.lastPathComponent) {
+                    walker.skipDescendants()
+                    return
+                }
+                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?
+                    .isRegularFile == true else { return }
+                let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+                guard path.hasPrefix(prefix) else { return }
+                paths.append(String(path.dropFirst(prefix.count)))
+                if paths.count >= maxFiles { done = true }
             }
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
-            else { continue }
-            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
-            guard path.hasPrefix(prefix) else { continue }
-            paths.append(String(path.dropFirst(prefix.count)))
-            if paths.count >= maxFiles { break }
         }
         return paths
     }

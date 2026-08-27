@@ -56,6 +56,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// its changes.
     private let diffHeader = DiffHeaderView()
     private var diffHeaderHeight: NSLayoutConstraint!
+    /// Side-by-side diffs, built the first time the mode is used.
+    private var sideBySideDiff: SideBySideDiffView?
+    /// The mode is a preference, not a property of the file: it sticks for the
+    /// session so stepping between diffs does not keep switching layout.
+    private static var diffMode: DiffHeaderView.Mode = .unified
     /// Shown instead of the text view when the active document is a picture.
     private var imagePreview: ImagePreviewView?
     /// Shown instead of the text view for a file-history table tab.
@@ -128,7 +133,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scrollView.hasVerticalRuler = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.editorBackground
-        scrollView.verticalRulerView = LineNumberRulerView(textView: textView)
+        let ruler = LineNumberRulerView(textView: textView)
+        ruler.onChangeClicked = { [weak self] change, rect in
+            self?.showGitChange(change, from: rect)
+        }
+        scrollView.verticalRulerView = ruler
         scrollView.rulersVisible = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -157,6 +166,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffHeader.isHidden = true
         diffHeader.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
         diffHeader.onNext = { [weak self] in self?.stepThroughDiff(forward: true) }
+        diffHeader.onToggleMode = { [weak self] in self?.toggleDiffMode() }
         container.addSubview(diffHeader)
 
         findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
@@ -186,6 +196,51 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         reloadTabs()
     }
 
+    // MARK: - Uncommitted change marks
+
+    /// Recompute the gutter marks for the file on screen. Runs off the main
+    /// thread: it shells out to `git diff`, and the editor must not wait for it.
+    func refreshGitLineChanges() {
+        // The repository can be handed to a pane before its views exist.
+        guard isViewLoaded else { return }
+        guard let url = currentURL, url.isFileURL,
+              let document = currentDocument, !document.isVirtual,
+              let root = repositoryRoot else {
+            applyGitLineChanges([], for: nil)
+            return
+        }
+        let generation = gitLineChangeGeneration + 1
+        gitLineChangeGeneration = generation
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let changes = GitLineChanges.changes(for: url, in: root)
+            DispatchQueue.main.async {
+                guard let self, self.gitLineChangeGeneration == generation,
+                      self.currentURL == url else { return }
+                self.applyGitLineChanges(changes, for: url)
+            }
+        }
+    }
+
+    private func applyGitLineChanges(_ changes: [GitLineChanges.Change], for url: URL?) {
+        gitLineChanges = changes
+        gitLineChangesURL = url
+        (scrollView.verticalRulerView as? LineNumberRulerView)?.gitChanges = changes
+    }
+
+    /// The little diff behind a gutter mark.
+    private func showGitChange(_ change: GitLineChanges.Change, from rect: NSRect) {
+        guard let ruler = scrollView.verticalRulerView else { return }
+        gitChangePopover?.close()
+        let controller = GitChangePopoverController(change: change)
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        _ = controller.view
+        popover.contentSize = controller.preferredSize
+        popover.show(relativeTo: rect, of: ruler, preferredEdge: .maxX)
+        gitChangePopover = popover
+    }
+
     // MARK: - Diff header
 
     /// The repository-relative path a diff buffer was built from: the Git panel
@@ -201,11 +256,59 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let url, let path = Self.diffPath(for: url) else {
             diffHeader.isHidden = true
             diffHeaderHeight.constant = 0
+            hideSideBySideDiff()
             return
         }
+        diffHeader.setMode(Self.diffMode)
         diffHeader.configure(path: path, changes: changeBlocks().count)
         diffHeader.isHidden = false
         diffHeaderHeight.constant = DiffHeaderView.height
+        applyDiffMode()
+    }
+
+    private func toggleDiffMode() {
+        Self.diffMode = Self.diffMode.next
+        diffHeader.setMode(Self.diffMode)
+        applyDiffMode()
+    }
+
+    /// Swap the code view for the two-column one (or back), leaving everything
+    /// else in the pane — header, tabs, find bar — exactly where it was.
+    private func applyDiffMode() {
+        guard !diffHeader.isHidden, let doc = currentDocument else {
+            hideSideBySideDiff()
+            return
+        }
+        guard Self.diffMode == .sideBySide else {
+            hideSideBySideDiff()
+            scrollView.isHidden = false
+            return
+        }
+        let view = ensureSideBySideDiff()
+        view.configure(diff: doc.text)
+        view.isHidden = false
+        scrollView.isHidden = true
+        diffHeader.configure(path: diffHeader.pathForTesting, changes: view.changeCount)
+    }
+
+    private func hideSideBySideDiff() {
+        sideBySideDiff?.isHidden = true
+    }
+
+    private func ensureSideBySideDiff() -> SideBySideDiffView {
+        if let sideBySideDiff { return sideBySideDiff }
+        let view = SideBySideDiffView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isHidden = true
+        self.view.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+        ])
+        sideBySideDiff = view
+        return view
     }
 
     /// Runs of consecutive added/removed lines — one "change" as a reader sees
@@ -226,6 +329,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Move to the next (or previous) block of changed lines, wrapping around at
     /// the ends the way the find bar does.
     private func stepThroughDiff(forward: Bool) {
+        if let sideBySideDiff, !sideBySideDiff.isHidden {
+            sideBySideDiff.step(forward: forward)
+            return
+        }
         let blocks = changeBlocks()
         guard !blocks.isEmpty else { return }
         let caret = textView.selectedRange().location
@@ -242,6 +349,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     // MARK: - Regression-test surface
 
+    var gitLineChangesForTesting: [GitLineChanges.Change] { gitLineChanges }
+    var editorBackgroundForTesting: NSColor { textView.backgroundColor }
     var diffHeaderForTesting: DiffHeaderView { diffHeader }
     var lineNumberRulerForTesting: LineNumberRulerView? {
         scrollView.verticalRulerView as? LineNumberRulerView
@@ -264,6 +373,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.codeBlocks.forEach { textView.toggleFold($0) }
     }
     var diffHeaderIsVisibleForTesting: Bool { !diffHeader.isHidden }
+    var sideBySideVisibleForTesting: Bool { sideBySideDiff.map { !$0.isHidden } ?? false }
+    var sideBySideBlockForTesting: Int { sideBySideDiff?.currentBlockForTesting ?? -1 }
+    var sideBySideGeometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat)? {
+        sideBySideDiff?.geometryForTesting
+    }
+    var sideBySideCurrentRowForTesting: Int? { sideBySideDiff?.currentRowForTesting }
+    func toggleDiffModeForTesting() { toggleDiffMode() }
     var changeBlockCountForTesting: Int { changeBlocks().count }
 
     private func ensureImagePreview() -> ImagePreviewView {
@@ -485,6 +601,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
 
         reloadTabs()
+        refreshGitLineChanges()
         scrollView.verticalRulerView?.needsDisplay = true
         textView.needsDisplay = true
         onActiveDocumentChanged?(url)
@@ -586,6 +703,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         do {
             try document.save()
             reloadTabs()
+            refreshGitLineChanges()
             if notify { onDocumentSaved?(document.url) }
             return true
         } catch {
@@ -824,6 +942,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scrollView.backgroundColor = Theme.editorBackground
         findBar.refreshAppearance()
         diffHeader.refreshAppearance()
+        sideBySideDiff?.refreshAppearance()
         imagePreview?.refreshFonts()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
@@ -989,7 +1108,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     // MARK: - Inline blame
 
     /// Project root, needed to run `git blame` in the right repository.
-    var repositoryRoot: URL?
+    var repositoryRoot: URL? {
+        didSet { refreshGitLineChanges() }
+    }
+    /// Uncommitted changes for the file on screen, per line.
+    private var gitLineChanges: [GitLineChanges.Change] = []
+    private var gitLineChangesURL: URL?
+    private var gitChangePopover: NSPopover?
+    private var gitLineChangeGeneration = 0
 
     private var blameWork: DispatchWorkItem?
     private var blameGeneration = 0

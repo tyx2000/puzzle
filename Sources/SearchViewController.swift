@@ -430,23 +430,40 @@ final class SearchViewController: NSViewController {
                                     includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                                     options: [.skipsHiddenFiles]) else { return [] }
         guard let matcher = SearchMatcher(query: query, options: options) else { return [] }
-        for case let url as URL in e {
-            if skipDirs.contains(url.lastPathComponent) { e.skipDescendants(); continue }
-            guard shouldLoadForNativeSearch(url),
-                  let data = try? Data(contentsOf: url),
-                  !data.prefix(1024).contains(0) else { continue }
-            // Not a string subtraction: the enumerator hands back resolved
-            // paths (/private/var/…) while `directory` may still be the symlink
-            // (/var/…), and replacing that as a substring left "/private" glued
-            // to the front of every result.
-            guard let rel = relativePath(for: url, in: directory) else { continue }
-            var no = 0
-            for raw in String(decoding: data, as: UTF8.self)
-                .split(separator: "\n", omittingEmptySubsequences: false) {
-                no += 1
-                if matcher.firstRange(in: String(raw)) != nil {
-                    out.append((rel, no, searchPreview(String(raw), query: query, options: options)))
-                    if out.count >= maxHits { return out }
+        // One pool per file: the contents, the split lines and the URL's cached
+        // resource values are all released before the next file is read. Without
+        // it a whole-project search holds every file it has looked at.
+        var finished = false
+        while !finished {
+            autoreleasepool {
+                guard let url = e.nextObject() as? URL else {
+                    finished = true
+                    return
+                }
+                if skipDirs.contains(url.lastPathComponent) {
+                    e.skipDescendants()
+                    return
+                }
+                guard shouldLoadForNativeSearch(url),
+                      let data = try? Data(contentsOf: url),
+                      !data.prefix(1024).contains(0) else { return }
+                // Not a string subtraction: the enumerator hands back resolved
+                // paths (/private/var/…) while `directory` may still be the
+                // symlink (/var/…), and replacing that as a substring left
+                // "/private" glued to the front of every result.
+                guard let rel = relativePath(for: url, in: directory) else { return }
+                var no = 0
+                for raw in String(decoding: data, as: UTF8.self)
+                    .split(separator: "\n", omittingEmptySubsequences: false) {
+                    no += 1
+                    if matcher.firstRange(in: String(raw)) != nil {
+                        out.append((rel, no,
+                                    searchPreview(String(raw), query: query, options: options)))
+                        if out.count >= maxHits {
+                            finished = true
+                            return
+                        }
+                    }
                 }
             }
         }

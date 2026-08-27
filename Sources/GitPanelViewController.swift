@@ -41,6 +41,12 @@ final class GitPanelViewController: NSViewController {
     }
     private var showingHistory = false
     private var showingBranches = false
+    /// What the table was last built from, so a refresh that changes nothing
+    /// does not rebuild the rows out from under a click.
+    private var renderedEntries: [GitService.Status.Entry] = []
+    private var renderedActiveChangesPath: String?
+    private var renderedActiveCommitFile: String?
+    private var reloadDeferred = false
 
     private let segmented = FlatPanelTabBar(labels: ["Changes", "Branch", "History"])
     private let table = NSTableView()
@@ -344,7 +350,7 @@ final class GitPanelViewController: NSViewController {
                 guard self.directory == directory else { return }
                 self.applyStatus(status, in: directory)
                 if !self.showingBranches && !self.showingHistory {
-                    self.table.reloadData()
+                    self.reloadRows()
                 }
             }
 
@@ -399,6 +405,42 @@ final class GitPanelViewController: NSViewController {
                 }
             }
         }
+    }
+
+    /// Rebuild the rows only when they would come out different, and never
+    /// while the mouse is down inside the panel.
+    ///
+    /// `reloadData` throws away the row views, and with them any button that is
+    /// mid-click: a refresh landing between mouse-down and mouse-up swallowed
+    /// the click. Git and file-system events fire constantly (a build alone
+    /// produces a stream of them), which is why the row buttons worked only
+    /// some of the time.
+    private func reloadRows(force: Bool = false) {
+        guard isViewLoaded else { return }
+        guard force || rowsNeedReload else { return }
+        guard NSEvent.pressedMouseButtons == 0 else {
+            guard !reloadDeferred else { return }
+            reloadDeferred = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self else { return }
+                self.reloadDeferred = false
+                self.reloadRows(force: true)
+            }
+            return
+        }
+        renderedEntries = entries
+        renderedActiveChangesPath = activeChangesPath
+        renderedActiveCommitFile = activeCommitFile.map { "\($0.commit):\($0.path)" }
+        table.reloadData()
+    }
+
+    /// True when what is on screen no longer matches the model.
+    private var rowsNeedReload: Bool {
+        if showingBranches || showingHistory { return true }
+        if renderedEntries != entries { return true }
+        if renderedActiveChangesPath != activeChangesPath { return true }
+        let commitKey = activeCommitFile.map { "\($0.commit):\($0.path)" }
+        return renderedActiveCommitFile != commitKey
     }
 
     /// Apply the cheap status snapshot independently of the slower history and
@@ -1049,6 +1091,16 @@ final class GitPanelViewController: NSViewController {
 
     // MARK: - Regression-test surface
 
+    /// Rows rebuilt since the last check — the count a refresh must not raise
+    /// when nothing changed.
+    var reloadWouldRebuildForTesting: Bool { rowsNeedReload }
+    var rowCountForTesting: Int { table.numberOfRows }
+    func applyStatusForTesting(_ status: GitService.Status, in directory: URL) {
+        _ = view
+        applyStatus(status, in: directory)
+        reloadRows()
+    }
+
     var discardAllEnabledForTesting: Bool {
         _ = view
         return discardAllButton.isEnabled
@@ -1160,6 +1212,9 @@ extension GitPanelViewController: NSTableViewDelegate {
         cell.configure(entry: entry, onDiscard: { [weak self] in
             guard let self, let directory = self.directory else { return }
             self.discardChanges(entry, in: directory)
+        }, onOpen: { [weak self] in
+            guard let self, let directory = self.directory else { return }
+            self.onOpenFile?(directory.appendingPathComponent(entry.path))
         })
         return cell
     }
@@ -1245,7 +1300,35 @@ private final class GitHistoryFileCell: DrawnSidebarCell {
     }
 }
 
+/// Test seam: the row type is private, so expose a probe that builds one.
+final class GitChangeCellProbe: NSView {
+    private let cell = GitChangeCell()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(cell)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        cell.frame = bounds
+        cell.layoutSubtreeIfNeeded()
+    }
+
+    func configureProbe(path: String, onOpen: @escaping () -> Void) {
+        cell.configure(entry: GitService.Status.Entry(code: " M", path: path, originalPath: nil),
+                       onDiscard: {}, onOpen: onOpen)
+    }
+
+    var buttonFramesForTesting: [NSRect] { cell.buttonFramesForTesting }
+    func openForTesting() { cell.openForTesting() }
+}
+
 private final class GitChangeCell: DrawnSidebarCell {
+    /// Opens the file itself. Clicking the row shows the diff, which is the
+    /// right default, but jumping to the source was two steps until now.
+    private let openButton = NSButton()
     private let discardButton = NSButton()
     private var status = ""
     private var icon: SidebarIcon?
@@ -1253,28 +1336,38 @@ private final class GitChangeCell: DrawnSidebarCell {
     private var folder = ""
     private var statusColor = NSColor.clear
     private var onDiscard: (() -> Void)?
+    private var onOpen: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        discardButton.title = ""
-        discardButton.image = Theme.symbol(
-            "arrow.uturn.backward", accessibilityDescription: "Discard file changes",
-            pointSize: 11, weight: .medium)
-        discardButton.imagePosition = .imageOnly
-        discardButton.imageScaling = .scaleProportionallyDown
-        discardButton.bezelStyle = .inline
-        discardButton.isBordered = false
-        discardButton.toolTip = "Discard file changes"
-        discardButton.setAccessibilityLabel("Discard file changes")
-        discardButton.target = self
-        discardButton.action = #selector(discardAction)
-        addSubview(discardButton)
+        configure(button: openButton, symbol: "doc.text",
+                  label: "Open file", action: #selector(openAction))
+        configure(button: discardButton, symbol: "arrow.uturn.backward",
+                  label: "Discard file changes", action: #selector(discardAction))
+    }
+
+    private func configure(button: NSButton, symbol: String,
+                           label: String, action: Selector) {
+        button.title = ""
+        button.image = Theme.symbol(symbol, accessibilityDescription: label,
+                                    pointSize: 11, weight: .medium)
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        button.target = self
+        button.action = action
+        addSubview(button)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(entry: GitService.Status.Entry, onDiscard: @escaping () -> Void) {
+    func configure(entry: GitService.Status.Entry, onDiscard: @escaping () -> Void,
+                   onOpen: @escaping () -> Void) {
         self.onDiscard = onDiscard
+        self.onOpen = onOpen
         status = entry.displayCode
         statusColor = entry.isUntracked ? Theme.green : Theme.yellow
         icon = .file(URL(fileURLWithPath: entry.path))
@@ -1288,9 +1381,13 @@ private final class GitChangeCell: DrawnSidebarCell {
     override func layout() {
         super.layout()
         // A small tree_line_height can leave the row shorter than the button.
+        // Discard first, then Open: the destructive one is not the one under
+        // the pointer when reaching for the edge of the row.
         let side = min(24, floor(bounds.height))
-        discardButton.frame = NSRect(x: max(0, bounds.width - 6 - side),
-                                     y: floor((bounds.height - side) / 2),
+        let y = floor((bounds.height - side) / 2)
+        openButton.frame = NSRect(x: max(0, bounds.width - 6 - side), y: y,
+                                  width: side, height: side)
+        discardButton.frame = NSRect(x: max(0, openButton.frame.minX - 2 - side), y: y,
                                      width: side, height: side)
     }
 
@@ -1305,11 +1402,15 @@ private final class GitChangeCell: DrawnSidebarCell {
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
             in: NSRect(x: 44, y: 0,
-                       width: max(0, bounds.width - 78), height: bounds.height),
+                       width: max(0, discardButton.frame.minX - 50), height: bounds.height),
             gap: 5, primaryLineBreak: .byTruncatingMiddle)
     }
 
     @objc private func discardAction() { onDiscard?() }
+    @objc private func openAction() { onOpen?() }
+
+    var buttonFramesForTesting: [NSRect] { [discardButton.frame, openButton.frame] }
+    func openForTesting() { onOpen?() }
 }
 
 private final class GitBranchCell: DrawnSidebarCell {

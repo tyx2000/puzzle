@@ -46,6 +46,11 @@ enum RegressionTests {
         try testActivityBarUsesTextLabels()
         try testAyuDarkTheme()
         try testDiffHeaderStepsThroughChanges()
+        try testGitLineChangeMarks()
+        try testThemeIsReadyBeforeAnyView()
+        try testGutterMarksUncommittedChanges()
+        try testChangesRowsSurviveRefreshes()
+        try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
         print("Regression tests passed")
@@ -344,6 +349,24 @@ enum RegressionTests {
         pane.jumpToLine(2, column: 999)
         try expect(pane.caretLocationForTesting == "first line\nsecond line".count,
                    "a column past the line did not clamp to its end")
+
+        // A pathological query (one letter in a large file) counts every match
+        // but stops retaining ranges, so the find bar's memory is bounded.
+        let crowded = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        crowded.textStorage?.setAttributedString(NSAttributedString(
+            string: String(repeating: "a\n", count: FindBarView.maxRetainedMatches + 500),
+            attributes: Theme.textAttributes(color: Theme.foreground)))
+        let crowdedBar = FindBarView(frame: .zero)
+        crowdedBar.attach(to: crowded)
+        crowdedBar.setQuery("a")
+        try expect(crowdedBar.retainedMatchCountForTesting == FindBarView.maxRetainedMatches,
+                   "the find bar retained \(crowdedBar.retainedMatchCountForTesting) ranges")
+        try expect(crowdedBar.totalMatchCountForTesting == FindBarView.maxRetainedMatches + 500,
+                   "the count stopped counting at the cap instead of reporting the truth")
+        crowdedBar.clearHighlights()
+        try expect(crowdedBar.retainedMatchCountForTesting == 0
+                    && crowdedBar.totalMatchCountForTesting == 0,
+                   "clearing left the match bookkeeping behind")
 
         // The panel keeps the keyboard contract: arrows move, Return accepts.
         let panel = PalettePanel()
@@ -706,6 +729,26 @@ enum RegressionTests {
             .out.split(separator: "\0").map(String.init)
         try expect(stillStaged == ["outside.txt"],
                    "commit disturbed staged changes outside the project")
+
+        // Each changed file offers a way to the source, not only to its diff.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        var openedFile: URL?
+        panel.onOpenFile = { openedFile = $0 }
+        panel.setDirectory(project)
+        let cell = GitChangeCellProbe()
+        cell.frame = NSRect(x: 0, y: 0, width: 260, height: Theme.treeRowHeight())
+        cell.configureProbe(path: "Sources/App.swift",
+                            onOpen: { openedFile = project.appendingPathComponent("Sources/App.swift") })
+        cell.layoutSubtreeIfNeeded()
+        let cellButtons = cell.buttonFramesForTesting
+        try expect(cellButtons.count == 2 && cellButtons[0].maxX <= cellButtons[1].minX,
+                   "the open button does not sit before discard: \(cellButtons)")
+        try expect(cellButtons.allSatisfy { $0.width > 0 && $0.maxX <= cell.bounds.width },
+                   "a row button is off the row: \(cellButtons)")
+        cell.openForTesting()
+        try expect(openedFile?.lastPathComponent == "App.swift",
+                   "the open button did not ask for the file: \(String(describing: openedFile))")
 
         // Discarding everything restores each tracked file to HEAD in one pass.
         let firstFile = project.appendingPathComponent("bulk-one.txt")
@@ -2123,6 +2166,433 @@ enum RegressionTests {
         try expect(pane.currentLineBandRectForTesting == nil
                     && ruler.currentLineBandRect() == nil,
                    "a selection still painted an active-line band")
+    }
+
+    /// The side-by-side diff mode behind the header's rightmost button.
+    /// Uncommitted changes marked in the gutter of the file itself.
+    private static func testGitLineChangeMarks() throws {
+        // -U0 hunks: an addition, a modification, and a deletion.
+        let diff = """
+        diff --git a/App.swift b/App.swift
+        --- a/App.swift
+        +++ b/App.swift
+        @@ -3,0 +4,2 @@ func f() {
+        +added one
+        +added two
+        @@ -10 +11 @@
+        -was this
+        +is now this
+        @@ -20,2 +20,0 @@
+        -gone one
+        -gone two
+        """
+        let changes = GitLineChanges.parse(diff)
+        try expect(changes.count == 3, "expected three marks, got \(changes.count)")
+
+        let inserted = changes[0]
+        try expect(inserted.kind == .added && inserted.lines == 4...5,
+                   "the insertion is not marked on its own lines: \(inserted)")
+        let edited = changes[1]
+        try expect(edited.kind == .modified && edited.lines == 11...11
+                    && edited.removed == ["was this"] && edited.added == ["is now this"],
+                   "the rewritten line did not keep both sides: \(edited)")
+        let removedRun = changes[2]
+        // Git reports a pure deletion as `+N,0`, where N is the line it came
+        // *after* — verified against git itself — so the mark belongs on N+1,
+        // the line that now sits where the deleted ones were.
+        try expect(removedRun.kind == .deleted && removedRun.lines == 21...21
+                    && removedRun.removed.count == 2 && removedRun.added.isEmpty,
+                   "the deletion is not pinned to the following line: \(removedRun)")
+
+        // Lookup is by line, which is what the gutter and the popover both use.
+        try expect(GitLineChanges.change(at: 5, in: changes)?.kind == .added,
+                   "the second inserted line is not covered")
+        try expect(GitLineChanges.change(at: 6, in: changes) == nil,
+                   "an untouched line claims a change")
+
+        // Against a real repository, a saved edit shows up on the right line.
+        let root = try temporaryDirectory("gutter-marks")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        let file = root.appendingPathComponent("App.swift")
+        try Data("one\ntwo\nthree\n".utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+        try expect(GitService.commit("base", in: root).code == 0, "commit failed")
+        try Data("one\nTWO\nthree\nfour\n".utf8).write(to: file)
+        let live = GitLineChanges.changes(for: file, in: root)
+        try expect(live.contains { $0.kind == .modified && $0.lines == 2...2 },
+                   "the edited line is not marked: \(live)")
+        try expect(live.contains { $0.kind == .added && $0.lines == 4...4 },
+                   "the appended line is not marked: \(live)")
+        // A file with nothing uncommitted has no marks at all.
+        _ = GitService.stageAll(in: root)
+        _ = GitService.commit("second", in: root)
+        try expect(GitLineChanges.changes(for: file, in: root).isEmpty,
+                   "a clean file still reports marks")
+
+        // The popover says what happened, in both directions.
+        let popover = GitChangePopoverController(change: edited)
+        _ = popover.view
+        let text = popover.contentForTesting
+        try expect(text.contains("Line 11 modified") && text.contains("- was this")
+                    && text.contains("+ is now this"),
+                   "the popover does not explain the change: \(text.debugDescription)")
+
+        // Clicking the gutter opens that change, and only where one exists.
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let ruler = LineNumberRulerView(textView: textView)
+        ruler.gitChanges = changes
+        var opened: GitLineChanges.Change?
+        ruler.onChangeClicked = { change, _ in opened = change }
+        try expect(ruler.clickChangeForTesting(at: 11), "line 11 has no mark to click")
+        try expect(opened == edited, "the click opened the wrong change")
+        try expect(!ruler.clickChangeForTesting(at: 6),
+                   "an unchanged line responded to a click")
+    }
+
+    /// The Changes rows must survive the refreshes that fire while you click.
+    /// Views cache the colours they are built with, so the theme has to be
+    /// loaded before the first one exists.
+    private static func testThemeIsReadyBeforeAnyView() throws {
+        let settings = Settings.shared
+        let savedTheme = settings.theme
+        defer { settings.theme = savedTheme; Theme.invalidateCaches() }
+
+        // Stand in for "the app was started by opening a folder": the palette is
+        // whatever the delegate prepared, and a pane built afterwards must be
+        // painted in it rather than in the default one.
+        settings.theme = .ayuDark
+        Theme.invalidateCaches()
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        try expect(sameColor(pane.editorBackgroundForTesting, Theme.editorBackground),
+                   "a pane built after the theme loaded is painted in another palette")
+        try expect(sameColor(pane.editorBackgroundForTesting, Theme.panelBackground),
+                   "the code area is not the panel's surface under Ayu")
+
+        // The band on the active line is the tree's active row, and it is
+        // lighter than the code behind it — the two must not swap.
+        func luminance(_ color: NSColor) -> CGFloat {
+            guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+            return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        }
+        try expect(sameColor(Theme.lineHighlight, Theme.activeRow),
+                   "the active line is not the tree's active row")
+        try expect(luminance(Theme.lineHighlight) > luminance(Theme.editorBackground),
+                   "the active line is darker than the code area, so they read as swapped")
+
+        // The delegate prepares them before any window: openFiles: arrives
+        // first when Finder or `pz` starts the app with a project.
+        let delegate = AppDelegate()
+        delegate.applicationWillFinishLaunching(
+            Notification(name: NSApplication.willFinishLaunchingNotification))
+        try expect(delegate.settingsPreparedForTesting,
+                   "the theme is not loaded before the first window can be built")
+    }
+
+    /// Uncommitted changes are marked in the gutter, and a mark opens the diff
+    /// behind it.
+    private static func testGutterMarksUncommittedChanges() throws {
+        let root = try temporaryDirectory("gutter-marks")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "T"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        let file = root.appendingPathComponent("sample.swift")
+        try Data("one\ntwo\nthree\nfour\nfive\n".utf8).write(to: file)
+        _ = GitService.commit("base", in: root)
+        // Line 2 modified, "four" deleted, a line added at the end. The
+        // deletion is kept away from the edit: adjacent ones are a single hunk
+        // to Git, and correctly report as one modification.
+        try Data("one\nTWO CHANGED\nthree\nfive\nsix added\n".utf8).write(to: file)
+
+        // Puzzle stages changes as they are made, so the marks must come from
+        // a diff against HEAD — against the index they would all vanish, which
+        // is exactly what happened in normal use.
+        _ = GitService.stageAll(in: root)
+        let changes = GitLineChanges.changes(for: file, in: root)
+        let kinds = changes.map(\.kind)
+        try expect(kinds.contains(.modified), "a modified line was not marked: \(changes)")
+        try expect(kinds.contains(.added), "an added line was not marked: \(changes)")
+        try expect(kinds.contains(.deleted), "a deletion was not marked: \(changes)")
+        guard let modified = changes.first(where: { $0.kind == .modified }) else {
+            throw Failure(description: "no modified change")
+        }
+        try expect(modified.removed == ["two"] && modified.added == ["TWO CHANGED"],
+                   "the modified mark does not carry both sides: \(modified)")
+
+        // They reach the pane and the gutter, off the main thread.
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.repositoryRoot = root
+        pane.open(url: file)
+        pane.view.layoutSubtreeIfNeeded()
+        let deadline = Date().addingTimeInterval(5)
+        while pane.gitLineChangesForTesting.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(pane.gitLineChangesForTesting.count == changes.count,
+                   "the editor shows \(pane.gitLineChangesForTesting.count) of "
+                    + "\(changes.count) marks")
+        guard let ruler = pane.lineNumberRulerForTesting else {
+            throw Failure(description: "the editor has no gutter")
+        }
+        try expect(ruler.gitChanges.count == changes.count,
+                   "the gutter did not receive the marks")
+
+        // The ribbon is on the outer edge, clear of the fold arrow's column,
+        // so a changed line can still be folded.
+        // The ruler only paints the fragments inside the text view's visible
+        // rect, so give it a laid-out window before asking what it drew.
+        window.setContentSize(NSSize(width: 700, height: 300))
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        try expect(!ruler.changeMarkBarsForTesting.isEmpty,
+                   "the gutter drew no ribbons, so the geometry below proves nothing")
+        // Three targets share the gutter and none may overlap: the split
+        // divider's drag handle reaches in from the left, the fold arrow owns
+        // the right, and the ribbon plus the numbers sit between them.
+        let arrowColumn = ruler.ruleThickness - LineNumberRulerView.foldArrowColumn
+        let dividerReach = LineNumberRulerView.dividerReach
+        try expect(dividerReach >= SplitDividerHandleView.hitWidth / 2,
+                   "the ribbon column starts inside the divider's drag handle")
+        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.maxX <= arrowColumn },
+                   "a change target reaches into the fold arrow's column: "
+                    + "\(ruler.changeMarkTargetsForTesting)")
+        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.minX >= dividerReach },
+                   "a change target reaches into the divider's drag handle: "
+                    + "\(ruler.changeMarkTargetsForTesting)")
+        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.width >= 20 },
+                   "the change target is too small to hit: "
+                    + "\(ruler.changeMarkTargetsForTesting.map(\.width))")
+        try expect(ruler.changeMarkBarsForTesting.allSatisfy { $0.minX == dividerReach },
+                   "the ribbon is not just past the divider handle: "
+                    + "\(ruler.changeMarkBarsForTesting)")
+        // Four-digit line numbers still fit between the ribbon and the arrow.
+        let numbers = LineNumberRulerView.numberColumn
+        let digits = ("8888" as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
+        try expect(numbers.end - numbers.start >= digits,
+                   "the number column lost too much room: "
+                    + "\(numbers.end - numbers.start)pt for \(digits)pt of digits")
+
+
+        // Clicking a marked line asks for its diff; an unmarked one does not.
+        try expect(ruler.clickChangeForTesting(at: modified.lines.lowerBound),
+                   "clicking a marked line did nothing")
+        try expect(!ruler.clickChangeForTesting(at: 1),
+                   "an unchanged line offered a change to open")
+
+        // The popover shows what HEAD had and what is there now.
+        let popover = GitChangePopoverController(change: modified)
+        _ = popover.view
+        try expect(popover.contentForTesting.contains("two")
+                    && popover.contentForTesting.contains("TWO CHANGED"),
+                   "the popover does not show both sides: \(popover.contentForTesting)")
+
+        // Committing clears them.
+        _ = GitService.commit("second", in: root)
+        pane.refreshGitLineChanges()
+        let cleared = Date().addingTimeInterval(5)
+        while !pane.gitLineChangesForTesting.isEmpty && Date() < cleared {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(pane.gitLineChangesForTesting.isEmpty,
+                   "the marks outlived the commit that made them history")
+    }
+
+    private static func testChangesRowsSurviveRefreshes() throws {
+        let directory = try temporaryDirectory("changes-rows")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let panel = GitPanelViewController()
+        _ = panel.view
+
+        func entry(_ path: String, _ code: String) -> GitService.Status.Entry {
+            GitService.Status.Entry(code: code, path: path, originalPath: nil)
+        }
+        let status = GitService.Status(branch: "main",
+                                       entries: [entry("a.swift", " M"), entry("b.swift", "??")],
+                                       isRepo: true, userName: "T",
+                                       ahead: 0, hasUpstream: true)
+        panel.applyStatusForTesting(status, in: directory)
+        try expect(!panel.reloadWouldRebuildForTesting,
+                   "the rows were left needing a rebuild right after one")
+
+        // The same status again — a build touching files fires these constantly.
+        panel.applyStatusForTesting(status, in: directory)
+        try expect(!panel.reloadWouldRebuildForTesting,
+                   "an identical refresh still wanted to rebuild the rows, "
+                    + "which is what swallowed clicks on the row buttons")
+
+        // A real change still rebuilds.
+        let changed = GitService.Status(branch: "main",
+                                        entries: [entry("a.swift", " M")],
+                                        isRepo: true, userName: "T",
+                                        ahead: 0, hasUpstream: true)
+        panel.applyStatusForTesting(changed, in: directory)
+        try expect(panel.rowCountForTesting == 1,
+                   "a changed status did not reach the table: \(panel.rowCountForTesting)")
+
+        // Discard sits before Open, and neither overlaps the name.
+        let cell = GitChangeCellProbe()
+        cell.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        cell.configureProbe(path: "Sources/App.swift", onOpen: {})
+        cell.layoutSubtreeIfNeeded()
+        let frames = cell.buttonFramesForTesting
+        try expect(frames.count == 2 && frames[0].maxX <= frames[1].minX,
+                   "Open is not after Discard: \(frames)")
+        try expect(frames.allSatisfy { $0.maxX <= cell.bounds.width },
+                   "a row button hangs off the row: \(frames)")
+    }
+
+    private static func testSideBySideDiff() throws {
+        let diff = """
+        diff --git a/Sources/App.swift b/Sources/App.swift
+        --- a/Sources/App.swift
+        +++ b/Sources/App.swift
+        @@ -10,4 +10,5 @@ func f() {
+         context ten
+        -removed eleven
+        +added eleven
+        +added twelve
+         context twelve
+        @@ -40,2 +40,1 @@
+         context forty
+        -gone forty-one
+        """
+        let rows = SideBySideDiff.rows(from: diff)
+        // Hunk header, context, the paired change block, context, hunk, …
+        try expect(rows.first?.kind == .hunk,
+                   "the first row is not the hunk header: \(String(describing: rows.first))")
+        let firstContext = rows[1]
+        try expect(firstContext.leftNumber == 10 && firstContext.rightNumber == 10
+                    && firstContext.leftText == "context ten",
+                   "context lines are not numbered on both sides: \(firstContext)")
+
+        // One removed against two added: the pair lines up, the extra addition
+        // gets an empty left side rather than shifting everything down.
+        let changes = rows.filter(\.isChange)
+        try expect(changes.count == 3, "expected three changed rows, got \(changes.count)")
+        try expect(changes[0].leftText == "removed eleven"
+                    && changes[0].rightText == "added eleven",
+                   "the rewritten line is not opposite its replacement: \(changes[0])")
+        try expect(changes[1].leftText == nil && changes[1].rightText == "added twelve",
+                   "the extra addition did not get an empty left side: \(changes[1])")
+        try expect(changes[2].leftText == "gone forty-one" && changes[2].rightText == nil,
+                   "a deletion did not get an empty right side: \(changes[2])")
+        // Numbering follows each side independently.
+        try expect(changes[0].leftNumber == 11 && changes[0].rightNumber == 11
+                    && changes[1].rightNumber == 12,
+                   "the two sides do not count their own lines: \(changes.map(\.rightNumber))")
+        // The step buttons see the same two blocks the unified view does.
+        try expect(SideBySideDiff.changeBlockStarts(rows).count == 2,
+                   "change blocks: \(SideBySideDiff.changeBlockStarts(rows))")
+
+        // The three controls are comfortable targets, not glyph-sized ones, and
+        // they do not overlap.
+        let sized = DiffHeaderView()
+        sized.frame = NSRect(x: 0, y: 0, width: 420, height: DiffHeaderView.height)
+        sized.layoutSubtreeIfNeeded()
+        let frames = sized.buttonFramesForTesting
+        try expect(frames.allSatisfy { $0.width >= 28 && $0.height >= 20 },
+                   "the header buttons are too small to hit: \(frames)")
+        try expect(zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX },
+                   "the header buttons overlap: \(frames)")
+        try expect(frames.allSatisfy { $0.maxX <= sized.bounds.width },
+                   "a header button hangs off the strip: \(frames)")
+
+        // Hovering one gives it a background of its own.
+        let button = DiffHeaderButton()
+        try expect(!button.isHoveredForTesting, "a button starts out hovered")
+        button.setHoveredForTesting(true)
+        try expect(button.isHoveredForTesting, "hover state is not tracked")
+
+        // The header offers the other mode, and says which one that is.
+        let header = DiffHeaderView()
+        try expect(header.modeForTesting == .unified, "diffs do not start unified")
+        var toggles = 0
+        header.onToggleMode = { toggles += 1 }
+        header.toggleModeForTesting()
+        try expect(toggles == 1, "the mode button is not wired")
+        header.setMode(.sideBySide)
+        try expect(header.modeLabelForTesting == "Show as one file",
+                   "the button does not name what it switches to: "
+                    + "\(String(describing: header.modeLabelForTesting))")
+
+        // In the pane, switching swaps which view is on screen and keeps the
+        // change count, then steps through the same blocks.
+        let directory = try temporaryDirectory("side-by-side")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        let url = URL(string:
+            "puzzle-diff:///repo/.puzzle-diff-preview?window=sbs&path=Sources/App.swift")!
+        DocumentStore.shared.setVirtualDocument(url: url, text: diff,
+                                                displayName: "App.swift (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(!pane.sideBySideVisibleForTesting,
+                   "a diff opened side by side without being asked")
+
+        pane.toggleDiffModeForTesting()
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(pane.sideBySideVisibleForTesting,
+                   "the mode button did not bring up the two-column view")
+        try expect(pane.diffHeaderForTesting.summaryForTesting == "2 changes",
+                   "the header lost its count in side-by-side: "
+                    + pane.diffHeaderForTesting.summaryForTesting)
+        // A fresh diff starts at its first line: a clip view left alone keeps
+        // its origin at the bottom, which opened every diff on its last row.
+        guard let geometry = pane.sideBySideGeometryForTesting else {
+            throw Failure(description: "the side-by-side view reported no geometry")
+        }
+        try expect(geometry.rows == rows.count,
+                   "the view shows \(geometry.rows) of \(rows.count) parsed rows")
+        try expect(geometry.contentHeight >= CGFloat(rows.count) * Theme.lineMetrics().target - 1,
+                   "the table is shorter than its rows: \(geometry)")
+        try expect(geometry.scrollOffset == 0,
+                   "the diff opened scrolled to \(geometry.scrollOffset)")
+        pane.diffHeaderForTesting.clickNextForTesting()
+        try expect(pane.sideBySideBlockForTesting == 0,
+                   "stepping did not move to the first change")
+
+        // A diff taller than the view must actually scroll when stepping, not
+        // merely move an index.
+        var long = "@@ -1,200 +1,200 @@\n"
+        for index in 1...120 { long += " context line \(index)\n" }
+        long += "-old tail\n+new tail\n"
+        for index in 1...40 { long += " trailing \(index)\n" }
+        DocumentStore.shared.setVirtualDocument(url: url, text: long,
+                                                displayName: "App.swift (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        let before = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
+        pane.diffHeaderForTesting.clickNextForTesting()
+        pane.view.layoutSubtreeIfNeeded()
+        let after = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
+        try expect(after > before,
+                   "stepping in side-by-side did not scroll: \(before) -> \(after)")
+        try expect(pane.sideBySideCurrentRowForTesting != nil,
+                   "the change it stepped to is not marked")
+        pane.diffHeaderForTesting.clickNextForTesting()
+        pane.diffHeaderForTesting.clickNextForTesting()
+        try expect(pane.sideBySideBlockForTesting == 0,
+                   "stepping past the last change did not wrap")
+
+        pane.toggleDiffModeForTesting()
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(!pane.sideBySideVisibleForTesting,
+                   "switching back did not restore the single-file view")
     }
 
     private static func testDiffHeaderStepsThroughChanges() throws {

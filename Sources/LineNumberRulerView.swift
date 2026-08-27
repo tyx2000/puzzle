@@ -5,6 +5,41 @@ import AppKit
 /// paragraph style, so their baselines align exactly with the code — and
 /// soft-wrapped continuation lines are skipped.
 final class LineNumberRulerView: NSRulerView {
+    /// Uncommitted changes for the file on screen, marked beside their lines.
+    var gitChanges: [GitLineChanges.Change] = [] {
+        didSet { needsDisplay = true }
+    }
+    /// Asked to explain the change on a line the user clicked.
+    var onChangeClicked: ((GitLineChanges.Change, NSRect) -> Void)?
+    /// Gutter columns, outer edge inward:
+    ///
+    ///     [ divider reach ][ ribbon ][ line numbers ][ fold arrow ]
+    ///
+    /// The first band belongs to the split divider's drag handle, which is
+    /// centred on the boundary and reaches into the editor; anything drawn or
+    /// clicked there is really the resize target. The last belongs to the fold
+    /// arrow. The ribbon and the numbers live between them, so all three
+    /// targets are reachable without fighting each other.
+    static let dividerReach: CGFloat = 8
+    static let changeMarkWidth: CGFloat = 3
+    static let foldArrowColumn: CGFloat = 14
+    /// Where the line numbers start and end inside the gutter.
+    static var numberColumn: (start: CGFloat, end: CGFloat) {
+        (dividerReach + changeMarkWidth + 2, gutterWidth() - foldArrowColumn)
+    }
+
+    /// Wide enough for four digits in the editor's own font, plus the columns
+    /// either side of them. Derived rather than fixed: at the previous 46pt a
+    /// four-digit line number already touched the code, and `buffer_font_size`
+    /// moves the requirement.
+    static func gutterWidth(for font: NSFont = Theme.editorFont()) -> CGFloat {
+        let digits = ceil(("8888" as NSString).size(withAttributes: [.font: font]).width)
+        return dividerReach + changeMarkWidth + 2 + digits + 4 + foldArrowColumn
+    }
+
+    private var changeMarkRects: [(change: GitLineChanges.Change, rect: NSRect)] = []
+    /// Where the ribbon itself was painted, as opposed to its click target.
+    private var changeMarkBars: [NSRect] = []
     private weak var textView: PuzzleTextView?
     private var arrowHitRects: [Int: NSRect] = [:]
     private var foldableRowRects: [Int: NSRect] = [:]
@@ -16,7 +51,7 @@ final class LineNumberRulerView: NSRulerView {
         self.textView = textView
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
-        ruleThickness = 46
+        ruleThickness = Self.gutterWidth()
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Code folding gutter")
@@ -44,7 +79,13 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    @objc private func redraw() { needsDisplay = true }
+    @objc private func redraw() {
+        // The font can change under us (settings.json), and the gutter is sized
+        // from it.
+        let width = Self.gutterWidth()
+        if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
+        needsDisplay = true
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -111,6 +152,12 @@ final class LineNumberRulerView: NSRulerView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        // The fold arrow wins where they overlap; it is the smaller target.
+        if !arrowHitRects.contains(where: { $0.value.insetBy(dx: -3, dy: -3).contains(point) }),
+           let hit = changeMarkRects.first(where: { $0.rect.contains(point) }) {
+            onChangeClicked?(hit.change, hit.rect)
+            return
+        }
         guard let identity = arrowHitRects.first(where: {
             $0.value.insetBy(dx: -3, dy: -3).contains(point)
         })?.key,
@@ -138,6 +185,8 @@ final class LineNumberRulerView: NSRulerView {
         bounds.fill()
         arrowHitRects.removeAll(keepingCapacity: true)
         foldableRowRects.removeAll(keepingCapacity: true)
+        changeMarkRects.removeAll(keepingCapacity: true)
+        changeMarkBars.removeAll(keepingCapacity: true)
 
         let content = textView.string as NSString
         let inset = textView.textContainerInset.height
@@ -168,7 +217,8 @@ final class LineNumberRulerView: NSRulerView {
         let diffNumbers = textView.diffLineNumbers
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
             .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
-        let numberWidth = ruleThickness - 14
+        let numbers = Self.numberColumn
+        let numberWidth = numbers.end
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
             let fragChar = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
             let isLineStart = fragChar.location == 0
@@ -198,24 +248,52 @@ final class LineNumberRulerView: NSRulerView {
                 let value = "\(shown)" as NSString
                 let attributes = lineNo == caretLine ? active : normal
                 let textHeight = value.size(withAttributes: attributes).height
-                let box = NSRect(x: 0, y: y + (fragRect.height - textHeight) / 2,
-                                 width: numberWidth, height: textHeight)
+                let box = NSRect(x: numbers.start,
+                                 y: y + (fragRect.height - textHeight) / 2,
+                                 width: numbers.end - numbers.start,
+                                 height: textHeight)
                 value.draw(in: box, withAttributes: attributes)
+            }
+            // The change ribbon runs along the outer edge of the gutter. It used
+            // to sit against the code, where it shared a column with the fold
+            // arrow and stole its clicks on any line that had changed.
+            if let change = GitLineChanges.change(at: lineNo, in: self.gitChanges) {
+                let markRect = NSRect(x: Self.dividerReach, y: y,
+                                      width: Self.changeMarkWidth,
+                                      height: fragRect.height)
+                change.colour.setFill()
+                if change.kind == .deleted {
+                    // Nothing occupies the line any more, so mark the seam
+                    // rather than the whole row.
+                    let seam = NSRect(x: markRect.minX, y: markRect.minY,
+                                      width: markRect.width, height: 3)
+                    NSBezierPath(roundedRect: seam, xRadius: 1.5, yRadius: 1.5).fill()
+                } else {
+                    NSBezierPath(roundedRect: markRect, xRadius: 1.5, yRadius: 1.5).fill()
+                }
+                self.changeMarkBars.append(markRect)
+                // The ribbon is 3pt wide; the target is the ribbon plus the
+                // number column, which clears the divider handle on one side
+                // and the fold arrow on the other.
+                self.changeMarkRects.append(
+                    (change, NSRect(x: Self.dividerReach, y: y,
+                                    width: numbers.end - Self.dividerReach,
+                                    height: fragRect.height)))
             }
             if let block = foldableByLine[fragChar.location] {
                 let rowRect = NSRect(
                     x: 0, y: y,
                     width: self.ruleThickness, height: fragRect.height)
                 let hitRect = NSRect(
-                    x: self.ruleThickness - 14, y: y,
-                    width: 14, height: fragRect.height)
+                    x: self.ruleThickness - Self.foldArrowColumn, y: y,
+                    width: Self.foldArrowColumn, height: fragRect.height)
                 self.foldableRowRects[block.identity] = rowRect
                 self.arrowHitRects[block.identity] = hitRect
 
                 if self.hoveredBlock == block.identity {
                     let centerY = y + fragRect.height / 2
                     let arrowRect = NSRect(
-                        x: self.ruleThickness - 12,
+                        x: self.ruleThickness - Self.foldArrowColumn + 2,
                         y: centerY - 5,
                         width: 10, height: 10)
                     self.drawFoldArrow(
@@ -259,6 +337,14 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     var clientViewVisibleRectForTesting: NSRect { textView?.visibleRect ?? .zero }
+    var changeMarkCountForTesting: Int { changeMarkRects.count }
+    var changeMarkTargetsForTesting: [NSRect] { changeMarkRects.map(\.rect) }
+    var changeMarkBarsForTesting: [NSRect] { changeMarkBars }
+    func clickChangeForTesting(at line: Int) -> Bool {
+        guard let change = GitLineChanges.change(at: line, in: gitChanges) else { return false }
+        onChangeClicked?(change, NSRect(x: 0, y: 0, width: ruleThickness, height: 20))
+        return true
+    }
 
     private func newlineCount(_ s: NSString, upTo location: Int) -> Int {
         guard location > 0 else { return 0 }

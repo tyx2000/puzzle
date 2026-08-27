@@ -26,9 +26,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return windows.last
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    /// Settings have to be in place before any view exists.
+    ///
+    /// Views cache the colours they are built with, and `openFiles:` — how
+    /// Finder and `pz` start the app with a project — runs *before*
+    /// `applicationDidFinishLaunching`. Loading the theme there meant a window
+    /// opened that way was built against the default palette: the code area
+    /// kept One Dark's grey while everything drawn live used the chosen theme,
+    /// which read as the editor background and the active line swapping places.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        prepareSettings()
+    }
+
+    /// Idempotent: `applicationDidFinishLaunching` still calls it in case a
+    /// future entry point reaches that first.
+    private func prepareSettings() {
+        guard !settingsPrepared else { return }
+        settingsPrepared = true
         Settings.shared.load()
         Theme.applyAppearance()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        prepareSettings()
         LauncherInstaller.installIfNeeded()
         // A settings.json written by an older build lacks options added since;
         // rewrite it with the full documented set, keeping the user's values.
@@ -48,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         applyLaunchArguments(to: controller)
     }
+
+    private var settingsPrepared = false
+    var settingsPreparedForTesting: Bool { settingsPrepared }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
@@ -78,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `pz` command). Each opens in its own window, so `pz` never has to spawn a
     /// second copy of the app — one process, one window per invocation.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        // This can be the first delegate call of the process, before any
+        // window — and therefore any cached colour — exists.
+        prepareSettings()
         var handled = false
         for path in filenames {
             var isDir: ObjCBool = false

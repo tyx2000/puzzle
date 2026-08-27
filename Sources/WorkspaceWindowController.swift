@@ -127,8 +127,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         sidebar.onGitChanged = { [weak self] in
             self?.refreshGit(requireFollowUp: true)
-            // Committing rewrites authorship for the committed lines.
+            // Committing rewrites authorship for the committed lines, and
+            // clears the gutter marks for everything it took.
             self?.editor.invalidateBlame()
+            self?.editor.refreshGitLineChanges()
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.openProjectInTerminal() }
@@ -171,6 +173,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
+        quickOpenIndex = []
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
         DocumentStore.shared.releaseTransientMemory()
@@ -208,6 +211,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func releaseTransientMemory() {
+        // Rebuilt in well under a second the next time ⌘P is used, and on a
+        // large checkout it is the biggest thing this window holds.
+        quickOpenIndex = []
+        palette?.dismiss()
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
     }
@@ -263,6 +270,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         } else {
             reloaded.forEach { editor.invalidateBlame(for: $0) }
         }
+        editor.refreshGitLineChanges()
     }
 
     /// Show a file's git diff in the editor, coloured by DiffHighlighter.
