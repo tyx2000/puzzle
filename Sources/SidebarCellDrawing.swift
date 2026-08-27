@@ -139,18 +139,42 @@ enum SidebarCellDrawing {
             return NSSize(width: diameter, height: diameter)
         }
 
-        /// Centred on the label's cap-height — the line the eye reads the text
-        /// as sitting on — rather than on its line box, which carries ascender
-        /// and descender room the digits and the label never use.
+        /// Centred on the label's *ink* — where its glyphs actually sit.
+        ///
+        /// `font.capHeight` is a nominal metric: in this UI font the drawn caps
+        /// are a point taller than it claims, which left the badge visibly low
+        /// against the word beside it. Measuring the label settles it.
         static func draw(_ value: String, at x: CGFloat, baseline: CGFloat,
-                         labelFont: NSFont, background: NSColor, foreground: NSColor) {
+                         labelFont: NSFont, background: NSColor, foreground: NSColor,
+                         alignedWith label: String = "") {
             guard !value.isEmpty else { return }
             let size = size(value, labelFont: labelFont)
-            let centreY = baseline - labelFont.capHeight / 2
-            let rect = NSRect(x: x, y: (centreY - size.height / 2).rounded(),
+            let centreY = baseline - inkHalfHeight(of: label, font: labelFont)
+            // Half points: a whole device pixel at 2x. Rounding to whole points
+            // shifted the circle up to a point off the text it belongs to,
+            // which is exactly what "not quite centred" looked like.
+            let top = ((centreY - size.height / 2) * 2).rounded() / 2
+            let rect = NSRect(x: (x * 2).rounded() / 2, y: top,
                               width: size.width, height: size.height)
             image(value, labelFont: labelFont, background: background,
                   foreground: foreground)?.draw(in: rect)
+        }
+
+        /// Half the height of the label's drawn glyphs, measured from its
+        /// baseline. Falls back to the nominal cap-height when there is no
+        /// context to measure in.
+        private static func inkHalfHeight(of label: String, font: NSFont) -> CGFloat {
+            guard !label.isEmpty else { return font.capHeight / 2 }
+            let line = CTLineCreateWithAttributedString(
+                NSAttributedString(string: label, attributes: [.font: font]))
+            // Glyph path bounds, which are relative to the baseline and do not
+            // depend on wherever the context's text position happens to be —
+            // `CTLineGetImageBounds` does, and using it put the badge ten points
+            // out. Measuring beats `font.capHeight`, a nominal figure that in
+            // this UI font sits a point below where the caps are actually drawn.
+            let ink = CTLineGetBoundsWithOptions(line, [.useGlyphPathBounds])
+            guard ink.height > 0 else { return font.capHeight / 2 }
+            return (ink.minY + ink.maxY) / 2
         }
 
         /// The badge as an image: drawn in its own flipped space, so the digits
@@ -182,6 +206,45 @@ enum SidebarCellDrawing {
                 return true
             }
         }
+    }
+
+    /// A label with its count badge as one line of text.
+    ///
+    /// Placing the badge by arithmetic against the label's baseline never quite
+    /// landed: the drawn baseline is not the requested one (AppKit adds the
+    /// font's leading), and `capHeight` is a nominal figure this UI font does
+    /// not honour. As an attachment in the same line, the two share a baseline
+    /// by construction and there is nothing left to get wrong.
+    static func labelWithBadge(_ label: String, badge: String, font: NSFont,
+                               colour: NSColor, badgeBackground: NSColor,
+                               badgeForeground: NSColor,
+                               alignment: NSTextAlignment = .left,
+                               lineBreak: NSLineBreakMode = .byTruncatingTail)
+        -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = lineBreak
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: colour, .paragraphStyle: paragraph,
+        ]
+        let result = NSMutableAttributedString(string: label, attributes: attributes)
+        guard !badge.isEmpty,
+              let image = Badge.image(badge, labelFont: font,
+                                      background: badgeBackground,
+                                      foreground: badgeForeground) else { return result }
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        // Centred on the cap-height, measured from the baseline the line itself
+        // establishes.
+        let size = image.size
+        attachment.bounds = NSRect(x: 0, y: (font.capHeight - size.height) / 2,
+                                   width: size.width, height: size.height)
+        result.append(NSAttributedString(string: " ", attributes: attributes))
+        let badgeRun = NSMutableAttributedString(attachment: attachment)
+        badgeRun.addAttribute(.paragraphStyle, value: paragraph,
+                              range: NSRange(location: 0, length: badgeRun.length))
+        result.append(badgeRun)
+        return result
     }
 
     static func icon(_ icon: SidebarIcon?, in rect: NSRect) {

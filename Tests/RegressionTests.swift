@@ -2435,6 +2435,32 @@ enum RegressionTests {
         try expect(SidebarCellDrawing.Badge.size("", labelFont: labelFont) == .zero,
                    "an empty badge still takes room")
 
+        // Label and badge are one line of text, so they cannot drift apart:
+        // the badge is an attachment, and AppKit gives it the line's baseline.
+        let composed = SidebarCellDrawing.labelWithBadge(
+            "Push", badge: "12", font: labelFont, colour: .white,
+            badgeBackground: .gray, badgeForeground: .black)
+        try expect(composed.string.hasPrefix("Push"),
+                   "the label lost its text: \(composed.string.debugDescription)")
+        var attachmentCount = 0
+        var attachmentOffset: CGFloat = 0
+        composed.enumerateAttribute(.attachment,
+                                    in: NSRange(location: 0, length: composed.length)) {
+            value, _, _ in
+            guard let attachment = value as? NSTextAttachment else { return }
+            attachmentCount += 1
+            attachmentOffset = attachment.bounds.origin.y
+        }
+        try expect(attachmentCount == 1, "expected one badge attachment, got \(attachmentCount)")
+        // Raised so its middle sits on the cap-height, not dropped to the baseline.
+        try expect(attachmentOffset < 0,
+                   "the badge sits on the baseline instead of straddling the text")
+        let empty = SidebarCellDrawing.labelWithBadge(
+            "Push", badge: "", font: labelFont, colour: .white,
+            badgeBackground: .gray, badgeForeground: .black)
+        try expect(empty.string == "Push",
+                   "an empty badge still added something: \(empty.string.debugDescription)")
+
         // The digits sit in the middle of the circle, both ways. Measured off
         // the rendered badge rather than trusted to the font metrics.
         for value in ["1", "12", "128"] {
@@ -2468,12 +2494,29 @@ enum RegressionTests {
                         + "\(inkCentre.y) vs \(centre.y)")
         }
 
-        // Nothing to push: the whole control is inert, menu included, and a
-        // click on it does nothing.
+        // Nothing to push: the button itself is inert…
         try expect(!panel.pushEnabledForTesting,
                    "Push is still live with nothing to push")
         try expect(!panel.clickPushForTesting(),
                    "clicking a disabled Push still acted")
+        // …but its menu is not, because that is when fetch and pull matter.
+        try expect(panel.pushMenuEnabledForTesting,
+                   "the menu went dead with nothing to push, taking fetch and pull with it")
+        try expect(panel.pushMenuItemEnabledForTesting("Fetch") == true,
+                   "Fetch is disabled with nothing to push")
+        try expect(panel.pushMenuItemEnabledForTesting("Pull") == true,
+                   "Pull is disabled with nothing to push")
+        try expect(panel.pushMenuItemEnabledForTesting("Commit & Push") == false,
+                   "Commit & Push is offered with nothing to commit")
+
+        // Uncommitted work: Commit & Push comes alive even though Push is not.
+        panel.applyStatusForTesting(status(entries: [entry("a.swift")], ahead: 0),
+                                    in: directory)
+        try expect(!panel.pushEnabledForTesting,
+                   "Push woke up on uncommitted changes, which it cannot send")
+        try expect(panel.pushMenuItemEnabledForTesting("Commit & Push") == true,
+                   "Commit & Push is disabled with changes waiting to be committed")
+        panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
         // Something to push, or a branch with no upstream to push to: live again.
         panel.applyStatusForTesting(status(entries: [], ahead: 1), in: directory)
         try expect(panel.pushEnabledForTesting, "Push is dead with a commit waiting")

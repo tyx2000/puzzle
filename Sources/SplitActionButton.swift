@@ -25,7 +25,14 @@ final class SplitActionButton: NSView {
             needsDisplay = true
         }
     }
-    var isEnabled = true {
+    /// The label half — the action itself.
+    var isPrimaryEnabled = true {
+        didSet { needsDisplay = true }
+    }
+    /// The chevron half. Its menu holds operations that make sense even when
+    /// the action does not (fetch and pull with nothing to push), so the two
+    /// halves are disabled separately.
+    var isMenuEnabled = true {
         didSet { needsDisplay = true }
     }
 
@@ -80,10 +87,19 @@ final class SplitActionButton: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let half: Half? = !isEnabled ? nil : (menuRect.contains(point) ? .menu : .primary)
+        let over: Half? = menuRect.contains(point) ? .menu : .primary
+        let half: Half? = isEnabled(over) ? over : nil
         guard half != hovered else { return }
         hovered = half
         needsDisplay = true
+    }
+
+    private func isEnabled(_ half: Half?) -> Bool {
+        switch half {
+        case .primary: return isPrimaryEnabled
+        case .menu: return isMenuEnabled
+        case nil: return false
+        }
     }
 
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
@@ -94,9 +110,10 @@ final class SplitActionButton: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard isEnabled else { return }
         let point = convert(event.locationInWindow, from: nil)
-        pressed = menuRect.contains(point) ? .menu : .primary
+        let half: Half = menuRect.contains(point) ? .menu : .primary
+        guard isEnabled(half) else { return }
+        pressed = half
         needsDisplay = true
         // The menu opens on press, the way a pull-down does.
         if pressed == .menu, let actionMenu {
@@ -119,10 +136,10 @@ final class SplitActionButton: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: 5, yRadius: 5)
-        // A disabled control keeps its shape but stops looking pressable.
-        (isEnabled ? Theme.activeTab : Theme.inactiveTab).setFill()
+        // A disabled half keeps its shape but stops looking pressable.
+        ((isPrimaryEnabled || isMenuEnabled) ? Theme.activeTab : Theme.inactiveTab).setFill()
         path.fill()
-        if isEnabled, let half = pressed ?? hovered {
+        if let half = pressed ?? hovered, isEnabled(half) {
             Theme.hover.setFill()
             let rect = half == .menu ? menuRect : primaryRect
             NSGraphicsContext.saveGraphicsState()
@@ -130,7 +147,8 @@ final class SplitActionButton: NSView {
             rect.fill()
             NSGraphicsContext.restoreGraphicsState()
         }
-        (isEnabled ? Theme.border : Theme.border.withAlphaComponent(0.6)).setStroke()
+        ((isPrimaryEnabled || isMenuEnabled)
+            ? Theme.border : Theme.border.withAlphaComponent(0.6)).setStroke()
         path.lineWidth = 1
         path.stroke()
 
@@ -139,19 +157,17 @@ final class SplitActionButton: NSView {
         Theme.border.setFill()
         NSRect(x: menuRect.minX, y: 1, width: 1, height: bounds.height - 2).fill()
 
-        let ink = isEnabled ? Theme.foreground : Theme.dimText
-        let font = labelFont
-        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: font]).width)
-        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: primaryRect)
-        SidebarCellDrawing.text(title, font: font, color: ink, baseline: baseline,
-                                in: NSRect(x: Self.horizontalPadding, y: 0,
-                                           width: titleWidth, height: bounds.height))
-        SidebarCellDrawing.Badge.draw(
-            badge, at: Self.horizontalPadding + titleWidth + SidebarCellDrawing.Badge.gap,
-            baseline: baseline, labelFont: font,
-            background: Theme.activeRow, foreground: ink)
+        let ink = isPrimaryEnabled ? Theme.foreground : Theme.dimText
+        let content = SidebarCellDrawing.labelWithBadge(
+            title, badge: badge, font: labelFont, colour: ink,
+            badgeBackground: Theme.activeRow, badgeForeground: ink)
+        SidebarCellDrawing.attributedText(
+            content, in: NSRect(x: Self.horizontalPadding, y: 0,
+                                width: max(0, primaryRect.width - Self.horizontalPadding),
+                                height: bounds.height))
         drawChevron(in: NSRect(x: menuRect.midX - 4, y: bounds.midY - 2.5,
-                               width: 8, height: 5), colour: ink)
+                               width: 8, height: 5),
+                    colour: isMenuEnabled ? Theme.foreground : Theme.dimText)
     }
 
     /// Stroked rather than drawn from a template image: this view paints its
@@ -180,9 +196,9 @@ final class SplitActionButton: NSView {
     /// Goes through the same enablement check as a real click.
     @discardableResult
     func clickPrimaryForTesting() -> Bool {
-        guard isEnabled else { return false }
+        guard isPrimaryEnabled else { return false }
         onPrimary?()
         return true
     }
-    var menuIsReachableForTesting: Bool { isEnabled && actionMenu != nil }
+    var menuIsReachableForTesting: Bool { isMenuEnabled && actionMenu != nil }
 }

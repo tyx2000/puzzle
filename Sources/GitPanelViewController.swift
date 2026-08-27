@@ -511,14 +511,22 @@ final class GitPanelViewController: NSViewController {
         // How much is waiting rides on the button as a badge, the same shape
         // the Changes tab and the activity bar use for their counts.
         pushControl.badge = aheadCount > 0 ? "\(aheadCount)" : ""
-        // Nothing to push means nothing the control can do — including its
-        // menu, which is all push variants. A branch with no upstream is the
-        // exception: pushing is exactly what sets one up.
-        pushControl.isEnabled = pushIsPossible
+        // Nothing to push disables the button itself, but not its menu: fetch
+        // and pull are exactly what you reach for when you are up to date, and
+        // "Commit & Push" works whenever there is something to commit. A branch
+        // with no upstream can always push — that is what sets one up.
+        pushControl.isPrimaryEnabled = pushIsPossible
+        pushControl.isMenuEnabled = true
         let menu = pushMenu
+        // Each item says for itself whether it can run; AppKit's automatic
+        // enabling would grey them all out, since the panel is the target.
+        menu.autoenablesItems = false
         menu.removeAllItems()
-        menu.addItem(withTitle: "Commit & Push", action: #selector(commitAndPushAction),
-                     keyEquivalent: "")
+        let commitAndPush = NSMenuItem(title: "Commit & Push",
+                                       action: #selector(commitAndPushAction),
+                                       keyEquivalent: "")
+        commitAndPush.isEnabled = !entries.isEmpty
+        menu.addItem(commitAndPush)
         if !remotes.isEmpty {
             menu.addItem(.separator())
             for remote in remotes {
@@ -526,14 +534,26 @@ final class GitPanelViewController: NSViewController {
                                       action: #selector(pushToRemoteAction(_:)),
                                       keyEquivalent: "")
                 item.representedObject = remote.name
+                // Pushing to a named remote is a push: same condition.
+                item.isEnabled = pushIsPossible
                 menu.addItem(item)
             }
         }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Fetch", action: #selector(fetchAction), keyEquivalent: "")
-        menu.addItem(withTitle: "Pull", action: #selector(pullAction), keyEquivalent: "")
+        // Fetch and pull ask the remote what *it* has, so they are useful
+        // precisely when there is nothing local to push.
+        let fetch = NSMenuItem(title: "Fetch", action: #selector(fetchAction), keyEquivalent: "")
+        let pull = NSMenuItem(title: "Pull", action: #selector(pullAction), keyEquivalent: "")
+        fetch.isEnabled = true
+        pull.isEnabled = hasUpstream
+        menu.addItem(fetch)
+        menu.addItem(pull)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Force Push…", action: #selector(forcePushAction), keyEquivalent: "")
+        let force = NSMenuItem(title: "Force Push…", action: #selector(forcePushAction),
+                               keyEquivalent: "")
+        // Rewriting the remote branch needs one to rewrite.
+        force.isEnabled = hasUpstream
+        menu.addItem(force)
         for item in menu.items { item.target = self }
         pushControl.actionMenu = menu
         pushControl.toolTip = aheadCount > 0
@@ -681,7 +701,8 @@ final class GitPanelViewController: NSViewController {
         activeOperationID = id
         operationLocksMessage = lockCommitMessage
         commitButton.isEnabled = false
-        pushControl.isEnabled = false
+        pushControl.isPrimaryEnabled = false
+        pushControl.isMenuEnabled = false
         newBranchButton.isEnabled = false
         remoteButton.isEnabled = false
         table.isEnabled = false
@@ -700,7 +721,8 @@ final class GitPanelViewController: NSViewController {
         guard activeOperationID == id else { return }
         activeOperationID = nil
         commitButton.isEnabled = true
-        pushControl.isEnabled = pushIsPossible
+        pushControl.isPrimaryEnabled = pushIsPossible
+        pushControl.isMenuEnabled = true
         newBranchButton.isEnabled = true
         remoteButton.isEnabled = true
         table.isEnabled = true
@@ -1113,7 +1135,15 @@ final class GitPanelViewController: NSViewController {
     }
     var pushEnabledForTesting: Bool {
         _ = view
-        return pushControl.isEnabled
+        return pushControl.isPrimaryEnabled
+    }
+    var pushMenuEnabledForTesting: Bool {
+        _ = view
+        return pushControl.menuIsReachableForTesting
+    }
+    func pushMenuItemEnabledForTesting(_ title: String) -> Bool? {
+        _ = view
+        return pushControl.actionMenu?.items.first { $0.title == title }?.isEnabled
     }
     func clickPushForTesting() -> Bool {
         _ = view
@@ -1663,19 +1693,12 @@ private final class FlatPanelTabButton: NSView {
         }
         let font = Theme.uiFont(11)
         let ink = isSelected ? Theme.foreground : Theme.dimText
-        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: font]).width)
-        let badgeSize = SidebarCellDrawing.Badge.size(badge, labelFont: font)
-        let total = titleWidth + (badgeSize.width > 0
-                                    ? SidebarCellDrawing.Badge.gap + badgeSize.width : 0)
-        let start = max(0, (bounds.width - total) / 2)
-        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
-        SidebarCellDrawing.text(title, font: font, color: ink, baseline: baseline,
-                                in: NSRect(x: start, y: 0,
-                                           width: titleWidth, height: bounds.height))
-        SidebarCellDrawing.Badge.draw(
-            badge, at: start + titleWidth + SidebarCellDrawing.Badge.gap,
-            baseline: baseline, labelFont: font,
-            background: Theme.activeRow, foreground: Theme.foreground)
+        SidebarCellDrawing.attributedText(
+            SidebarCellDrawing.labelWithBadge(
+                title, badge: badge, font: font, colour: ink,
+                badgeBackground: Theme.activeRow, badgeForeground: Theme.foreground,
+                alignment: .center),
+            in: bounds)
     }
 
     override func mouseDown(with event: NSEvent) {

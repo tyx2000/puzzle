@@ -126,21 +126,12 @@ final class ActivityButton: NSView {
         let font = Theme.uiFont(10.5)
         let ink = isSelected ? Theme.foreground : Theme.dimText
         let content = bounds.insetBy(dx: 4, dy: 0)
-        let badgeSize = SidebarCellDrawing.Badge.size(badge ?? "", labelFont: font)
-        let titleWidth = min(ceil((title as NSString).size(withAttributes: [.font: font]).width),
-                             max(0, content.width - badgeSize.width
-                                    - (badgeSize.width > 0 ? SidebarCellDrawing.Badge.gap : 0)))
-        let total = titleWidth + (badgeSize.width > 0
-                                    ? SidebarCellDrawing.Badge.gap + badgeSize.width : 0)
-        let start = content.minX + max(0, (content.width - total) / 2)
-        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: content)
-        SidebarCellDrawing.text(title, font: font, color: ink, baseline: baseline,
-                                in: NSRect(x: start, y: content.minY,
-                                           width: titleWidth, height: content.height))
-        SidebarCellDrawing.Badge.draw(
-            badge ?? "", at: start + titleWidth + SidebarCellDrawing.Badge.gap,
-            baseline: baseline, labelFont: font,
-            background: Theme.activeRow, foreground: Theme.foreground)
+        SidebarCellDrawing.attributedText(
+            SidebarCellDrawing.labelWithBadge(
+                title, badge: badge ?? "", font: font, colour: ink,
+                badgeBackground: Theme.activeRow, badgeForeground: Theme.foreground,
+                alignment: .center),
+            in: content)
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
