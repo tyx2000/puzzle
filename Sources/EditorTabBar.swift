@@ -89,6 +89,10 @@ final class EditorTabBar: NSView {
         needsDisplay = true
     }
 
+    static var selectedColoursForTesting: (surface: NSColor, ink: NSColor) {
+        (Theme.selectedControl, Theme.selectedControlText)
+    }
+
     func reload(tabs: [TabInfo], active: Int) {
         while pills.count > tabs.count {
             pills.removeLast().removeFromSuperview()
@@ -187,10 +191,11 @@ final class TabPillView: NSView {
         self.active = active
         label.stringValue = modified ? "\(title) ●" : title
         label.font = Theme.uiFont(11.5)
-        // Selection is communicated solely by the active tab surface. Keeping
-        // the foreground stable avoids making inactive file names look disabled.
-        label.textColor = Theme.foreground
-        closeButton.contentTintColor = Theme.foreground
+        // The open file reads like the selected item everywhere else does: its
+        // own surface and its own ink. The rest stay legible rather than
+        // greyed, so the strip does not look half-disabled.
+        label.textColor = active ? Theme.selectedControlText : Theme.foreground
+        closeButton.contentTintColor = active ? Theme.selectedControlText : Theme.foreground
         toolTip = path
         needsDisplay = true
         needsLayout = true
@@ -211,7 +216,7 @@ final class TabPillView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard active else { return }
-        Theme.activeTab.setFill()
+        Theme.selectedControl.setFill()
         bounds.fill()
     }
 

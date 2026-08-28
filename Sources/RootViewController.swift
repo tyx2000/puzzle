@@ -10,8 +10,10 @@ final class RootViewController: NSViewController {
     /// Panel width is preserved across panel switches. The floor is what the
     /// Git panel's rows need before names start truncating.
     static let minimumSidebarWidth: CGFloat = 300
+    /// What a window opens at.
+    static let defaultSidebarWidth: CGFloat = 500
     private var minimumSidebarWidth: CGFloat { Self.minimumSidebarWidth }
-    private var lastSidebarWidth: CGFloat = 400
+    private var lastSidebarWidth: CGFloat = RootViewController.defaultSidebarWidth
     /// Owns the panel width so switching panels can never change it. Dragging the
     /// divider updates its constant, so the divider still works.
     private var sidebarWidthConstraint: NSLayoutConstraint!

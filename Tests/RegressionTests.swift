@@ -55,6 +55,7 @@ enum RegressionTests {
         try testGutterMarksUncommittedChanges()
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
+        try testSelectedControlsAgree()
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
@@ -2834,6 +2835,47 @@ enum RegressionTests {
         try expect(ruler.changeMarkBarsForTesting.allSatisfy { $0.minX == dividerReach },
                    "the ribbon is not just past the divider handle: "
                     + "\(ruler.changeMarkBarsForTesting)")
+        // Under the pointer the ribbon grows to the right, into the gap it was
+        // given — never under the numbers.
+        try expect(LineNumberRulerView.changeMarkHoverWidth
+                    > LineNumberRulerView.changeMarkWidth,
+                   "the ribbon does not widen on hover")
+        try expect(dividerReach + LineNumberRulerView.changeMarkHoverWidth
+                    <= LineNumberRulerView.numberColumn.start,
+                   "the hovered ribbon reaches into the line numbers")
+        // The width eases between the two sizes rather than jumping.
+        try expect(LineNumberRulerView.markWidth(progress: 0)
+                    == LineNumberRulerView.changeMarkWidth,
+                   "the transition does not start at the resting width")
+        try expect(LineNumberRulerView.markWidth(progress: 1)
+                    == LineNumberRulerView.changeMarkHoverWidth,
+                   "the transition does not end at the hovered width")
+        let midpoint = LineNumberRulerView.markWidth(progress: 0.5)
+        try expect(midpoint > LineNumberRulerView.changeMarkWidth
+                    && midpoint < LineNumberRulerView.changeMarkHoverWidth,
+                   "the midpoint is outside the two widths: \(midpoint)")
+        try expect(midpoint > (LineNumberRulerView.changeMarkWidth
+                                + LineNumberRulerView.changeMarkHoverWidth) / 2,
+                   "the easing is not front-loaded, so the ribbon lags the pointer")
+        try expect(LineNumberRulerView.markWidth(progress: -1)
+                    == LineNumberRulerView.changeMarkWidth
+                    && LineNumberRulerView.markWidth(progress: 2)
+                        == LineNumberRulerView.changeMarkHoverWidth,
+                   "progress outside 0...1 is not clamped")
+
+        ruler.hoverChangeForTesting(at: 2)
+        try expect(ruler.hoverIsAnimatingForTesting,
+                   "hovering did not start the transition")
+        // Let it run rather than reading a half-drawn frame.
+        ruler.settleHoverForTesting()
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        let hovered = ruler.changeMarkBarsForTesting
+        try expect(hovered.contains { $0.width == LineNumberRulerView.changeMarkHoverWidth },
+                   "hovering a change did not widen its ribbon: \(hovered.map(\.width))")
+        try expect(hovered.contains { $0.width == LineNumberRulerView.changeMarkWidth },
+                   "every ribbon widened, not just the hovered one: \(hovered.map(\.width))")
+        ruler.hoverChangeForTesting(at: nil)
         // Four-digit line numbers still fit between the ribbon and the arrow.
         let numbers = LineNumberRulerView.numberColumn
         let digits = ("8888" as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
@@ -2958,6 +3000,54 @@ enum RegressionTests {
         try expect(twoLine - textBlock <= Theme.treeRowHeight()
                     - ceil(primaryFont.ascender - primaryFont.descender) + 1,
                    "a two-line row carries more padding than a one-line row")
+    }
+
+    /// The three strips that show a selection — the activity bar, the Git
+    /// panel's tabs, the file tabs — say it the same way, and loudly enough.
+    private static func testSelectedControlsAgree() throws {
+        let settings = Settings.shared
+        let saved = settings.theme
+        defer { settings.theme = saved; Theme.invalidateCaches() }
+
+        func luminance(_ colour: NSColor) -> CGFloat {
+            guard let c = colour.usingColorSpace(.sRGB) else { return 0 }
+            return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        }
+
+        for theme in [Theme.Name.one, .ayuDark] {
+            settings.theme = theme
+            Theme.invalidateCaches()
+            let strips = [ActivityBarView.selectedColoursForTesting,
+                          EditorTabBar.selectedColoursForTesting,
+                          GitPanelViewController.selectedTabColoursForTesting]
+            for strip in strips.dropFirst() {
+                try expect(sameColor(strip.surface, strips[0].surface)
+                            && sameColor(strip.ink, strips[0].ink),
+                           "\(theme.rawValue): the strips disagree about selection")
+            }
+            let surface = luminance(Theme.selectedControl)
+            // Against the bar it sits on. `activeTab` was two percent away,
+            // which read as nothing at all.
+            try expect(abs(surface - luminance(Theme.barBackground)) > 0.05,
+                       "\(theme.rawValue): the selected surface barely differs from its bar")
+            try expect(abs(surface - luminance(Theme.panelBackground)) > 0.05,
+                       "\(theme.rawValue): the selected surface barely differs from the panel")
+            try expect(abs(surface - luminance(Theme.activeTab)) > 0.02,
+                       "\(theme.rawValue): selection fell back to the old, subtler surface")
+            try expect(abs(luminance(Theme.selectedControlText) - surface) > 0.35,
+                       "\(theme.rawValue): the selected label is not readable on its surface")
+            // Quiet enough to belong to the same family as the tree's selection
+            // rather than glowing above everything else in the window.
+            try expect(surface <= luminance(Theme.activeRow) + 0.02,
+                       "\(theme.rawValue): selection is brighter than the tree's own")
+        }
+
+        // A window opens with room for the Git panel's rows.
+        try expect(RootViewController.defaultSidebarWidth == 500,
+                   "the sidebar no longer opens at 500pt")
+        try expect(RootViewController.defaultSidebarWidth
+                    >= RootViewController.minimumSidebarWidth,
+                   "the default sidebar width is below its own floor")
     }
 
     private static func testSideBySideDiff() throws {

@@ -14,6 +14,12 @@ final class ActivityBarView: NSView {
 
     private var buttons: [ActivityButton] = []
 
+    /// The colours the selected button paints with, so a test can hold the
+    /// three strips to one another.
+    static var selectedColoursForTesting: (surface: NSColor, ink: NSColor) {
+        (Theme.selectedControl, Theme.selectedControlText)
+    }
+
     /// Repaint after a theme change (the bar draws straight from the theme).
     func refreshAppearance() {
         needsDisplay = true
@@ -117,14 +123,14 @@ final class ActivityButton: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if isSelected {
-            Theme.activeTab.setFill()   // white in light, editor bg in dark
+            Theme.selectedControl.setFill()
             bounds.fill()
         }
         // Label and badge are centred as one unit, and the badge sits on the
         // label's own line. Truncates rather than overflowing into the
         // neighbouring slot when the panel is dragged narrow.
         let font = Theme.uiFont(10.5)
-        let ink = isSelected ? Theme.foreground : Theme.dimText
+        let ink = isSelected ? Theme.selectedControlText : Theme.dimText
         let content = bounds.insetBy(dx: 4, dy: 0)
         SidebarCellDrawing.attributedText(
             SidebarCellDrawing.labelWithBadge(

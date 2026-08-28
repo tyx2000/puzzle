@@ -75,6 +75,17 @@ enum Theme {
     // editor without vanishing into the tab strip: it keeps the surface one step
     // lighter, which is the only thing marking which tab is open.
     static var activeTab: NSColor        { themed(0xffffff, 0x282c34, ayu: 0x161a24) }
+    /// Behind whatever is selected in a strip of controls: the panel tab, the
+    /// activity-bar button, the open file's tab. One token so the three read as
+    /// the same state, and far enough from the bar behind them to be seen —
+    /// `activeTab` sits a couple of percent off its background, which under Ayu
+    /// was barely a shadow.
+    /// Kept in the same family as `activeRow`, the tone the file tree already
+    /// selects with, rather than a brighter one of its own.
+    static var selectedControl: NSColor  { themed(0xdcdce0, 0x343a45, ayu: 0x232a36) }
+    static var selectedControlText: NSColor {
+        themed(0x1c1e22, 0xeaeef5, ayu: 0xe6e9ef)
+    }
     static var inactiveTab: NSColor      { themed(0xefefef, 0x21252b, ayu: 0x0d1017) }
     static var hover: NSColor            { themed(0xe0e0e1, 0x2f343e, ayu: 0x1c212b) }
     /// active file in the tree

@@ -1171,6 +1171,10 @@ final class GitPanelViewController: NSViewController {
         tabChanged()
     }
 
+    static var selectedTabColoursForTesting: (surface: NSColor, ink: NSColor) {
+        (Theme.selectedControl, Theme.selectedControlText)
+    }
+
     var listStyleForTesting: NSTableView.Style {
         _ = view
         return table.style
@@ -1623,11 +1627,11 @@ private final class FlatPanelTabButton: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if isSelected {
-            Theme.activeTab.setFill()
+            Theme.selectedControl.setFill()
             bounds.fill()
         }
         let font = Theme.uiFont(11)
-        let ink = isSelected ? Theme.foreground : Theme.dimText
+        let ink = isSelected ? Theme.selectedControlText : Theme.dimText
         SidebarCellDrawing.attributedText(
             SidebarCellDrawing.labelWithBadge(
                 title, badge: badge, font: font, colour: ink,
