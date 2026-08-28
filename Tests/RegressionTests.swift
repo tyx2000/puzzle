@@ -56,6 +56,7 @@ enum RegressionTests {
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
         try testSelectedControlsAgree()
+        try testGutterWidthFollowsLineCount()
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
@@ -2841,7 +2842,7 @@ enum RegressionTests {
                     > LineNumberRulerView.changeMarkWidth,
                    "the ribbon does not widen on hover")
         try expect(dividerReach + LineNumberRulerView.changeMarkHoverWidth
-                    <= LineNumberRulerView.numberColumn.start,
+                    <= LineNumberRulerView.numberColumn(digits: 2).start,
                    "the hovered ribbon reaches into the line numbers")
         // The width eases between the two sizes rather than jumping.
         try expect(LineNumberRulerView.markWidth(progress: 0)
@@ -2877,7 +2878,7 @@ enum RegressionTests {
                    "every ribbon widened, not just the hovered one: \(hovered.map(\.width))")
         ruler.hoverChangeForTesting(at: nil)
         // Four-digit line numbers still fit between the ribbon and the arrow.
-        let numbers = LineNumberRulerView.numberColumn
+        let numbers = LineNumberRulerView.numberColumn(digits: 4)
         let digits = ("8888" as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
         try expect(numbers.end - numbers.start >= digits,
                    "the number column lost too much room: "
@@ -3004,6 +3005,66 @@ enum RegressionTests {
 
     /// The three strips that show a selection — the activity bar, the Git
     /// panel's tabs, the file tabs — say it the same way, and loudly enough.
+    /// The gutter is only as wide as the numbers it has to draw. A fixed
+    /// four-digit column cost every short file the same margin.
+    private static func testGutterWidthFollowsLineCount() throws {
+        typealias Ruler = LineNumberRulerView
+        try expect(Ruler.digits(forHighestLine: 1) == Ruler.minimumDigits,
+                   "a one-line file collapses the gutter below its floor")
+        try expect(Ruler.digits(forHighestLine: 99) == 2, "99 asks for more than two digits")
+        try expect(Ruler.digits(forHighestLine: 100) == 3, "100 still asks for two digits")
+        try expect(Ruler.digits(forHighestLine: 9999) == 4, "9999 does not ask for four digits")
+
+        let short = Ruler.gutterWidth(digits: Ruler.digits(forHighestLine: 80))
+        let long = Ruler.gutterWidth(digits: Ruler.digits(forHighestLine: 4200))
+        try expect(short < long - 4, "a short file gets the same gutter as a long one")
+
+        // And the live gutter follows the file it is showing, not a constant.
+        let root = try temporaryDirectory("gutter-width")
+        let brief = root.appendingPathComponent("brief.txt")
+        try Data(String(repeating: "x\n", count: 40).utf8).write(to: brief)
+        let bulky = root.appendingPathComponent("bulky.txt")
+        try Data(String(repeating: "x\n", count: 1500).utf8).write(to: bulky)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: brief)
+        pane.view.layoutSubtreeIfNeeded()
+        guard let ruler = pane.lineNumberRulerForTesting else {
+            throw Failure(description: "the editor has no gutter")
+        }
+        ruler.displayIfNeeded()
+        let briefWidth = ruler.ruleThickness
+        pane.open(url: bulky)
+        pane.view.layoutSubtreeIfNeeded()
+        ruler.displayIfNeeded()
+        let bulkyWidth = ruler.ruleThickness
+        try expect(briefWidth < bulkyWidth,
+                   "the gutter is \(briefWidth)pt for 40 lines and \(bulkyWidth)pt for 1500")
+        try expect(briefWidth == Ruler.gutterWidth(digits: 2),
+                   "a 40-line file does not get the two-digit gutter: \(briefWidth)pt")
+        try expect(bulkyWidth == Ruler.gutterWidth(digits: 4),
+                   "a 1500-line file does not get the four-digit gutter: \(bulkyWidth)pt")
+
+        // Whatever the width, the numbers keep a column of their own between
+        // the ribbon and the fold arrow.
+        for line in [1, 9, 10, 99, 100, 1000, 99999] {
+            let digits = Ruler.digits(forHighestLine: line)
+            let column = Ruler.numberColumn(digits: digits)
+            try expect(column.start >= Ruler.dividerReach + Ruler.changeMarkHoverWidth,
+                       "line numbers run under the change ribbon at \(line) lines")
+            try expect(column.end > column.start,
+                       "the number column is empty at \(line) lines")
+            let value = "\(line)" as NSString
+            let drawn = value.size(withAttributes: [.font: Theme.editorFont()]).width
+            try expect(column.end - column.start >= drawn - 0.5,
+                       "line \(line) does not fit its own column")
+        }
+    }
+
     private static func testSelectedControlsAgree() throws {
         let settings = Settings.shared
         let saved = settings.theme

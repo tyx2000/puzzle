@@ -26,20 +26,34 @@ final class LineNumberRulerView: NSRulerView {
     /// column: the ribbon grows into the gap, it does not push anything.
     static let changeMarkHoverWidth: CGFloat = 8
     static let foldArrowColumn: CGFloat = 14
+    /// Never narrower than this, however short the file: a one-digit column
+    /// reads as a stray character rather than a gutter, and a file one line
+    /// from `9` to `10` would shift the code sideways.
+    static let minimumDigits = 2
+
     /// Where the line numbers start and end inside the gutter.
-    static var numberColumn: (start: CGFloat, end: CGFloat) {
+    static func numberColumn(digits: Int,
+                             font: NSFont = Theme.editorFont()) -> (start: CGFloat, end: CGFloat) {
         // Room for the ribbon at its hovered width, so growing it never runs
-        // under a four-digit line number.
-        (dividerReach + changeMarkHoverWidth + 2, gutterWidth() - foldArrowColumn)
+        // under the widest line number.
+        (dividerReach + changeMarkHoverWidth + 2,
+         gutterWidth(for: font, digits: digits) - foldArrowColumn)
     }
 
-    /// Wide enough for four digits in the editor's own font, plus the columns
-    /// either side of them. Derived rather than fixed: at the previous 46pt a
-    /// four-digit line number already touched the code, and `buffer_font_size`
-    /// moves the requirement.
-    static func gutterWidth(for font: NSFont = Theme.editorFont()) -> CGFloat {
-        let digits = ceil(("8888" as NSString).size(withAttributes: [.font: font]).width)
-        return dividerReach + changeMarkHoverWidth + 2 + digits + 4 + foldArrowColumn
+    /// Wide enough for the widest number this file will actually show, plus the
+    /// columns either side of it. Derived rather than fixed: a fixed four-digit
+    /// column charged a 90-line file for digits it never draws, and
+    /// `buffer_font_size` moves the requirement anyway.
+    static func gutterWidth(for font: NSFont = Theme.editorFont(),
+                            digits: Int = 4) -> CGFloat {
+        let sample = String(repeating: "8", count: max(digits, minimumDigits))
+        let width = ceil((sample as NSString).size(withAttributes: [.font: font]).width)
+        return dividerReach + changeMarkHoverWidth + 2 + width + 4 + foldArrowColumn
+    }
+
+    /// Digits needed to write the highest line number in the file.
+    static func digits(forHighestLine line: Int) -> Int {
+        max(minimumDigits, String(max(line, 1)).count)
     }
 
     private var changeMarkRects: [(change: GitLineChanges.Change, rect: NSRect)] = []
@@ -120,6 +134,9 @@ final class LineNumberRulerView: NSRulerView {
         // Common mode: the ribbon keeps animating while the pointer is tracked.
         RunLoop.main.add(timer, forMode: .common)
     }
+    /// Line count for rulers with no document index behind them (the history
+    /// pane), rebuilt only when the text changes.
+    private var cachedLineCount: (length: Int, lines: Int)?
     private var gutterTrackingArea: NSTrackingArea?
     private var editorTrackingArea: NSTrackingArea?
 
@@ -127,7 +144,7 @@ final class LineNumberRulerView: NSRulerView {
         self.textView = textView
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
-        ruleThickness = Self.gutterWidth()
+        ruleThickness = Self.gutterWidth(digits: Self.minimumDigits)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Code folding gutter")
@@ -135,7 +152,7 @@ final class LineNumberRulerView: NSRulerView {
             "Click an arrow to fold or unfold a block. Option-Command-[ toggles the block at the caret.")
 
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(redraw),
+        center.addObserver(self, selector: #selector(textChanged),
                            name: NSText.didChangeNotification, object: textView)
         center.addObserver(self, selector: #selector(redraw),
                            name: NSView.frameDidChangeNotification, object: textView)
@@ -157,11 +174,45 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     @objc private func redraw() {
-        // The font can change under us (settings.json), and the gutter is sized
-        // from it.
-        let width = Self.gutterWidth()
-        if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
+        updateThickness()
         needsDisplay = true
+    }
+
+    @objc private func textChanged() {
+        cachedLineCount = nil
+        redraw()
+    }
+
+    /// The gutter is sized from the font, which can change under us
+    /// (settings.json), and from the file's own line count, which grows as the
+    /// user types. Done before drawing rather than during it, so the width the
+    /// numbers are laid out against is the width the ruler actually has.
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        updateThickness()
+    }
+
+    private func updateThickness() {
+        let width = Self.gutterWidth(digits: currentDigits)
+        if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
+    }
+
+    /// Digits the file on screen needs. A diff buffer numbers its lines as they
+    /// sit in the original file, so its widest number is not its length.
+    private var currentDigits: Int {
+        Self.digits(forHighestLine: highestLineNumber)
+    }
+
+    private var highestLineNumber: Int {
+        guard let textView else { return 1 }
+        let diff = textView.diffLineNumbers
+        if !diff.isEmpty { return diff.compactMap { $0 }.max() ?? 1 }
+        if let index = lineIndexProvider?() { return index.lineCount }
+        let content = textView.string as NSString
+        if let cached = cachedLineCount, cached.length == content.length { return cached.lines }
+        let lines = LineIndex(content).lineCount
+        cachedLineCount = (content.length, lines)
+        return lines
     }
 
     override func updateTrackingAreas() {
@@ -304,7 +355,7 @@ final class LineNumberRulerView: NSRulerView {
         let diffNumbers = textView.diffLineNumbers
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
             .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
-        let numbers = Self.numberColumn
+        let numbers = Self.numberColumn(digits: currentDigits, font: font)
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
             let fragChar = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
             let isLineStart = fragChar.location == 0
