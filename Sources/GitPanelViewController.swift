@@ -53,7 +53,7 @@ final class GitPanelViewController: NSViewController {
     private var reloadDeferred = false
 
     private let segmented = FlatPanelTabBar(labels: ["Changes", "Branch", "History"])
-    private let table = NSTableView()
+    private let table = GitTableView()
     private let branchLabel = NSTextField(labelWithString: "")
     private let commitField = CommitMessageTextView()
     private var commitScroll: HorizontalBorderScrollView!
@@ -149,14 +149,21 @@ final class GitPanelViewController: NSViewController {
         table.addTableColumn(column)
         table.headerView = nil
         table.rowSizeStyle = .custom
+        // `.automatic` resolves to the inset style, which pads the top of the
+        // list by 10pt and rounds its rows — so the first row sat further from
+        // the toolbar above it than the toolbar sat from the tabs. The file
+        // tree already uses the plain style; the panel now matches.
+        table.style = .plain
         table.backgroundColor = Theme.panelBackground
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         table.usesAlternatingRowBackgroundColors = false
 
         let scroll = NSScrollView()
+        PuzzleScroller.adopt(scroll)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
@@ -490,18 +497,21 @@ final class GitPanelViewController: NSViewController {
 
     private func updateTabLayout() {
         let branchTab = showingBranches
+        // Committing belongs to Changes. Branch and History are lists to read,
+        // so they give the whole panel to their list.
+        let listOnly = showingBranches || showingHistory
         branchToolbar.isHidden = !branchTab
         branchToolbarHeight.constant = branchTab ? 52 : 0
         tableTopToTabs.isActive = !branchTab
         tableTopToBranchToolbar.isActive = branchTab
-        tableBottomToFooter.isActive = !branchTab
-        tableBottomToContainer.isActive = branchTab
-        branchLabel.isHidden = branchTab
-        commitScroll.isHidden = branchTab
-        progressShimmer.isHidden = branchTab || activeOperationID == nil
-        commitButton.isHidden = branchTab
-        discardAllButton.isHidden = branchTab
-        pushControl.isHidden = branchTab
+        tableBottomToFooter.isActive = !listOnly
+        tableBottomToContainer.isActive = listOnly
+        branchLabel.isHidden = listOnly
+        commitScroll.isHidden = listOnly
+        progressShimmer.isHidden = listOnly || activeOperationID == nil
+        commitButton.isHidden = listOnly
+        discardAllButton.isHidden = listOnly
+        pushControl.isHidden = listOnly
     }
 
     @objc private func commit() { performCommit(push: false) }
@@ -814,6 +824,96 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
+    /// Right-click menu for a row. Replaces the buttons that used to sit at the
+    /// end of each row: they crowded long names, and every row carried them
+    /// whether or not the pointer was anywhere near.
+    private func contextMenu(forRow row: Int) -> NSMenu? {
+        guard let directory else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        if showingBranches {
+            guard row < branches.count else { return nil }
+            let branch = branches[row]
+            add(to: menu, title: "Switch to “\(branch.name)”", enabled: !branch.isCurrent) {
+                [weak self] in self?.switchBranch(branch, in: directory)
+            }
+            menu.addItem(.separator())
+            add(to: menu, title: branch.isRemote ? "Delete Remote Branch…" : "Delete Branch…",
+                enabled: !branch.isCurrent) {
+                [weak self] in self?.deleteBranch(branch, in: directory)
+            }
+            return menu
+        }
+
+        if showingHistory {
+            guard row < historyRows.count else { return nil }
+            switch historyRows[row] {
+            case .commit(let commit, _):
+                add(to: menu, title: "Copy Commit Hash") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(commit.shortHash, forType: .string)
+                }
+                add(to: menu, title: "Copy Commit Message") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(commit.subject, forType: .string)
+                }
+            case .file(let file, let commit):
+                add(to: menu, title: "Show Changes in This Commit") { [weak self] in
+                    self?.onOpenCommitDiff?(commit, file, directory)
+                }
+                add(to: menu, title: "Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(file.path, forType: .string)
+                }
+            }
+            return menu
+        }
+
+        guard row < entries.count else { return nil }
+        let entry = entries[row]
+        let fileURL = directory.appendingPathComponent(entry.path)
+        add(to: menu, title: "Show Changes") { [weak self] in
+            self?.onOpenDiff?(entry, directory)
+        }
+        add(to: menu, title: "Open File") { [weak self] in
+            self?.onOpenFile?(fileURL)
+        }
+        menu.addItem(.separator())
+        add(to: menu, title: "Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.path, forType: .string)
+        }
+        add(to: menu, title: "Reveal in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        }
+        menu.addItem(.separator())
+        add(to: menu, title: "Discard Changes…") { [weak self] in
+            self?.discardChanges(entry, in: directory)
+        }
+        return menu
+    }
+
+    private func add(to menu: NSMenu, title: String, enabled: Bool = true,
+                     action: @escaping () -> Void) {
+        let item = NSMenuItem(title: title, action: #selector(runMenuAction(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = MenuAction(run: action)
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    /// Boxes a closure so it can ride on an `NSMenuItem`.
+    private final class MenuAction {
+        let run: () -> Void
+        init(run: @escaping () -> Void) { self.run = run }
+    }
+
+    @objc private func runMenuAction(_ sender: NSMenuItem) {
+        (sender.representedObject as? MenuAction)?.run()
+    }
+
     private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
         guard !branch.isCurrent else { return }
         let alert = NSAlert()
@@ -1053,6 +1153,62 @@ final class GitPanelViewController: NSViewController {
         _ = view
         return pushControl.title
     }
+    /// Point the panel at a directory without kicking off a refresh, so a test
+    /// controls exactly what the model holds.
+    func setDirectoryForTesting(_ url: URL) {
+        _ = view
+        directory = url
+    }
+
+    /// The commit box and its buttons, which only Changes shows.
+    var footerVisibleForTesting: Bool {
+        _ = view
+        return !commitScroll.isHidden && !commitButton.isHidden && !pushControl.isHidden
+    }
+    func showChangesForTesting() {
+        _ = view
+        segmented.selectedSegment = 0
+        tabChanged()
+    }
+
+    var listStyleForTesting: NSTableView.Style {
+        _ = view
+        return table.style
+    }
+    var firstRowRectForTesting: NSRect {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        return table.numberOfRows > 0 ? table.rect(ofRow: 0) : .zero
+    }
+
+    var listScrollInsetsForTesting: NSEdgeInsets {
+        _ = view
+        return table.enclosingScrollView?.contentInsets ?? NSEdgeInsets()
+    }
+    var listAdjustsInsetsForTesting: Bool {
+        _ = view
+        return table.enclosingScrollView?.automaticallyAdjustsContentInsets ?? true
+    }
+
+    func rowHeightForTesting(_ row: Int) -> CGFloat {
+        _ = view
+        return tableView(table, heightOfRow: row)
+    }
+
+    func contextMenuForTesting(row: Int) -> NSMenu? {
+        _ = view
+        return contextMenu(forRow: row)
+    }
+    /// True when the row lights up under the pointer.
+    func hoverForTesting(row: Int) -> Bool {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return false }
+        table.setHoveredRowForTesting(row)
+        return (table.rowView(atRow: row, makeIfNecessary: true) as? GitRowView)?
+            .isHovered ?? false
+    }
+
     var pushBadgeForTesting: String {
         _ = view
         return pushControl.badge
@@ -1093,6 +1249,7 @@ extension GitPanelViewController: NSTableViewDataSource {
         let view = (tableView.makeView(withIdentifier: id, owner: self) as? GitRowView)
             ?? GitRowView()
         view.identifier = id
+        view.isHovered = table.hoveredRow == row
         view.isActiveFile = false
         if showingBranches {
             return view
@@ -1115,17 +1272,32 @@ extension GitPanelViewController: NSTableViewDataSource {
 
 extension GitPanelViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if showingBranches { return GitBranchCell.preferredRowHeight }
-        if showingHistory, row < historyRows.count,
-           case .commit = historyRows[row] {
-            let titleHeight = ceil(Theme.uiFont(11).boundingRectForFont.height)
-            let infoHeight = ceil(Theme.uiFont(9.5).boundingRectForFont.height)
-            return max(38, titleHeight + infoHeight + 7)
+        // Every row in the panel is measured in `tree_line_height`, the same
+        // unit the file tree uses: one for a file, two for the rows that carry
+        // a second line of metadata (a branch, a commit).
+        if showingBranches { return Self.twoLineRowHeight }
+        if showingHistory, row < historyRows.count, case .commit = historyRows[row] {
+            return Self.twoLineRowHeight
         }
-        // File rows — Changes entries and the files inside an expanded commit —
-        // are the same kind of row as the file tree's, so they take the same
-        // `tree_line_height` instead of measuring their own font.
         return Theme.treeRowHeight()
+    }
+
+    /// Branch and commit rows put the name over its author and date.
+    ///
+    /// Their text plus the same breathing room a single-line row has, rather
+    /// than two whole rows: once the two lines were tightened, doubling the row
+    /// left so much padding that the rows themselves looked far apart.
+    static var twoLineRowHeight: CGFloat {
+        let primary = Theme.uiFont(11)
+        let secondary = Theme.uiFont(9.5)
+        let bands = SidebarCellDrawing.twoLineBands(
+            in: NSRect(x: 0, y: 0, width: 100, height: 0),
+            primaryFont: primary, secondaryFont: secondary)
+        let block = bands.secondary.maxY - bands.primary.minY
+        let singleLine = ceil(primary.ascender - primary.descender)
+        // What `tree_line_height` leaves around one line of text.
+        let padding = max(4, Theme.treeRowHeight() - singleLine)
+        return ceil(block + padding)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1136,15 +1308,7 @@ extension GitPanelViewController: NSTableViewDelegate {
                         as? GitBranchCell) ?? GitBranchCell()
             cell.identifier = id
             let branch = branches[row]
-            cell.configure(branch: branch,
-                           onSwitch: { [weak self] in
-                               guard let self, let directory = self.directory else { return }
-                               self.switchBranch(branch, in: directory)
-                           },
-                           onDelete: { [weak self] in
-                               guard let self, let directory = self.directory else { return }
-                               self.deleteBranch(branch, in: directory)
-                           })
+            cell.configure(branch: branch)
             return cell
         }
         if showingHistory {
@@ -1175,13 +1339,7 @@ extension GitPanelViewController: NSTableViewDelegate {
                     as? GitChangeCell) ?? GitChangeCell()
         cell.identifier = id
         let entry = entries[row]
-        cell.configure(entry: entry, onDiscard: { [weak self] in
-            guard let self, let directory = self.directory else { return }
-            self.discardChanges(entry, in: directory)
-        }, onOpen: { [weak self] in
-            guard let self, let directory = self.directory else { return }
-            self.onOpenFile?(directory.appendingPathComponent(entry.path))
-        })
+        cell.configure(entry: entry)
         return cell
     }
 }
@@ -1209,13 +1367,12 @@ private final class GitCommitCell: DrawnSidebarCell {
         let subjectFont = Theme.uiFont(11)
         let metaFont = Theme.uiFont(9.5)
         let detailFont = Theme.uiFont(9.5)
-        let titleHeight = ceil(max(subjectFont.boundingRectForFont.height,
-                                   metaFont.boundingRectForFont.height)) + 1
-        let detailHeight = ceil(detailFont.boundingRectForFont.height) + 1
-        let gap: CGFloat = 2
-        let contentHeight = titleHeight + gap + detailHeight
-        let top = floor((bounds.height - contentHeight) / 2)
-        let titleBand = NSRect(x: 0, y: top, width: bounds.width, height: titleHeight)
+        // Ascender-to-descender, not the font's full box: two of those stacked
+        // pushed the subject and its blame line apart until the row read as two.
+        let bands = SidebarCellDrawing.twoLineBands(
+            in: bounds, primaryFont: subjectFont, secondaryFont: detailFont)
+        let titleBand = bands.primary
+        let detailHeight = bands.secondary.height
         let titleBaseline = SidebarCellDrawing.centeredBaseline(for: subjectFont, in: titleBand)
         // Align the chevron's visual center with the subject's cap-height, not
         // merely the row center. Commit ID and subject share this exact baseline.
@@ -1233,7 +1390,7 @@ private final class GitCommitCell: DrawnSidebarCell {
                                            width: max(0, bounds.width - 92),
                                            height: titleBand.height))
 
-        let blameBand = NSRect(x: 20, y: titleBand.maxY + gap,
+        let blameBand = NSRect(x: 20, y: bands.secondary.minY,
                                width: max(0, bounds.width - 26),
                                height: detailHeight)
         SidebarCellDrawing.text(blame, font: detailFont, color: Theme.dimText,
@@ -1282,58 +1439,21 @@ final class GitChangeCellProbe: NSView {
         cell.layoutSubtreeIfNeeded()
     }
 
-    func configureProbe(path: String, onOpen: @escaping () -> Void) {
-        cell.configure(entry: GitService.Status.Entry(code: " M", path: path, originalPath: nil),
-                       onDiscard: {}, onOpen: onOpen)
+    func configureProbe(path: String) {
+        cell.configure(entry: GitService.Status.Entry(code: " M", path: path, originalPath: nil))
     }
 
-    var buttonFramesForTesting: [NSRect] { cell.buttonFramesForTesting }
-    func openForTesting() { cell.openForTesting() }
+    var nameForTesting: String { cell.nameForTesting }
 }
 
 private final class GitChangeCell: DrawnSidebarCell {
-    /// Opens the file itself. Clicking the row shows the diff, which is the
-    /// right default, but jumping to the source was two steps until now.
-    private let openButton = NSButton()
-    private let discardButton = NSButton()
     private var status = ""
     private var icon: SidebarIcon?
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
-    private var onDiscard: (() -> Void)?
-    private var onOpen: (() -> Void)?
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        configure(button: openButton, symbol: "doc.text",
-                  label: "Open file", action: #selector(openAction))
-        configure(button: discardButton, symbol: "arrow.uturn.backward",
-                  label: "Discard file changes", action: #selector(discardAction))
-    }
-
-    private func configure(button: NSButton, symbol: String,
-                           label: String, action: Selector) {
-        button.title = ""
-        button.image = Theme.symbol(symbol, accessibilityDescription: label,
-                                    pointSize: 11, weight: .medium)
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.toolTip = label
-        button.setAccessibilityLabel(label)
-        button.target = self
-        button.action = action
-        addSubview(button)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(entry: GitService.Status.Entry, onDiscard: @escaping () -> Void,
-                   onOpen: @escaping () -> Void) {
-        self.onDiscard = onDiscard
-        self.onOpen = onOpen
+    func configure(entry: GitService.Status.Entry) {
         status = entry.displayCode
         statusColor = entry.isUntracked ? Theme.green : Theme.yellow
         icon = .file(URL(fileURLWithPath: entry.path))
@@ -1344,19 +1464,6 @@ private final class GitChangeCell: DrawnSidebarCell {
         needsDisplay = true
     }
 
-    override func layout() {
-        super.layout()
-        // A small tree_line_height can leave the row shorter than the button.
-        // Discard first, then Open: the destructive one is not the one under
-        // the pointer when reaching for the edge of the row.
-        let side = min(24, floor(bounds.height))
-        let y = floor((bounds.height - side) / 2)
-        openButton.frame = NSRect(x: max(0, bounds.width - 6 - side), y: y,
-                                  width: side, height: side)
-        discardButton.frame = NSRect(x: max(0, openButton.frame.minX - 2 - side), y: y,
-                                     width: side, height: side)
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
                                 in: NSRect(x: 6, y: 0, width: 18, height: bounds.height),
@@ -1364,128 +1471,50 @@ private final class GitChangeCell: DrawnSidebarCell {
         SidebarCellDrawing.icon(icon,
                                 in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
                                            width: 13, height: 13))
+        // The whole row is the name's now that the buttons have moved to the
+        // context menu.
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: NSRect(x: 44, y: 0,
-                       width: max(0, discardButton.frame.minX - 50), height: bounds.height),
+            in: NSRect(x: 44, y: 0, width: max(0, bounds.width - 52), height: bounds.height),
             gap: 5, primaryLineBreak: .byTruncatingMiddle)
     }
 
-    @objc private func discardAction() { onDiscard?() }
-    @objc private func openAction() { onOpen?() }
-
-    var buttonFramesForTesting: [NSRect] { [discardButton.frame, openButton.frame] }
-    func openForTesting() { onOpen?() }
+    var nameForTesting: String { name }
 }
 
 private final class GitBranchCell: DrawnSidebarCell {
-    private let switchButton = NSButton()
-    private let deleteButton = NSButton()
-    private var onSwitch: (() -> Void)?
-    private var onDelete: (() -> Void)?
     private var name = ""
     private var metadata = ""
     private var isCurrent = false
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        switchButton.title = ""
-        switchButton.image = Theme.symbol("arrow.right.circle", accessibilityDescription: "Switch branch",
-                                          pointSize: 12)
-        switchButton.imagePosition = .imageOnly
-        switchButton.imageScaling = .scaleProportionallyDown
-        switchButton.bezelStyle = .inline
-        switchButton.isBordered = false
-        switchButton.toolTip = "Switch branch"
-        switchButton.setAccessibilityLabel("Switch branch")
-        switchButton.target = self
-        switchButton.action = #selector(switchAction)
-        switchButton.translatesAutoresizingMaskIntoConstraints = false
-
-        deleteButton.title = ""
-        deleteButton.image = Theme.symbol("trash", accessibilityDescription: "Delete branch",
-                                          pointSize: 12)
-        deleteButton.imagePosition = .imageOnly
-        deleteButton.imageScaling = .scaleProportionallyDown
-        deleteButton.bezelStyle = .inline
-        deleteButton.isBordered = false
-        deleteButton.toolTip = "Delete branch"
-        deleteButton.setAccessibilityLabel("Delete branch")
-        deleteButton.target = self
-        deleteButton.action = #selector(deleteAction)
-        deleteButton.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(switchButton)
-        addSubview(deleteButton)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(branch: GitService.Branch, onSwitch: @escaping () -> Void,
-                   onDelete: @escaping () -> Void) {
-        self.onSwitch = onSwitch
-        self.onDelete = onDelete
+    func configure(branch: GitService.Branch) {
         name = branch.isCurrent ? "\(branch.name)  · current" : branch.name
         metadata = "\(branch.author)  ·  \(branch.createdAt)"
         isCurrent = branch.isCurrent
-        switchButton.isEnabled = !branch.isCurrent
-        deleteButton.isEnabled = !branch.isCurrent
         toolTip = branch.name
         exposeToAccessibility("Branch \(branch.name), \(metadata)")
         needsDisplay = true
     }
 
-    override func layout() {
-        super.layout()
-        let totalWidth = Self.actionButtonWidth * 2 + Self.actionButtonGap
-        let x = max(8, bounds.width - totalWidth - 8)
-        let y = floor((bounds.height - Self.actionButtonHeight) / 2)
-        switchButton.frame = NSRect(x: x, y: y,
-                                    width: Self.actionButtonWidth,
-                                    height: Self.actionButtonHeight)
-        deleteButton.frame = NSRect(x: x + Self.actionButtonWidth + Self.actionButtonGap,
-                                    y: y,
-                                    width: Self.actionButtonWidth,
-                                    height: Self.actionButtonHeight)
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         let primaryFont = Theme.uiFont(11)
         let secondaryFont = Theme.uiFont(9.5)
-        let primaryHeight = ceil(primaryFont.boundingRectForFont.height) + 1
-        let secondaryHeight = ceil(secondaryFont.boundingRectForFont.height) + 1
-        let textHeight = primaryHeight + Self.textLineGap + secondaryHeight
-        let top = floor((bounds.height - textHeight) / 2)
-        let buttonX = max(8, bounds.width - (Self.actionButtonWidth * 2
-                                             + Self.actionButtonGap) - 8)
-        let width = max(0, buttonX - 16)
+        // Switch and delete moved to the row's context menu, so the name has
+        // the full width.
+        let bands = SidebarCellDrawing.twoLineBands(
+            in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height),
+            primaryFont: primaryFont, secondaryFont: secondaryFont)
         SidebarCellDrawing.text(
             name, font: primaryFont,
             color: isCurrent ? Theme.cursor : Theme.foreground,
-            in: NSRect(x: 8, y: top, width: width, height: primaryHeight),
-            lineBreak: .byTruncatingMiddle)
+            in: bands.primary, lineBreak: .byTruncatingMiddle)
         SidebarCellDrawing.text(
             metadata, font: secondaryFont, color: Theme.dimText,
-            in: NSRect(x: 8, y: top + primaryHeight + Self.textLineGap,
-                       width: width, height: secondaryHeight),
-            lineBreak: .byTruncatingTail)
+            in: bands.secondary, lineBreak: .byTruncatingTail)
     }
 
-    static var preferredRowHeight: CGFloat {
-        let primaryHeight = ceil(Theme.uiFont(11).boundingRectForFont.height) + 1
-        let secondaryHeight = ceil(Theme.uiFont(9.5).boundingRectForFont.height) + 1
-        let textHeight = primaryHeight + textLineGap + secondaryHeight
-        return max(44, max(textHeight, actionButtonHeight) + 8)
-    }
-
-    private static let actionButtonWidth: CGFloat = 26
-    private static let actionButtonHeight: CGFloat = 26
-    private static let actionButtonGap: CGFloat = 6
-    private static let textLineGap: CGFloat = 0
-
-    @objc private func switchAction() { onSwitch?() }
-    @objc private func deleteAction() { onDelete?() }
+    var nameForTesting: String { name }
 }
 
 /// Two-state tab strip with the same full-height selection treatment as the
@@ -1699,14 +1728,86 @@ private final class HorizontalBorderScrollView: NSScrollView {
 
 /// Git-panel row: flat background, with the same active-file tint the file tree
 /// uses for the document currently shown on the right.
+/// The Git panel's list. Tracks the row under the pointer so rows can light up
+/// like the file tree's, and hands right-clicks to the panel.
+final class GitTableView: NSTableView {
+    var contextMenuProvider: ((Int) -> NSMenu?)?
+    private var hoverTrackingArea: NSTrackingArea?
+    private(set) var hoveredRow = -1
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard hoverTrackingArea == nil else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseExited(with event: NSEvent) { setHoveredRow(-1) }
+
+    override func layout() {
+        super.layout()
+        refreshHoverState()
+    }
+
+    func refreshHoverState() {
+        guard let window else {
+            setHoveredRow(-1)
+            return
+        }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    private func updateHoveredRow(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }
+
+    private func setHoveredRow(_ row: Int) {
+        let next = row >= 0 && row < numberOfRows ? row : -1
+        guard next != hoveredRow else { return }
+        let previous = hoveredRow
+        hoveredRow = next
+        for index in [previous, next] where index >= 0 {
+            (rowView(atRow: index, makeIfNecessary: false) as? GitRowView)?
+                .isHovered = index == next
+        }
+    }
+
+    /// Right-click targets the row under the pointer without selecting it.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        guard row >= 0 else { return nil }
+        return contextMenuProvider?(row)
+    }
+}
+
 final class GitRowView: NSTableRowView {
     var isActiveFile = false
+    var isHovered = false {
+        didSet {
+            guard isHovered != oldValue else { return }
+            needsDisplay = true
+        }
+    }
 
     override func drawBackground(in dirtyRect: NSRect) {
         Theme.panelBackground.setFill()
         bounds.fill()
         if isActiveFile {
             Theme.activeRow.setFill()
+            bounds.fill()
+        } else if isHovered {
+            Theme.hover.setFill()
             bounds.fill()
         }
     }

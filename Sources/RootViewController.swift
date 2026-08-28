@@ -7,8 +7,10 @@ final class RootViewController: NSViewController {
     let sidebar: SidebarViewController
     let editor: EditorViewController
 
-    /// Panel width is preserved across panel switches.
-    private let minimumSidebarWidth: CGFloat = 150
+    /// Panel width is preserved across panel switches. The floor is what the
+    /// Git panel's rows need before names start truncating.
+    static let minimumSidebarWidth: CGFloat = 300
+    private var minimumSidebarWidth: CGFloat { Self.minimumSidebarWidth }
     private var lastSidebarWidth: CGFloat = 400
     /// Owns the panel width so switching panels can never change it. Dragging the
     /// divider updates its constant, so the divider still works.
@@ -89,6 +91,9 @@ final class RootViewController: NSViewController {
         dividerHandle.dividerThickness = split.splitView.dividerThickness
         dividerHandle.needsDisplay = true
     }
+
+    func resizeSidebarForTesting(to width: CGFloat) { resizeSidebar(to: width) }
+    var sidebarWidthForTesting: CGFloat { sidebarWidthConstraint.constant }
 
     /// Re-assert the remembered width after switching panels.
     func preserveSidebarWidth() { applyWidth(lastSidebarWidth) }

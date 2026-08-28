@@ -27,7 +27,8 @@ final class GitChangePopoverController: NSViewController {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
 
-        scroll.documentView = textView
+PuzzleScroller.adopt(scroll)
+                scroll.documentView = textView
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false

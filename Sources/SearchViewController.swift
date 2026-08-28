@@ -87,6 +87,7 @@ final class SearchViewController: NSViewController {
         outline.usesAlternatingRowBackgroundColors = false
 
         let scroll = NSScrollView()
+        PuzzleScroller.adopt(scroll)
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true

@@ -126,6 +126,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             name: Document.didReloadFromDisk, object: nil)
 
         scrollView = NSScrollView()
+        PuzzleScroller.adopt(scrollView)
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
@@ -353,6 +354,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var gitLineChangesForTesting: [GitLineChanges.Change] { gitLineChanges }
     var editorBackgroundForTesting: NSColor { textView.backgroundColor }
     var diffHeaderForTesting: DiffHeaderView { diffHeader }
+    var verticalScrollerForTesting: NSScroller? { scrollView.verticalScroller }
     var lineNumberRulerForTesting: LineNumberRulerView? {
         scrollView.verticalRulerView as? LineNumberRulerView
     }

@@ -175,6 +175,7 @@ final class FileTreeViewController: NSViewController {
         outlineView.outlineTableColumn = column
 
         let scrollView = NSScrollView()
+        PuzzleScroller.adopt(scrollView)
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = true
@@ -182,8 +183,7 @@ final class FileTreeViewController: NSViewController {
         scrollView.scrollerKnobStyle = .light
         // Full-size windows otherwise let NSScrollView apply titlebar safe-area
         // insets of its own, pulling the first tree row back above our 32pt gap.
-        scrollView.automaticallyAdjustsContentInsets = false
-        scrollView.contentInsets = NSEdgeInsets()
+        // Insets and scrollers both come from `PuzzleScroller.adopt` above.
 
         self.view = scrollView
     }
@@ -290,6 +290,7 @@ final class FileTreeViewController: NSViewController {
     func contextMenuForTesting(row: Int) -> NSMenu? { contextMenu(forRow: row) }
     var rowCountForTesting: Int { outlineView.numberOfRows }
     var outlineViewForTesting: NSOutlineView { outlineView }
+    var verticalScrollerForTesting: NSScroller? { outlineView.enclosingScrollView?.verticalScroller }
     func nodeForTesting(at row: Int) -> FileNode? { outlineView.item(atRow: row) as? FileNode }
     func expandRowForTesting(_ row: Int) {
         guard let item = outlineView.item(atRow: row) else { return }

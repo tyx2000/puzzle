@@ -31,7 +31,8 @@ final class SideBySideDiffView: FlatView {
         table.dataSource = self
         table.delegate = self
 
-        scroll.documentView = table
+PuzzleScroller.adopt(scroll)
+                scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.editorBackground

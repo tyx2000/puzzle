@@ -47,6 +47,7 @@ enum RegressionTests {
         try testBranchMenu()
         try testMaterialFileIcons()
         try testActivityBarUsesTextLabels()
+        try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
         try testDiffHeaderStepsThroughChanges()
         try testGitLineChangeMarks()
@@ -737,22 +738,14 @@ enum RegressionTests {
         // Each changed file offers a way to the source, not only to its diff.
         let panel = GitPanelViewController()
         _ = panel.view
-        var openedFile: URL?
-        panel.onOpenFile = { openedFile = $0 }
         panel.setDirectory(project)
+        // The row is just the file now; its actions live in the context menu.
         let cell = GitChangeCellProbe()
         cell.frame = NSRect(x: 0, y: 0, width: 260, height: Theme.treeRowHeight())
-        cell.configureProbe(path: "Sources/App.swift",
-                            onOpen: { openedFile = project.appendingPathComponent("Sources/App.swift") })
+        cell.configureProbe(path: "Sources/App.swift")
         cell.layoutSubtreeIfNeeded()
-        let cellButtons = cell.buttonFramesForTesting
-        try expect(cellButtons.count == 2 && cellButtons[0].maxX <= cellButtons[1].minX,
-                   "the open button does not sit before discard: \(cellButtons)")
-        try expect(cellButtons.allSatisfy { $0.width > 0 && $0.maxX <= cell.bounds.width },
-                   "a row button is off the row: \(cellButtons)")
-        cell.openForTesting()
-        try expect(openedFile?.lastPathComponent == "App.swift",
-                   "the open button did not ask for the file: \(String(describing: openedFile))")
+        try expect(cell.nameForTesting == "App.swift",
+                   "the row does not show the file name: \(cell.nameForTesting)")
 
         // Discarding everything restores each tracked file to HEAD in one pass.
         let firstFile = project.appendingPathComponent("bulk-one.txt")
@@ -2183,6 +2176,100 @@ enum RegressionTests {
         }
     }
 
+    /// The scrollbar knob comes from the theme: AppKit's dark-mode grey is the
+    /// brightest thing on an Ayu Dark window.
+    private static func testScrollersFollowTheTheme() throws {
+        let settings = Settings.shared
+        let saved = settings.theme
+        defer { settings.theme = saved; Theme.invalidateCaches() }
+
+        func luminance(_ color: NSColor) -> CGFloat {
+            guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+            return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        }
+
+        settings.theme = .ayuDark
+        Theme.invalidateCaches()
+        let knob = luminance(Theme.scrollerKnob)
+        let editor = luminance(Theme.editorBackground)
+        try expect(knob > editor + 0.02,
+                   "the knob does not separate from the surface behind it")
+        try expect(knob < 0.25,
+                   "the knob is brighter than anything else on an Ayu window: \(knob)")
+        try expect(luminance(Theme.foreground) - knob > 0.3,
+                   "the knob competes with the text for attention")
+
+        // The capsule must survive the inset: an overlay knob is 6pt across,
+        // and taking 3pt off each side left nothing to see.
+        let overlayKnob = NSRect(x: 8, y: 14.5, width: 6, height: 26)
+        let painted = PuzzleScroller.knobPaintRect(for: overlayKnob, vertical: true)
+        try expect(painted.width >= 4 && painted.height == overlayKnob.height,
+                   "the knob collapsed under its inset: \(painted)")
+        try expect(PuzzleScroller.knobPaintRect(for: .zero, vertical: true).isEmpty,
+                   "an empty knob rect produced something to draw")
+        let horizontal = PuzzleScroller.knobPaintRect(
+            for: NSRect(x: 4, y: 8, width: 40, height: 6), vertical: false)
+        try expect(horizontal.height >= 4 && horizontal.width == 40,
+                   "a horizontal knob collapsed: \(horizontal)")
+
+        // It is actually what gets painted, not just a colour nobody reads.
+        guard let paintedColour = PuzzleScroller.knobColourForTesting() else {
+            throw Failure(description: "the scroller drew nothing")
+        }
+        try expect(abs(luminance(paintedColour) - knob) < 0.08,
+                   "the knob painted \(luminance(paintedColour)) against the theme's \(knob)")
+
+        // Overlay scrollers are what every window here uses; a scroller that
+        // opts out of them is silently replaced by AppKit's own.
+        try expect(PuzzleScroller.isCompatibleWithOverlayScrollers,
+                   "the themed scroller would be dropped for overlay style")
+
+        // The panel does not narrow past what its rows need.
+        try expect(RootViewController.minimumSidebarWidth == 300,
+                   "the sidebar floor moved: \(RootViewController.minimumSidebarWidth)")
+        let root = RootViewController(sidebar: SidebarViewController(),
+                                      editor: EditorViewController())
+        _ = root.view
+        root.view.frame = NSRect(x: 0, y: 0, width: 1200, height: 700)
+        root.view.layoutSubtreeIfNeeded()
+        root.resizeSidebarForTesting(to: 80)
+        root.view.layoutSubtreeIfNeeded()
+        try expect(root.sidebarWidthForTesting >= RootViewController.minimumSidebarWidth,
+                   "dragging the divider went below the floor: \(root.sidebarWidthForTesting)")
+
+        // No scroll view keeps AppKit's automatic content insets: they are for
+        // lists running under a titlebar, and here they were pure dead space
+        // above the first row.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        try expect(panel.listScrollInsetsForTesting.top == 0,
+                   "the Git list starts \(panel.listScrollInsetsForTesting.top)pt down")
+        try expect(!panel.listAdjustsInsetsForTesting,
+                   "the Git list still lets AppKit inset it")
+        // Nor the inset table style, whose 10pt of top padding made the gap
+        // below the Branch toolbar bigger than the gap above it.
+        try expect(panel.listStyleForTesting == .plain,
+                   "the Git list uses an inset table style")
+        panel.applyStatusForTesting(
+            GitService.Status(branch: "main",
+                              entries: [GitService.Status.Entry(code: " M", path: "a.swift",
+                                                                originalPath: nil)],
+                              isRepo: true, userName: "T", ahead: 0, hasUpstream: true),
+            in: URL(fileURLWithPath: "/tmp"))
+        try expect(panel.firstRowRectForTesting.minY == 0,
+                   "the list starts \(panel.firstRowRectForTesting.minY)pt below its top")
+
+        // Every scroll view in the app gets one.
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        try expect(pane.verticalScrollerForTesting is PuzzleScroller,
+                   "the editor kept AppKit's scroller")
+        let tree = FileTreeViewController()
+        _ = tree.view
+        try expect(tree.verticalScrollerForTesting is PuzzleScroller,
+                   "the file tree kept AppKit's scroller")
+    }
+
     private static func testAyuDarkTheme() throws {
         let settings = Settings.shared
         let saved = settings.theme
@@ -2784,6 +2871,7 @@ enum RegressionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let panel = GitPanelViewController()
         _ = panel.view
+        panel.setDirectoryForTesting(directory)
 
         func entry(_ path: String, _ code: String) -> GitService.Status.Entry {
             GitService.Status.Entry(code: code, path: path, originalPath: nil)
@@ -2811,16 +2899,65 @@ enum RegressionTests {
         try expect(panel.rowCountForTesting == 1,
                    "a changed status did not reach the table: \(panel.rowCountForTesting)")
 
-        // Discard sits before Open, and neither overlaps the name.
-        let cell = GitChangeCellProbe()
-        cell.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        cell.configureProbe(path: "Sources/App.swift", onOpen: {})
-        cell.layoutSubtreeIfNeeded()
-        let frames = cell.buttonFramesForTesting
-        try expect(frames.count == 2 && frames[0].maxX <= frames[1].minX,
-                   "Open is not after Discard: \(frames)")
-        try expect(frames.allSatisfy { $0.maxX <= cell.bounds.width },
-                   "a row button hangs off the row: \(frames)")
+        // Row actions are a right-click away, and the row itself is just the
+        // file: no buttons to miss, and none competing with a long name.
+        guard let changesMenu = panel.contextMenuForTesting(row: 0) else {
+            throw Failure(description: "a changed file has no context menu")
+        }
+        let changeTitles = changesMenu.items.map(\.title)
+        for expected in ["Show Changes", "Open File", "Copy Path", "Reveal in Finder",
+                         "Discard Changes…"] {
+            try expect(changeTitles.contains(expected),
+                       "the row menu is missing \(expected): \(changeTitles)")
+        }
+
+        // Hovering lights the row under the pointer, as in the file tree.
+        try expect(panel.hoverForTesting(row: 0),
+                   "a row does not light up under the pointer")
+
+        // Branch and History are lists to read: the commit box and its buttons
+        // belong to Changes and stay there.
+        try expect(panel.footerVisibleForTesting, "Changes lost its commit footer")
+        panel.showHistory()
+        try expect(!panel.footerVisibleForTesting,
+                   "History still shows the commit box below its list")
+        panel.showBranchTab()
+        try expect(!panel.footerVisibleForTesting, "Branch shows the commit box")
+        panel.showChangesForTesting()
+        try expect(panel.footerVisibleForTesting, "Changes did not get its footer back")
+
+        // The two lines of a branch or commit row sit together, and the pair
+        // sits in the middle: measured on the font's bounding box they drifted
+        // apart until one row read as two.
+        let row = NSRect(x: 0, y: 0, width: 300, height: GitPanelViewController.twoLineRowHeight)
+        let primaryFont = Theme.uiFont(11)
+        let secondaryFont = Theme.uiFont(9.5)
+        let bands = SidebarCellDrawing.twoLineBands(in: row, primaryFont: primaryFont,
+                                                    secondaryFont: secondaryFont)
+        let gap = bands.secondary.minY - bands.primary.maxY
+        try expect(gap >= 0 && gap <= 2,
+                   "the two lines are \(gap)pt apart")
+        let block = bands.secondary.maxY - bands.primary.minY
+        try expect(block < row.height,
+                   "the text block (\(block)pt) does not fit its row (\(row.height)pt)")
+        try expect(abs((bands.primary.minY - row.minY) - (row.maxY - bands.secondary.maxY)) <= 1,
+                   "the block is not centred: \(bands)")
+
+        // Rows are measured in tree_line_height: one for a file, two for the
+        // rows that carry a second line.
+        try expect(panel.rowHeightForTesting(0) == Theme.treeRowHeight(),
+                   "a file row is \(panel.rowHeightForTesting(0))pt, not one tree row")
+        // A two-line row is its text plus the padding a one-line row has — not
+        // two whole rows, which left the rows looking far apart.
+        let twoLine = GitPanelViewController.twoLineRowHeight
+        try expect(twoLine > Theme.treeRowHeight(),
+                   "a two-line row is no taller than a one-line row: \(twoLine)")
+        try expect(twoLine < Theme.treeRowHeight() * 2,
+                   "a two-line row is still a doubled row: \(twoLine)")
+        let textBlock = bands.secondary.maxY - bands.primary.minY
+        try expect(twoLine - textBlock <= Theme.treeRowHeight()
+                    - ceil(primaryFont.ascender - primaryFont.descender) + 1,
+                   "a two-line row carries more padding than a one-line row")
     }
 
     private static func testSideBySideDiff() throws {

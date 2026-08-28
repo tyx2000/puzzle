@@ -64,7 +64,8 @@ final class PalettePanel: NSPanel {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
-        scroll.documentView = table
+PuzzleScroller.adopt(scroll)
+                scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false

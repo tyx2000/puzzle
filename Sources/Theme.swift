@@ -64,6 +64,10 @@ enum Theme {
     static var panelBackground: NSColor  { themed(0xefefef, 0x21252b, ayu: 0x0d1017) }
     static var barBackground: NSColor    { themed(0xefefef, 0x21252b, ayu: 0x0d1017) }
     static var activityBar: NSColor      { themed(0xe4e4e5, 0x21252b, ayu: 0x0d1017) }
+    /// Scrollbars. AppKit's dark knob is a fixed light grey, which Ayu's near
+    /// black surfaces turn into the brightest thing on screen.
+    static var scrollerKnob: NSColor     { themed(0x9a9aa0, 0x6b7280, ayu: 0x39404e) }
+    static var scrollerSlot: NSColor     { themed(0xf0f0f0, 0x1f2229, ayu: 0x11151d) }
     static var border: NSColor           { themed(0xdcdcdd, 0x181a1f, ayu: 0x1b1f29) }
     static var selection: NSColor        { themed(0xd4d4d5, 0x3e4451, ayu: 0x193155) }
     static var lineHighlight: NSColor    { themed(0xf0f0f0, 0x2c313c, ayu: 0x232a36) }
