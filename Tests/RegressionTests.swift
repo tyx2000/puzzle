@@ -56,6 +56,8 @@ enum RegressionTests {
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
         try testSelectedControlsAgree()
+        try testLineEditingShortcuts()
+        try testGitMarksFollowUnsavedEdits()
         try testGutterWidthFollowsLineCount()
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
@@ -3007,6 +3009,139 @@ enum RegressionTests {
     /// panel's tabs, the file tabs — say it the same way, and loudly enough.
     /// The gutter is only as wide as the numbers it has to draw. A fixed
     /// four-digit column cost every short file the same margin.
+    /// Return carries the indent, Shift-Return opens an indented line below
+    /// from anywhere on the current one, and Command-D copies the line.
+    private static func testLineEditingShortcuts() throws {
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags,
+                 _ characters: String) throws -> NSEvent {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: 0, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters,
+                isARepeat: false, keyCode: code) else {
+                throw Failure(description: "could not construct a key event")
+            }
+            return event
+        }
+
+        // Return at the end of an indented line starts the next one under it.
+        textView.string = "func f() {\n    let value = 1\n}"
+        textView.setSelectedRange(NSRange(location: 28, length: 0))   // end of line 2
+        textView.insertNewline(nil)
+        try expect(textView.string == "func f() {\n    let value = 1\n    \n}",
+                   "Return did not carry the indentation: \(textView.string.debugDescription)")
+        try expect(textView.selectedRange().location == 33,
+                   "the caret did not land after the carried indent")
+
+        // Returning from inside an indent carries only the part before the
+        // caret, so the text below keeps the indentation it already had rather
+        // than gaining a second copy of it.
+        textView.string = "    value"
+        textView.setSelectedRange(NSRange(location: 2, length: 0))
+        textView.insertNewline(nil)
+        try expect(textView.string == "  \n    value",
+                   "Return inside the indent duplicated it: \(textView.string.debugDescription)")
+
+        // Shift-Return works from the middle of the line, and from its start.
+        textView.string = "\tfirst\nsecond"
+        textView.setSelectedRange(NSRange(location: 3, length: 0))
+        textView.keyDown(with: try key(36, [.shift], "\r"))
+        try expect(textView.string == "\tfirst\n\t\nsecond",
+                   "Shift-Return did not open an indented line below: "
+                    + "\(textView.string.debugDescription)")
+        try expect(textView.selectedRange().location == 8,
+                   "the caret is not on the new line: \(textView.selectedRange())")
+
+        // Including on a last line that has no terminator of its own.
+        textView.string = "  last"
+        textView.setSelectedRange(NSRange(location: 1, length: 0))
+        try expect(textView.insertLineBelow() && textView.string == "  last\n  ",
+                   "Shift-Return on an unterminated final line: "
+                    + "\(textView.string.debugDescription)")
+
+        // Command-D copies the caret's line and keeps the caret's column.
+        textView.string = "one\n    two\nthree"
+        textView.setSelectedRange(NSRange(location: 8, length: 0))    // inside "two"
+        textView.keyDown(with: try key(2, [.command], "d"))
+        try expect(textView.string == "one\n    two\n    two\nthree",
+                   "Command-D did not copy the line: \(textView.string.debugDescription)")
+        try expect(textView.selectedRange().location == 16,
+                   "the caret did not follow the copy: \(textView.selectedRange())")
+
+        // A selection spanning lines copies all of them, once.
+        textView.string = "a\nb\nc"
+        textView.setSelectedRange(NSRange(location: 0, length: 3))
+        try expect(textView.duplicateCurrentLine() && textView.string == "a\nb\na\nb\nc",
+                   "Command-D over a selection: \(textView.string.debugDescription)")
+    }
+
+    /// The gutter marks the buffer, not the file on disk. They used to appear
+    /// only after a save, which is exactly when they stop being useful.
+    private static func testGitMarksFollowUnsavedEdits() throws {
+        let root = try temporaryDirectory("live-marks")
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "T"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        let file = root.appendingPathComponent("live.swift")
+        try Data("one\ntwo\nthree\nfour\n".utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+        _ = GitService.commit("base", in: root)
+
+        // The in-process diff has to agree with the one Git prints, or the
+        // marks would move under the user the moment they saved.
+        let baseline = GitLineChanges.baseline(for: file, in: root)
+        try expect(baseline == ["one", "two", "three", "four"],
+                   "HEAD's copy did not come back: \(String(describing: baseline))")
+        for edited in ["one\nTWO\nthree\nfour\n",
+                       "one\ntwo\nthree\nfour\nfive\n",
+                       "one\nfour\n",
+                       "added\none\ntwo\nthree\nfour\n",
+                       "one\ntwo\nthree\n"] {
+            try Data(edited.utf8).write(to: file)
+            _ = GitService.stageAll(in: root)
+            let fromGit = GitLineChanges.changes(for: file, in: root)
+            let inProcess = GitLineChanges.changes(from: baseline ?? [],
+                                                   to: GitLineChanges.lines(of: edited))
+            try expect(fromGit == inProcess,
+                       "the in-process diff disagrees with git for "
+                        + "\(edited.debugDescription):\n  git: \(fromGit)\n  ours: \(inProcess)")
+        }
+        try Data("one\ntwo\nthree\nfour\n".utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+
+        // And end to end: type into an open buffer, save nothing, get marks.
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.repositoryRoot = root
+        pane.open(url: file)
+        pane.view.layoutSubtreeIfNeeded()
+        let settled = Date().addingTimeInterval(5)
+        while !pane.gitLineChangesForTesting.isEmpty && Date() < settled {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(pane.gitLineChangesForTesting.isEmpty,
+                   "an unedited file is marked: \(pane.gitLineChangesForTesting)")
+
+        pane.setCaretForTesting(4)
+        pane.insertTextForTesting("EDITED ")
+        try expect(pane.isModifiedForTesting, "the edit did not reach the document")
+        let deadline = Date().addingTimeInterval(5)
+        while pane.gitLineChangesForTesting.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let marks = pane.gitLineChangesForTesting
+        try expect(marks.count == 1 && marks[0].kind == .modified && marks[0].lines == 2...2,
+                   "an unsaved edit was not marked on its own line: \(marks)")
+        try expect(!pane.isModifiedForTesting == false, "the buffer was saved behind our back")
+        let onDisk = try String(contentsOf: file, encoding: .utf8)
+        try expect(onDisk == "one\ntwo\nthree\nfour\n",
+                   "marking the buffer wrote to the file: \(onDisk.debugDescription)")
+    }
+
     private static func testGutterWidthFollowsLineCount() throws {
         typealias Ruler = LineNumberRulerView
         try expect(Ruler.digits(forHighestLine: 1) == Ruler.minimumDigits,

@@ -200,21 +200,66 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     // MARK: - Uncommitted change marks
 
-    /// Recompute the gutter marks for the file on screen. Runs off the main
-    /// thread: it shells out to `git diff`, and the editor must not wait for it.
+    /// Reload HEAD's copy of the file on screen and re-mark against it. Runs
+    /// off the main thread: it shells out to Git, and the editor must not wait
+    /// for it. Called when the file, the repository, or HEAD itself changes —
+    /// the marks in between come from the baseline this leaves behind.
     func refreshGitLineChanges() {
         // The repository can be handed to a pane before its views exist.
         guard isViewLoaded else { return }
+        liveMarkWork?.cancel()
         guard let url = currentURL, url.isFileURL,
               let document = currentDocument, !document.isVirtual,
               let root = repositoryRoot else {
+            gitBaseline = nil
+            gitBaselineURL = nil
             applyGitLineChanges([], for: nil)
             return
         }
         let generation = gitLineChangeGeneration + 1
         gitLineChangeGeneration = generation
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let changes = GitLineChanges.changes(for: url, in: root)
+            let baseline = GitLineChanges.baseline(for: url, in: root)
+            DispatchQueue.main.async {
+                guard let self, self.gitLineChangeGeneration == generation,
+                      self.currentURL == url else { return }
+                self.gitBaseline = baseline
+                self.gitBaselineURL = url
+                self.recomputeGitLineChanges()
+            }
+        }
+    }
+
+    /// Re-mark after an edit. Debounced, because the marks only need to keep up
+    /// with the typing, not with each keystroke.
+    func scheduleGitLineChanges() {
+        guard gitBaselineURL != nil, gitBaselineURL == currentURL else { return }
+        liveMarkWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.recomputeGitLineChanges() }
+        liveMarkWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.liveMarkDelay, execute: work)
+    }
+
+    /// Mark the buffer as it stands rather than as it was last saved. The diff
+    /// is computed in process against HEAD's copy: running `git diff` per pause
+    /// would spawn a subprocess for every burst of typing, and would still only
+    /// see the file on disk.
+    private func recomputeGitLineChanges() {
+        liveMarkWork?.cancel()
+        guard let url = currentURL, url == gitBaselineURL,
+              let baseline = gitBaseline,
+              let document = currentDocument, !document.isVirtual,
+              !document.isMinifiedPreview else {
+            applyGitLineChanges([], for: gitBaselineURL == currentURL ? currentURL : nil)
+            return
+        }
+        // An immutable copy, because the split and the diff run off the main
+        // thread while the user keeps typing into the storage.
+        guard let snapshot = (textView.string as NSString).copy() as? NSString else { return }
+        let generation = gitLineChangeGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let changes = GitLineChanges.changes(from: baseline,
+                                                 to: GitLineChanges.lines(of: snapshot as String))
             DispatchQueue.main.async {
                 guard let self, self.gitLineChangeGeneration == generation,
                       self.currentURL == url else { return }
@@ -1023,6 +1068,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             images: doc.markdownImages,
             activeSourceRange: reveal)
         textView.refreshBracketMatches()
+        scheduleGitLineChanges()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -1139,6 +1185,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var gitLineChangesURL: URL?
     private var gitChangePopover: NSPopover?
     private var gitLineChangeGeneration = 0
+    /// HEAD's copy of the file on screen, kept so an edit can be marked without
+    /// asking Git again.
+    private var gitBaseline: [String]?
+    private var gitBaselineURL: URL?
+    private var liveMarkWork: DispatchWorkItem?
+    /// Long enough that a burst of typing is one diff, short enough that the
+    /// ribbon appears while the line is still the one being written.
+    static let liveMarkDelay: TimeInterval = 0.25
 
     private var blameWork: DispatchWorkItem?
     private var blameGeneration = 0

@@ -1223,6 +1223,16 @@ final class PuzzleTextView: NSTextView {
             deleteCurrentLine()
             return
         }
+        // Return on the line, not in it: the caret can be anywhere and still
+        // start a fresh line underneath.
+        if event.keyCode == 36, modifiers == [.shift] {
+            insertLineBelow()
+            return
+        }
+        if event.keyCode == 2, modifiers == [.command] {   // D
+            duplicateCurrentLine()
+            return
+        }
         if modifiers.contains([.command, .option]),
            let key = event.charactersIgnoringModifiers {
             if key == "[", let block = innermostBlock(at: selectedRange().location) {
@@ -1277,6 +1287,103 @@ final class PuzzleTextView: NSTextView {
                                  length: 0))
         refreshBracketMatches()
         return true
+    }
+
+
+    // MARK: - Line editing
+
+    /// The whitespace a new line inherits from the line at `location`: its own
+    /// leading run of spaces and tabs, cut at the caret when the caret is still
+    /// inside that run, so splitting an indent does not duplicate it.
+    private func carriedIndent(at location: Int) -> String {
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: location, length: 0))
+        var end = line.location
+        let limit = min(NSMaxRange(line), source.length)
+        while end < limit {
+            let character = source.character(at: end)
+            guard character == 0x20 || character == 0x09 else { break }
+            end += 1
+        }
+        end = min(end, max(location, line.location))
+        guard end > line.location else { return "" }
+        return source.substring(with: NSRange(location: line.location,
+                                              length: end - line.location))
+    }
+
+    /// Where the line at `location` stops carrying text, before whatever
+    /// terminates it. Inserting here appends to the line rather than to the one
+    /// below, and works the same on a final line with no terminator at all.
+    private func endOfLineContent(at location: Int) -> Int {
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: location, length: 0))
+        var end = NSMaxRange(line)
+        if end > line.location, source.character(at: end - 1) == 0x0A { end -= 1 }
+        if end > line.location, source.character(at: end - 1) == 0x0D { end -= 1 }
+        return end
+    }
+
+    /// A new line inherits the indentation of the one it came from. Without
+    /// this every Return in indented code sent the caret back to column zero.
+    override func insertNewline(_ sender: Any?) {
+        let indent = carriedIndent(at: min(selectedRange().location, (string as NSString).length))
+        guard !indent.isEmpty else {
+            super.insertNewline(sender)
+            return
+        }
+        insertText("\n" + indent, replacementRange: selectedRange())
+    }
+
+    /// Shift-Return: open a line under the current one, indented like it, from
+    /// anywhere on the line. No need to walk the caret to the end first.
+    @discardableResult
+    func insertLineBelow() -> Bool {
+        let source = string as NSString
+        let caret = min(selectedRange().location, source.length)
+        let indent = indentOfLine(at: caret)
+        let insertion = endOfLineContent(at: caret)
+        let text = "\n" + indent
+        guard shouldChangeText(in: NSRange(location: insertion, length: 0),
+                               replacementString: text) else { return false }
+        textStorage?.replaceCharacters(in: NSRange(location: insertion, length: 0), with: text)
+        didChangeText()
+        setSelectedRange(NSRange(location: insertion + (text as NSString).length, length: 0))
+        scrollRangeToVisible(selectedRange())
+        refreshBracketMatches()
+        return true
+    }
+
+    /// Command-D: copy the caret's line — or every line the selection touches —
+    /// underneath itself, leaving the caret in the same spot of the copy.
+    @discardableResult
+    func duplicateCurrentLine() -> Bool {
+        let source = string as NSString
+        let selection = selectedRange()
+        let caret = min(selection.location, source.length)
+        let lines = source.lineRange(for: NSRange(location: caret,
+                                                  length: min(selection.length,
+                                                              source.length - caret)))
+        let end = endOfLineContent(at: max(lines.location, NSMaxRange(lines) - 1))
+        let block = NSRange(location: lines.location, length: end - lines.location)
+        guard block.length >= 0 else { return false }
+        let text = "\n" + source.substring(with: block)
+        guard shouldChangeText(in: NSRange(location: end, length: 0),
+                               replacementString: text) else { return false }
+        textStorage?.replaceCharacters(in: NSRange(location: end, length: 0), with: text)
+        didChangeText()
+        let shift = (text as NSString).length
+        setSelectedRange(NSRange(location: min(caret + shift, (string as NSString).length),
+                                 length: 0))
+        scrollRangeToVisible(selectedRange())
+        refreshBracketMatches()
+        return true
+    }
+
+    /// The full leading whitespace of a line, whatever the caret is doing:
+    /// measured from the end of the line's text, so a caret sitting inside the
+    /// indent does not shorten it.
+    private func indentOfLine(at location: Int) -> String {
+        carriedIndent(at: endOfLineContent(at: location))
     }
 
     private func innermostBlock(at location: Int) -> CodeBlock? {
