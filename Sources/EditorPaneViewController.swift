@@ -214,10 +214,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// off the main thread: it shells out to Git, and the editor must not wait
     /// for it. Called when the file, the repository, or HEAD itself changes —
     /// the marks in between come from the baseline this leaves behind.
-    func refreshGitLineChanges() {
+    func refreshGitLineChanges(reloadBaseline: Bool = true) {
         // The repository can be handed to a pane before its views exist.
         guard isViewLoaded else { return }
         liveMarkWork?.cancel()
+        // Saving a file cannot move HEAD, so the copy already in hand is still
+        // the right one to mark against. Asking Git again is ~65 ms, and with
+        // autosave a save happens on every focus change.
+        if !reloadBaseline, gitBaseline != nil, gitBaselineURL == currentURL {
+            recomputeGitLineChanges()
+            return
+        }
         guard let url = currentURL, url.isFileURL,
               let document = currentDocument, !document.isVirtual,
               let root = repositoryRoot else {
@@ -802,7 +809,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         do {
             try document.save()
             reloadTabs()
-            refreshGitLineChanges()
+            refreshGitLineChanges(reloadBaseline: false)
             if notify { onDocumentSaved?(document.url) }
             return true
         } catch {

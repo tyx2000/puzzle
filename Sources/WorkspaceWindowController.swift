@@ -139,14 +139,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
-            self?.sidebar.refreshGitPanelIfLoaded()
-            self?.refreshGit(requireFollowUp: true)
+            guard let self else { return }
             // The file changed on disk, so its cached blame is stale.
-            self?.editor.invalidateBlame(for: url)
+            self.editor.invalidateBlame(for: url)
             // Saving settings.json applies the new display config immediately.
             if url.standardizedFileURL == Settings.fileURL.standardizedFileURL {
                 Settings.shared.reload()
             }
+            self.scheduleGitRefreshAfterSave()
         }
         // Keep the file tree's active-file highlight in sync with the active tab.
         editor.onActiveDocumentChanged = { [weak self] url in
@@ -227,6 +227,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Project
 
     func openProject(_ url: URL) {
+        // Where the repository root is and who commits from it are resolved
+        // once per project and then reused; a new project resolves its own.
+        GitService.forgetRepositoryInfo()
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
         workspaceFileMonitor?.stop()
@@ -423,6 +426,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             .appendingPathComponent(commit, isDirectory: true)
             .appendingPathComponent(path)
     }
+
+    /// Saves arrive in bursts now that leaving a buffer writes it — switching
+    /// tabs, clicking into the tree, leaving the window. Each git refresh is a
+    /// subprocess and a repository walk, so a burst is collapsed into one.
+    private func scheduleGitRefreshAfterSave() {
+        gitRefreshAfterSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.gitRefreshAfterSave = nil
+            self.sidebar.refreshGitPanelIfLoaded()
+            self.refreshGit(requireFollowUp: true)
+        }
+        gitRefreshAfterSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.gitRefreshAfterSaveDelay,
+                                      execute: work)
+    }
+    /// Long enough to swallow a burst of focus changes, short enough that the
+    /// panel is current before the user can look at it.
+    static let gitRefreshAfterSaveDelay: TimeInterval = 0.4
+    private var gitRefreshAfterSave: DispatchWorkItem?
 
     func refreshGit(requireFollowUp: Bool = false) {
         guard let projectURL else { return }

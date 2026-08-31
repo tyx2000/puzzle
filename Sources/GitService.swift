@@ -249,54 +249,162 @@ enum GitService {
         return .data(data)
     }
 
+    /// One `git status` call, not seven.
+    ///
+    /// Porcelain v2's `--branch` header carries the branch name and the
+    /// ahead/behind counts, which used to be three more subprocesses
+    /// (`rev-parse --abbrev-ref`, `rev-parse @{u}`, `rev-list --count`), and the
+    /// repository's root and user name are resolved once per project rather
+    /// than per refresh. A git subprocess costs ~65 ms here whatever it asks
+    /// for, and a status refresh runs on every save.
     static func status(in directory: URL) -> Status {
-        let inside = run(["rev-parse", "--is-inside-work-tree"], in: directory)
-        guard inside.code == 0, inside.out.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
+        guard let info = repositoryInfo(for: directory) else {
             return Status(branch: "", entries: [], isRepo: false)
         }
-        let branchResult = run(["rev-parse", "--abbrev-ref", "HEAD"], in: directory)
-        let branch = branchResult.out.trimmingCharacters(in: .whitespacesAndNewlines)
-
         // `--untracked-files=all` lists individual files instead of collapsing
         // whole untracked directories into one entry (matches Zed's panel).
-        // Porcelain v1 paths are rooted at the repository even when Git runs
-        // from a nested project. Limit the command to this project, then strip
-        // that repository prefix so every UI consumer gets project-relative
-        // paths. `-z` also disables C-style quoting and supports newlines,
-        // quotes, backslashes and the literal text " -> " in file names.
-        let prefix = repositoryPrefix(for: directory)
-        let statusResult = run(["status", "--porcelain=v1", "-z",
-                                "--untracked-files=all", "--", "."], in: directory)
+        // Paths are rooted at the repository even when Git runs from a nested
+        // project, so they are cut back to the project below. `-z` disables
+        // C-style quoting and supports newlines, quotes, backslashes and the
+        // literal text " -> " in file names.
+        let result = run(["status", "--porcelain=v2", "--branch", "-z",
+                          "--untracked-files=all", "--", "."], in: directory)
+        guard result.code == 0 else {
+            return Status(branch: "", entries: [], isRepo: false)
+        }
+        var status = parseStatus(result.out, prefix: info.prefix)
+        status.userName = info.userName
+        return status
+    }
+
+    /// Porcelain v2 records, NUL separated, mapped back onto the two-character
+    /// codes the rest of the app reads. The shape is Git's, not ours:
+    ///
+    ///     # branch.head main
+    ///     # branch.ab +1 -0
+    ///     1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+    ///     2 <XY> … <score> <path> NUL <original path>
+    ///     u <XY> … <path>
+    ///     ? <path>
+    static func parseStatus(_ output: String, prefix: String) -> Status {
+        var branch = ""
+        var ahead = 0
+        var hasUpstream = false
         var entries: [Status.Entry] = []
-        let records = statusResult.out.split(separator: "\0", omittingEmptySubsequences: true)
+        let records = output.split(separator: "\0", omittingEmptySubsequences: true)
         var index = 0
+
+        func add(code: String, path: String, originalPath: String? = nil) {
+            guard let projectPath = projectRelativePath(path, prefix: prefix) else { return }
+            let original = originalPath.flatMap { projectRelativePath($0, prefix: prefix) }
+            entries.append(Status.Entry(code: code, path: projectPath, originalPath: original))
+        }
+
         while index < records.count {
-            let raw = String(records[index])
-            guard raw.count > 3 else {
-                index += 1
+            let record = String(records[index])
+            index += 1
+            guard let kind = record.first else { continue }
+            switch kind {
+            case "#":
+                let fields = record.split(separator: " ", maxSplits: 2,
+                                          omittingEmptySubsequences: true)
+                guard fields.count >= 3 else { continue }
+                switch fields[1] {
+                case "branch.head":
+                    // Git spells a detached HEAD "(detached)"; the panels have
+                    // always shown it as "detached".
+                    branch = fields[2] == "(detached)" ? "detached" : String(fields[2])
+                case "branch.upstream":
+                    hasUpstream = true
+                case "branch.ab":
+                    let counts = fields[2].split(separator: " ")
+                    if let first = counts.first, first.hasPrefix("+"),
+                       let count = Int(first.dropFirst()) {
+                        ahead = count
+                    }
+                default: break
+                }
+            case "1", "2", "u":
+                // Everything before the path is fixed-width fields; the path
+                // itself may contain spaces, so it takes what is left.
+                let leading = kind == "1" ? 8 : (kind == "2" ? 9 : 10)
+                let fields = record.split(separator: " ", maxSplits: leading,
+                                          omittingEmptySubsequences: true)
+                guard fields.count == leading + 1 else { continue }
+                // v2 writes an unchanged side as `.`, v1 as a space, and every
+                // reader of `code` tests against the space.
+                let code = String(fields[1]).replacingOccurrences(of: ".", with: " ")
+                if kind == "2" {
+                    // In -z mode a rename's original path is the next record.
+                    let original = index < records.count ? String(records[index]) : nil
+                    index += 1
+                    add(code: code, path: String(fields[leading]), originalPath: original)
+                } else {
+                    add(code: code, path: String(fields[leading]))
+                }
+            case "?", "!":
+                let path = String(record.dropFirst(2))
+                add(code: kind == "?" ? "??" : "!!", path: path)
+            default:
                 continue
             }
-            let code = String(raw.prefix(2))
-            let repositoryPath = String(raw.dropFirst(3))
-            // In -z mode a rename/copy is `XY new-path NUL old-path NUL`.
-            let hasOriginalPath = code.contains("R") || code.contains("C")
-            let originalPath: String?
-            if hasOriginalPath, index + 1 < records.count {
-                originalPath = projectRelativePath(String(records[index + 1]), prefix: prefix)
-            } else {
-                originalPath = nil
-            }
-            if let path = projectRelativePath(repositoryPath, prefix: prefix) {
-                entries.append(Status.Entry(code: code, path: path,
-                                            originalPath: originalPath))
-            }
-            if hasOriginalPath { index += 1 }
-            index += 1
         }
-        let (ahead, hasUpstream) = aheadCount(in: directory)
         return Status(branch: branch.isEmpty ? "detached" : branch, entries: entries,
-                      isRepo: true, userName: configuredUserName(in: directory),
-                      ahead: ahead, hasUpstream: hasUpstream)
+                      isRepo: true, ahead: ahead, hasUpstream: hasUpstream)
+    }
+
+    /// What a project's repository is, and who commits from it. None of this
+    /// changes while a window is open, and each field used to be a subprocess
+    /// inside every status refresh.
+    ///
+    /// Only positive answers are cached: a directory that is not a repository
+    /// yet may become one (`git init`), and the next refresh has to see that.
+    private struct RepositoryInfo {
+        /// The project's path relative to the repository root, empty when the
+        /// project *is* the root.
+        let prefix: String
+        let userName: String
+    }
+    private static var repositoryInfoCache: [String: RepositoryInfo] = [:]
+    /// Status refreshes run on more than one background queue.
+    private static let repositoryInfoLock = NSLock()
+
+    private static func repositoryInfo(for directory: URL) -> RepositoryInfo? {
+        let key = directory.standardizedFileURL.resolvingSymlinksInPath().path
+        repositoryInfoLock.lock()
+        let cached = repositoryInfoCache[key]
+        repositoryInfoLock.unlock()
+        if let cached { return cached }
+
+        let toplevel = run(["rev-parse", "--show-toplevel"], in: directory)
+        guard toplevel.code == 0 else { return nil }
+        let info = RepositoryInfo(prefix: prefix(of: directory, under: toplevel.out),
+                                  userName: configuredUserName(in: directory))
+        // A repository with no name configured is the one case worth asking
+        // about again: committing fails until it has one, and the user is
+        // likely to be setting it right now.
+        guard !info.userName.isEmpty else { return info }
+        repositoryInfoLock.lock()
+        repositoryInfoCache[key] = info
+        repositoryInfoLock.unlock()
+        return info
+    }
+
+    /// Drop what was resolved once, for when the repository itself changed
+    /// under the window — a different root, or a new `user.name`.
+    static func forgetRepositoryInfo() {
+        repositoryInfoLock.lock()
+        repositoryInfoCache.removeAll()
+        repositoryInfoLock.unlock()
+    }
+
+    private static func prefix(of directory: URL, under toplevel: String) -> String {
+        var rootPath = toplevel
+        if rootPath.last == "\n" { rootPath.removeLast() }
+        let root = URL(fileURLWithPath: rootPath).standardizedFileURL.resolvingSymlinksInPath()
+        let project = directory.standardizedFileURL.resolvingSymlinksInPath()
+        guard project.path != root.path, project.path.hasPrefix(root.path + "/") else { return "" }
+        return String(project.path.dropFirst(root.path.count + 1))
     }
 
     /// The name commits made here will carry: the repository's `user.name` if it
@@ -962,15 +1070,10 @@ enum GitService {
     }
 
     /// Repository-root prefix of the opened project, with no trailing slash.
+    /// Shared with `status`, so translating a path costs no subprocess after
+    /// the first one.
     private static func repositoryPrefix(for directory: URL) -> String {
-        let result = run(["rev-parse", "--show-toplevel"], in: directory)
-        guard result.code == 0 else { return "" }
-        var rootPath = result.out
-        if rootPath.last == "\n" { rootPath.removeLast() }
-        let root = URL(fileURLWithPath: rootPath).standardizedFileURL.resolvingSymlinksInPath()
-        let project = directory.standardizedFileURL.resolvingSymlinksInPath()
-        guard project.path != root.path, project.path.hasPrefix(root.path + "/") else { return "" }
-        return String(project.path.dropFirst(root.path.count + 1))
+        repositoryInfo(for: directory)?.prefix ?? ""
     }
 
     private static func projectRelativePath(_ path: String, prefix: String) -> String? {

@@ -56,6 +56,7 @@ enum RegressionTests {
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
         try testSelectedControlsAgree()
+        try testStatusMatchesPorcelainV1()
         try testAutosaveOnFocusChange()
         try testLineEditingShortcuts()
         try testGitMarksFollowUnsavedEdits()
@@ -729,18 +730,6 @@ enum RegressionTests {
         try expect(stillStaged == ["outside.txt"],
                    "commit disturbed staged changes outside the project")
 
-        // Each changed file offers a way to the source, not only to its diff.
-        let panel = GitPanelViewController()
-        _ = panel.view
-        panel.setDirectory(project)
-        // The row is just the file now; its actions live in the context menu.
-        let cell = GitChangeCellProbe()
-        cell.frame = NSRect(x: 0, y: 0, width: 260, height: Theme.treeRowHeight())
-        cell.configureProbe(path: "Sources/App.swift")
-        cell.layoutSubtreeIfNeeded()
-        try expect(cell.nameForTesting == "App.swift",
-                   "the row does not show the file name: \(cell.nameForTesting)")
-
         // Discarding everything restores each tracked file to HEAD in one pass.
         let firstFile = project.appendingPathComponent("bulk-one.txt")
         let secondFile = project.appendingPathComponent("bulk-two.txt")
@@ -837,6 +826,22 @@ enum RegressionTests {
         try expect(!FileManager.default.fileExists(
             atPath: project.appendingPathComponent(secondRename).path),
                    "rename discard left the renamed path behind")
+
+        // Last, because the panel stages in the background as soon as it is
+        // given a directory, and two git processes cannot hold the index at
+        // once — driving Git from here afterwards would race it.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        panel.setDirectory(project)
+        // Each changed file offers a way to the source, not only to its diff.
+        // The row is just the file now; its actions live in the context menu.
+        let cell = GitChangeCellProbe()
+        cell.frame = NSRect(x: 0, y: 0, width: 260, height: Theme.treeRowHeight())
+        cell.configureProbe(path: "Sources/App.swift")
+        cell.layoutSubtreeIfNeeded()
+        try expect(cell.nameForTesting == "App.swift",
+                   "the row does not show the file name: \(cell.nameForTesting)")
+
     }
 
     private static func testGitIgnoreRefreshReconciliation() throws {
@@ -2977,6 +2982,78 @@ enum RegressionTests {
     /// Leaving a buffer writes it: switching tabs, switching panes, clicking
     /// out of the editor, or leaving the window. Saving used to be entirely on
     /// the user, so an edit survived only if they remembered ⌘S.
+    /// `status` reads porcelain v2 and reports what v1 did, from one
+    /// subprocess instead of seven.
+    private static func testStatusMatchesPorcelainV1() throws {
+        let root = try temporaryDirectory("status-v2")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        for name in ["kept.txt", "edited.txt", "staged.txt", "gone.txt", "moved.txt"] {
+            try Data("\(name)\n".utf8).write(to: root.appendingPathComponent(name))
+        }
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-q", "-m", "base"], in: root)
+
+        // One of every shape the panel has to render.
+        try Data("changed\n".utf8).write(to: root.appendingPathComponent("edited.txt"))
+        try Data("changed\n".utf8).write(to: root.appendingPathComponent("staged.txt"))
+        _ = GitService.run(["add", "--", "staged.txt"], in: root)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("gone.txt"))
+        _ = GitService.run(["mv", "moved.txt", "renamed.txt"], in: root)
+        try Data("new\n".utf8).write(to: root.appendingPathComponent("fresh.txt"))
+        // A name that would break naive splitting.
+        let awkward = "two words -> and \"quotes\".txt"
+        try Data("odd\n".utf8).write(to: root.appendingPathComponent(awkward))
+
+        // The reference: what the previous implementation read.
+        let v1 = GitService.run(["status", "--porcelain=v1", "-z",
+                                 "--untracked-files=all", "--", "."], in: root)
+        var expected: [String: String] = [:]     // path -> code
+        let records = v1.out.split(separator: "\0", omittingEmptySubsequences: true)
+        var index = 0
+        while index < records.count {
+            let raw = String(records[index])
+            index += 1
+            guard raw.count > 3 else { continue }
+            let code = String(raw.prefix(2))
+            expected[String(raw.dropFirst(3))] = code
+            if code.contains("R") || code.contains("C") { index += 1 }   // the old path
+        }
+
+        let status = GitService.status(in: root)
+        try expect(status.isRepo && status.branch == "main",
+                   "the branch did not come from the status call: \(status.branch)")
+        try expect(status.userName == "Puzzle Test",
+                   "the user name was lost: \(status.userName)")
+        let actual = Dictionary(uniqueKeysWithValues: status.entries.map { ($0.path, $0.code) })
+        try expect(actual == expected,
+                   "porcelain v2 disagrees with v1:\n  v1: \(expected.sorted { $0.key < $1.key })"
+                    + "\n  v2: \(actual.sorted { $0.key < $1.key })")
+        guard let rename = status.entries.first(where: { $0.code.contains("R") }) else {
+            throw Failure(description: "the rename was not reported: \(status.entries)")
+        }
+        try expect(rename.path == "renamed.txt" && rename.originalPath == "moved.txt",
+                   "the rename lost a side: \(rename)")
+        try expect(status.entries.contains { $0.path == awkward && $0.isUntracked },
+                   "a name with spaces and quotes was dropped: \(status.entries.map(\.path))")
+
+        // Ahead/behind rides along on the same call.
+        try expect(status.hasUpstream == false && status.ahead == 0,
+                   "a branch with no upstream reported one")
+        let remote = root.appendingPathComponent("origin.git")
+        _ = GitService.run(["init", "-q", "--bare", remote.path], in: root)
+        _ = GitService.run(["remote", "add", "origin", remote.path], in: root)
+        _ = GitService.run(["push", "-q", "-u", "origin", "main"], in: root)
+        try Data("later\n".utf8).write(to: root.appendingPathComponent("kept.txt"))
+        _ = GitService.run(["commit", "-qam", "ahead"], in: root)
+        let pushable = GitService.status(in: root)
+        try expect(pushable.hasUpstream && pushable.ahead == 1,
+                   "ahead/behind did not come from the branch header: "
+                    + "\(pushable.hasUpstream) \(pushable.ahead)")
+    }
+
     private static func testAutosaveOnFocusChange() throws {
         let root = try temporaryDirectory("autosave")
         defer { try? FileManager.default.removeItem(at: root) }
