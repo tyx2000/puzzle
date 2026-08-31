@@ -325,6 +325,61 @@ enum SidebarCellDrawing {
                         width: max(0, rect.maxX - secondaryX), height: rect.height),
              lineBreak: .byTruncatingHead)
     }
+
+    /// A row that reads left to right and ends with its metadata: the leading
+    /// text is what the row is about, `trailing` and `trailingPinned` are who
+    /// and when. All three sit on the leading font's baseline, so a smaller
+    /// metadata font still shares the line.
+    ///
+    /// Space is given out from the right: `trailingPinned` (the timestamp) keeps
+    /// its natural width, `trailing` (the name) takes what is left of the
+    /// metadata's share and truncates, and the leading text gets the rest. The
+    /// order matters — letting the pair truncate as one string ate the name
+    /// whole and left a dangling ellipsis in front of the date.
+    static func leadingAndTrailing(leading: String, leadingFont: NSFont, leadingColor: NSColor,
+                                   trailing: String, trailingFont: NSFont,
+                                   trailingColor: NSColor,
+                                   trailingPinned: String = "",
+                                   in rect: NSRect, gap: CGFloat = 8,
+                                   trailingShare: CGFloat = 0.6,
+                                   leadingLineBreak: NSLineBreakMode = .byTruncatingTail) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        let baseline = centeredBaseline(for: leadingFont, in: rect)
+        func width(_ string: String) -> CGFloat {
+            // A point of slack: the measured advance rounds a hair under what
+            // is actually drawn, which clipped the last digit of a timestamp.
+            ceil((string as NSString).size(withAttributes: [.font: trailingFont]).width) + 2
+        }
+        let budget = floor(rect.width * trailingShare)
+        var metadataX = rect.maxX
+
+        if !trailingPinned.isEmpty {
+            let pinnedWidth = min(width(trailingPinned), budget)
+            let pinned = NSRect(x: rect.maxX - pinnedWidth, y: rect.minY,
+                                width: pinnedWidth, height: rect.height)
+            text(trailingPinned, font: trailingFont, color: trailingColor, baseline: baseline,
+                 in: pinned, lineBreak: .byClipping, alignment: .right)
+            metadataX = pinned.minX
+        }
+        if !trailing.isEmpty {
+            // The gap belongs between the name and the timestamp, not inside
+            // the name's own box — right-aligned text would have pushed it to
+            // the wrong side and run the two together.
+            let separation = trailingPinned.isEmpty ? 0 : gap
+            let remaining = max(0, budget - (rect.maxX - metadataX) - separation)
+            let nameWidth = min(width(trailing), remaining)
+            let name = NSRect(x: metadataX - separation - nameWidth, y: rect.minY,
+                              width: nameWidth, height: rect.height)
+            text(trailing, font: trailingFont, color: trailingColor, baseline: baseline,
+                 in: name, lineBreak: .byTruncatingTail, alignment: .right)
+            metadataX = name.minX
+        }
+        let leadingWidth = max(0, metadataX - gap - rect.minX)
+        text(leading, font: leadingFont, color: leadingColor, baseline: baseline,
+             in: NSRect(x: rect.minX, y: rect.minY,
+                        width: leadingWidth, height: rect.height),
+             lineBreak: leadingLineBreak)
+    }
 }
 
 /// Base class that keeps the custom-drawn rows useful to VoiceOver and updates

@@ -67,9 +67,26 @@ enum GitService {
         /// Full timestamp, shown below the commit subject in History.
         let absoluteDate: String
         let email: String
+        /// Short hashes of this commit's parents, first-parent first. Two or
+        /// more means a merge. Empty for the root commit — and for a parent
+        /// that the log's own filters pruned away.
+        var parents: [String] = []
+        /// Branch and tag names pointing here, as Git decorates them
+        /// ("HEAD -> main, origin/main"). Empty for most commits.
+        var refs: String = ""
 
         /// Blame summary shown as the commit record's secondary line.
         var blameSummary: String { "\(author)  ·  \(absoluteDate)" }
+
+        /// Branch and tag names to show as chips. `%D` reads
+        /// "HEAD -> main, origin/main, tag: v1"; the arrow is noise in a chip,
+        /// and a bare "HEAD" says nothing a branch name does not.
+        var refLabels: [String] {
+            refs.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .map { $0.hasPrefix("HEAD -> ") ? String($0.dropFirst(8)) : $0 }
+                .filter { !$0.isEmpty && $0 != "HEAD" }
+        }
     }
 
     @discardableResult
@@ -885,21 +902,41 @@ enum GitService {
     static func log(in directory: URL, limit: Int = 40) -> [Commit] {
         // NUL is the one byte commit metadata cannot contain, so neither an
         // unusual subject nor an author name can shift these fields.
-        let format = "%h%x00%s%x00%an%x00%ad%x00%ae"
-        let result = run(["--no-pager", "log", "-z", "--pretty=format:" + format,
+        //
+        // `%p` and `%D` carry the shape of the history — who each commit came
+        // from, and which branches point at it — which is what the graph column
+        // draws. `--date-order` is what a graph needs: still newest first, but
+        // a commit is never listed before one of its children, so a lane never
+        // has to jump backwards.
+        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D"
+        let result = run(["--no-pager", "log", "-z", "--date-order",
+                          "--pretty=format:" + format,
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
                           "--", "."], in: directory)
         guard result.code == 0 else { return [] }
-        let fields = result.out.split(separator: "\0", omittingEmptySubsequences: false)
+        return parseLog(result.out, fieldsPerCommit: 7)
+    }
+
+    /// Splits `-z` log output into commits. `fieldsPerCommit` says whether the
+    /// format carried the graph fields.
+    private static func parseLog(_ output: String, fieldsPerCommit: Int) -> [Commit] {
+        let fields = output.split(separator: "\0", omittingEmptySubsequences: false)
         var commits: [Commit] = []
         var index = 0
-        while index + 4 < fields.count {
-            commits.append(Commit(shortHash: String(fields[index]),
-                                  subject: String(fields[index + 1]),
-                                  author: String(fields[index + 2]),
-                                  absoluteDate: String(fields[index + 3]),
-                                  email: String(fields[index + 4])))
-            index += 5
+        while index + fieldsPerCommit - 1 < fields.count {
+            var commit = Commit(shortHash: String(fields[index]),
+                                subject: String(fields[index + 1]),
+                                author: String(fields[index + 2]),
+                                absoluteDate: String(fields[index + 3]),
+                                email: String(fields[index + 4]))
+            if fieldsPerCommit >= 7 {
+                commit.parents = String(fields[index + 5])
+                    .split(separator: " ").map(String.init)
+                commit.refs = String(fields[index + 6])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            commits.append(commit)
+            index += fieldsPerCommit
         }
         return commits
     }

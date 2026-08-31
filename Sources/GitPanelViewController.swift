@@ -1134,6 +1134,18 @@ final class GitPanelViewController: NSViewController {
     /// when nothing changed.
     var reloadWouldRebuildForTesting: Bool { rowsNeedReload }
     var rowCountForTesting: Int { table.numberOfRows }
+    /// What a row puts at each end of its single line, and what hovering it
+    /// reveals.
+    func rowTextForTesting(_ row: Int) -> (leading: String, trailing: String, hover: String) {
+        guard let view = tableView(table, viewFor: nil, row: row) else { return ("", "", "") }
+        if let cell = view as? GitCommitCell {
+            return (cell.subjectForTesting, cell.metaForTesting, cell.toolTipForTesting)
+        }
+        if let cell = view as? GitBranchCell {
+            return (cell.nameForTesting, cell.metadataForTesting, cell.toolTip ?? "")
+        }
+        return ("", "", "")
+    }
     func applyStatusForTesting(_ status: GitService.Status, in directory: URL) {
         _ = view
         applyStatus(status, in: directory)
@@ -1169,6 +1181,16 @@ final class GitPanelViewController: NSViewController {
         _ = view
         segmented.selectedSegment = 0
         tabChanged()
+    }
+    func showHistoryForTesting() {
+        _ = view
+        segmented.selectedSegment = 2
+        tabChanged()
+    }
+    /// The lane diagram behind the History rows.
+    var historyRefsForTesting: [String] { history.map(\.refs) }
+    var historyRowIsCommitForTesting: [Bool] {
+        historyRows.map { if case .commit = $0 { return true } else { return false } }
     }
 
     static var selectedTabColoursForTesting: (surface: NSColor, ink: NSColor) {
@@ -1276,32 +1298,11 @@ extension GitPanelViewController: NSTableViewDataSource {
 
 extension GitPanelViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        // Every row in the panel is measured in `tree_line_height`, the same
-        // unit the file tree uses: one for a file, two for the rows that carry
-        // a second line of metadata (a branch, a commit).
-        if showingBranches { return Self.twoLineRowHeight }
-        if showingHistory, row < historyRows.count, case .commit = historyRows[row] {
-            return Self.twoLineRowHeight
-        }
-        return Theme.treeRowHeight()
-    }
-
-    /// Branch and commit rows put the name over its author and date.
-    ///
-    /// Their text plus the same breathing room a single-line row has, rather
-    /// than two whole rows: once the two lines were tightened, doubling the row
-    /// left so much padding that the rows themselves looked far apart.
-    static var twoLineRowHeight: CGFloat {
-        let primary = Theme.uiFont(11)
-        let secondary = Theme.uiFont(9.5)
-        let bands = SidebarCellDrawing.twoLineBands(
-            in: NSRect(x: 0, y: 0, width: 100, height: 0),
-            primaryFont: primary, secondaryFont: secondary)
-        let block = bands.secondary.maxY - bands.primary.minY
-        let singleLine = ceil(primary.ascender - primary.descender)
-        // What `tree_line_height` leaves around one line of text.
-        let padding = max(4, Theme.treeRowHeight() - singleLine)
-        return ceil(block + padding)
+        // Every row in the panel is one `tree_line_height`, the unit the file
+        // tree uses. Branches and commits used to stack their metadata on a
+        // second line; it sits at the end of the same line instead, so a list
+        // of them scans like every other list in the sidebar.
+        Theme.treeRowHeight()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1318,13 +1319,12 @@ extension GitPanelViewController: NSTableViewDelegate {
         if showingHistory {
             guard row < historyRows.count else { return nil }
             switch historyRows[row] {
-            case .commit(let commit, let expanded):
+            case .commit(let commit, _):
                 let id = NSUserInterfaceItemIdentifier("git-commit-cell")
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitCommitCell) ?? GitCommitCell()
                 cell.identifier = id
-                let pending = isUnpushed(commit.shortHash)
-                cell.configure(commit: commit, expanded: expanded, pending: pending)
+                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash))
                 return cell
 
             case .file(let file, _):
@@ -1349,57 +1349,43 @@ extension GitPanelViewController: NSTableViewDelegate {
 }
 
 private final class GitCommitCell: DrawnSidebarCell {
-    private var chevron: NSImage?
-    private var meta = ""
     private var subject = ""
-    private var blame = ""
+    private var author = ""
+    private var date = ""
     private var metaColor = NSColor.clear
-    func configure(commit: GitService.Commit, expanded: Bool, pending: Bool) {
-        chevron = Theme.symbol(expanded ? "chevron.down" : "chevron.right",
-                                pointSize: 8, weight: .semibold)
-        meta = pending ? "↑ \(commit.shortHash)" : commit.shortHash
-        metaColor = pending ? Theme.cursor : Theme.dimText
+
+    func configure(commit: GitService.Commit, pending: Bool) {
         subject = commit.subject
-        blame = commit.blameSummary + (pending ? "  ·  not pushed" : "")
-        // The metadata is always visible below the record, so a delayed hover
-        // popup is both redundant and disruptive while scanning history.
-        toolTip = nil
-        exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), \(commit.subject), \(commit.author), \(commit.absoluteDate)")
+        // The name gives way before the timestamp does: a truncated name still
+        // reads, a truncated date does not.
+        author = pending ? "↑  " + commit.author : commit.author
+        date = commit.absoluteDate
+        // Unpushed commits are the reason Push is enabled, so they still have
+        // to be tellable apart at a glance — the arrow rides with the metadata
+        // rather than taking room from the subject.
+        metaColor = pending ? Theme.cursor : Theme.dimText
+        // One line can only carry so much. Everything the row had to drop —
+        // the commit id, where a branch or tag points — is one hover away.
+        var details = [commit.shortHash, commit.subject, commit.blameSummary]
+        if !commit.refLabels.isEmpty { details.insert(commit.refLabels.joined(separator: ", "), at: 1) }
+        if pending { details.append("not pushed") }
+        toolTip = details.joined(separator: "\n")
+        exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
+                                + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
     }
-    override func draw(_ dirtyRect: NSRect) {
-        let subjectFont = Theme.uiFont(11)
-        let metaFont = Theme.uiFont(9.5)
-        let detailFont = Theme.uiFont(9.5)
-        // Ascender-to-descender, not the font's full box: two of those stacked
-        // pushed the subject and its blame line apart until the row read as two.
-        let bands = SidebarCellDrawing.twoLineBands(
-            in: bounds, primaryFont: subjectFont, secondaryFont: detailFont)
-        let titleBand = bands.primary
-        let detailHeight = bands.secondary.height
-        let titleBaseline = SidebarCellDrawing.centeredBaseline(for: subjectFont, in: titleBand)
-        // Align the chevron's visual center with the subject's cap-height, not
-        // merely the row center. Commit ID and subject share this exact baseline.
-        let glyphCenterY = titleBaseline - subjectFont.capHeight / 2
-        SidebarCellDrawing.image(chevron, tint: Theme.dimText,
-                                 in: NSRect(x: 6, y: floor(glyphCenterY - 5),
-                                            width: 10, height: 10))
-        SidebarCellDrawing.text(meta, font: metaFont, color: metaColor,
-                                baseline: titleBaseline,
-                                in: NSRect(x: 20, y: titleBand.minY,
-                                           width: 62, height: titleBand.height))
-        SidebarCellDrawing.text(subject, font: subjectFont, color: Theme.foreground,
-                                baseline: titleBaseline,
-                                in: NSRect(x: 86, y: titleBand.minY,
-                                           width: max(0, bounds.width - 92),
-                                           height: titleBand.height))
 
-        let blameBand = NSRect(x: 20, y: bands.secondary.minY,
-                               width: max(0, bounds.width - 26),
-                               height: detailHeight)
-        SidebarCellDrawing.text(blame, font: detailFont, color: Theme.dimText,
-                                in: blameBand)
+    override func draw(_ dirtyRect: NSRect) {
+        SidebarCellDrawing.leadingAndTrailing(
+            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
+            trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
+            trailingPinned: date,
+            in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height))
     }
+
+    var subjectForTesting: String { subject }
+    var metaForTesting: String { "\(author)  ·  \(date)" }
+    var toolTipForTesting: String { toolTip ?? "" }
 }
 
 private final class GitHistoryFileCell: DrawnSidebarCell {
@@ -1417,13 +1403,17 @@ private final class GitHistoryFileCell: DrawnSidebarCell {
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) {
+        // Indented under the commit it belongs to, which is what says these
+        // rows are its files now that no lane is drawn behind them.
         SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
-                                in: NSRect(x: 24, y: 0, width: 14, height: bounds.height),
+                                in: NSRect(x: 18, y: 0, width: 14, height: bounds.height),
                                 alignment: .center)
+        let textX: CGFloat = 38
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: NSRect(x: 44, y: 0, width: max(0, bounds.width - 50), height: bounds.height))
+            in: NSRect(x: textX, y: 0, width: max(0, bounds.width - textX - 6),
+                       height: bounds.height))
     }
 }
 
@@ -1489,36 +1479,37 @@ private final class GitChangeCell: DrawnSidebarCell {
 
 private final class GitBranchCell: DrawnSidebarCell {
     private var name = ""
+    private var author = ""
+    private var date = ""
     private var metadata = ""
     private var isCurrent = false
 
     func configure(branch: GitService.Branch) {
         name = branch.isCurrent ? "\(branch.name)  · current" : branch.name
+        author = branch.author
+        date = branch.createdAt
         metadata = "\(branch.author)  ·  \(branch.createdAt)"
         isCurrent = branch.isCurrent
-        toolTip = branch.name
+        // A name that had to be truncated is worth reading in full.
+        toolTip = "\(branch.name)\n\(metadata)"
         exposeToAccessibility("Branch \(branch.name), \(metadata)")
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let primaryFont = Theme.uiFont(11)
-        let secondaryFont = Theme.uiFont(9.5)
         // Switch and delete moved to the row's context menu, so the name has
-        // the full width.
-        let bands = SidebarCellDrawing.twoLineBands(
+        // the full width up to its metadata.
+        SidebarCellDrawing.leadingAndTrailing(
+            leading: name, leadingFont: Theme.uiFont(11),
+            leadingColor: isCurrent ? Theme.cursor : Theme.foreground,
+            trailing: author, trailingFont: Theme.uiFont(9.5),
+            trailingColor: Theme.dimText, trailingPinned: date,
             in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height),
-            primaryFont: primaryFont, secondaryFont: secondaryFont)
-        SidebarCellDrawing.text(
-            name, font: primaryFont,
-            color: isCurrent ? Theme.cursor : Theme.foreground,
-            in: bands.primary, lineBreak: .byTruncatingMiddle)
-        SidebarCellDrawing.text(
-            metadata, font: secondaryFont, color: Theme.dimText,
-            in: bands.secondary, lineBreak: .byTruncatingTail)
+            leadingLineBreak: .byTruncatingMiddle)
     }
 
     var nameForTesting: String { name }
+    var metadataForTesting: String { metadata }
 }
 
 /// Two-state tab strip with the same full-height selection treatment as the

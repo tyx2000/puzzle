@@ -56,6 +56,8 @@ enum RegressionTests {
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
         try testSelectedControlsAgree()
+        try testHistoryLogDetails()
+        try testOneLinePanelRows()
         try testStatusMatchesPorcelainV1()
         try testAutosaveOnFocusChange()
         try testLineEditingShortcuts()
@@ -2939,51 +2941,135 @@ enum RegressionTests {
         panel.showChangesForTesting()
         try expect(panel.footerVisibleForTesting, "Changes did not get its footer back")
 
-        // The two lines of a branch or commit row sit together, and the pair
-        // sits in the middle: measured on the font's bounding box they drifted
-        // apart until one row read as two.
-        let row = NSRect(x: 0, y: 0, width: 300, height: GitPanelViewController.twoLineRowHeight)
-        let primaryFont = Theme.uiFont(11)
-        let secondaryFont = Theme.uiFont(9.5)
-        let bands = SidebarCellDrawing.twoLineBands(in: row, primaryFont: primaryFont,
-                                                    secondaryFont: secondaryFont)
-        let gap = bands.secondary.minY - bands.primary.maxY
-        try expect(gap >= 0 && gap <= 2,
-                   "the two lines are \(gap)pt apart")
-        let block = bands.secondary.maxY - bands.primary.minY
-        try expect(block < row.height,
-                   "the text block (\(block)pt) does not fit its row (\(row.height)pt)")
-        try expect(abs((bands.primary.minY - row.minY) - (row.maxY - bands.secondary.maxY)) <= 1,
-                   "the block is not centred: \(bands)")
-
-        // Rows are measured in tree_line_height: one for a file, two for the
-        // rows that carry a second line.
+        // Every row in the panel is one tree row: a changed file, a branch and
+        // a commit all scan the same way down the list.
         try expect(panel.rowHeightForTesting(0) == Theme.treeRowHeight(),
                    "a file row is \(panel.rowHeightForTesting(0))pt, not one tree row")
-        // A two-line row is its text plus the padding a one-line row has — not
-        // two whole rows, which left the rows looking far apart.
-        let twoLine = GitPanelViewController.twoLineRowHeight
-        try expect(twoLine > Theme.treeRowHeight(),
-                   "a two-line row is no taller than a one-line row: \(twoLine)")
-        try expect(twoLine < Theme.treeRowHeight() * 2,
-                   "a two-line row is still a doubled row: \(twoLine)")
-        let textBlock = bands.secondary.maxY - bands.primary.minY
-        try expect(twoLine - textBlock <= Theme.treeRowHeight()
-                    - ceil(primaryFont.ascender - primaryFont.descender) + 1,
-                   "a two-line row carries more padding than a one-line row")
+        panel.showBranchTab()
+        try expect(panel.rowHeightForTesting(0) == Theme.treeRowHeight(),
+                   "a branch row is \(panel.rowHeightForTesting(0))pt, not one tree row")
+        panel.showHistory()
+        try expect(panel.rowHeightForTesting(0) == Theme.treeRowHeight(),
+                   "a commit row is \(panel.rowHeightForTesting(0))pt, not one tree row")
+        panel.showChangesForTesting()
     }
 
-    /// The three strips that show a selection — the activity bar, the Git
-    /// panel's tabs, the file tabs — say it the same way, and loudly enough.
-    /// The gutter is only as wide as the numbers it has to draw. A fixed
-    /// four-digit column cost every short file the same margin.
-    /// Return carries the indent, Shift-Return opens an indented line below
-    /// from anywhere on the current one, and Command-D copies the line.
-    /// Leaving a buffer writes it: switching tabs, switching panes, clicking
-    /// out of the editor, or leaving the window. Saving used to be entirely on
-    /// the user, so an edit survived only if they remembered ⌘S.
+    /// The log carries what History needs to render and what its rows say in
+    /// their tooltips: parents (so a merge is recognisable), and the branch or
+    /// tag names pointing at a commit.
+    private static func testHistoryLogDetails() throws {
+        let root = try temporaryDirectory("graph")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) { _ = GitService.run(args, in: root) }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "T"])
+        git(["config", "user.email", "t@e.invalid"])
+        func commit(_ message: String, file: String = "main.txt") throws {
+            try Data("\(message)\n".utf8).write(to: root.appendingPathComponent(file))
+            git(["add", "-A"])
+            git(["commit", "-q", "-m", message])
+        }
+        try commit("first")
+        try commit("second")
+        git(["checkout", "-q", "-b", "feature"])
+        try commit("feature work", file: "feature.txt")
+        git(["checkout", "-q", "main"])
+        try commit("main moves on")
+        git(["merge", "-q", "--no-ff", "feature", "-m", "merge feature"])
+        try commit("after the merge")
+
+        let log = GitService.log(in: root, limit: 40)
+        try expect(log.count == 6, "the log did not come back whole: \(log.map(\.subject))")
+        guard let mergeIndex = log.firstIndex(where: { $0.parents.count == 2 }) else {
+            throw Failure(description: "no merge commit carried two parents: "
+                            + "\(log.map { ($0.subject, $0.parents) })")
+        }
+        try expect(log.first?.refLabels == ["main"],
+                   "the branch label was not read from the log: \(log.first?.refs ?? "-")")
+        try expect(log.last?.parents.isEmpty == true,
+                   "the root commit was given a parent: \(log.last?.parents ?? [])")
+
+        // The panel builds one row per commit.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        panel.setDirectory(root)
+        panel.showHistoryForTesting()
+        let deadline = Date().addingTimeInterval(5)
+        while panel.historyRowIsCommitForTesting.count < log.count && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(panel.historyRowIsCommitForTesting.allSatisfy { $0 },
+                   "unexpanded history showed something other than commits")
+    }
+
     /// `status` reads porcelain v2 and reports what v1 did, from one
     /// subprocess instead of seven.
+    /// Branch and History rows are one line: the thing itself on the left, who
+    /// and when on the right, and everything that no longer fits one hover
+    /// away. History rows also lost their chevron — the row is the control —
+    /// and the lane graph beside them.
+    private static func testOneLinePanelRows() throws {
+        let root = try temporaryDirectory("one-line-rows")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) { _ = GitService.run(args, in: root) }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "Ada Lovelace"])
+        git(["config", "user.email", "ada@example.invalid"])
+        try Data("one\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        git(["add", "-A"])
+        git(["commit", "-q", "-m", "the subject line"])
+
+        let panel = GitPanelViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        defer { window.close() }
+        panel.setDirectory(root)
+        panel.showHistory()
+        let deadline = Date().addingTimeInterval(5)
+        while panel.rowCountForTesting == 0 && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(panel.rowCountForTesting == 1,
+                   "history shows \(panel.rowCountForTesting) rows for one commit")
+        let commitRow = panel.rowTextForTesting(0)
+        try expect(commitRow.leading == "the subject line",
+                   "the commit message is not the left of the row: \(commitRow.leading)")
+        try expect(commitRow.trailing.contains("Ada Lovelace"),
+                   "the author is not on the right: \(commitRow.trailing)")
+        try expect(!commitRow.trailing.isEmpty
+                    && commitRow.trailing != "Ada Lovelace",
+                   "the time is missing from the right: \(commitRow.trailing)")
+        let hash = GitService.run(["rev-parse", "--short", "HEAD"], in: root)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        for detail in [hash, "main", "the subject line", "Ada Lovelace"] {
+            try expect(commitRow.hover.contains(detail),
+                       "hovering a commit does not reveal \(detail): \(commitRow.hover)")
+        }
+
+        // Clicking the row is what expands it, so its files appear underneath.
+        panel.expandCommit(at: 0)
+        let expanded = Date().addingTimeInterval(5)
+        while panel.rowCountForTesting < 2 && Date() < expanded {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(panel.rowCountForTesting == 2,
+                   "clicking a commit did not open its files: \(panel.rowCountForTesting)")
+        panel.expandCommit(at: 0)
+        try expect(panel.rowCountForTesting == 1, "clicking again did not close it")
+
+        panel.showBranchTab()
+        let branched = Date().addingTimeInterval(5)
+        while panel.rowCountForTesting == 0 && Date() < branched {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let branchRow = panel.rowTextForTesting(0)
+        try expect(branchRow.leading.hasPrefix("main"),
+                   "the branch name is not the left of the row: \(branchRow.leading)")
+        try expect(branchRow.trailing.contains("Ada Lovelace"),
+                   "the branch row does not carry its author: \(branchRow.trailing)")
+    }
+
     private static func testStatusMatchesPorcelainV1() throws {
         let root = try temporaryDirectory("status-v2")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3054,6 +3140,9 @@ enum RegressionTests {
                     + "\(pushable.hasUpstream) \(pushable.ahead)")
     }
 
+    /// Leaving a buffer writes it: switching tabs, switching panes, clicking
+    /// out of the editor, or leaving the window. Saving used to be entirely on
+    /// the user, so an edit survived only if they remembered ⌘S.
     private static func testAutosaveOnFocusChange() throws {
         let root = try temporaryDirectory("autosave")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3126,6 +3215,8 @@ enum RegressionTests {
                    "the buffer was marked saved even though nothing was written")
     }
 
+    /// Return carries the indent, Shift-Return opens an indented line below
+    /// from anywhere on the current one, and Command-D copies the line.
     private static func testLineEditingShortcuts() throws {
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags,
@@ -3257,6 +3348,8 @@ enum RegressionTests {
                    "marking the buffer wrote to the file: \(onDisk.debugDescription)")
     }
 
+    /// The gutter is only as wide as the numbers it has to draw. A fixed
+    /// four-digit column cost every short file the same margin.
     private static func testGutterWidthFollowsLineCount() throws {
         typealias Ruler = LineNumberRulerView
         try expect(Ruler.digits(forHighestLine: 1) == Ruler.minimumDigits,
@@ -3315,6 +3408,8 @@ enum RegressionTests {
         }
     }
 
+    /// The three strips that show a selection — the activity bar, the Git
+    /// panel's tabs, the file tabs — say it the same way, and loudly enough.
     private static func testSelectedControlsAgree() throws {
         func luminance(_ colour: NSColor) -> CGFloat {
             guard let c = colour.usingColorSpace(.sRGB) else { return 0 }
