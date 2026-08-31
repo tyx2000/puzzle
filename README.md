@@ -4,9 +4,9 @@ A tiny AppKit code editor in Swift, styled after Zed, with real tree-sitter
 syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 
 ## Features
-- **Zed-matched theme & layout** — One Light / One Dark that follow the system
-  appearance (like Zed with no theme pinned), or Ayu Dark via `theme` in
-  settings.json, Monaco 12 with configurable exact code/tree row heights.
+- **Zed-matched layout, one palette** — Ayu Dark throughout, fixed: it does not
+  follow the system appearance and there is nothing to configure. Monaco 12 with
+  configurable exact code/tree row heights.
   Zed-style header (tabs beside the traffic lights), full-width bottom status bar
   with a left **activity bar** (project · search · git · outline · settings) and
   right branch · line/col · language, editor tabs with an active accent, compact
@@ -117,7 +117,6 @@ with every property documented inline. Keys and defaults:
 | `ui_font_size` | `12` | base UI size; scales the whole panel hierarchy (8–32) |
 | `ui_font_weight` | `400` | UI weight; 600+ renders bold |
 | `tree_line_height` | `22` | exact file-tree row height in points (8–200) |
-| `theme` | `"one"` | colour theme: `"one"` (One Light/Dark, follows the system) or `"ayu-dark"` |
 
 ## Notes / limits
 - `NSTextView` is great for normal source files; multi-hundred-MB files are the

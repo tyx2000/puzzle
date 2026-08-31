@@ -9,8 +9,9 @@ struct LanguageDefinition {
     let display: String
 }
 
-/// tree-sitter backed highlighter. Parses a document and applies One Dark
-/// colors to an NSTextStorage, evaluating #eq?/#match?/#any-of? predicates.
+/// tree-sitter backed highlighter. Parses a document and applies the theme's
+/// syntax colours to an NSTextStorage, evaluating #eq?/#match?/#any-of?
+/// predicates.
 final class SyntaxHighlighter {
 
     // MARK: Language registry

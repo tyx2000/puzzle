@@ -266,7 +266,7 @@ enum SidebarCellDrawing {
     static func icon(_ icon: SidebarIcon?, in rect: NSRect) {
         switch icon {
         case .material(let name):
-            image(FileIcons.image(named: name, dark: Theme.isDark()), tint: nil, in: rect)
+            image(FileIcons.image(named: name, dark: true), tint: nil, in: rect)
         case .symbol(let symbol, let tint):
             image(symbol, tint: tint, in: rect)
         case nil:

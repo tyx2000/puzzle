@@ -63,9 +63,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // Do not retain both old and new full-size surfaces throughout a live
         // resize; redraw from the view tree instead.
         window.preservesContentDuringLiveResize = false
-        // Follow the system appearance (light/dark) exactly like Zed does when no
-        // theme is pinned. Zed-style header: full-size content with the tabs
-        // beside the traffic lights, transparent flat titlebar, no toolbar.
+        // Zed-style header: full-size content with the tabs beside the traffic
+        // lights, transparent flat titlebar, no toolbar.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = Theme.barBackground

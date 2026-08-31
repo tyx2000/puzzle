@@ -485,17 +485,11 @@ enum RegressionTests {
         }
         // Nothing is painted over the text any more, so the only requirement on
         // the outline is that it is visible against the surfaces it is drawn on.
-        for theme in [Theme.Name.one, .ayuDark] {
-            Settings.shared.theme = theme
-            Theme.invalidateCaches()
-            let outline = luma(Theme.matchOutline)
-            try expect(abs(outline - luma(Theme.editorBackground)) > 0.1,
-                       "\(theme.rawValue): the outline does not separate from the editor")
-            try expect(abs(outline - luma(Theme.panelBackground)) > 0.1,
-                       "\(theme.rawValue): the outline does not separate from the panel")
-        }
-        Settings.shared.theme = .ayuDark
-        Theme.invalidateCaches()
+        let outlineLuma = luma(Theme.matchOutline)
+        try expect(abs(outlineLuma - luma(Theme.editorBackground)) > 0.1,
+                   "the outline does not separate from the editor")
+        try expect(abs(outlineLuma - luma(Theme.panelBackground)) > 0.1,
+                   "the outline does not separate from the panel")
         // Stepping through matches still reads: the current one is drawn with a
         // heavier pen, in the same colour.
         try expect(Theme.currentMatchOutlineWidth > Theme.matchOutlineWidth,
@@ -524,13 +518,8 @@ enum RegressionTests {
 
 
 
-        // Ayu: the current match has to stand apart from the other matches and
-        // from the selection, or ↑↓ looks like it does nothing.
-        let settings = Settings.shared
-        let savedTheme = settings.theme
-        defer { settings.theme = savedTheme; Theme.invalidateCaches() }
-        settings.theme = .ayuDark
-        Theme.invalidateCaches()
+        // The current match has to stand apart from the other matches and from
+        // the selection, or ↑↓ looks like it does nothing.
         func luminance(_ color: NSColor) -> CGFloat {
             guard let c = color.usingColorSpace(.sRGB) else { return 0 }
             return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
@@ -572,7 +561,7 @@ enum RegressionTests {
         {
           // leading comment
           "ui_font_family": "Iosevka // Term",   // my font
-          "theme": "ayu-dark",
+          "tab_size": 4,
           "buffer_font_size": 13 // trailing
         }
         """
@@ -584,7 +573,7 @@ enum RegressionTests {
         }
         try expect(parsed["ui_font_family"] as? String == "Iosevka // Term",
                    "the value lost its slashes: \(String(describing: parsed["ui_font_family"]))")
-        try expect(parsed["theme"] as? String == "ayu-dark", "a later key was dropped")
+        try expect((parsed["tab_size"] as? NSNumber)?.intValue == 4, "a later key was dropped")
         try expect((parsed["buffer_font_size"] as? NSNumber)?.intValue == 13,
                    "a trailing comment was not stripped")
         // An escaped quote must not end the string early.
@@ -2181,25 +2170,19 @@ enum RegressionTests {
     }
 
     /// The scrollbar knob comes from the theme: AppKit's dark-mode grey is the
-    /// brightest thing on an Ayu Dark window.
+    /// brightest thing on a window this dark.
     private static func testScrollersFollowTheTheme() throws {
-        let settings = Settings.shared
-        let saved = settings.theme
-        defer { settings.theme = saved; Theme.invalidateCaches() }
-
         func luminance(_ color: NSColor) -> CGFloat {
             guard let c = color.usingColorSpace(.sRGB) else { return 0 }
             return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
         }
 
-        settings.theme = .ayuDark
-        Theme.invalidateCaches()
         let knob = luminance(Theme.scrollerKnob)
         let editor = luminance(Theme.editorBackground)
         try expect(knob > editor + 0.02,
                    "the knob does not separate from the surface behind it")
         try expect(knob < 0.25,
-                   "the knob is brighter than anything else on an Ayu window: \(knob)")
+                   "the knob is brighter than anything else on the window: \(knob)")
         try expect(luminance(Theme.foreground) - knob > 0.3,
                    "the knob competes with the text for attention")
 
@@ -2274,25 +2257,17 @@ enum RegressionTests {
                    "the file tree kept AppKit's scroller")
     }
 
+    /// One palette, fixed: nothing follows the system appearance and no setting
+    /// selects anything else, so the tokens can be asserted outright.
     private static func testAyuDarkTheme() throws {
-        let settings = Settings.shared
-        let saved = settings.theme
-        defer {
-            settings.theme = saved
-            Theme.invalidateCaches()
+        // A colour is one value, not an appearance-dependent one: views cache
+        // what they are built with, and a dynamic colour would resolve against
+        // whatever appearance happened to be current when they drew.
+        for colour in [Theme.editorBackground, Theme.foreground, Theme.selectedControl] {
+            try expect(colour.usingColorSpace(.sRGB) != nil,
+                       "a palette colour does not resolve on its own: \(colour)")
         }
-
-        settings.theme = .one
-        Theme.invalidateCaches()
-        let oneBackground = Theme.editorBackground.usingColorSpace(.sRGB)
-        try expect(Theme.isDark(NSAppearance(named: .aqua)!) == false,
-                   "the default theme ignored a light system appearance")
-
-        settings.theme = .ayuDark
-        Theme.invalidateCaches()
-        try expect(Theme.isDark(NSAppearance(named: .aqua)!),
-                   "Ayu Dark did not report itself as a dark theme")
-        // Ayu's code area is the panel's surface, and its active line is the
+        // The code area is the panel's surface, and the active line is the
         // tree's active row, so the editor and the panel read as one.
         try expect(sameColor(Theme.editorBackground, Theme.panelBackground),
                    "the code area does not match the file-tree panel")
@@ -2307,18 +2282,15 @@ enum RegressionTests {
                    "the sidebar/editor divider is not the shared border line")
         try expect(sameColor(Theme.foreground, hexColor(0xbfbdb6)),
                    "the editor foreground is not Ayu's")
-        // Types and calls swap hues between the two themes; the syntax roles
-        // exist so both stay right.
+        // Types are blue and calls yellow here, the reverse of most palettes —
+        // which is why the tokens name the role and not the hue.
         try expect(sameColor(Theme.syntaxType, hexColor(0x39bae6))
                     && sameColor(Theme.syntaxFunction, hexColor(0xffb454)),
-                   "Ayu's syntax roles did not follow the theme")
-        try expect(!sameColor(Theme.editorBackground, oneBackground),
-                   "switching themes did not change the resolved colour")
-
-        settings.theme = .one
-        Theme.invalidateCaches()
-        try expect(sameColor(Theme.editorBackground, oneBackground),
-                   "switching back to One kept Ayu's background")
+                   "the syntax roles are not Ayu's")
+        // Settings no longer carry a theme, and a file that still names one is
+        // rewritten without it rather than quietly keeping a dead key.
+        try expect(!Settings.shared.documentedContentsForTesting.contains("\"theme\""),
+                   "the settings template still offers a theme")
         // The editor panes' split view takes the colour directly…
         try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
                    "the editor split did not take its divider colour from the theme")
@@ -2714,25 +2686,15 @@ enum RegressionTests {
                    "an unchanged line responded to a click")
     }
 
-    /// The Changes rows must survive the refreshes that fire while you click.
-    /// Views cache the colours they are built with, so the theme has to be
-    /// loaded before the first one exists.
+    /// Views cache the colours they are built with, so a pane has to be painted
+    /// in the palette whatever order the app started in.
     private static func testThemeIsReadyBeforeAnyView() throws {
-        let settings = Settings.shared
-        let savedTheme = settings.theme
-        defer { settings.theme = savedTheme; Theme.invalidateCaches() }
-
-        // Stand in for "the app was started by opening a folder": the palette is
-        // whatever the delegate prepared, and a pane built afterwards must be
-        // painted in it rather than in the default one.
-        settings.theme = .ayuDark
-        Theme.invalidateCaches()
         let pane = EditorPaneViewController()
         _ = pane.view
         try expect(sameColor(pane.editorBackgroundForTesting, Theme.editorBackground),
                    "a pane built after the theme loaded is painted in another palette")
         try expect(sameColor(pane.editorBackgroundForTesting, Theme.panelBackground),
-                   "the code area is not the panel's surface under Ayu")
+                   "the code area is not the panel's surface")
 
         // The band on the active line is the tree's active row, and it is
         // lighter than the code behind it — the two must not swap.
@@ -2751,7 +2713,7 @@ enum RegressionTests {
         delegate.applicationWillFinishLaunching(
             Notification(name: NSApplication.willFinishLaunchingNotification))
         try expect(delegate.settingsPreparedForTesting,
-                   "the theme is not loaded before the first window can be built")
+                   "settings are not loaded before the first window can be built")
     }
 
     /// Uncommitted changes are marked in the gutter, and a mark opens the diff
@@ -3201,41 +3163,35 @@ enum RegressionTests {
     }
 
     private static func testSelectedControlsAgree() throws {
-        let settings = Settings.shared
-        let saved = settings.theme
-        defer { settings.theme = saved; Theme.invalidateCaches() }
-
         func luminance(_ colour: NSColor) -> CGFloat {
             guard let c = colour.usingColorSpace(.sRGB) else { return 0 }
             return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
         }
 
-        for theme in [Theme.Name.one, .ayuDark] {
-            settings.theme = theme
-            Theme.invalidateCaches()
+        do {
             let strips = [ActivityBarView.selectedColoursForTesting,
                           EditorTabBar.selectedColoursForTesting,
                           GitPanelViewController.selectedTabColoursForTesting]
             for strip in strips.dropFirst() {
                 try expect(sameColor(strip.surface, strips[0].surface)
                             && sameColor(strip.ink, strips[0].ink),
-                           "\(theme.rawValue): the strips disagree about selection")
+                           "the strips disagree about selection")
             }
             let surface = luminance(Theme.selectedControl)
             // Against the bar it sits on. `activeTab` was two percent away,
             // which read as nothing at all.
             try expect(abs(surface - luminance(Theme.barBackground)) > 0.05,
-                       "\(theme.rawValue): the selected surface barely differs from its bar")
+                       "the selected surface barely differs from its bar")
             try expect(abs(surface - luminance(Theme.panelBackground)) > 0.05,
-                       "\(theme.rawValue): the selected surface barely differs from the panel")
+                       "the selected surface barely differs from the panel")
             try expect(abs(surface - luminance(Theme.activeTab)) > 0.02,
-                       "\(theme.rawValue): selection fell back to the old, subtler surface")
+                       "selection fell back to the old, subtler surface")
             try expect(abs(luminance(Theme.selectedControlText) - surface) > 0.35,
-                       "\(theme.rawValue): the selected label is not readable on its surface")
+                       "the selected label is not readable on its surface")
             // Quiet enough to belong to the same family as the tree's selection
             // rather than glowing above everything else in the window.
             try expect(surface <= luminance(Theme.activeRow) + 0.02,
-                       "\(theme.rawValue): selection is brighter than the tree's own")
+                       "selection is brighter than the tree's own")
         }
 
         // A window opens with room for the Git panel's rows.

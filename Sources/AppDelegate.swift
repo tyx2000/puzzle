@@ -28,12 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Settings have to be in place before any view exists.
     ///
-    /// Views cache the colours they are built with, and `openFiles:` — how
-    /// Finder and `pz` start the app with a project — runs *before*
-    /// `applicationDidFinishLaunching`. Loading the theme there meant a window
-    /// opened that way was built against the default palette: the code area
-    /// kept One Dark's grey while everything drawn live used the chosen theme,
-    /// which read as the editor background and the active line swapping places.
+    /// Views cache the fonts and metrics they are built with, and `openFiles:`
+    /// — how Finder and `pz` start the app with a project — runs *before*
+    /// `applicationDidFinishLaunching`. Loading settings there meant a window
+    /// opened that way was built against the defaults rather than the user's.
     func applicationWillFinishLaunching(_ notification: Notification) {
         prepareSettings()
     }
@@ -462,9 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func clearRecents() { recentProjects.clear() }
 
     @objc private func settingsChanged() {
-        // A new theme changes the colours baked into each cached highlighter's
-        // capture table, and AppKit's own controls follow a pinned theme.
-        Theme.applyAppearance()
+        // Fonts and metrics are baked into each cached highlighter's attribute
+        // table, so the cache cannot survive a settings change.
         HighlightService.shared.evictUnused(keeping: [])
         // Re-apply fonts/metrics to every open window.
         DocumentStore.shared.reapplyDisplaySettings()

@@ -64,8 +64,7 @@ enum FileIcons {
     /// `.d.ts` wins over `.ts`. Falls back to the generic file icon.
     ///
     /// Names are resolved when a row is configured; the image itself is only
-    /// looked up while drawing, so switching light/dark picks the right variant
-    /// without rebuilding every row.
+    /// looked up while drawing, so a row never holds on to a rendered icon.
     static func fileIconName(for name: String) -> String? {
         guard let manifest else { return nil }
         let lowered = name.lowercased()

@@ -2,9 +2,9 @@ import AppKit
 
 /// The scrollbar knob, drawn from the theme.
 ///
-/// AppKit's dark-mode knob is a fixed light grey. On One Dark that reads fine;
-/// on Ayu Dark, whose surfaces are near black, the same grey is the brightest
-/// thing on screen. Drawing it ourselves keeps it in the palette.
+/// AppKit's dark-mode knob is a fixed light grey, and against surfaces this
+/// near black it is the brightest thing on screen. Drawing it ourselves keeps
+/// it in the palette.
 final class PuzzleScroller: NSScroller {
     /// Required, or AppKit silently falls back to its own scroller for the
     /// overlay style every window here uses.

@@ -95,9 +95,9 @@ final class ImagePreviewView: FlatView {
         let frame = imageView.frame
         guard frame.width > 1, frame.height > 1 else { return }
         let square: CGFloat = 8
-        NSColor(white: Theme.isDark() ? 0.22 : 0.94, alpha: 1).setFill()
+        NSColor(white: 0.22, alpha: 1).setFill()
         frame.fill()
-        NSColor(white: Theme.isDark() ? 0.27 : 0.88, alpha: 1).setFill()
+        NSColor(white: 0.27, alpha: 1).setFill()
         var row = 0
         var y = frame.minY
         while y < frame.maxY {
