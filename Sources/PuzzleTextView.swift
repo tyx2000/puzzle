@@ -1214,6 +1214,16 @@ final class PuzzleTextView: NSTextView {
         return layoutManager.characterIndexForGlyph(at: glyph)
     }
 
+    /// The editor gave up focus — clicked away from, or the window went
+    /// inactive. What that is worth saving is the pane's business.
+    var onLostFocus: (() -> Void)?
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onLostFocus?() }
+        return resigned
+    }
+
     /// VS Code's macOS folding shortcuts: ⌥⌘[ toggles the innermost block at
     /// the caret, and ⌥⌘] unfolds the pane.
     override func keyDown(with event: NSEvent) {

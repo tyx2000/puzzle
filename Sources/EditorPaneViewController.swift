@@ -101,6 +101,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                                   height: CGFloat.greatestFiniteMagnitude)
         textView.autoresizingMask = [.width]
         textView.delegate = self
+        // Deferred: the responder change is still in flight, and a window being
+        // torn down resigns its responder too — by the time this runs, a closed
+        // pane has no window and nothing is written. That matters because
+        // closing a tab may have just asked the user, who answered Don't Save.
+        textView.onLostFocus = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.view.window != nil else { return }
+                self.autosaveIfNeeded()
+            }
+        }
         textView.onExplicitCaretInteraction = { [weak self] in
             guard let self, let url = self.currentURL else { return }
             self.lineActivatedURLs.insert(url)
@@ -409,6 +419,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
     func refreshBracketMatchesForTesting() { textView.refreshBracketMatches() }
+    @discardableResult
+    func focusEditorForTesting() -> Bool { view.window?.makeFirstResponder(textView) ?? false }
     func insertTextForTesting(_ text: String) {
         textView.insertText(text, replacementRange: textView.selectedRange())
     }
@@ -578,10 +590,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func activate(index: Int) {
         guard openURLs.indices.contains(index) else { return }
-        // Remember where the caret was in the outgoing document.
+        // Remember where the caret was in the outgoing document, and write it
+        // out: moving to another tab is leaving this one.
         if let prev = currentURL {
             selections[prev] = textView.selectedRange()
             foldedBlocks[prev] = layoutManager.foldedBlockIdentities
+            if prev != openURLs[index] { autosaveIfNeeded() }
         }
 
         activeIndex = index
@@ -751,6 +765,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func save() {
         guard let doc = currentDocument, !doc.isReadOnly else { return }
         persist(doc, notify: true, presentErrors: true)
+    }
+
+    /// Write the buffer the user is leaving, the way Zed's
+    /// `autosave: on_focus_change` does: switching tabs or panes, clicking into
+    /// another part of the window, or leaving the app.
+    ///
+    /// Silent by design. A save that cannot go through — the file changed on
+    /// disk underneath the edit — leaves the document dirty and says nothing,
+    /// rather than throwing a modal at someone who has already looked away.
+    /// They get the question the next time they save or close it deliberately.
+    func autosaveIfNeeded() {
+        guard let document = currentDocument, document.isModified,
+              !document.isReadOnly, !document.isVirtual else { return }
+        persist(document, notify: true, presentErrors: false)
     }
 
     @discardableResult

@@ -56,6 +56,7 @@ enum RegressionTests {
         try testChangesRowsSurviveRefreshes()
         try testGitPanelCounters()
         try testSelectedControlsAgree()
+        try testAutosaveOnFocusChange()
         try testLineEditingShortcuts()
         try testGitMarksFollowUnsavedEdits()
         try testGutterWidthFollowsLineCount()
@@ -2973,6 +2974,81 @@ enum RegressionTests {
     /// four-digit column cost every short file the same margin.
     /// Return carries the indent, Shift-Return opens an indented line below
     /// from anywhere on the current one, and Command-D copies the line.
+    /// Leaving a buffer writes it: switching tabs, switching panes, clicking
+    /// out of the editor, or leaving the window. Saving used to be entirely on
+    /// the user, so an edit survived only if they remembered ⌘S.
+    private static func testAutosaveOnFocusChange() throws {
+        let root = try temporaryDirectory("autosave")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first.txt")
+        let second = root.appendingPathComponent("second.txt")
+        try Data("first\n".utf8).write(to: first)
+        try Data("second\n".utf8).write(to: second)
+
+        let editor = EditorViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = editor
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        editor.open(url: first)
+        editor.open(url: second)
+        guard let pane = editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        pane.activate(index: 0)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("EDIT ")
+        try expect(pane.isModifiedForTesting, "the edit did not reach the buffer")
+
+        // Switching tabs saves what is being left behind.
+        pane.activate(index: 1)
+        var onDisk = try String(contentsOf: first, encoding: .utf8)
+        try expect(onDisk == "EDIT first\n",
+                   "switching tabs did not save the file: \(onDisk.debugDescription)")
+
+        // Clicking out of the editor saves too, one main-queue hop later.
+        pane.activate(index: 1)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("AGAIN ")
+        try expect(pane.focusEditorForTesting(), "the editor could not take focus")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 40, height: 20))
+        window.contentView?.addSubview(field)
+        window.makeFirstResponder(field)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        onDisk = try String(contentsOf: second, encoding: .utf8)
+        try expect(onDisk == "AGAIN second\n",
+                   "losing focus did not save the file: \(onDisk.debugDescription)")
+        field.removeFromSuperview()
+
+        // Leaving the window writes every pane's buffer — what
+        // `windowDidResignKey` calls when the user clicks another window or
+        // switches apps.
+        pane.activate(index: 1)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("LEFT ")
+        editor.autosaveAll()
+        onDisk = try String(contentsOf: second, encoding: .utf8)
+        try expect(onDisk == "LEFT AGAIN second\n",
+                   "leaving the window did not save: \(onDisk.debugDescription)")
+
+        // A file that changed underneath the edit is never overwritten in
+        // silence: the buffer stays dirty and waits to be asked about.
+        pane.activate(index: 0)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("MINE ")
+        try Data("theirs\n".utf8).write(to: first)
+        // The modification date has one-second resolution on some volumes.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: first.path)
+        pane.autosaveIfNeeded()
+        onDisk = try String(contentsOf: first, encoding: .utf8)
+        try expect(onDisk == "theirs\n",
+                   "autosave overwrote a file that changed on disk: \(onDisk.debugDescription)")
+        try expect(pane.isModifiedForTesting,
+                   "the buffer was marked saved even though nothing was written")
+    }
+
     private static func testLineEditingShortcuts() throws {
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags,

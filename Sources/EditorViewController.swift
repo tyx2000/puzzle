@@ -174,6 +174,8 @@ final class EditorViewController: NSViewController {
 
     private func setActivePane(_ pane: EditorPaneViewController) {
         guard activePane !== pane else { return }
+        // The pane being left loses focus, so its buffer is written.
+        activePane?.autosaveIfNeeded()
         activePane = pane
         for p in panes { p.isActivePane = (p === pane) }
         onTabBarHeightChanged?(pane.tabBarHeight)
@@ -254,6 +256,8 @@ final class EditorViewController: NSViewController {
         onActiveDocumentChanged?(activePane?.currentURL)
     }
     func save() { activePane?.save() }
+    /// Every pane's open buffer, for the window going inactive.
+    func autosaveAll() { panes.forEach { $0.autosaveIfNeeded() } }
 
     /// Show the in-file find bar in the focused pane, optionally pre-filled.
     func showFindBar(seed: String? = nil, replacing: Bool = false) {

@@ -184,6 +184,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         updateTitlebarGeometry()
     }
 
+    /// Clicking another window, or switching apps, is a focus change: the
+    /// buffers are written before attention moves on.
+    func windowDidResignKey(_ notification: Notification) {
+        editor.autosaveAll()
+    }
+
     func windowDidResize(_ notification: Notification) {
         updateTitlebarGeometry()
     }
