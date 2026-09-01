@@ -162,6 +162,10 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
 
     var showsClearButtonForTesting: Bool { !clearButton.isHidden }
     func clickClearForTesting() { clearButton.performClickForTesting() }
+    func setClearHoveredForTesting(_ on: Bool) { clearButton.setHoveredForTesting(on) }
+    /// In this view's own coordinates: the button lives inside the trailing
+    /// stack, so its `frame` is relative to that.
+    var clearFrameForTesting: NSRect { clearButton.convert(clearButton.bounds, to: self) }
 
     // MARK: - NSTextFieldDelegate
 
@@ -222,31 +226,38 @@ private final class ClearButton: NSView {
     override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
     override func mouseDown(with event: NSEvent) { onClick?() }
     func performClickForTesting() { onClick?() }
+    func setHoveredForTesting(_ on: Bool) {
+        hovered = on
+        needsDisplay = true
+    }
     override func accessibilityPerformPress() -> Bool {
         onClick?()
         return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Drawn rather than an SF Symbol: the disc has to read at 13pt against
-        // the field's own background, and the cross is cut out of it in that
-        // background colour so it stays crisp at any size.
-        let side: CGFloat = 13
-        let box = NSRect(x: floor((bounds.width - side) / 2),
-                         y: floor((bounds.height - side) / 2),
-                         width: side, height: side)
-        (hovered ? Theme.foreground : Theme.dimText).setFill()
-        NSBezierPath(ovalIn: box).fill()
+        // Weighted like the Aa / wd / .* glyphs it sits beside: a mark in the
+        // dim text colour, with nothing behind it until the pointer arrives.
+        // A filled disc read as a blob next to them, and a bright one on hover
+        // was heavier than anything else in the field.
+        if hovered {
+            let disc = NSRect(x: floor((bounds.width - 16) / 2),
+                              y: floor((bounds.height - 16) / 2),
+                              width: 16, height: 16)
+            Theme.toggleActiveBackground.setFill()
+            NSBezierPath(ovalIn: disc).fill()
+        }
 
-        let arm = box.insetBy(dx: 4, dy: 4)
+        let arm = NSRect(x: (bounds.width - 7) / 2, y: (bounds.height - 7) / 2,
+                         width: 7, height: 7)
         let cross = NSBezierPath()
         cross.move(to: NSPoint(x: arm.minX, y: arm.minY))
         cross.line(to: NSPoint(x: arm.maxX, y: arm.maxY))
         cross.move(to: NSPoint(x: arm.maxX, y: arm.minY))
         cross.line(to: NSPoint(x: arm.minX, y: arm.maxY))
-        cross.lineWidth = 1.5
+        cross.lineWidth = 1.25
         cross.lineCapStyle = .round
-        Theme.inputBackground.setStroke()
+        (hovered ? Theme.foreground : Theme.dimText).setStroke()
         cross.stroke()
     }
 }

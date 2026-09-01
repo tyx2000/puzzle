@@ -3073,6 +3073,46 @@ enum RegressionTests {
         try expect(!input.showsClearButtonForTesting,
                    "the clear button stayed after the field was emptied")
 
+        // At rest the ✕ is a mark like the glyphs beside it, with nothing
+        // behind it; the background belongs to hover alone. A filled disc read
+        // as a blob in a row of thin glyphs.
+        input.stringValue = "needle"
+        input.layoutSubtreeIfNeeded()
+        /// `colorAt` indexes device pixels from the top-left; the caller works
+        /// in the view's own points, which on this display are half of them.
+        func pixel(at point: NSPoint) throws -> NSColor {
+            input.displayIfNeeded()
+            guard let rep = input.bitmapImageRepForCachingDisplay(in: input.bounds) else {
+                throw Failure(description: "the field would not render")
+            }
+            input.cacheDisplay(in: input.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / max(1, input.bounds.width)
+            guard let colour = rep.colorAt(x: Int(point.x * scale),
+                                           y: Int((input.bounds.height - point.y) * scale)) else {
+                throw Failure(description: "no pixel at \(point)")
+            }
+            return colour.usingColorSpace(.sRGB) ?? colour
+        }
+        func matches(_ a: NSColor, _ b: NSColor) -> Bool {
+            abs(a.redComponent - b.redComponent) < 0.02
+                && abs(a.greenComponent - b.greenComponent) < 0.02
+                && abs(a.blueComponent - b.blueComponent) < 0.02
+        }
+        let clear = input.clearFrameForTesting
+        // Inside the disc but clear of the cross, which is only 7pt across.
+        let edge = NSPoint(x: clear.midX - 6, y: clear.midY)
+        let background = Theme.inputBackground.usingColorSpace(.sRGB)!
+        input.setClearHoveredForTesting(false)
+        let atRest = try pixel(at: edge)
+        try expect(matches(atRest, background),
+                   "the clear button paints a background when it is not hovered")
+        input.setClearHoveredForTesting(true)
+        let hovered = try pixel(at: edge)
+        try expect(!matches(hovered, background),
+                   "hovering the clear button did not light it up")
+        input.setClearHoveredForTesting(false)
+        input.stringValue = ""
+
         // The find bar wires the same field, and its chevron lines up with it.
         let bar = FindBarView(frame: NSRect(x: 0, y: 0, width: 520, height: 42))
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
