@@ -57,6 +57,7 @@ enum RegressionTests {
         try testGitPanelCounters()
         try testSelectedControlsAgree()
         try testHistoryLogDetails()
+        try testCommitNeedsChangesAndAMessage()
         try testOneLinePanelRows()
         try testStatusMatchesPorcelainV1()
         try testAutosaveOnFocusChange()
@@ -3008,6 +3009,56 @@ enum RegressionTests {
     /// and when on the right, and everything that no longer fits one hover
     /// away. History rows also lost their chevron — the row is the control —
     /// and the lane graph beside them.
+    /// Commit needs both halves: something changed, and something said about
+    /// it. The button used to accept the click either way and answer with an
+    /// alert, or commit nothing at all.
+    private static func testCommitNeedsChangesAndAMessage() throws {
+        let root = try temporaryDirectory("commit-enabled")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) { _ = GitService.run(args, in: root) }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "T"])
+        git(["config", "user.email", "t@e.invalid"])
+        try Data("one\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        git(["add", "-A"])
+        git(["commit", "-q", "-m", "base"])
+
+        let panel = GitPanelViewController()
+        _ = panel.view
+        try expect(!panel.commitEnabledForTesting,
+                   "Commit was live before a repository was even loaded")
+
+        // A clean repository with a message typed into it still has nothing to
+        // commit.
+        panel.applyStatusForTesting(
+            GitService.Status(branch: "main", entries: [], isRepo: true), in: root)
+        panel.setCommitMessageForTesting("a message")
+        try expect(!panel.commitEnabledForTesting,
+                   "Commit was available with nothing changed")
+
+        // Changes with no message: still not a commit.
+        let entry = GitService.Status.Entry(code: " M", path: "file.txt", originalPath: nil)
+        panel.setCommitMessageForTesting("")
+        panel.applyStatusForTesting(
+            GitService.Status(branch: "main", entries: [entry], isRepo: true), in: root)
+        try expect(!panel.commitEnabledForTesting,
+                   "Commit was available with no message")
+        panel.setCommitMessageForTesting("   \n  ")
+        try expect(!panel.commitEnabledForTesting,
+                   "whitespace counted as a commit message")
+
+        // Both halves present.
+        panel.setCommitMessageForTesting("real message")
+        try expect(panel.commitEnabledForTesting,
+                   "Commit stayed unavailable with changes and a message")
+
+        // And it goes back as soon as either half is taken away.
+        panel.applyStatusForTesting(
+            GitService.Status(branch: "main", entries: [], isRepo: true), in: root)
+        try expect(!panel.commitEnabledForTesting,
+                   "Commit stayed live after the changes were committed away")
+    }
+
     private static func testOneLinePanelRows() throws {
         let root = try temporaryDirectory("one-line-rows")
         defer { try? FileManager.default.removeItem(at: root) }

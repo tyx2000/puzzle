@@ -45,6 +45,14 @@ final class GitPanelViewController: NSViewController {
     /// nothing left to do.
     private var pushIsPossible: Bool { aheadCount > 0 || !hasUpstream }
     private var hasUpstream = true
+    /// A commit needs both something to commit and something to say about it.
+    /// Either missing and the button says so by being unavailable, rather than
+    /// accepting the click and answering with an alert.
+    private var commitIsPossible: Bool { hasChanges && !trimmedCommitMessage.isEmpty }
+    private var hasChanges = false
+    private var trimmedCommitMessage: String {
+        commitField.string.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     /// What the table was last built from, so a refresh that changes nothing
     /// does not rebuild the rows out from under a click.
     private var renderedEntries: [GitService.Status.Entry] = []
@@ -93,10 +101,12 @@ final class GitPanelViewController: NSViewController {
         branches.removeAll()
         remotes.removeAll()
         aheadCount = 0
+        hasChanges = false
         if isViewLoaded {
             branchLabel.stringValue = "Loading Git status…"
             segmented.setLabel("Changes", forSegment: 0)
             refreshPushButton()
+            refreshCommitButton()
             table.reloadData()
         }
         refresh()
@@ -177,7 +187,16 @@ final class GitPanelViewController: NSViewController {
         // Commit message box.
         commitField.font = Theme.uiFont(11)
         commitField.placeholder = "Commit message  (⌘↩ to commit)"
-        commitField.onCommitShortcut = { [weak self] in self?.commit() }
+        commitField.onCommitShortcut = { [weak self] in
+            // ⌘↩ obeys the same rule the button does; there is nothing to
+            // explain in an alert that the disabled button has not said.
+            guard let self, self.commitIsPossible, self.activeOperationID == nil else {
+                NSSound.beep()
+                return
+            }
+            self.commit()
+        }
+        commitField.onTextChange = { [weak self] in self?.refreshCommitButton() }
         commitField.isRichText = false
         commitField.backgroundColor = Theme.activeTab
         commitField.textColor = Theme.foreground
@@ -217,6 +236,7 @@ final class GitPanelViewController: NSViewController {
         pushControl.onClick = { [weak self] in self?.pushAction() }
         pushControl.translatesAutoresizingMaskIntoConstraints = false
         refreshPushButton()
+        refreshCommitButton()
 
         [segmented, branchToolbar, scroll, branchLabel, commitScroll, progressShimmer,
          commitButton, pushControl,
@@ -458,8 +478,10 @@ final class GitPanelViewController: NSViewController {
                            badge: status.entries.isEmpty ? "" : "\(status.entries.count)",
                            forSegment: 0)
         discardAllButton.isEnabled = !status.entries.isEmpty
+        hasChanges = !status.entries.isEmpty
         aheadCount = status.ahead
         hasUpstream = status.hasUpstream
+        refreshCommitButton()
         refreshPushButton()
     }
 
@@ -518,6 +540,14 @@ final class GitPanelViewController: NSViewController {
 
     /// How much is waiting rides on the button as a badge, the same shape the
     /// Changes tab and the activity bar use for their counts.
+    private func refreshCommitButton() {
+        // Never enable anything while an operation owns the panel.
+        commitButton.isEnabled = activeOperationID == nil && commitIsPossible
+        commitButton.toolTip = commitIsPossible ? nil
+            : (hasChanges ? "Describe the change to commit it"
+                          : "Nothing to commit")
+    }
+
     private func refreshPushButton() {
         pushControl.badge = aheadCount > 0 ? "\(aheadCount)" : ""
         // Nothing to push, nothing to do. A branch with no upstream is the
@@ -593,6 +623,7 @@ final class GitPanelViewController: NSViewController {
                 // Commit succeeded. Reflect the local repository state before
                 // starting any network push, so Changes clears immediately.
                 self.commitField.string = ""
+                self.refreshCommitButton()
                 if let postCommitStatus {
                     self.applyStatus(postCommitStatus, in: directory)
                     self.table.reloadData()
@@ -655,7 +686,7 @@ final class GitPanelViewController: NSViewController {
     private func finishOperation(_ id: UUID) {
         guard activeOperationID == id else { return }
         activeOperationID = nil
-        commitButton.isEnabled = true
+        refreshCommitButton()
         pushControl.isEnabled = pushIsPossible
         newBranchButton.isEnabled = true
         remoteButton.isEnabled = true
@@ -1155,6 +1186,14 @@ final class GitPanelViewController: NSViewController {
     var discardAllEnabledForTesting: Bool {
         _ = view
         return discardAllButton.isEnabled
+    }
+    var commitEnabledForTesting: Bool {
+        _ = view
+        return commitButton.isEnabled
+    }
+    func setCommitMessageForTesting(_ message: String) {
+        _ = view
+        commitField.string = message
     }
     func discardAllForTesting(in directory: URL) { discardAllChanges(in: directory) }
 
@@ -1824,6 +1863,23 @@ final class GitRowView: NSTableRowView {
 final class CommitMessageTextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
     var onCommitShortcut: (() -> Void)?
+    /// Typing changes whether there is anything to commit.
+    var onTextChange: (() -> Void)?
+
+    override func didChangeText() {
+        super.didChangeText()
+        onTextChange?()
+    }
+
+    /// Setting the text in code — clearing it after a commit — is not a user
+    /// edit, so AppKit posts nothing. The panel still has to hear about it.
+    override var string: String {
+        get { super.string }
+        set {
+            super.string = newValue
+            onTextChange?()
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
