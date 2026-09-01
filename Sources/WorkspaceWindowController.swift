@@ -182,6 +182,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         updateTitlebarGeometry()
+        // Coming back from somewhere else — a terminal, most likely. Anything
+        // resolved once for this project could have been changed out there
+        // where no file inside .git would show it: `git config --global
+        // user.name` is the case that started this.
+        GitService.forgetRepositoryInfo()
+        sidebar.refreshGitPanelIfLoaded()
+        refreshGit(requireFollowUp: true)
     }
 
     /// Clicking another window, or switching apps, is a focus change: the
@@ -269,6 +276,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// repository, and when Puzzle becomes active after such a change.
     func refreshExternalGitState() {
         guard let projectURL else { return }
+        // Something changed inside .git — possibly the repository's own
+        // `user.name`, which is otherwise resolved once and reused.
+        GitService.forgetRepositoryInfo()
         let reloaded = DocumentStore.shared.reloadExternalChanges(at: [projectURL])
         sidebar.fileTree.refresh(changedURLs: [projectURL])
         sidebar.refreshGitPanelIfLoaded()

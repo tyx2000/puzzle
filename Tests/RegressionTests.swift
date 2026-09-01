@@ -57,6 +57,7 @@ enum RegressionTests {
         try testGitPanelCounters()
         try testSelectedControlsAgree()
         try testHistoryLogDetails()
+        try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
         try testCommitNeedsChangesAndAMessage()
         try testOneLinePanelRows()
@@ -3013,6 +3014,45 @@ enum RegressionTests {
     /// Commit needs both halves: something changed, and something said about
     /// it. The button used to accept the click either way and answer with an
     /// alert, or commit nothing at all.
+    /// Who the next commit will be authored by is resolved once per project and
+    /// reused — a status refresh costs one subprocess, not several. It still
+    /// has to notice `git config` run in a terminal, which touches nothing the
+    /// app would otherwise look at.
+    private static func testCommitIdentityFollowsGitConfig() throws {
+        let root = try temporaryDirectory("identity")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) { _ = GitService.run(args, in: root) }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "First Name"])
+        git(["config", "user.email", "first@example.invalid"])
+        try Data("one\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        git(["add", "-A"])
+        git(["commit", "-q", "-m", "base"])
+
+        GitService.forgetRepositoryInfo()
+        try expect(GitService.status(in: root).userName == "First Name",
+                   "the configured name did not reach the status")
+
+        // Changed from outside, exactly as a terminal would.
+        git(["config", "user.name", "Second Name"])
+        try expect(GitService.status(in: root).userName == "First Name",
+                   "the name is not being cached at all, so a status refresh "
+                    + "pays for it every time")
+        // What the repository monitor and window activation both do.
+        GitService.forgetRepositoryInfo()
+        let refreshed = GitService.status(in: root)
+        try expect(refreshed.userName == "Second Name",
+                   "the new name was not picked up: \(refreshed.userName)")
+
+        // And it reaches the line above the commit box.
+        let panel = GitPanelViewController()
+        _ = panel.view
+        panel.applyStatusForTesting(refreshed, in: root)
+        try expect(panel.headerLabelForTesting.contains("Second Name"),
+                   "the commit header still shows the old identity: "
+                    + panel.headerLabelForTesting)
+    }
+
     private static func testSearchFieldClearAndAlignment() throws {
         let input = SearchInputView(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
         input.placeholder = "Search…"

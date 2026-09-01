@@ -1187,6 +1187,10 @@ final class GitPanelViewController: NSViewController {
         _ = view
         return discardAllButton.isEnabled
     }
+    var headerLabelForTesting: String {
+        _ = view
+        return branchLabel.stringValue
+    }
     var commitEnabledForTesting: Bool {
         _ = view
         return commitButton.isEnabled
