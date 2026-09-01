@@ -19,6 +19,7 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
     }
 
     private let field = NSTextField()
+    private let clearButton = ClearButton()
     private var toggles: [GlyphToggle] = []
     private var optionStack: NSStackView!
     private var fieldToOptions: NSLayoutConstraint!
@@ -37,7 +38,10 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
 
     var stringValue: String {
         get { field.stringValue }
-        set { field.stringValue = newValue }
+        set {
+            field.stringValue = newValue
+            updateClearButton()
+        }
     }
     var placeholder: String = "" {
         didSet { field.placeholderAttributedString = placeholderString(placeholder) }
@@ -71,7 +75,12 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         toggles[1].onToggle = { [weak self] on in self?.options.wholeWord = on }
         toggles[2].onToggle = { [weak self] on in self?.options.regex = on }
 
-        optionStack = NSStackView(views: toggles)
+        clearButton.onClick = { [weak self] in self?.clear() }
+
+        // First in the row of trailing controls, so it sits right after the
+        // text it clears. A stack view collapses it when it is hidden, which an
+        // ordinary constraint would not — the field takes the room back.
+        optionStack = NSStackView(views: [clearButton] + toggles)
         optionStack.orientation = .horizontal
         optionStack.spacing = 8
         optionStack.translatesAutoresizingMaskIntoConstraints = false
@@ -90,6 +99,7 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
             optionStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
             optionStack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        updateClearButton()
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -127,6 +137,22 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         if selectAll { field.currentEditor()?.selectAll(nil) }
     }
 
+    /// Empty the query the way the Escape key does, without closing anything.
+    func clear() {
+        guard !field.stringValue.isEmpty else { return }
+        field.stringValue = ""
+        updateClearButton()
+        onChange?("", options)
+        focus()
+    }
+
+    /// Nothing to clear, nothing to show: the button appears with the text.
+    private func updateClearButton() {
+        let shouldShow = !field.stringValue.isEmpty
+        guard clearButton.isHidden == shouldShow else { return }
+        clearButton.isHidden = !shouldShow
+    }
+
     func refreshFonts() {
         field.font = Theme.uiFont(12)
         field.placeholderAttributedString = placeholderString(placeholder)
@@ -134,9 +160,13 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    var showsClearButtonForTesting: Bool { !clearButton.isHidden }
+    func clickClearForTesting() { clearButton.performClickForTesting() }
+
     // MARK: - NSTextFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
+        updateClearButton()
         onChange?(field.stringValue, options)
     }
     func controlTextDidBeginEditing(_ obj: Notification) { focused = true; needsDisplay = true }
@@ -152,6 +182,72 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         default:
             return false
         }
+    }
+}
+
+/// The round ✕ inside a search field. Drawn rather than an NSButton so it can
+/// carry the same hover treatment as the glyph toggles beside it.
+private final class ClearButton: NSView {
+    /// Like every other drawn view here — the shared drawing helpers assume it.
+    override var isFlipped: Bool { true }
+    var onClick: (() -> Void)?
+    private var hovered = false
+    private var tracking: NSTrackingArea?
+
+    init() {
+        super.init(frame: .zero)
+        isHidden = true
+        toolTip = "Clear"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Clear search")
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 16).isActive = true
+        heightAnchor.constraint(equalToConstant: 18).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow,
+                                            .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    func performClickForTesting() { onClick?() }
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Drawn rather than an SF Symbol: the disc has to read at 13pt against
+        // the field's own background, and the cross is cut out of it in that
+        // background colour so it stays crisp at any size.
+        let side: CGFloat = 13
+        let box = NSRect(x: floor((bounds.width - side) / 2),
+                         y: floor((bounds.height - side) / 2),
+                         width: side, height: side)
+        (hovered ? Theme.foreground : Theme.dimText).setFill()
+        NSBezierPath(ovalIn: box).fill()
+
+        let arm = box.insetBy(dx: 4, dy: 4)
+        let cross = NSBezierPath()
+        cross.move(to: NSPoint(x: arm.minX, y: arm.minY))
+        cross.line(to: NSPoint(x: arm.maxX, y: arm.maxY))
+        cross.move(to: NSPoint(x: arm.maxX, y: arm.minY))
+        cross.line(to: NSPoint(x: arm.minX, y: arm.maxY))
+        cross.lineWidth = 1.5
+        cross.lineCapStyle = .round
+        Theme.inputBackground.setStroke()
+        cross.stroke()
     }
 }
 

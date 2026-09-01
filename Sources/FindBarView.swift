@@ -99,7 +99,10 @@ final class FindBarView: FlatView {
         NSLayoutConstraint.activate([
             heightConstraint,
             replaceToggle.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            replaceToggle.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            // Centred on the query field, not pinned a fixed distance from the
+            // top: the button's own height comes from its image, so the offset
+            // that happened to line up at one size did not at another.
+            replaceToggle.centerYAnchor.constraint(equalTo: input.centerYAnchor),
             input.leadingAnchor.constraint(equalTo: replaceToggle.trailingAnchor, constant: 4),
             input.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             input.heightAnchor.constraint(equalToConstant: 30),
@@ -271,6 +274,11 @@ final class FindBarView: FlatView {
     var preferredHeight: CGFloat { replaceRow.isHidden ? 42 : 76 }
 
     var isReplaceVisibleForTesting: Bool { !replaceRow.isHidden }
+    /// Frames of the two things that have to line up on the query row.
+    var rowAlignmentForTesting: (toggle: NSRect, input: NSRect) {
+        (replaceToggle.frame, input.frame)
+    }
+    var queryInputForTesting: SearchInputView { input }
     func setReplacementForTesting(_ text: String) { replaceInput.stringValue = text }
     func setOptionsForTesting(_ options: SearchOptions) {
         input.setOptions(options)

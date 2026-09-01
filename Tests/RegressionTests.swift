@@ -57,6 +57,7 @@ enum RegressionTests {
         try testGitPanelCounters()
         try testSelectedControlsAgree()
         try testHistoryLogDetails()
+        try testSearchFieldClearAndAlignment()
         try testCommitNeedsChangesAndAMessage()
         try testOneLinePanelRows()
         try testStatusMatchesPorcelainV1()
@@ -3012,6 +3013,44 @@ enum RegressionTests {
     /// Commit needs both halves: something changed, and something said about
     /// it. The button used to accept the click either way and answer with an
     /// alert, or commit nothing at all.
+    private static func testSearchFieldClearAndAlignment() throws {
+        let input = SearchInputView(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
+        input.placeholder = "Search…"
+        input.layoutSubtreeIfNeeded()
+        try expect(!input.showsClearButtonForTesting,
+                   "an empty field offers something to clear")
+
+        var reported: [String] = []
+        input.onChange = { text, _ in reported.append(text) }
+        input.stringValue = "needle"
+        input.layoutSubtreeIfNeeded()
+        try expect(input.showsClearButtonForTesting,
+                   "a field with a query has no clear button")
+        input.clickClearForTesting()
+        try expect(input.stringValue.isEmpty, "clearing left the query behind")
+        try expect(reported == [""],
+                   "clearing did not report the empty query: \(reported)")
+        try expect(!input.showsClearButtonForTesting,
+                   "the clear button stayed after the field was emptied")
+
+        // The find bar wires the same field, and its chevron lines up with it.
+        let bar = FindBarView(frame: NSRect(x: 0, y: 0, width: 520, height: 42))
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        textView.string = "let value = 1\n"
+        bar.attach(to: textView)
+        bar.setQuery("value")
+        bar.layoutSubtreeIfNeeded()
+        let alignment = bar.rowAlignmentForTesting
+        try expect(abs(alignment.toggle.midY - alignment.input.midY) <= 0.5,
+                   "the replace chevron is \(alignment.toggle.midY) against the "
+                    + "field's \(alignment.input.midY)")
+        try expect(bar.queryInputForTesting.showsClearButtonForTesting,
+                   "the find bar's field has no clear button")
+        bar.queryInputForTesting.clickClearForTesting()
+        try expect(bar.retainedMatchCountForTesting == 0,
+                   "clearing the find bar left its matches highlighted")
+    }
+
     private static func testCommitNeedsChangesAndAMessage() throws {
         let root = try temporaryDirectory("commit-enabled")
         defer { try? FileManager.default.removeItem(at: root) }
