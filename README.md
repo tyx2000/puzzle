@@ -8,20 +8,16 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   follow the system appearance and there is nothing to configure. Monaco 12 with
   configurable exact code/tree row heights.
   Zed-style header (tabs beside the traffic lights), full-width bottom status bar
-  with a left **activity bar** (project · search · git · outline · settings) and
+  with a left **activity bar** (project · search · git) and
   right branch · line/col · language, editor tabs with an active accent, compact
   file tree with Material Icon Theme file/folder icons + git-dirty markers,
   aligned gutter, current-line highlight. Fully flat — no Liquid Glass.
-- **Editor split** — top-right split icon (or ⌘\) opens a second vertical pane
-  with its **own independent tab strip**. Panes share document buffers via
-  `DocumentStore`, so the same file open in both panes edits one buffer (Zed
-  behavior). Toggling again collapses back to one pane.
 - **Tree ↔ tab sync** — the active tab's file gets a persistent background row in
   the tree; the tree also shows git-dirty coloring.
-- **No status bar** — four evenly-spaced buttons (project · search · git ·
-  settings) live in the sidebar's 40pt bottom action bar, whose width is the
-  panel's width and stays fixed when switching panels. The active button has a
-  white background; tapping the active one collapses the panel.
+- **No status bar** — one evenly-spaced button per panel (project · search ·
+  git) lives in the sidebar's 40pt bottom action bar, whose width is the panel's
+  width and stays fixed when switching panels. The active button has a
+  full-height background; tapping the active one collapses the panel.
 - **File tabs** — row height follows the window traffic lights and wraps when
   needed; active tabs use the same edge-to-edge background rule as the panel
   action buttons.
@@ -29,7 +25,8 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   and the match highlighted; click a file to open it, a line to jump to it.
 - **Git panel** — flat Changes / History tabs, automatically staged changed
   files with status codes, branch, full-width commit message editor + commit.
-- **Settings** — the gear opens `~/.config/puzzle/settings.json`. Editor font:
+- **Settings** — the gear at the top right opens `~/.config/puzzle/settings.json`.
+  Editor font:
   `buffer_font_family`, `buffer_font_size`, `buffer_font_weight`,
   `code_line_height`, `tab_size`. Panel/UI
   font: `ui_font_family`, `ui_font_size`, `ui_font_weight` (`ui_font_size` scales
@@ -79,7 +76,6 @@ PATH. Installing is optional — the app also runs straight out of `build/`.
 open build/Puzzle.app                              # pick a folder on launch
 open build/Puzzle.app --args /path/to/repo         # open a project
 open build/Puzzle.app --args /path/to/repo a.ts b.json   # open files as tabs
-open build/Puzzle.app --args /path/to/repo a.ts --split   # start split
 ```
 Ad-hoc signed (not notarized). If Gatekeeper blocks it, right-click → Open, or
 `xattr -dr com.apple.quarantine build/Puzzle.app`.
@@ -90,7 +86,7 @@ overwrites an unrelated command with the same name.
 
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
-⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘\ split editor · ⌘G git ·
+⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘G git ·
 ⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line
 
 ## Layout

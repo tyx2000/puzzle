@@ -46,6 +46,7 @@ enum RegressionTests {
         try testProjectTitleStrip()
         try testBranchMenu()
         try testMaterialFileIcons()
+        try testSettingsGearLivesTopRight()
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
@@ -1877,21 +1878,63 @@ enum RegressionTests {
                    "blur did not cancel unconfirmed file creation")
     }
 
+    /// Settings opens a file, not a panel, so its control is a gear with the
+    /// editor's own actions at the top right — always there, whatever is open.
+    private static func testSettingsGearLivesTopRight() throws {
+        try expect(!ActivityBarView.Action.allCases.contains { "\($0)" == "settings" },
+                   "the activity bar still offers a Settings panel")
+
+        let editor = EditorViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = editor
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        editor.view.layoutSubtreeIfNeeded()
+
+        var opened = 0
+        editor.onOpenSettings = { opened += 1 }
+        // An empty window shows the welcome screen and no tab strip at all.
+        // The gear is not part of the strip, so it is still there.
+        try expect(editor.settingsGearVisibleForTesting,
+                   "the gear disappeared with the tab strip")
+        editor.clickSettingsGearForTesting()
+        try expect(opened == 1, "the gear did not ask for settings on an empty editor")
+
+        let root = try temporaryDirectory("settings-gear")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("file.swift")
+        try Data("let value = 1\n".utf8).write(to: file)
+        editor.open(url: file)
+        editor.view.layoutSubtreeIfNeeded()
+        try expect(editor.settingsGearVisibleForTesting,
+                   "the gear disappeared once a file was open")
+        editor.clickSettingsGearForTesting()
+        try expect(opened == 2, "the gear stopped working once a file was open")
+
+        // And it keeps clear of the tabs: the strip reserves the same width the
+        // gear occupies, so a long tab title cannot run underneath it.
+        try expect(EditorTabBar.actionAreaWidth >= 32,
+                   "the tab strip stopped reserving room for the window's actions")
+    }
+
     private static func testActivityBarUsesTextLabels() throws {
         let bar = ActivityBarView(frame: NSRect(x: 0, y: 0, width: 320, height: 40))
         bar.layoutSubtreeIfNeeded()
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
+        // One button per panel. Settings is not a panel — it opens a file — so
+        // it sits with the editor's actions at the top right instead.
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git"],
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
 
         // The Git label carries the live changed-file count in the same form as
         // the panel's own "Changes (7)" tab. A clean tree has nothing to say, so
         // the count disappears rather than reading "(0)".
         bar.setChangeCount(7)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7", "Settings"],
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7"],
                    "the change count did not reach the Git label: "
                     + "\(bar.buttonTitlesForTesting)")
         bar.setChangeCount(0)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git", "Settings"],
+        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git"],
                    "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
@@ -2104,9 +2147,9 @@ enum RegressionTests {
         // rewritten without it rather than quietly keeping a dead key.
         try expect(!Settings.shared.documentedContentsForTesting.contains("\"theme\""),
                    "the settings template still offers a theme")
-        // The editor panes' split view takes the colour directly…
+        // The sidebar/editor split takes the colour directly…
         try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
-                   "the editor split did not take its divider colour from the theme")
+                   "the split did not take its divider colour from the theme")
         // …and the window's sidebar divider is painted over AppKit's hairline by
         // the drag handle, whose line must cover exactly that hairline.
         let handle = SplitDividerHandleView(

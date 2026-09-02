@@ -137,6 +137,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.showBranchMenu(from: rect)
         }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
+        editor.onOpenSettings = { [weak self] in self?.openSettings() }
         editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
         editor.onDocumentSaved = { [weak self] url in
             guard let self else { return }
@@ -865,7 +866,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     @objc func findInFile(_ sender: Any?) { editor.showFindBar() }
     @objc func findAndReplace(_ sender: Any?) { editor.showFindBar(replacing: true) }
     @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
-    @objc func splitEditor(_ sender: Any?) { editor.splitEditor() }
 
     @objc func showSettings(_ sender: Any?) { openSettings() }
 
@@ -897,17 +897,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// Activity-bar routing: the sidebar is always visible; tapping an action
     /// selects the requested panel.
     private func handleActivity(_ action: ActivityBarView.Action) {
-        if action == .settings {
-            openSettings()
-            return
-        }
         // Tapping an action selects its panel; the sidebar remains visible.
         root.showSidebar()
         switch action {
         case .project:  sidebar.showFiles()
         case .search:   sidebar.showSearch()
         case .git:      sidebar.showGit()
-        case .settings: break
         }
         root.preserveSidebarWidth()
     }

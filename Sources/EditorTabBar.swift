@@ -7,12 +7,8 @@ final class EditorTabBar: NSView {
     var onClose: ((Int) -> Void)?
     var onCloseOthers: ((Int) -> Void)?
     var onCloseRight: ((Int) -> Void)?
-    var onSplit: (() -> Void)?
     var onHeightChanged: ((CGFloat) -> Void)?
 
-    var splitActive = false {
-        didSet { splitButton.contentTintColor = splitActive ? Theme.cursor : Theme.dimText }
-    }
 
     var paneActive = true { didSet { needsDisplay = true } }
 
@@ -24,16 +20,16 @@ final class EditorTabBar: NSView {
     }
 
     private var pills: [TabPillView] = []
-    private let splitButton = NSButton()
     /// Fallback until the owning window reports its traffic-light geometry.
     static let defaultRowHeight: CGFloat = 32
     private(set) var rowHeight: CGFloat = EditorTabBar.defaultRowHeight
     private let gap: CGFloat = 0
     private let padding: CGFloat = 0
-    /// Space reserved on the right for the split action.
-    private let splitAreaWidth: CGFloat = 34
+    /// Space kept clear on the right for the window's own actions, which are
+    /// drawn over this bar by the editor container so they survive an empty
+    /// window with no tabs at all.
+    static let actionAreaWidth: CGFloat = 34
     private var contentHeight: CGFloat = EditorTabBar.defaultRowHeight
-    private var splitButtonTop: NSLayoutConstraint!
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
@@ -41,26 +37,6 @@ final class EditorTabBar: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        splitButton.image = NSImage(systemSymbolName: "rectangle.split.2x1",
-                                    accessibilityDescription: "Split editor")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        splitButton.isBordered = false
-        splitButton.bezelStyle = .regularSquare
-        splitButton.imageScaling = .scaleProportionallyDown
-        splitButton.contentTintColor = Theme.dimText
-        splitButton.toolTip = "Split editor"
-        splitButton.target = self
-        splitButton.action = #selector(splitAction)
-        splitButton.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(splitButton)
-        splitButtonTop = splitButton.topAnchor.constraint(
-            equalTo: topAnchor, constant: (rowHeight - 20) / 2)
-        NSLayoutConstraint.activate([
-            splitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            splitButtonTop,
-            splitButton.widthAnchor.constraint(equalToConstant: 22),
-            splitButton.heightAnchor.constraint(equalToConstant: 20),
-        ])
 
     }
 
@@ -72,7 +48,6 @@ final class EditorTabBar: NSView {
         let rows = max(1, Int(round(contentHeight / rowHeight)))
         rowHeight = resolved
         contentHeight = CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
-        splitButtonTop.constant = (rowHeight - 20) / 2
         invalidateIntrinsicContentSize()
         needsLayout = true
         layoutPills()
@@ -124,7 +99,7 @@ final class EditorTabBar: NSView {
     }
 
     private func layoutPills() {
-        let available = max(80, bounds.width - splitAreaWidth - padding)
+        let available = max(80, bounds.width - Self.actionAreaWidth - padding)
         var x = padding
         var y = padding
         var rows = 1
@@ -152,7 +127,6 @@ final class EditorTabBar: NSView {
         NSSize(width: NSView.noIntrinsicMetric, height: max(rowHeight, contentHeight))
     }
 
-    @objc private func splitAction() { onSplit?() }
 }
 
 /// One flat tab. Active = full-height background, no border or outer gap.

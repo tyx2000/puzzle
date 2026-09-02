@@ -408,7 +408,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     ) -> Int {
         let folded = foldedRanges
         guard !folded.isEmpty else { return 0 }
-        var modifiedGlyphs = Array(
+        let unchangedGlyphs = Array(
             UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
         var modified = Array(
             UnsafeBufferPointer(start: props, count: glyphRange.length))
@@ -423,7 +423,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         guard changed else { return 0 }
         modified.withUnsafeBufferPointer {
             layoutManager.setGlyphs(
-                modifiedGlyphs, properties: $0.baseAddress!,
+                unchangedGlyphs, properties: $0.baseAddress!,
                 characterIndexes: charIndexes, font: aFont,
                 forGlyphRange: glyphRange)
         }

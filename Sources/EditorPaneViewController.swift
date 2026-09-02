@@ -4,7 +4,6 @@ import AppKit
 /// independent (own tabs) but share document buffers via DocumentStore.
 final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onActiveDocumentChanged: ((URL?) -> Void)?
-    var onRequestSplit: (() -> Void)?
     var onBecameActive: ((EditorPaneViewController) -> Void)?
     var onEmptied: ((EditorPaneViewController) -> Void)?
     var onDocumentEdited: (() -> Void)?
@@ -157,7 +156,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.onClose = { [weak self] in self?.close(index: $0) }
         tabBar.onCloseOthers = { [weak self] in self?.closeOtherTabs(around: $0) }
         tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
-        tabBar.onSplit = { [weak self] in self?.onRequestSplit?() }
         tabBar.onHeightChanged = { [weak self] height in
             self?.onTabBarHeightChanged?(height)
         }

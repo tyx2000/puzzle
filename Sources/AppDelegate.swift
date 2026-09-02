@@ -250,7 +250,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             for f in fileArgs { controller.editor.open(url: URL(fileURLWithPath: f)) }
 
-            if args.contains("--split") { controller.editor.splitEditor() }
             if let i = args.firstIndex(of: "--panel"), i + 1 < args.count {
                 switch args[i + 1] {
                 case "search":   controller.sidebar.showSearch()
@@ -387,8 +386,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.showGit(_:)), keyEquivalent: "3")
         viewMenu.addItem(withTitle: "Show Sidebar",
                          action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
-        viewMenu.addItem(withTitle: "Split Editor",
-                         action: #selector(WorkspaceWindowController.splitEditor(_:)), keyEquivalent: "\\")
         viewMenuItem.submenu = viewMenu
 
         let windowMenuItem = NSMenuItem()

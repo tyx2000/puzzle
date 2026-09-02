@@ -1,12 +1,15 @@
 import AppKit
 
-/// Zed's bottom-left action bar: a 40pt row spanning the panel width with four
-/// evenly-spaced buttons (project, search, git, settings). The button for the
-/// visible panel gets a full-height active background.
+/// Zed's bottom-left action bar: a 40pt row spanning the panel width with one
+/// evenly-spaced button per panel. The button for the visible panel gets a
+/// full-height active background.
+///
+/// Settings is not here: it opens a file rather than a panel, so it lives with
+/// the editor's own actions at the top right of the window.
 final class ActivityBarView: NSView {
     static let height: CGFloat = 40
 
-    enum Action: Int, CaseIterable { case project, search, git, settings }
+    enum Action: Int, CaseIterable { case project, search, git }
 
     /// Called with the tapped action. The host decides whether to show that
     /// panel or, if it's already showing, collapse the sidebar.
@@ -46,7 +49,6 @@ final class ActivityBarView: NSView {
             (.project, "Files"),
             (.search, "Search"),
             (.git, "Git"),
-            (.settings, "Settings"),
         ]
         buttons = specs.map { action, title in
             let b = ActivityButton(title: title)

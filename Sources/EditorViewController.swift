@@ -1,9 +1,10 @@
 import AppKit
 
-/// Container for one or more editor panes arranged in a vertical split. Each
-/// pane has its own tab strip; buffers are shared via DocumentStore.
+/// Container for the editor's single pane and the welcome screen behind it.
+/// The pane owns the tab strip; buffers come from DocumentStore.
 final class EditorViewController: NSViewController {
     var onDocumentSaved: ((URL) -> Void)?
+    var onOpenSettings: (() -> Void)?
     var onActiveDocumentChanged: ((URL?) -> Void)?
     /// Welcome-screen actions, forwarded to the window controller.
     var onOpenFolder: (() -> Void)?
@@ -14,103 +15,119 @@ final class EditorViewController: NSViewController {
     var onOpenRecent: ((URL) -> Void)?
     var onTabBarHeightChanged: ((CGFloat) -> Void)?
 
-    private var panes: [EditorPaneViewController] = []
-    private weak var activePane: EditorPaneViewController?
-    private var editorSplit: NSSplitView!
+    private var pane: EditorPaneViewController!
     private let welcome = WelcomeView()
+    /// Settings opens a file, so it belongs with the editor's actions rather
+    /// than with the panel switcher. It sits over the tab strip's reserved
+    /// right edge — in the container, not in the strip, so an empty window
+    /// with no tabs still offers it.
+    private let settingsButton = NSButton()
+    private var settingsButtonTop: NSLayoutConstraint!
     private var tabRowHeight = EditorTabBar.defaultRowHeight
     private var fileHistories: [URL: FileHistoryModel] = [:]
 
-    var currentURL: URL? { activePane?.currentURL }
-
-    /// Number of editor panes (1, or 2 when split).
-    var paneCount: Int { panes.count }
-    /// Tabs open in a given pane — panes are independent.
-    func openURLs(inPane index: Int) -> [URL] {
-        panes.indices.contains(index) ? panes[index].openURLs : []
-    }
-    /// Index of the focused pane.
-    var activePaneIndex: Int? { activePane.flatMap { panes.firstIndex(of: $0) } }
+    var currentURL: URL? { pane?.currentURL }
+    var openURLs: [URL] { pane?.openURLs ?? [] }
 
     func setTabRowHeight(_ height: CGFloat) {
         tabRowHeight = height
-        panes.forEach { $0.setTabRowHeight(height) }
-        onTabBarHeightChanged?(activePane?.tabBarHeight ?? height)
+        settingsButtonTop?.constant = (height - 20) / 2
+        pane?.setTabRowHeight(height)
+        onTabBarHeightChanged?(pane?.tabBarHeight ?? height)
     }
 
     override func loadView() {
         let container = FlatView()
         container.fillColor = Theme.editorBackground
 
-        editorSplit = PuzzleSplitView()
-        editorSplit.isVertical = true
-        editorSplit.dividerStyle = .thin
-        editorSplit.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(editorSplit)
+        let pane = makePane()
+        pane.view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(pane.view)
 
         welcome.translatesAutoresizingMaskIntoConstraints = false
         welcome.onOpenFolder = { [weak self] in self?.onOpenFolder?() }
         welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
         container.addSubview(welcome)
 
+        settingsButton.image = NSImage(systemSymbolName: "gearshape",
+                                       accessibilityDescription: "Settings")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        settingsButton.isBordered = false
+        settingsButton.bezelStyle = .regularSquare
+        settingsButton.imageScaling = .scaleProportionallyDown
+        settingsButton.contentTintColor = Theme.dimText
+        settingsButton.toolTip = "Settings"
+        settingsButton.setAccessibilityLabel("Settings")
+        settingsButton.target = self
+        settingsButton.action = #selector(settingsAction)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(settingsButton)
+        settingsButtonTop = settingsButton.topAnchor.constraint(
+            equalTo: container.topAnchor, constant: (tabRowHeight - 20) / 2)
+
         NSLayoutConstraint.activate([
-            editorSplit.topAnchor.constraint(equalTo: container.topAnchor),
-            editorSplit.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            editorSplit.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            editorSplit.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            pane.view.topAnchor.constraint(equalTo: container.topAnchor),
+            pane.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            pane.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            pane.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             welcome.topAnchor.constraint(equalTo: container.topAnchor),
             welcome.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             welcome.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             welcome.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            settingsButton.trailingAnchor.constraint(equalTo: container.trailingAnchor,
+                                                     constant: -10),
+            settingsButtonTop,
+            settingsButton.widthAnchor.constraint(equalToConstant: 22),
+            settingsButton.heightAnchor.constraint(equalToConstant: 20),
         ])
         self.view = container
-
-        addPane()  // first pane
+        updatePlaceholder()
     }
 
     /// Read-only access for the test harnesses.
-    var activePaneForTesting: EditorPaneViewController? { activePane }
-    var panesForTesting: [EditorPaneViewController] { panes }
+    var activePaneForTesting: EditorPaneViewController? { pane }
+    func clickSettingsGearForTesting() { settingsAction() }
+    var settingsGearVisibleForTesting: Bool {
+        _ = view
+        return !settingsButton.isHidden && settingsButton.window != nil
+    }
 
-    // MARK: - Panes
+    @objc private func settingsAction() { onOpenSettings?() }
 
-    /// Project root, forwarded to panes so inline blame knows which repo to ask.
+    // MARK: - The pane
+
+    /// Project root, forwarded to the pane so inline blame knows which repo to
+    /// ask.
     var repositoryRoot: URL? {
-        didSet { panes.forEach { $0.repositoryRoot = repositoryRoot } }
+        didSet { pane?.repositoryRoot = repositoryRoot }
     }
 
     /// Blame is keyed by file and line; a commit or checkout invalidates it.
-    /// Re-read the uncommitted-change marks in every pane.
-    func refreshGitLineChanges() { panes.forEach { $0.refreshGitLineChanges() } }
+    func refreshGitLineChanges() { pane?.refreshGitLineChanges() }
 
     func invalidateBlame(for url: URL? = nil) {
-        panes.forEach { $0.invalidateBlame(for: url) }
+        pane?.invalidateBlame(for: url)
     }
 
-    @discardableResult
-    private func addPane() -> EditorPaneViewController {
+    private func makePane() -> EditorPaneViewController {
         let pane = EditorPaneViewController()
         pane.setTabRowHeight(tabRowHeight)
         pane.repositoryRoot = repositoryRoot
         pane.fileHistoryProvider = { [weak self] url in self?.fileHistories[url] }
-        pane.onRequestSplit = { [weak self] in self?.splitEditor() }
-        pane.onBecameActive = { [weak self] p in self?.setActivePane(p) }
         pane.onDocumentSaved = { [weak self] url in
             guard let self else { return }
-            // The same document may be visible in both panes. Clear every
-            // modified marker after a manual save completes.
-            self.panes.forEach { $0.reloadTabs() }
+            self.pane?.reloadTabs()
             self.onDocumentSaved?(url)
         }
         pane.onDocumentEdited = { [weak self] in
-            self?.panes.forEach { $0.reloadTabs() }
+            self?.pane?.reloadTabs()
         }
         pane.onActiveDocumentChanged = { [weak self] url in
-            guard let self, self.activePane === pane else { return }
+            guard let self else { return }
             self.onActiveDocumentChanged?(url)
             self.updatePlaceholder()
         }
-        pane.onEmptied = { [weak self] p in self?.closePane(p) }
+        pane.onEmptied = { [weak self] _ in self?.updatePlaceholder() }
         pane.onTabOpened = { [weak pane] url in
             guard let pane else { return }
             DocumentStore.shared.registerOpen(url, owner: pane)
@@ -118,106 +135,52 @@ final class EditorViewController: NSViewController {
         pane.onTabClosed = { [weak self, weak pane] url in
             guard let pane else { return }
             DocumentStore.shared.unregisterOpen(url, owner: pane)
-            guard let self else { return }
-            if !self.panes.contains(where: { $0.openURLs.contains(url) }) {
-                self.fileHistories.removeValue(forKey: url)
-            }
+            self?.fileHistories.removeValue(forKey: url)
         }
-        pane.onTabBarHeightChanged = { [weak self, weak pane] height in
-            guard let self, let pane, self.activePane === pane else { return }
-            self.onTabBarHeightChanged?(height)
+        pane.onTabBarHeightChanged = { [weak self] height in
+            self?.onTabBarHeightChanged?(height)
         }
 
         addChild(pane)
-        panes.append(pane)
-        editorSplit.addArrangedSubview(pane.view)
-        setActivePane(pane)
-        updatePlaceholder()
+        pane.isActivePane = true
+        self.pane = pane
         return pane
     }
 
-    /// Confirm all modified documents before a window close. URLs are
-    /// de-duplicated because the same document can be open in both panes.
+    /// Confirm all modified documents before a window close.
     func confirmClose() -> Bool {
-        var seen = Set<URL>()
-        for pane in panes {
-            let urls = pane.openURLs.filter { seen.insert($0).inserted }
-            guard pane.confirmClose(urls: urls) else { return false }
-        }
-        return true
+        guard let pane else { return true }
+        return pane.confirmClose(urls: pane.openURLs)
     }
 
-    /// Detach every pane's layout manager — called after confirmClose().
+    /// Detach the pane's layout manager — called after confirmClose().
     func detachAllPanes() {
-        panes.forEach { $0.prepareForClose() }
+        pane?.prepareForClose()
     }
 
     func releaseTransientMemory() {
-        panes.forEach { $0.releaseTransientMemory() }
-    }
-
-    private func closePane(_ pane: EditorPaneViewController) {
-        // Keep at least one pane alive.
-        guard panes.count > 1, let index = panes.firstIndex(of: pane) else {
-            updatePlaceholder(); return
-        }
-        guard pane.confirmClose(urls: pane.openURLs) else { return }
-        // Before the pane goes away, or its layout manager stays attached to
-        // the document and pins it.
-        pane.prepareForClose()
-        pane.view.removeFromSuperview()
-        pane.removeFromParent()
-        panes.remove(at: index)
-        setActivePane(panes[max(0, index - 1)])
-        updatePlaceholder()
-    }
-
-    private func setActivePane(_ pane: EditorPaneViewController) {
-        guard activePane !== pane else { return }
-        // The pane being left loses focus, so its buffer is written.
-        activePane?.autosaveIfNeeded()
-        activePane = pane
-        for p in panes { p.isActivePane = (p === pane) }
-        onTabBarHeightChanged?(pane.tabBarHeight)
-        onActiveDocumentChanged?(pane.currentURL)
+        pane?.releaseTransientMemory()
     }
 
     private func updatePlaceholder() {
-        let hasOpenFiles = panes.contains { !$0.openURLs.isEmpty }
+        let hasOpenFiles = !(pane?.openURLs.isEmpty ?? true)
         welcome.isHidden = hasOpenFiles || hasProject
-        // The split (and its blank text view) must not cover the welcome screen.
-        editorSplit.isHidden = !hasOpenFiles
+        // The pane (and its blank text view) must not cover the welcome screen.
+        pane?.view.isHidden = !hasOpenFiles
     }
 
-    /// Split the active file into a second vertical pane with its own tabs.
-    /// Close the active pane's current tab. False when there was none to close.
+    /// Close the current tab. False when there was none to close.
     @discardableResult
     func closeActiveTab() -> Bool {
-        guard let pane = activePane ?? panes.first, let index = pane.activeTabIndex
-        else { return false }
+        guard let pane, let index = pane.activeTabIndex else { return false }
         pane.close(index: index)
         return true
     }
 
-    func splitEditor() {
-        if panes.count > 1 {
-            // Already split: collapse back to a single pane.
-            if let last = panes.last { closePane(last) }
-            return
-        }
-        let source = activePane
-        let pane = addPane()
-        if let url = source?.currentURL { pane.open(url: url) }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.editorSplit.setPosition(self.editorSplit.bounds.width / 2, ofDividerAt: 0)
-        }
-    }
-
-    // MARK: - Forwarded to the active pane
+    // MARK: - Forwarded to the pane
 
     func open(url: URL, replacingContent: Bool = false) {
-        (activePane ?? panes.first)?.open(url: url, replacingContent: replacingContent)
+        pane?.open(url: url, replacingContent: replacingContent)
         updatePlaceholder()
     }
 
@@ -233,46 +196,44 @@ final class EditorViewController: NSViewController {
     func canMutatePath(_ base: URL) -> Bool {
         let path = base.standardizedFileURL.path
         let prefix = path.hasSuffix("/") ? path : path + "/"
-        for pane in panes {
-            for url in pane.openURLs {
-                let candidate = url.standardizedFileURL.path
-                guard candidate == path || candidate.hasPrefix(prefix) else { continue }
-                if DocumentStore.shared.cachedDocument(for: url)?.isModified == true {
-                    return false
-                }
+        for url in pane?.openURLs ?? [] {
+            let candidate = url.standardizedFileURL.path
+            guard candidate == path || candidate.hasPrefix(prefix) else { continue }
+            if DocumentStore.shared.cachedDocument(for: url)?.isModified == true {
+                return false
             }
         }
         return true
     }
 
     func pathRenamed(from oldURL: URL, to newURL: URL) {
-        panes.forEach { $0.pathRenamed(from: oldURL, to: newURL) }
-        onActiveDocumentChanged?(activePane?.currentURL)
+        pane?.pathRenamed(from: oldURL, to: newURL)
+        onActiveDocumentChanged?(pane?.currentURL)
     }
 
     func pathDeleted(_ url: URL) {
-        panes.forEach { $0.pathDeleted(url) }
+        pane?.pathDeleted(url)
         updatePlaceholder()
-        onActiveDocumentChanged?(activePane?.currentURL)
+        onActiveDocumentChanged?(pane?.currentURL)
     }
-    func save() { activePane?.save() }
-    /// Every pane's open buffer, for the window going inactive.
-    func autosaveAll() { panes.forEach { $0.autosaveIfNeeded() } }
+    func save() { pane?.save() }
+    /// The open buffer, for the window going inactive.
+    func autosaveAll() { pane?.autosaveIfNeeded() }
 
-    /// Show the in-file find bar in the focused pane, optionally pre-filled.
+    /// Show the in-file find bar, optionally pre-filled.
     func showFindBar(seed: String? = nil, replacing: Bool = false) {
-        (activePane ?? panes.first)?.showFindBar(seed: seed, replacing: replacing)
+        pane?.showFindBar(seed: seed, replacing: replacing)
     }
     func jumpToLine(_ line: Int, column: Int? = nil) {
-        activePane?.jumpToLine(line, column: column)
+        pane?.jumpToLine(line, column: column)
     }
 
-    /// Whether any pane has a document to act on (⌘L has nothing to do without).
-    var hasOpenDocument: Bool { (activePane ?? panes.first)?.currentURL != nil }
+    /// Whether there is a document to act on (⌘L has nothing to do without).
+    var hasOpenDocument: Bool { pane?.currentURL != nil }
 
-    /// Re-apply font / line-height settings to every pane.
+    /// Re-apply font / line-height settings.
     func refreshDisplay() {
-        panes.forEach { $0.refreshDisplay() }
+        pane?.refreshDisplay()
         welcome.refreshFonts()
     }
 }
