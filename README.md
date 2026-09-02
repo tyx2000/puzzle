@@ -47,9 +47,10 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 - **External changes** — project files are monitored with FSEvents; disk and
   local edits use last-write-wins ordering with no conflict prompt.
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
-  Bash, TypeScript/JS, and Markdown, with `#eq?`/`#match?`/`#any-of?` predicate
-  evaluation and a One Dark capture→color map. Adding a language is one entry in
-  `SyntaxHighlighter.languages` + a bundled `highlights.scm`.
+  Bash and TypeScript/JS, with `#eq?`/`#match?`/`#any-of?` predicate evaluation
+  and a capture→color map. Adding a language is one entry in
+  `SyntaxHighlighter.languages` + a bundled `highlights.scm`. Markdown is shown
+  as plain text: no preview, no grammar.
 - **Find in file** — native incremental find bar (⌘F).
 - **Find in folder** — project-wide search via ripgrep (built-in fallback).
 - **Git** — branch in the status bar, dirty files marked, status sheet (⌘G).
