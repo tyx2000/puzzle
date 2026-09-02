@@ -154,7 +154,6 @@ final class DiffHeaderView: FlatView {
 
     var pathForTesting: String { folder.isEmpty ? name : "\(folder)/\(name)" }
     var modeForTesting: Mode { mode }
-    func hoverNextForTesting() { nextButton.setHoveredForTesting(true) }
     var buttonFramesForTesting: [NSRect] {
         [previousButton.frame, nextButton.frame, modeButton.frame]
     }

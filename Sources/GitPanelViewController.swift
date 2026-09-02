@@ -1183,10 +1183,6 @@ final class GitPanelViewController: NSViewController {
         reloadRows()
     }
 
-    var discardAllEnabledForTesting: Bool {
-        _ = view
-        return discardAllButton.isEnabled
-    }
     var headerLabelForTesting: String {
         _ = view
         return branchLabel.stringValue
@@ -1199,7 +1195,6 @@ final class GitPanelViewController: NSViewController {
         _ = view
         commitField.string = message
     }
-    func discardAllForTesting(in directory: URL) { discardAllChanges(in: directory) }
 
     /// The line above the commit box: project, branch and commit author.
     /// Push's label, its menu, and the tab's own count — the three places a
@@ -1230,8 +1225,6 @@ final class GitPanelViewController: NSViewController {
         segmented.selectedSegment = 2
         tabChanged()
     }
-    /// The lane diagram behind the History rows.
-    var historyRefsForTesting: [String] { history.map(\.refs) }
     var historyRowIsCommitForTesting: [Bool] {
         historyRows.map { if case .commit = $0 { return true } else { return false } }
     }

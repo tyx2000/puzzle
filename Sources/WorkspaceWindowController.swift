@@ -877,6 +877,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             return
         }
     }
+    @objc func selectNextTab(_ sender: Any?) { editor.stepTab(by: 1) }
+    @objc func selectPreviousTab(_ sender: Any?) { editor.stepTab(by: -1) }
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard !editor.reopenLastClosedTab() else { return }
+        NSSound.beep()
+    }
     @objc func showFiles(_ sender: Any?) {
         root.showSidebar(); sidebar.showFiles(); root.preserveSidebarWidth()
     }

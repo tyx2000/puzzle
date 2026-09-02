@@ -88,7 +88,6 @@ enum Theme {
     static let red = hex(0xf07178)
     static let green = hex(0xaad94c)
     static let yellow = hex(0xffb454)
-    static let orange = hex(0xff8f40)
     static let blue = hex(0x39bae6)
     static let purple = hex(0xd2a6ff)
     static let cyan = hex(0x95e6cb)
@@ -102,10 +101,6 @@ enum Theme {
     static let syntaxFunction = hex(0xffb454)
     static let syntaxKeyword = hex(0xff8f40)
     static let syntaxConstant = hex(0xd2a6ff)
-
-    /// macOS window corner radius on this OS — action buttons and file tabs use
-    /// the same value so their corners read as part of the same window.
-    static let cornerRadius: CGFloat = 10
 
     // Font + exact row metrics come from settings.json.
 

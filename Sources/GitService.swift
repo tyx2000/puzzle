@@ -837,12 +837,6 @@ enum GitService {
         return run(["commit", "-m", message, "--", "."], in: directory)
     }
 
-    static func forcePush(in directory: URL) -> RemoteResult {
-        // --force-with-lease refuses to clobber commits the remote gained since
-        // the last fetch; plain --force would discard a colleague's work.
-        remote(["push", "--force-with-lease"], in: directory, verb: "Force push")
-    }
-
     /// Authorship of a single line, for the inline blame annotation.
     struct BlameLine {
         let author: String

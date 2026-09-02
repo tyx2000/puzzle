@@ -43,6 +43,34 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Index of the tab on screen, for commands that act on "the current tab".
     var activeTabIndex: Int? { activeIndex }
 
+    /// Step to the next or previous tab, wrapping at the ends: with a handful
+    /// of files open, wrapping is what makes the shortcut usable without
+    /// looking at which tab is where.
+    func stepTab(by offset: Int) {
+        guard openURLs.count > 1, let current = activeIndex else { return }
+        let count = openURLs.count
+        activate(index: ((current + offset) % count + count) % count)
+    }
+
+    /// Files closed in this pane, most recent last, so ⇧⌘T can put one back.
+    /// Bounded: this is an undo affordance for a slip of the hand, not a
+    /// session history.
+    private var closedURLs: [URL] = []
+    static let reopenableTabs = 10
+
+    @discardableResult
+    func reopenLastClosedTab() -> Bool {
+        while let url = closedURLs.popLast() {
+            // A file that has since been deleted, or that is already open
+            // again, is not what the user meant to get back.
+            guard FileManager.default.fileExists(atPath: url.path),
+                  !openURLs.contains(url) else { continue }
+            open(url: url)
+            return true
+        }
+        return false
+    }
+
     var currentURL: URL? { activeIndex.flatMap { openURLs.indices.contains($0) ? openURLs[$0] : nil } }
     private var currentDocument: Document? { currentURL.map { DocumentStore.shared.document(for: $0) } }
 
@@ -422,7 +450,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: 0, length: textView.string.count))
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
-    func refreshBracketMatchesForTesting() { textView.refreshBracketMatches() }
     @discardableResult
     func focusEditorForTesting() -> Bool { view.window?.makeFirstResponder(textView) ?? false }
     func insertTextForTesting(_ text: String) {
@@ -431,23 +458,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func setCaretForTesting(_ location: Int) {
         textView.setSelectedRange(NSRange(location: location, length: 0))
     }
-    func scrollToForTesting(_ location: Int) {
-        textView.scrollRangeToVisible(NSRange(location: location, length: 0))
-    }
-    func lineIndexForTesting() -> LineIndex? { currentDocument?.lineIndex }
     var textInsetForTesting: CGFloat { textView.textContainerInset.width }
-    var textViewWidthForTesting: CGFloat { textView.bounds.width }
-    func disableWrappingForTesting() {
-        textView.isHorizontallyResizable = true
-        textView.textContainer?.widthTracksTextView = false
-        textView.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                              height: CGFloat.greatestFiniteMagnitude)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                  height: CGFloat.greatestFiniteMagnitude)
-    }
-    func visibleGlyphRangeForTesting() -> NSRange {
-        guard let container = textView.textContainer else { return NSRange() }
-        return layoutManager.glyphRange(forBoundingRect: textView.visibleRect, in: container)
+    /// Whether a silent write goes through — false when the file changed on
+    /// disk and only the user can choose a side.
+    var autosaveWritesForTesting: Bool {
+        guard let document = currentDocument else { return false }
+        return persistForTesting(document)
     }
     var findBarForTesting: FindBarView { findBar }
     var textForTesting: String { textView.string }
@@ -521,8 +537,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBarHeight.constant = 0
         view.window?.makeFirstResponder(textView)
     }
-
-    var isFindBarVisible: Bool { !findBar.isHidden }
 
     // MARK: - Tabs / documents
 
@@ -689,6 +703,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let url = openURLs[index]
         guard confirmClose(urls: [url]) else { return }
         openURLs.remove(at: index)
+        if url.isFileURL {
+            closedURLs.removeAll { $0 == url }
+            closedURLs.append(url)
+            if closedURLs.count > Self.reopenableTabs { closedURLs.removeFirst() }
+        }
         selections.removeValue(forKey: url)
         lineActivatedURLs.remove(url)
         foldedBlocks.removeValue(forKey: url)
@@ -819,31 +838,31 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
     }
 
-    /// Ask about all modified documents before mutating tab ownership. A
-    /// successful save is the only choice that clears the modified marker;
-    /// choosing Don't Save lets DocumentStore discard the buffer once its last
-    /// pane unregisters it.
+    func persistForTesting(_ document: Document) -> Bool {
+        persist(document, notify: false, presentErrors: false)
+    }
+
+    /// Write every modified document before mutating tab ownership.
+    ///
+    /// Closing writes the buffer rather than asking about it — the same rule
+    /// leaving it does, and the reason there is no "Save changes?" sheet: a
+    /// question whose answer we already know is not worth asking. Undo, not a
+    /// modal, is how an edit is taken back.
+    ///
+    /// The one case that still asks is a save that cannot go through on its
+    /// own: the file changed on disk under the edit. Choosing between the two
+    /// versions is not ours to make, and closing silently would drop one of
+    /// them. `persist` puts that question up itself.
+    ///
+    /// Returns false only when the user cancelled such a question, which
+    /// leaves the tab (or the window) open.
     func confirmClose(urls: [URL]) -> Bool {
         var seen = Set<URL>()
         for url in urls where seen.insert(url).inserted {
             guard let document = DocumentStore.shared.cachedDocument(for: url),
                   document.isModified, !document.isReadOnly else { continue }
-
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Save changes to “\(document.name)”?"
-            alert.informativeText = "File:\n\(document.url.path)\n\nSave writes the current editor contents to this file. Don’t Save closes the tab and permanently discards the unsaved editor contents. Cancel leaves the tab open."
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Don’t Save")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                guard persist(document, notify: true, presentErrors: true) else { return false }
-            case .alertSecondButtonReturn:
-                continue
-            default:
-                return false
-            }
+            if persist(document, notify: true, presentErrors: false) { continue }
+            guard persist(document, notify: true, presentErrors: true) else { return false }
         }
         return true
     }

@@ -172,9 +172,6 @@ final class SyntaxHighlighter {
         return def
     }
 
-    /// Names of grammars currently materialised (for tests / diagnostics).
-    static var loadedLanguageNames: [String] { loaded.keys.sorted() }
-
     /// Drop cached query text for languages nothing has open any more.
     static func unloadDefinitions(keeping names: Set<String>) {
         for key in loaded.keys where !names.contains(key) { loaded.removeValue(forKey: key) }

@@ -169,6 +169,15 @@ final class EditorViewController: NSViewController {
         pane?.view.isHidden = !hasOpenFiles
     }
 
+    func stepTab(by offset: Int) { pane?.stepTab(by: offset) }
+
+    @discardableResult
+    func reopenLastClosedTab() -> Bool {
+        let reopened = pane?.reopenLastClosedTab() ?? false
+        updatePlaceholder()
+        return reopened
+    }
+
     /// Close the current tab. False when there was none to close.
     @discardableResult
     func closeActiveTab() -> Bool {

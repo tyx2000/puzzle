@@ -46,6 +46,8 @@ enum RegressionTests {
         try testProjectTitleStrip()
         try testBranchMenu()
         try testMaterialFileIcons()
+        try testClosingATabWritesIt()
+        try testTabKeyboardNavigation()
         try testSettingsGearLivesTopRight()
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
@@ -1880,6 +1882,105 @@ enum RegressionTests {
 
     /// Settings opens a file, not a panel, so its control is a gear with the
     /// editor's own actions at the top right — always there, whatever is open.
+    /// Tabs are reachable from the keyboard, and a tab closed by mistake comes
+    /// back. Before this the only way between tabs was the mouse, and a
+    /// mis-hit ⌘W meant finding the file in the tree again.
+    /// Closing a tab writes it, the same way leaving it does. The sheet that
+    /// used to ask is gone: the answer was already known, and the same edit
+    /// behaved differently depending on whether the user had clicked away
+    /// first.
+    private static func testClosingATabWritesIt() throws {
+        let root = try temporaryDirectory("close-writes")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("notes.txt")
+        try Data("original\n".utf8).write(to: file)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: file)
+        pane.view.layoutSubtreeIfNeeded()
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("EDITED ")
+        try expect(pane.isModifiedForTesting, "the edit did not reach the buffer")
+
+        // No sheet: a modal here would hang the test, so reaching the
+        // assertions at all is part of what is being checked.
+        pane.close(index: 0)
+        try expect(pane.openURLs.isEmpty, "the tab did not close")
+        let onDisk = try String(contentsOf: file, encoding: .utf8)
+        try expect(onDisk == "EDITED original\n",
+                   "closing did not write the buffer: \(onDisk.debugDescription)")
+
+        // A file that changed underneath the edit is the one case still worth
+        // asking about, so the close is refused rather than silently picking a
+        // side. `confirmClose` reports that by returning false.
+        pane.open(url: file)
+        pane.view.layoutSubtreeIfNeeded()
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("MINE ")
+        try Data("theirs\n".utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: file.path)
+        try expect(!pane.autosaveWritesForTesting,
+                   "a conflicted buffer was written without asking")
+        let afterConflict = try String(contentsOf: file, encoding: .utf8)
+        try expect(afterConflict == "theirs\n",
+                   "the conflicting file was overwritten: \(afterConflict.debugDescription)")
+    }
+
+    private static func testTabKeyboardNavigation() throws {
+        let root = try temporaryDirectory("tab-keys")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var files: [URL] = []
+        for name in ["one.swift", "two.swift", "three.swift"] {
+            let url = root.appendingPathComponent(name)
+            try Data("// \(name)\n".utf8).write(to: url)
+            files.append(url)
+        }
+        let editor = EditorViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = editor
+        defer { window.close() }
+        files.forEach { editor.open(url: $0) }
+        editor.view.layoutSubtreeIfNeeded()
+        guard let pane = editor.activePaneForTesting else {
+            throw Failure(description: "no pane")
+        }
+        try expect(pane.openURLs.count == 3, "the files did not open as tabs")
+        try expect(editor.currentURL == files[2], "the last opened file is not active")
+
+        // Stepping wraps at both ends.
+        editor.stepTab(by: 1)
+        try expect(editor.currentURL == files[0], "next tab did not wrap to the first")
+        editor.stepTab(by: -1)
+        try expect(editor.currentURL == files[2], "previous tab did not wrap to the last")
+        editor.stepTab(by: -1)
+        try expect(editor.currentURL == files[1], "previous tab did not step back")
+
+        // Closing and reopening: the most recently closed comes back first.
+        pane.close(index: 1)
+        try expect(!pane.openURLs.contains(files[1]), "the tab did not close")
+        pane.close(index: 0)
+        try expect(pane.openURLs == [files[2]], "the second close did not land")
+        try expect(editor.reopenLastClosedTab() && editor.currentURL == files[0],
+                   "reopen did not restore the most recently closed tab")
+        try expect(editor.reopenLastClosedTab() && editor.currentURL == files[1],
+                   "reopen did not walk back through the closed tabs")
+        try expect(!editor.reopenLastClosedTab(),
+                   "reopen invented a tab that was never closed")
+
+        // A file deleted after it was closed is not resurrected.
+        let doomed = files[0]
+        pane.close(index: pane.openURLs.firstIndex(of: doomed) ?? 0)
+        try FileManager.default.removeItem(at: doomed)
+        try expect(!editor.reopenLastClosedTab(),
+                   "reopen brought back a file that no longer exists")
+    }
+
     private static func testSettingsGearLivesTopRight() throws {
         try expect(!ActivityBarView.Action.allCases.contains { "\($0)" == "settings" },
                    "the activity bar still offers a Settings panel")

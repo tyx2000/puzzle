@@ -55,10 +55,6 @@ enum FileIcons {
         lastUsed.removeAll(keepingCapacity: false)
     }
 
-    /// True when Puzzle has its icon resources; the tree keeps its SF Symbols
-    /// otherwise.
-    static var isAvailable: Bool { manifest != nil }
-
     /// The icon name for a file, by whole name first (`package.json`,
     /// `Dockerfile`) and then by extension, longest compound suffix first so
     /// `.d.ts` wins over `.ts`. Falls back to the generic file icon.

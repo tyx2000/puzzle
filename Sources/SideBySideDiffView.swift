@@ -101,7 +101,6 @@ PuzzleScroller.adopt(scroll)
 
     // MARK: - Regression-test surface
 
-    var rowsForTesting: [SideBySideDiff.Row] { rows }
     var currentRowForTesting: Int? { currentRow }
     /// Row count and scroll offset, so the table's own geometry stays checkable
     /// without a live window.

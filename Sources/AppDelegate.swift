@@ -345,6 +345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                      keyEquivalent: "w")
         closeWindow.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(closeWindow)
+        // ⇧⌘T is the browser's gesture for the same slip of the hand.
+        fileMenu.addItem(withTitle: "Reopen Closed Tab",
+                         action: #selector(WorkspaceWindowController.reopenClosedTab(_:)),
+                         keyEquivalent: "T")
         fileMenuItem.submenu = fileMenu
 
         let editMenuItem = NSMenuItem()
@@ -386,6 +390,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.showGit(_:)), keyEquivalent: "3")
         viewMenu.addItem(withTitle: "Show Sidebar",
                          action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
+        viewMenu.addItem(.separator())
+        // The shortcut every tabbed editor and browser uses; without it the
+        // tabs could only be reached with the mouse.
+        let nextTab = NSMenuItem(title: "Next Tab",
+                                 action: #selector(WorkspaceWindowController.selectNextTab(_:)),
+                                 keyEquivalent: "]")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(nextTab)
+        let previousTab = NSMenuItem(
+            title: "Previous Tab",
+            action: #selector(WorkspaceWindowController.selectPreviousTab(_:)),
+            keyEquivalent: "[")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(previousTab)
         viewMenuItem.submenu = viewMenu
 
         let windowMenuItem = NSMenuItem()

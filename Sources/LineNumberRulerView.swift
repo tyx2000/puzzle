@@ -467,7 +467,6 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     var clientViewVisibleRectForTesting: NSRect { textView?.visibleRect ?? .zero }
-    var changeMarkCountForTesting: Int { changeMarkRects.count }
     var changeMarkTargetsForTesting: [NSRect] { changeMarkRects.map(\.rect) }
     /// Pretend the pointer is on the change covering `line`.
     func hoverChangeForTesting(at line: Int?) {

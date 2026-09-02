@@ -87,22 +87,6 @@ enum SidebarCellDrawing {
              lineBreak: lineBreak, alignment: alignment)
     }
 
-    /// Vertical layout for a row that stacks a name over a line of metadata.
-    ///
-    /// Measured on ascender-to-descender rather than `boundingRectForFont`,
-    /// whose box carries the font's leading: with two of those stacked, the
-    /// lines drifted several points apart and the row read as two rows.
-    static func twoLineBands(in rect: NSRect, primaryFont: NSFont, secondaryFont: NSFont,
-                             gap: CGFloat = 1) -> (primary: NSRect, secondary: NSRect) {
-        let primaryHeight = ceil(primaryFont.ascender - primaryFont.descender)
-        let secondaryHeight = ceil(secondaryFont.ascender - secondaryFont.descender)
-        let total = primaryHeight + gap + secondaryHeight
-        let top = rect.minY + floor((rect.height - total) / 2)
-        return (NSRect(x: rect.minX, y: top, width: rect.width, height: primaryHeight),
-                NSRect(x: rect.minX, y: top + primaryHeight + gap,
-                       width: rect.width, height: secondaryHeight))
-    }
-
     static func attributedText(_ string: NSAttributedString, in rect: NSRect) {
         guard rect.width > 0, rect.height > 0, string.length > 0 else { return }
         let measured = string.boundingRect(

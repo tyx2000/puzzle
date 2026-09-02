@@ -174,7 +174,6 @@ PuzzleScroller.adopt(scroll)
 
     // MARK: - Regression-test surface
 
-    var itemsForTesting: [Item] { items }
     var selectedIndexForTesting: Int { selection }
     func moveSelectionForTesting(by delta: Int) { move(by: delta) }
     func acceptForTesting() { accept() }

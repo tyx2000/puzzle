@@ -39,8 +39,10 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 - **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers.
 - **Dock menu** — right-click the running app icon to open one of the ten most
   recently used valid project folders in a new Puzzle window.
-- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, explicit manual
-  save (⌘S), and a close confirmation for unsaved buffers.
+- **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, and ⌘S. Buffers
+  are written whenever they are left — another tab, another window, another app,
+  or closing them — so nothing asks about unsaved changes. A file that changed
+  on disk under an edit still asks, because only you can pick a side.
 - **External changes** — project files are monitored with FSEvents; disk and
   local edits use last-write-wins ordering with no conflict prompt.
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
@@ -87,6 +89,7 @@ overwrites an unrelated command with the same name.
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
 ⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘G git ·
+⇧⌘] next tab · ⇧⌘[ previous tab · ⌘W close tab · ⇧⌘T reopen closed tab ·
 ⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line
 
 ## Layout

@@ -273,12 +273,6 @@ final class FileTreeViewController: NSViewController {
         return nil
     }
 
-    /// Whether `row` is inside the scrolled visible area.
-    func isRowVisible(_ row: Int) -> Bool {
-        guard let scroll = view as? NSScrollView else { return false }
-        return scroll.contentView.bounds.intersects(outlineView.rect(ofRow: row))
-    }
-
     // MARK: - Regression-test surface
 
     /// Distance from one file row to the next: its height plus the gap AppKit
@@ -364,10 +358,6 @@ final class FileTreeViewController: NSViewController {
             outlineView.noteHeightOfRows(withIndexesChanged:
                 IndexSet(integersIn: 0..<outlineView.numberOfRows))
         }
-    }
-
-    func setDirtyPaths(_ paths: Set<String>) {
-        setStatus(modified: paths, untracked: [])
     }
 
     func setStatus(modified: Set<String>, untracked: Set<String>) {
@@ -1069,7 +1059,6 @@ private final class FileTreeCell: DrawnSidebarCell {
     private var icon: SidebarIcon?
     private var titleColor = NSColor.clear
     var titleColorForTesting: NSColor { titleColor }
-    var iconForTesting: SidebarIcon? { icon }
 
     func configure(title: String, disclosure: NSImage?,
                    icon: SidebarIcon?,

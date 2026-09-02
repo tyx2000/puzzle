@@ -549,8 +549,6 @@ final class DocumentStore {
     func documentIsCached(_ url: URL) -> Bool { docs[url] != nil }
     func cachedDocument(for url: URL) -> Document? { docs[url] }
 
-    /// Number of buffers currently held (tests / diagnostics).
-    var cachedCount: Int { docs.count }
     var cachedBytes: Int { docs.values.reduce(0) { $0 + $1.estimatedMemoryCost } }
 
     /// Immutable copies of current unsaved text inside a project. Project

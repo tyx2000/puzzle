@@ -144,16 +144,4 @@ enum DiffHighlighter {
         return (old, new)
     }
 
-    /// Counts for the tab subtitle / status line.
-    static func stats(in text: String) -> (added: Int, removed: Int) {
-        var added = 0, removed = 0
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            switch kind(of: String(line)) {
-            case .added: added += 1
-            case .removed: removed += 1
-            default: break
-            }
-        }
-        return (added, removed)
-    }
 }
