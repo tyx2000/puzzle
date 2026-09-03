@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import Foundation
 
 @main
@@ -48,6 +49,7 @@ enum RegressionTests {
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
         try testTabKeyboardNavigation()
+        try testBundleDeclaresDocumentTypes()
         try testSettingsGearLivesTopRight()
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
@@ -1979,6 +1981,60 @@ enum RegressionTests {
         try FileManager.default.removeItem(at: doomed)
         try expect(!editor.reopenLastClosedTab(),
                    "reopen brought back a file that no longer exists")
+    }
+
+    /// Finder only offers apps that declare what they can open. Without a
+    /// `CFBundleDocumentTypes` entry Puzzle was missing from Open With for
+    /// every file type, including the ones it is for.
+    private static func testBundleDeclaresDocumentTypes() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let build = try String(contentsOf: root.appendingPathComponent("build.sh"),
+                               encoding: .utf8)
+        guard let start = build.range(of: "<key>CFBundleDocumentTypes</key>") else {
+            throw Failure(description: "the bundle declares no document types, "
+                            + "so Open With hides it")
+        }
+        let claims = String(build[start.lowerBound...])
+
+        // Alternate, not Owner: being offered in the list is the point; taking
+        // over as the default for every source file on the machine is not.
+        try expect(!claims.contains("<string>Owner</string>"),
+                   "the bundle claims to own a document type")
+        try expect(claims.contains("<string>Alternate</string>"),
+                   "the document claims carry no handler rank")
+        // Images open in a preview that cannot edit them.
+        try expect(claims.contains("<string>public.image</string>")
+                    && claims.contains("<string>Viewer</string>"),
+                   "images are not claimed, or are claimed as editable")
+        // Everything else, including files macOS cannot type at all.
+        for type in ["public.text", "public.source-code", "public.json", "public.data"] {
+            try expect(claims.contains("<string>\(type)</string>"),
+                       "the bundle does not claim \(type)")
+        }
+
+        // Every language the app highlights has to be reachable from Finder.
+        // An extension macOS types as something else (a .ts file is
+        // public.mpeg-2-transport-stream, a video) or does not type at all
+        // (.rs, .go get an anonymous `dyn.` type that conforms to nothing)
+        // matches no UTI claim, so it has to be named outright.
+        let declared = Set(
+            claims.components(separatedBy: "<string>")
+                .compactMap { $0.components(separatedBy: "</string>").first })
+        var unreachable: [String] = []
+        for spec in SyntaxHighlighter.specs {
+            for ext in spec.extensions where !declared.contains(ext) {
+                guard let type = UTType(filenameExtension: ext) else {
+                    unreachable.append(".\(ext) (no system type)")
+                    continue
+                }
+                guard !type.conforms(to: .text), !type.conforms(to: .sourceCode),
+                      !declared.contains(type.identifier) else { continue }
+                unreachable.append(".\(ext) (\(type.identifier))")
+            }
+        }
+        try expect(unreachable.isEmpty,
+                   "Finder cannot offer Puzzle for: \(unreachable.joined(separator: ", "))")
     }
 
     private static func testSettingsGearLivesTopRight() throws {

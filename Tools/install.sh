@@ -26,6 +26,13 @@ rm -rf "$APPDIR/Puzzle.app"
 cp -R "$BUILD" "$APPDIR/Puzzle.app"
 echo "installed $APPDIR/Puzzle.app"
 
+# Launch Services caches what each app claims to open. Replacing the bundle in
+# place does not always invalidate that cache, so a freshly declared document
+# type can take a logout to show up in Finder's Open With. Registering the new
+# bundle explicitly makes it immediate.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APPDIR/Puzzle.app" >/dev/null 2>&1
+
 # ── 2. The pz command ───────────────────────────────────────────────────────
 # Pick a directory on the *user's real login PATH* that we can write to.
 #

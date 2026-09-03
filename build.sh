@@ -142,6 +142,114 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>Puzzle asks iTerm to open a terminal window for the current project.</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSPrincipalClass</key>        <string>NSApplication</string>
+
+    <!-- Without this, Finder's Open With never lists Puzzle: Launch Services
+         only offers apps that say which documents they handle.
+
+         `LSHandlerRank` is Alternate throughout on purpose. Owner would put
+         Puzzle forward as the default application for every source file on the
+         machine, which is not a text editor's call to make; Alternate offers
+         it in the list and leaves the default alone. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Text Document</string>
+            <key>CFBundleTypeRole</key>    <string>Editor</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.text</string>
+                <string>public.plain-text</string>
+                <string>public.source-code</string>
+                <string>public.script</string>
+                <string>public.json</string>
+                <string>public.xml</string>
+                <string>public.yaml</string>
+                <string>net.daringfireball.markdown</string>
+            </array>
+        </dict>
+        <!-- The languages Puzzle highlights, named outright. Most of these
+             conform to public.text and would match the entry above anyway;
+             naming them is what makes Puzzle a *recommended* application for
+             them in Finder rather than a generic fallback. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Source Code</string>
+            <key>CFBundleTypeRole</key>    <string>Editor</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.swift-source</string>
+                <string>public.python-script</string>
+                <string>public.c-source</string>
+                <string>public.c-header</string>
+                <string>com.microsoft.typescript</string>
+                <string>com.netscape.javascript-source</string>
+                <string>public.shell-script</string>
+                <string>public.bash-script</string>
+                <string>public.zsh-script</string>
+                <string>org.iso.sql</string>
+                <string>public.toml</string>
+                <string>public.css</string>
+                <string>public.html</string>
+                <string>public.geojson</string>
+                <string>public.svg-image</string>
+                <string>com.apple.property-list</string>
+            </array>
+        </dict>
+        <!-- Extensions macOS has no type for (.rs, .go, .jsx get an anonymous
+             `dyn.` type that conforms to nothing, so even the public.data claim
+             below misses them) or types wrongly: a .ts file is
+             public.mpeg-2-transport-stream, a video format.
+             This entry deliberately carries no LSItemContentTypes — a dict with
+             both is matched by its UTI list alone and the extensions are
+             ignored, which is why they had no effect when they were listed
+             beside one. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Source File</string>
+            <key>CFBundleTypeRole</key>    <string>Editor</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>ts</string>   <string>mts</string>  <string>cts</string>
+                <string>jsx</string>  <string>cjs</string>  <string>mjs</string>
+                <string>rs</string>   <string>go</string>
+                <string>jsonc</string><string>scss</string>
+                <string>xsl</string>  <string>xslt</string> <string>xsd</string>
+                <string>ddl</string>  <string>mysql</string><string>psql</string>
+                <string>pyi</string>  <string>pyw</string>
+                <string>bashrc</string><string>zshrc</string><string>profile</string>
+                <string>csproj</string><string>resx</string>
+                <string>dockerfile</string><string>gitignore</string>
+                <string>dockerignore</string><string>npmignore</string>
+                <string>eslintignore</string><string>prettierignore</string>
+                <string>rgignore</string>
+            </array>
+        </dict>
+        <!-- Images open in the preview pane, which cannot edit them — so this
+             one is a Viewer, not an Editor. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Image</string>
+            <key>CFBundleTypeRole</key>    <string>Viewer</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.image</string>
+            </array>
+        </dict>
+        <!-- Files Launch Services cannot type at all — a Dockerfile, a
+             .gitignore, an extensionless script — arrive as public.data. An
+             editor should still be offered for them. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Any Document</string>
+            <key>CFBundleTypeRole</key>    <string>Editor</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+                <string>public.folder</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
