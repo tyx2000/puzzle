@@ -361,6 +361,13 @@ final class LineNumberRulerView: NSRulerView {
             let isLineStart = fragChar.location == 0
                 || content.character(at: fragChar.location - 1) == 10
             guard isLineStart else { return }  // skip wrapped continuations
+            // Markdown fence and table-separator source lines are collapsed to
+            // layout control rows. Drawing their numbers into a 1pt fragment
+            // stacked labels on top of the adjacent real lines.
+            if let manager = layoutManager as? FoldingLayoutManager,
+               manager.isMarkdownControlLineCollapsed(at: fragChar.location) {
+                return
+            }
             // Derive the source line from this fragment's character location.
             // Folded glyphs may skip many hard lines, so incrementing a visual
             // counter would incorrectly renumber the source after a fold.

@@ -34,7 +34,7 @@ enum RegressionTests {
         try testVirtualDocumentRefreshesInPlace()
         try testLargeFilesAreRejectedBeforeLoading()
         try testPreviewPayloadsAreReleased()
-        try testMarkdownIsPlainText()
+        try testMarkdownLiveEditing()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
@@ -1439,45 +1439,273 @@ enum RegressionTests {
 
     }
 
-    /// A Markdown file is text like any other: no preview, no hidden syntax,
-    /// no decorations — and no grammar behind it either, so nothing rewrites
-    /// what the buffer shows.
-    private static func testMarkdownIsPlainText() throws {
-        let root = try temporaryDirectory("markdown-plain")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("notes.md")
-        let source = "# Title\n\nSome **strong** text and `code`.\n\n- item\n"
-        try Data(source.utf8).write(to: file)
-
-        try expect(SyntaxHighlighter.spec(forExtension: "md") == nil,
-                   "Markdown still resolves to a grammar")
+    private static func testMarkdownLiveEditing() throws {
+        let directory = try temporaryDirectory("markdown-live-editing")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("README.md")
+        let initial = "# Initial heading\n\nThis is **important** and [linked](https://example.com).\n"
+        try Data(initial.utf8).write(to: url)
 
         let pane = EditorPaneViewController()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.contentViewController = pane
-        defer { window.close() }
-        pane.open(url: file)
-        pane.view.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        _ = pane.view
+        pane.repositoryRoot = directory
+        pane.open(url: url)
+        let document = DocumentStore.shared.document(for: url)
+        try expect(document.storage.string == initial,
+                   "live Markdown formatting changed the editable source")
+        let headingLocation = (initial as NSString).range(of: "Initial heading").location
+        let strongLocation = (initial as NSString).range(of: "important").location
+        let linkLocation = (initial as NSString).range(of: "linked").location
+        let headingFont = document.storage.attribute(.font, at: headingLocation,
+                                                     effectiveRange: nil) as? NSFont
+        let strongFont = document.storage.attribute(.font, at: strongLocation,
+                                                    effectiveRange: nil) as? NSFont
+        let linkColor = document.storage.attribute(.foregroundColor, at: linkLocation,
+                                                   effectiveRange: nil) as? NSColor
+        let markerColor = document.storage.attribute(.foregroundColor, at: 0,
+                                                     effectiveRange: nil) as? NSColor
+        let headingStroke = document.storage.attribute(.strokeWidth, at: headingLocation,
+                                                       effectiveRange: nil) as? NSNumber
+        let strongStroke = document.storage.attribute(.strokeWidth, at: strongLocation,
+                                                      effectiveRange: nil) as? NSNumber
+        try expect(headingFont?.pointSize ?? 0 > Theme.editorFont().pointSize
+                   && (headingStroke?.doubleValue ?? 0) < 0,
+                   "Markdown heading was not formatted in the editable buffer")
+        try expect(strongFont != nil && (strongStroke?.doubleValue ?? 0) < 0,
+                   "Markdown strong emphasis was not formatted in the editable buffer")
+        try expect(sameColor(linkColor, Theme.blue),
+                   "Markdown link label was not rendered as a link")
+        try expect(sameColor(markerColor, Theme.dimText),
+                   "Markdown source marker did not visually recede")
+        let markdownLayout = FoldingLayoutManager()
+        markdownLayout.updateMarkdownSyntaxRanges(document.markdownSyntaxRanges,
+                                                   replacements: document.markdownGlyphReplacements,
+                                                   revealing: nil)
+        let linkDestination = (initial as NSString).range(of: "https://example.com").location
+        try expect(markdownLayout.isCharacterHidden(at: 0)
+                   && markdownLayout.isCharacterHidden(at: linkDestination)
+                   && !markdownLayout.isCharacterHidden(at: headingLocation),
+                   "opening Markdown did not collapse source syntax into rendered text")
+        let headingLine = (initial as NSString).lineRange(
+            for: NSRange(location: headingLocation, length: 0))
+        markdownLayout.revealMarkdownSyntax(in: headingLine)
+        try expect(!markdownLayout.isCharacterHidden(at: 0),
+                   "entering a Markdown line did not reveal its editable source markers")
 
-        try expect(pane.textForTesting == source,
-                   "the buffer no longer holds the file verbatim")
-        // Every character is drawn: nothing is hidden, and the `#` and `**`
-        // are still there to see.
-        for offset in 0..<(source as NSString).length {
-            try expect(!pane.isCharacterHiddenForTesting(offset),
-                       "character \(offset) of a Markdown file is hidden")
-        }
-        try expect(pane.showsLineNumbersForTesting,
-                   "a Markdown file lost its line-number gutter")
+        let edited = """
+        ## Live heading
+
+        `payload` and *updated*
+
+        ```swift
+        let value = 1
+        ```
+
+        | Name | Value |
+        | --- | --- |
+        | Alpha \\| content &amp; text that must wrap onto multiple visual lines in a narrow table | 1 |
+
+        - [ ] Pending item
+        - [x] Completed item
+
+        Setext heading
+        ===============
+
+        > Quoted text
+        - Bullet item
+        3. Ordered item
+
+        ---
+
+        ![Diagram](diagram.png)
+
+        [Reference label][docs]
+
+        [docs]: https://example.com/docs
+
+            let indented = true
+
+        Escaped \\*literal\\* and <kbd>Cmd</kbd>
+
+        Hard break\\
+        next line with <hello@example.com> and https://example.com/path.
+
+        Entities: &amp; and &#169;.
+
+        A note[^detail].
+
+        [^detail]: Footnote body
+
+        <!-- hidden note -->
+
+        """
+        document.storage.replaceCharacters(
+            in: NSRange(location: 0, length: document.storage.length),
+            with: edited)
+        pane.textDidChange(Notification(name: NSText.didChangeNotification))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        try expect(document.storage.string == edited,
+                   "editing live Markdown no longer preserved its source")
+        let codeLocation = (edited as NSString).range(of: "payload").location
+        let codeBackground = document.storage.attribute(.backgroundColor, at: codeLocation,
+                                                        effectiveRange: nil) as? NSColor
+        try expect(sameColor(codeBackground, Theme.inputBackground),
+                   "Markdown edit was not formatted on the next run-loop turn")
+        try expect(document.markdownCodeBlocks.count == 2
+                   && document.markdownCodeBlocks[0].language == "swift",
+                   "fenced/indented Markdown code was not published as rendered blocks")
+        try expect(document.markdownTables.count == 1
+                   && document.markdownTables[0].columnCount == 2
+                   && document.markdownTables[0].rows.count == 2
+                   && document.markdownTables[0].rows[1].cells[0]
+                       .contains("Alpha | content & text"),
+                   "Markdown table rows and columns were not parsed for rendering")
+        try expect(pane.markdownDecorationCountsForTesting.codeBlocks == 2
+                   && pane.markdownDecorationCountsForTesting.tables == 1,
+                   "Markdown block decorations did not reach the active editor view")
+        try expect(document.markdownTasks.count == 2
+                   && !document.markdownTasks[0].checked
+                   && document.markdownTasks[1].checked
+                   && pane.markdownTaskCountForTesting == 2,
+                   "Markdown task-list markers were not published as checkboxes")
+        try expect(document.markdownLineMarkers.count == 4,
+                   "blockquote, list and footnote markers were not rendered: "
+                    + "\(document.markdownLineMarkers.map { ($0.kind, $0.sourceRange) })")
+        try expect(document.markdownRules.count == 1,
+                   "thematic break was not published as a rendered rule")
+        try expect(document.markdownImages.count == 1
+                   && document.markdownImages[0].alt == "Diagram"
+                   && document.markdownImages[0].url?.lastPathComponent == "diagram.png",
+                   "standalone Markdown image was not resolved for rendering")
+        try expect(!pane.showsLineNumbersForTesting,
+                   "Markdown editor still displayed its line-number ruler")
+        try expect(!pane.hasActiveLineForTesting,
+                   "Markdown editor still displayed an active-line background")
+        try expect(document.markdownCollapsedLineRanges.count >= 3,
+                   "Markdown fence/table separator lines were not collapsed")
+
+        // Prose is set in a column, not across the whole window: Markdown is
+        // read, and a full-width measure is hard to track line to line. Code
+        // still fills the pane — a line means something at column 120.
+        let measure = PuzzleTextView.readingColumns * Theme.characterWidth()
+        let wide = NSWindow(contentRect: NSRect(x: 0, y: 0,
+                                                width: measure + 400, height: 600),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        wide.contentViewController = pane
+        defer { wide.close() }
+        wide.makeKeyAndOrderFront(nil)
+        wide.setContentSize(NSSize(width: measure + 400, height: 600))
+        wide.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let inset = pane.textInsetForTesting
+        // The column is the measure, whatever is left over is the margin.
+        try expect(abs((pane.textViewWidthForTesting - inset * 2) - measure) <= 1,
+                   "the Markdown column is \(pane.textViewWidthForTesting - inset * 2)pt "
+                    + "wide, not the \(measure)pt measure")
+        try expect(inset > 20,
+                   "Markdown is not set in a centred column: \(inset)pt of margin")
+        let listing = directory.appendingPathComponent("listing.swift")
+        try Data("let value = 1\n".utf8).write(to: listing)
+        pane.open(url: listing)
+        wide.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         try expect(pane.textInsetForTesting < 20,
-                   "a Markdown file is still set in a reading column: "
-                    + "\(pane.textInsetForTesting)pt")
-        // Nothing resolves a grammar for it, so nothing paints it either.
-        try expect(SyntaxHighlighter.spec(forExtension: "markdown") == nil
-                    && SyntaxHighlighter.spec(forExtension: "mdx") == nil,
-                   "another Markdown extension still resolves to a grammar")
+                   "source was indented like prose: \(pane.textInsetForTesting)pt")
+        let setextLocation = (edited as NSString).range(of: "Setext heading").location
+        let setextStroke = document.storage.attribute(
+            .strokeWidth, at: setextLocation, effectiveRange: nil) as? NSNumber
+        try expect((setextStroke?.doubleValue ?? 0) < 0,
+                   "Setext heading did not receive rendered heading typography")
+        let referenceDestination = (edited as NSString).range(of: "https://example.com/docs").location
+        let escapedSlash = (edited as NSString).range(of: #"\*literal"#).location
+        let htmlOpen = (edited as NSString).range(of: "<kbd>").location
+        let hardBreak = (edited as NSString).range(of: "Hard break\\").location
+            + ("Hard break" as NSString).length
+        let htmlComment = (edited as NSString).range(of: "<!-- hidden note -->").location
+        let bareURLLocation = (edited as NSString).range(of: "https://example.com/path").location
+        let entityLocation = (edited as NSString).range(of: "Entities: &amp;").location
+            + ("Entities: " as NSString).length
+        let footnoteReference = (edited as NSString).range(of: "[^detail]").location
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(referenceDestination, $0)
+        }, "reference-link definition remained visible")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(escapedSlash, $0)
+        }, "escaped Markdown punctuation retained its source backslash")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(htmlOpen, $0)
+        }, "simple inline HTML tags were not collapsed")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(hardBreak, $0)
+        }, "hard-break source marker remained visible")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(htmlComment, $0)
+        }, "Markdown HTML comment remained visible")
+        let bareURLColor = document.storage.attribute(
+            .foregroundColor, at: bareURLLocation, effectiveRange: nil) as? NSColor
+        try expect(sameColor(bareURLColor, Theme.blue),
+                   "bare GFM URL was not rendered as a link")
+        try expect(document.markdownGlyphReplacements.contains {
+            $0.sourceRange.location == entityLocation && $0.character == 0x26
+        }, "Markdown character entity was not decoded for rendered display")
+        try expect(document.markdownSyntaxRanges.contains {
+            NSLocationInRange(footnoteReference, $0)
+        }, "Markdown footnote reference retained its source delimiters")
+
+        let tableLayout = FoldingLayoutManager()
+        let tableContainer = NSTextContainer(
+            size: NSSize(width: 220, height: CGFloat.greatestFiniteMagnitude))
+        tableContainer.widthTracksTextView = true
+        tableLayout.addTextContainer(tableContainer)
+        document.storage.addLayoutManager(tableLayout)
+        let tableView = PuzzleTextView(
+            frame: NSRect(x: 0, y: 0, width: 220, height: 300),
+            textContainer: tableContainer)
+        tableView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks,
+            tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers,
+            rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: nil)
+        tableLayout.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: nil)
+        let fenceLocation = (edited as NSString).range(of: "```swift").location
+        try expect(tableLayout.isMarkdownControlLineCollapsed(at: fenceLocation),
+                   "collapsed Markdown fence line would still draw a gutter number")
+        let wrappedLocation = (edited as NSString).range(of: "Alpha").location
+        let dynamicHeight = tableLayout.markdownTableRowHeightForTesting(
+            at: wrappedLocation) ?? 0
+        try expect(dynamicHeight > Theme.lineMetrics().target,
+                   "wrapped Markdown table content retained the fixed code-line height")
+        try expect(tableLayout.isCharacterHidden(at: wrappedLocation),
+                   "rendered table source still participated in ordinary text wrapping")
+        tableLayout.ensureLayout(for: tableContainer)
+        let fencedBodyLocation = (edited as NSString).range(of: "let value = 1").location
+        let fencedBodyGlyph = tableLayout.glyphIndexForCharacter(at: fencedBodyLocation)
+        let fencedBodyFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: fencedBodyGlyph, effectiveRange: nil)
+        try expect(fencedBodyFragment.height >= Theme.lineMetrics().target,
+                   "final fenced-code content row was compressed with its closing fence")
+        guard let wrappedRow = document.markdownTables[0].rows.first(where: {
+            NSLocationInRange(wrappedLocation, $0.sourceRange)
+        }) else { throw Failure(description: "wrapped table row metadata was missing") }
+        let rowAnchor = wrappedRow.lineRange.length > wrappedRow.sourceRange.length
+            ? NSMaxRange(wrappedRow.lineRange) - 1 : wrappedRow.sourceRange.location
+        let wrappedGlyph = tableLayout.glyphIndexForCharacter(at: rowAnchor)
+        let wrappedFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: wrappedGlyph, effectiveRange: nil)
+        try expect(wrappedFragment.height > Theme.lineMetrics().target,
+                   "TextKit did not apply the measured Markdown table row height")
+        document.storage.removeLayoutManager(tableLayout)
+
+        pane.prepareForClose()
+        document.isModified = false
+        DocumentStore.shared.release(url, stillOpen: false)
     }
 
     private static func testFindMatchesAreComplete() throws {
@@ -2401,8 +2629,8 @@ enum RegressionTests {
                    "the gutter band sits at \(gutter.minY), the code's row at \(expectedY)")
 
         // Folding still hides a block's body when the document lays out on
-        // demand (diffs keep full layout, because their change bands measure
-        // ranges across the whole document).
+        // demand (source files do; Markdown and diffs keep full layout because
+        // their decorations measure ranges across the whole document).
         do {
             let long = directory.appendingPathComponent("folded.swift")
             var body = "import AppKit\n\nfunc outer() {\n    let a = 1\n}\n"
@@ -2420,6 +2648,14 @@ enum RegressionTests {
                        "folding did not hide the block body under on-demand layout")
             try expect(pane.nonContiguousLayoutForTesting,
                        "a source file did not get on-demand layout")
+
+            let notes = directory.appendingPathComponent("notes.md")
+            try Data("# Title\n\n```swift\nlet x = 1\n```\n".utf8).write(to: notes)
+            pane.open(url: notes)
+            pane.view.layoutSubtreeIfNeeded()
+            try expect(!pane.nonContiguousLayoutForTesting,
+                       "Markdown lost its full layout, so its decorations would "
+                        + "measure ranges that are not laid out yet")
         }
 
         // The undo stack is bounded, so a long session cannot accumulate every
@@ -2999,6 +3235,15 @@ enum RegressionTests {
                    "unexpanded history showed something other than commits")
     }
 
+    /// `status` reads porcelain v2 and reports what v1 did, from one
+    /// subprocess instead of seven.
+    /// Branch and History rows are one line: the thing itself on the left, who
+    /// and when on the right, and everything that no longer fits one hover
+    /// away. History rows also lost their chevron — the row is the control —
+    /// and the lane graph beside them.
+    /// Commit needs both halves: something changed, and something said about
+    /// it. The button used to accept the click either way and answer with an
+    /// alert, or commit nothing at all.
     /// Who the next commit will be authored by is resolved once per project and
     /// reused — a status refresh costs one subprocess, not several. It still
     /// has to notice `git config` run in a terminal, which touches nothing the
@@ -3116,9 +3361,6 @@ enum RegressionTests {
                    "clearing the find bar left its matches highlighted")
     }
 
-    /// Commit needs both halves: something changed, and something said about
-    /// it. The button used to accept the click either way and answer with an
-    /// alert, or commit nothing at all.
     private static func testCommitNeedsChangesAndAMessage() throws {
         let root = try temporaryDirectory("commit-enabled")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3166,10 +3408,6 @@ enum RegressionTests {
                    "Commit stayed live after the changes were committed away")
     }
 
-    /// Branch and History rows are one line: the thing itself on the left, who
-    /// and when on the right, and everything that no longer fits one hover
-    /// away. History rows also lost their chevron — the row is the control —
-    /// and the lane graph beside them.
     private static func testOneLinePanelRows() throws {
         let root = try temporaryDirectory("one-line-rows")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3232,8 +3470,6 @@ enum RegressionTests {
                    "the branch row does not carry its author: \(branchRow.trailing)")
     }
 
-    /// `status` reads porcelain v2 and reports what v1 did, from one
-    /// subprocess instead of seven.
     private static func testStatusMatchesPorcelainV1() throws {
         let root = try temporaryDirectory("status-v2")
         defer { try? FileManager.default.removeItem(at: root) }

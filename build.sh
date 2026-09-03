@@ -41,6 +41,13 @@ cc_obj ts_p.o       "$V/tree-sitter-typescript/typescript/src/parser.c"         
 cc_obj ts_s.o       "$V/tree-sitter-typescript/typescript/src/scanner.c"           "$V/tree-sitter-typescript/typescript/src"
 cc_obj tsx_p.o      "$V/tree-sitter-typescript/tsx/src/parser.c"                   "$V/tree-sitter-typescript/tsx/src"
 cc_obj tsx_s.o      "$V/tree-sitter-typescript/tsx/src/scanner.c"                  "$V/tree-sitter-typescript/tsx/src"
+cc_obj md_p.o       "$V/tree-sitter-markdown/tree-sitter-markdown/src/parser.c"    "$V/tree-sitter-markdown/tree-sitter-markdown/src"
+cc_obj md_s.o       "$V/tree-sitter-markdown/tree-sitter-markdown/src/scanner.c"   "$V/tree-sitter-markdown/tree-sitter-markdown/src"
+# The inline grammar is a separate parser: the block grammar emits `inline`
+# nodes with raw text, and this one parses emphasis/links/code spans inside
+# them. Needed by the markdown preview renderer.
+cc_obj mdi_p.o      "$V/tree-sitter-markdown/tree-sitter-markdown-inline/src/parser.c"  "$V/tree-sitter-markdown/tree-sitter-markdown-inline/src"
+cc_obj mdi_s.o      "$V/tree-sitter-markdown/tree-sitter-markdown-inline/src/scanner.c" "$V/tree-sitter-markdown/tree-sitter-markdown-inline/src"
 cc_obj swift_p.o    "$V/tree-sitter-swift/src/parser.c"                            "$V/tree-sitter-swift/src"
 cc_obj swift_s.o    "$V/tree-sitter-swift/src/scanner.c"                           "$V/tree-sitter-swift/src"
 cc_obj html_p.o     "$V/tree-sitter-html/src/parser.c"                             "$V/tree-sitter-html/src"
@@ -101,6 +108,7 @@ cp "$V/tree-sitter-bash/queries/highlights.scm"                             "$AP
 cp "$V/tree-sitter-yaml/queries/highlights.scm"                             "$APP/Contents/Resources/queries/yaml.scm"
 cp "$V/tree-sitter-typescript/queries/highlights.scm"                       "$APP/Contents/Resources/queries/typescript.scm"
 cp "$ROOT/Queries/typescript_ecma.scm"                                      "$APP/Contents/Resources/queries/typescript_ecma.scm"
+cp "$V/tree-sitter-markdown/tree-sitter-markdown/queries/highlights.scm"    "$APP/Contents/Resources/queries/markdown.scm"
 cp "$V/tree-sitter-swift/queries/highlights.scm"                            "$APP/Contents/Resources/queries/swift.scm"
 cp "$V/tree-sitter-html/queries/highlights.scm"                             "$APP/Contents/Resources/queries/html.scm"
 cp "$V/tree-sitter-css/queries/highlights.scm"                              "$APP/Contents/Resources/queries/css.scm"
@@ -222,7 +230,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
                 <string>dockerfile</string><string>gitignore</string>
                 <string>dockerignore</string><string>npmignore</string>
                 <string>eslintignore</string><string>prettierignore</string>
-                <string>rgignore</string>
+                <string>rgignore</string><string>mdx</string>
             </array>
         </dict>
         <!-- Images open in the preview pane, which cannot edit them — so this

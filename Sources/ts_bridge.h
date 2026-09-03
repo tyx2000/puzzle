@@ -9,6 +9,8 @@ const TSLanguage *tree_sitter_bash(void);
 const TSLanguage *tree_sitter_yaml(void);
 const TSLanguage *tree_sitter_typescript(void);
 const TSLanguage *tree_sitter_tsx(void);
+const TSLanguage *tree_sitter_markdown(void);
+const TSLanguage *tree_sitter_markdown_inline(void);
 const TSLanguage *tree_sitter_swift(void);
 const TSLanguage *tree_sitter_html(void);
 const TSLanguage *tree_sitter_css(void);

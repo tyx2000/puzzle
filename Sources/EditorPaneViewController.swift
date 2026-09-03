@@ -120,6 +120,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.insertionPointColor = Theme.cursor
         textView.selectedTextAttributes = [.backgroundColor: Theme.selection]
         textView.textContainerInset = NSSize(width: 6, height: 8)
+        textView.rememberBaseInset()
         // Required for the text view to grow with content (otherwise no scrolling).
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -141,7 +142,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.onExplicitCaretInteraction = { [weak self] in
             guard let self, let url = self.currentURL else { return }
             self.lineActivatedURLs.insert(url)
-            self.textView.showsCurrentLineBand = true
+            self.textView.showsCurrentLineBand = self.currentDocument?.languageSpec?.name
+                != "markdown"
         }
         textView.onCommandClick = { [weak self] location in
             self?.navigateToDefinition(at: location) ?? false
@@ -459,6 +461,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: location, length: 0))
     }
     var textInsetForTesting: CGFloat { textView.textContainerInset.width }
+    var textViewWidthForTesting: CGFloat { textView.bounds.width }
     /// Whether a silent write goes through — false when the file changed on
     /// disk and only the user can choose a side.
     var autosaveWritesForTesting: Bool {
@@ -627,10 +630,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // cost ~34 MB of fragment storage before its first line was drawn; on
         // demand that is ~16 MB.
         //
-        // Not for diffs: they decorate ranges across the whole document
-        // (full-width change bands), and geometry for a range that has not been
-        // laid out yet comes back at the origin.
-        layoutManager.allowsNonContiguousLayout = !doc.isVirtual
+        // Not for Markdown or diffs: both decorate ranges across the whole
+        // document (code-block boxes, full-width change bands), and geometry
+        // for a range that has not been laid out yet comes back at the origin —
+        // measured, a fenced block's box landed at the top of the file.
+        layoutManager.allowsNonContiguousLayout =
+            !doc.isVirtual && doc.languageSpec?.name != "markdown"
 
         // Move this pane's layout manager onto the document's storage.
         if layoutManager.textStorage !== doc.storage {
@@ -657,11 +662,24 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.isEditable = !doc.isReadOnly
         let lineIsActive = lineActivatedURLs.contains(url)
         textView.showsCurrentLineBand = lineIsActive
+            && doc.languageSpec?.name != "markdown"
         if !lineIsActive { clearInlineBlameRequest() }
         textView.diffBands = doc.diffBands
         textView.diffLineNumbers = doc.diffLineNumbers
         textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
         layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
+        let markdownReveal = markdownRevealRange(for: doc)
+        layoutManager.updateMarkdownSyntaxRanges(
+            doc.markdownSyntaxRanges,
+            collapsedLines: doc.markdownCollapsedLineRanges,
+            replacements: doc.markdownGlyphReplacements,
+            revealing: markdownReveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
+            tasks: doc.markdownTasks,
+            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
+            images: doc.markdownImages,
+            activeSourceRange: markdownReveal)
 
         // Synthetic file-history tabs use a real four-column table. Keep this
         // check ahead of images/text so only one primary content view is shown.
@@ -685,7 +703,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             imagePreview?.clear()
             imagePreview?.isHidden = true
             scrollView.isHidden = false
-            scrollView.rulersVisible = true
+            // Rendered Markdown reads like a document, not a source listing:
+            // no gutter, and a column of readable width instead of the full
+            // pane.
+            let isMarkdown = doc.languageSpec?.name == "markdown"
+            scrollView.rulersVisible = !isMarkdown
+            textView.readingWidth = isMarkdown
+                ? PuzzleTextView.readingColumns * Theme.characterWidth()
+                : nil
             showDiffHeader(for: doc.diffLineNumbers.isEmpty ? nil : url)
         }
 
@@ -720,6 +745,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             textView.showsCurrentLineBand = false
             textView.updateCodeBlocks([], resetFolds: false)
             textView.updateJSXTagMatches([])
+            layoutManager.updateMarkdownSyntaxRanges([], revealing: nil)
+            textView.updateMarkdownDecorations(
+                codeBlocks: [], tables: [], tasks: [], activeSourceRange: nil)
             imagePreview?.clear()
             imagePreview?.isHidden = true
             fileHistoryView?.isHidden = true
@@ -881,7 +909,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let offset = column.map { min(max(0, $0 - 1), lineLength) } ?? 0
         let target = NSRange(location: min(location + offset, length), length: 0)
         if let url = currentURL { lineActivatedURLs.insert(url) }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.setSelectedRange(target)
         textView.scrollRangeToVisible(target)
         view.window?.makeFirstResponder(textView)
@@ -920,7 +948,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 let target = NSRange(location: min(destination.utf16Location, length), length: 0)
                 self.selections[destination.url] = target
                 self.lineActivatedURLs.insert(destination.url)
-                self.textView.showsCurrentLineBand = true
+                self.textView.showsCurrentLineBand = self.currentDocument?.languageSpec?.name
+                    != "markdown"
                 self.suppressSelectionSideEffects = true
                 self.textView.setSelectedRange(target)
                 self.suppressSelectionSideEffects = false
@@ -1080,7 +1109,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard !doc.isApplyingExternalChange else { return }
         clearDefinitionHover()
         if let url = currentURL { lineActivatedURLs.insert(url) }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = doc.languageSpec?.name != "markdown"
         let wasModified = doc.isModified
         doc.markLocalEdit()
         if !wasModified { onDocumentEdited?() }
@@ -1092,6 +1121,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // immediately; the debounced TSX parse publishes current ranges.
         doc.updateJSXTagMatches([])
         HighlightService.shared.scheduleHighlight(doc)
+        let reveal = markdownRevealRange(for: doc)
+        layoutManager.revealMarkdownSyntax(in: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
+            tasks: doc.markdownTasks,
+            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
+            images: doc.markdownImages,
+            activeSourceRange: reveal)
         textView.refreshBracketMatches()
         scheduleGitLineChanges()
     }
@@ -1100,12 +1137,24 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard !suppressSelectionSideEffects else { return }
         textView.refreshBracketMatches()
         if let url = currentURL { selections[url] = textView.selectedRange() }
+        if let document = currentDocument {
+            let reveal = markdownRevealRange(for: document)
+            layoutManager.revealMarkdownSyntax(in: reveal)
+            textView.updateMarkdownDecorations(
+                codeBlocks: document.markdownCodeBlocks,
+                tables: document.markdownTables,
+                tasks: document.markdownTasks,
+                lineMarkers: document.markdownLineMarkers,
+                rules: document.markdownRules,
+                images: document.markdownImages,
+                activeSourceRange: reveal)
+        }
         guard let url = currentURL, lineActivatedURLs.contains(url) else {
             textView.showsCurrentLineBand = false
             textView.inlineBlame = nil
             return
         }
-        textView.showsCurrentLineBand = true
+        textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         scheduleInlineBlame()
@@ -1115,6 +1164,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
     var hasActiveLineForTesting: Bool { textView.showsCurrentLineBand }
     var inlineBlameForTesting: String? { textView.inlineBlame }
+    var markdownDecorationCountsForTesting: (codeBlocks: Int, tables: Int) {
+        textView.markdownDecorationCountsForTesting
+    }
+    var markdownTaskCountForTesting: Int { textView.markdownTaskCountForTesting }
     var showsLineNumbersForTesting: Bool { scrollView.rulersVisible }
     var currentLineHeightForTesting: CGFloat? {
         layoutManager.ensureLayout(for: textView.textContainer!)
@@ -1126,6 +1179,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               document.url == currentURL else { return }
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
+        let reveal = markdownRevealRange(for: document)
+        layoutManager.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: reveal)
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {
@@ -1142,9 +1207,33 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
+        let reveal = markdownRevealRange(for: document)
+        layoutManager.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: reveal)
+        textView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+            images: document.markdownImages,
+            activeSourceRange: reveal)
         textView.refreshBracketMatches()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
+    }
+
+    /// Reveal source markers only on lines the user explicitly entered. Merely
+    /// opening a Markdown file leaves the document in its rendered appearance.
+    private func markdownRevealRange(for document: Document) -> NSRange? {
+        guard document.languageSpec?.name == "markdown",
+              let url = currentURL, lineActivatedURLs.contains(url) else { return nil }
+        let source = document.storage.string as NSString
+        let selection = textView.selectedRange()
+        let location = min(selection.location, source.length)
+        let length = min(selection.length, source.length - location)
+        return source.lineRange(for: NSRange(location: location, length: length))
     }
 
     // MARK: - Inline blame

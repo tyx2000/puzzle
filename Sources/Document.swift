@@ -111,6 +111,17 @@ final class Document {
     /// Stored on the document so split panes share syntax metadata while each
     /// pane independently decides which pair its caret activates.
     private(set) var jsxTagMatches: [JSXTagMatch] = []
+    /// Markdown syntax characters retained in storage but collapsed by each
+    /// pane's layout manager when their line is not being edited.
+    private(set) var markdownSyntaxRanges: [NSRange] = []
+    private(set) var markdownCollapsedLineRanges: [NSRange] = []
+    private(set) var markdownCodeBlocks: [MarkdownCodeBlockDecoration] = []
+    private(set) var markdownTables: [MarkdownTableDecoration] = []
+    private(set) var markdownTasks: [MarkdownTaskDecoration] = []
+    private(set) var markdownLineMarkers: [MarkdownLineMarkerDecoration] = []
+    private(set) var markdownRules: [MarkdownRuleDecoration] = []
+    private(set) var markdownImages: [MarkdownImageDecoration] = []
+    private(set) var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
 
     /// Tab label override (diffs show "file.swift (diff)" / "… @ abc1234").
     private(set) var displayName: String?
@@ -373,6 +384,28 @@ final class Document {
             name: Self.structureDidChange, object: self)
     }
 
+    func updateMarkdownPresentation(_ presentation: MarkdownPresentation) {
+        guard presentation.hiddenSyntaxRanges != markdownSyntaxRanges
+                || presentation.collapsedLineRanges != markdownCollapsedLineRanges
+                || presentation.codeBlocks != markdownCodeBlocks
+                || presentation.tables != markdownTables
+                || presentation.tasks != markdownTasks
+                || presentation.lineMarkers != markdownLineMarkers
+                || presentation.rules != markdownRules
+                || presentation.images != markdownImages
+                || presentation.glyphReplacements != markdownGlyphReplacements else { return }
+        markdownSyntaxRanges = presentation.hiddenSyntaxRanges
+        markdownCollapsedLineRanges = presentation.collapsedLineRanges
+        markdownCodeBlocks = presentation.codeBlocks
+        markdownTables = presentation.tables
+        markdownTasks = presentation.tasks
+        markdownLineMarkers = presentation.lineMarkers
+        markdownRules = presentation.rules
+        markdownImages = presentation.images
+        markdownGlyphReplacements = presentation.glyphReplacements
+        NotificationCenter.default.post(
+            name: Self.structureDidChange, object: self)
+    }
 
     /// Approximate retained bytes used by this document. Attributed text costs
     /// more than its UTF-16 characters because syntax runs retain attributes.
@@ -725,6 +758,7 @@ final class HighlightService {
         // Generated diff buffers get the diff painter, not tree-sitter.
         if doc.isVirtual {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             doc.diffBands = DiffHighlighter.apply(to: storage)
             doc.diffLineNumbers = DiffHighlighter.lineNumbers(in: storage.string)
             return
@@ -736,11 +770,13 @@ final class HighlightService {
         // huge (or unsupported) file never pages in parser tables it won't use.
         guard let spec = doc.languageSpec, !doc.isUnsupported else {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
         let text = storage.string
         guard text.utf8.count <= maxBytes else {
             doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
         let tags: [JSXTagMatch]
@@ -749,6 +785,13 @@ final class HighlightService {
             tags = hl.highlight(text: text, storage: storage, fullRange: full)
         } else {
             tags = []
+        }
+        if spec.name == "markdown" {
+            doc.updateMarkdownPresentation(
+                MarkdownLiveStyler.apply(text: text, to: storage,
+                                         documentURL: doc.url))
+        } else {
+            doc.updateMarkdownPresentation(MarkdownPresentation())
         }
         doc.updateJSXTagMatches(tags)
     }
@@ -775,6 +818,10 @@ final class HighlightService {
             self.pending[doc.url] = nil
         }
         pending[doc.url] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        // Markdown is formatted in-place, so publish its visual syntax on the
+        // next run-loop turn. Other grammars retain the typing debounce because
+        // their full tree-sitter parse has no visible read/edit mode transition.
+        let delay = doc.languageSpec?.name == "markdown" ? 0 : 0.18
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }

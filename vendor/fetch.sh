@@ -11,6 +11,7 @@ clone https://github.com/tree-sitter/tree-sitter-json.git        tree-sitter-jso
 clone https://github.com/tree-sitter/tree-sitter-bash.git        tree-sitter-bash
 clone https://github.com/tree-sitter-grammars/tree-sitter-yaml.git tree-sitter-yaml
 clone https://github.com/tree-sitter/tree-sitter-typescript.git  tree-sitter-typescript
+clone https://github.com/tree-sitter-grammars/tree-sitter-markdown.git tree-sitter-markdown
 clone https://github.com/tree-sitter/tree-sitter-html.git      tree-sitter-html
 clone https://github.com/tree-sitter/tree-sitter-css.git       tree-sitter-css
 clone https://github.com/tree-sitter/tree-sitter-python.git    tree-sitter-python
