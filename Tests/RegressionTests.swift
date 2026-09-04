@@ -47,6 +47,7 @@ enum RegressionTests {
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
+        try testIndexLockContention()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
         try testMinifiedJSONOpensFormatted()
@@ -5269,6 +5270,71 @@ enum RegressionTests {
         history.toggleRowForTesting(0)
         try expect(history.expandedRowForTesting == nil,
                    "clicking the expanded history row did not collapse it")
+    }
+
+    /// Puzzle stages every change as it is made and the panel stages again as
+    /// it refreshes, so it can collide with itself over `.git/index.lock` —
+    /// "Another git process seems to be running in this repository", from an
+    /// app the user only asked to commit.
+    private static func testIndexLockContention() throws {
+        // Which subcommands are guarded, decided from the arguments as spawned.
+        try expect(GitService.writesIndex(["add", "-A", "--", "."]),
+                   "`git add` was not treated as an index write")
+        try expect(GitService.writesIndex(["-c", "core.hooksPath=/dev/null", "commit", "-m", "x"]),
+                   "a `-c` option hid the subcommand behind it")
+        try expect(!GitService.writesIndex(["--no-pager", "status", "--porcelain=v2"]),
+                   "`git status` was serialized as though it wrote the index")
+        try expect(!GitService.writesIndex(["--no-pager", "show", "HEAD:file.txt"]),
+                   "a read was serialized as though it wrote the index")
+
+        let root = try temporaryDirectory("index-lock")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+        try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
+                   "index-lock fixture init failed")
+        _ = GitService.run(["config", "user.name", "Lock Test"], in: repository)
+        _ = GitService.run(["config", "user.email", "lock@example.invalid"], in: repository)
+        for index in 1...8 {
+            try Data("file \(index)".utf8)
+                .write(to: repository.appendingPathComponent("file\(index).txt"))
+        }
+        try expect(GitService.commit("initial", in: repository).code == 0,
+                   "index-lock fixture commit failed")
+
+        // Staging and reading at once, the way the panel and the editor do it.
+        let failures = NSMutableArray()
+        DispatchQueue.concurrentPerform(iterations: 8) { iteration in
+            try? Data("edit \(iteration)".utf8)
+                .write(to: repository.appendingPathComponent("file\(iteration + 1).txt"))
+            let staged = GitService.stageAll(in: repository)
+            if staged.code != 0 {
+                synchronized(failures) { failures.add(staged.err) }
+            }
+            _ = GitService.status(in: repository)
+        }
+        try expect(failures.count == 0,
+                   "concurrent staging hit the index lock: \(failures)")
+
+        // A lock held from outside the app — a terminal, another window — is
+        // waited out rather than reported.
+        let lock = repository.appendingPathComponent(".git/index.lock")
+        try Data().write(to: lock)
+        defer { try? FileManager.default.removeItem(at: lock) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+            try? FileManager.default.removeItem(at: lock)
+        }
+        try Data("later".utf8).write(to: repository.appendingPathComponent("file1.txt"))
+        let contended = GitService.stageAll(in: repository)
+        try expect(contended.code == 0,
+                   "a lock held for 200ms was reported instead of waited out: \(contended.err)")
+    }
+
+    /// `NSMutableArray` is not thread-safe, and the failure list is written
+    /// from every worker at once.
+    private static func synchronized(_ token: AnyObject, _ body: () -> Void) {
+        objc_sync_enter(token)
+        defer { objc_sync_exit(token) }
+        body()
     }
 
     private static func testCodeBlockAnalysisAndFolding() throws {

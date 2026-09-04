@@ -92,12 +92,84 @@ enum GitService {
     @discardableResult
     static func run(_ args: [String], in directory: URL,
                     timeout: TimeInterval? = nil) -> (out: String, err: String, code: Int32) {
-        let result = runProcess(executable: URL(fileURLWithPath: "/usr/bin/env"),
-                                arguments: ["git"] + args, in: directory,
-                                timeout: timeout)
-        return (String(decoding: result.stdout, as: UTF8.self),
-                String(decoding: result.stderr, as: UTF8.self),
-                result.code)
+        func spawn() -> (out: String, err: String, code: Int32) {
+            let result = runProcess(executable: URL(fileURLWithPath: "/usr/bin/env"),
+                                    arguments: ["git"] + args, in: directory,
+                                    timeout: timeout)
+            return (String(decoding: result.stdout, as: UTF8.self),
+                    String(decoding: result.stderr, as: UTF8.self),
+                    result.code)
+        }
+        guard writesIndex(args) else { return spawn() }
+        indexWriteLock.lock()
+        defer { indexWriteLock.unlock() }
+        return waitingOutTheIndexLock(spawn)
+    }
+
+    // MARK: - The index lock
+
+    /// Git guards `.git/index` with `.git/index.lock` and, finding one, fails
+    /// outright — "Another git process seems to be running in this repository"
+    /// — rather than waiting. Puzzle reaches that on its own: it stages every
+    /// change as it is made, the panel stages again while it refreshes, and a
+    /// commit stages before it commits.
+    ///
+    /// Two defences, because there are two ways to collide:
+    ///
+    /// * Against itself, this lock. Index writers run one at a time, whichever
+    ///   queue they were started from.
+    /// * Against everything else — a terminal, a second window, a Git hook —
+    ///   `waitingOutTheIndexLock`, since no lock inside this process can cover
+    ///   a process outside it.
+    private static let indexWriteLock = NSLock()
+
+    /// How long to wait for a lock held outside the app. Long enough to cover
+    /// an ordinary `git add` or `git commit` running in a terminal, short
+    /// enough that a genuinely stale lock still reports itself.
+    static let indexLockWait: TimeInterval = 2
+
+    /// Subcommands that take the index lock. Reads are absent on purpose: they
+    /// are told not to take the optional lock at all (`GIT_OPTIONAL_LOCKS`),
+    /// which is what kept `status` refreshes colliding with staging.
+    private static let indexWriters: Set<String> = [
+        "add", "am", "apply", "checkout", "cherry-pick", "clean", "commit",
+        "merge", "mv", "pull", "rebase", "reset", "restore", "revert", "rm",
+        "stash", "switch", "update-index",
+    ]
+
+    /// The subcommand is the first argument that is not a global option. `-c`
+    /// takes a value, so it is stepped over rather than mistaken for one.
+    static func writesIndex(_ args: [String]) -> Bool {
+        var index = args.startIndex
+        while index < args.endIndex {
+            let argument = args[index]
+            if argument == "-c" || argument == "--git-dir" || argument == "--work-tree" {
+                index = args.index(index, offsetBy: 2, limitedBy: args.endIndex) ?? args.endIndex
+                continue
+            }
+            if argument.hasPrefix("-") {
+                index = args.index(after: index)
+                continue
+            }
+            return indexWriters.contains(argument)
+        }
+        return false
+    }
+
+    /// Retry while the failure is nothing but someone else's lock. Trying again
+    /// is exactly what the user does when the dialog appears, so it is done for
+    /// them; an index write that fails on the lock has not changed anything, so
+    /// there is nothing to undo before retrying.
+    private static func waitingOutTheIndexLock(
+        _ attempt: () -> (out: String, err: String, code: Int32)
+    ) -> (out: String, err: String, code: Int32) {
+        let deadline = Date().addingTimeInterval(indexLockWait)
+        while true {
+            let result = attempt()
+            guard result.code != 0, result.err.contains("index.lock"),
+                  Date() < deadline else { return result }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     /// Git commands such as `check-ignore --stdin -z` need lossless path input;
@@ -131,6 +203,11 @@ enum GitService {
         // single-operation gate would refuse everything after it.
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        // Reads — `status`, `diff`, `log` — otherwise take the index lock
+        // opportunistically, to write back refreshed stat information. That
+        // housekeeping is worth nothing here and collides with the staging
+        // Puzzle does on every change.
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
         environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
         process.environment = environment
