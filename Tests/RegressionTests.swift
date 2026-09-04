@@ -1,5 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
+import AVFoundation
+import PDFKit
+import Compression
 import Foundation
 
 @main
@@ -14,6 +17,7 @@ enum RegressionTests {
         try testReviewFixes()
         try testQuickOpenAndGoToLine()
         try testFindAndReplace()
+        try testFindSelectionNavigationAndTabIsolation()
         try testPanelAffordances()
         try testScopedStatusAndStaging()
         try testGitIgnoreRefreshReconciliation()
@@ -34,12 +38,16 @@ enum RegressionTests {
         try testVirtualDocumentRefreshesInPlace()
         try testLargeFilesAreRejectedBeforeLoading()
         try testPreviewPayloadsAreReleased()
+        try testMediaFilesPlayInsteadOfLoading()
+        try testPDFPreview()
+        try testEPUBReading()
         try testMarkdownLiveEditing()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
+        try testMinifiedJSONOpensFormatted()
         try testFileTreeSurvivesReentrantReload()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
@@ -461,6 +469,90 @@ enum RegressionTests {
                    "a capture group was not expanded: \(pane.textForTesting.debugDescription)")
     }
 
+    private static func testFindSelectionNavigationAndTabIsolation() throws {
+        let directory = try temporaryDirectory("find-tabs")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.swift")
+        let second = directory.appendingPathComponent("second.swift")
+        let source = "let café = 1\nlet café = 2\nlet café = 3\n"
+        try Data(source.utf8).write(to: first)
+        try Data("x\ny\n".utf8).write(to: second)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { pane.prepareForClose(); window.close() }
+        pane.open(url: first)
+        try expect(pane.focusEditorForTesting(), "could not focus editor for selection test")
+        guard let editor = window.firstResponder as? PuzzleTextView else {
+            throw Failure(description: "editor was not the first responder")
+        }
+        // This is the word selection delivered by a double click, in UTF-16 coordinates.
+        let word = (source as NSString).range(of: "café")
+        editor.setSelectedRange(word)
+        pane.showFindBar()
+        let bar = pane.findBarForTesting
+        let input = bar.queryInputForTesting
+        try expect(input.stringValue == "café" && editor.searchMatches.count == 3,
+                   "Cmd-F lost the selected word before searching")
+        guard let firstBand = editor.currentLineBandRect() else {
+            throw Failure(description: "selected search result has no current-line band")
+        }
+        let commandField = NSTextField()
+        let commandEditor = NSTextView()
+        try expect(input.control(commandField, textView: commandEditor,
+                                 doCommandBy: #selector(NSResponder.insertNewline(_:))),
+                   "Enter did not navigate search results")
+        try expect(editor.currentMatchIndex == 1
+                    && (editor.currentLineBandRect()?.minY ?? 0) > firstBand.minY,
+                   "Enter did not move the current-line highlight to the next match")
+        _ = input.control(commandField, textView: commandEditor,
+                          doCommandBy: #selector(NSResponder.moveUp(_:)))
+        try expect(editor.currentMatchIndex == 0 && editor.currentLineBandRect() == firstBand,
+                   "Up did not restore the previous result's line highlight")
+        _ = input.control(commandField, textView: commandEditor,
+                          doCommandBy: #selector(NSResponder.moveDown(_:)))
+        let savedRange = bar.state.currentRange
+        bar.setOptionsForTesting(SearchOptions(caseSensitive: true, wholeWord: true, regex: false))
+        _ = input.control(commandField, textView: commandEditor,
+                          doCommandBy: #selector(NSResponder.moveDown(_:)))
+        bar.setReplaceVisible(true)
+        bar.setReplacementForTesting("name")
+
+        // Same open + jump sequence as a result clicked in the global search panel.
+        pane.open(url: second)
+        pane.jumpToLine(2)
+        try expect(bar.isHidden && editor.searchMatches.isEmpty
+                    && editor.searchResultLineLocation == nil,
+                   "global search jump carried stale underlines into another document")
+        pane.showFindBar(seed: "y")
+        try expect(editor.searchMatches == [NSRange(location: 2, length: 1)],
+                   "the second tab did not search its own contents")
+        pane.activate(index: 0)
+        try expect(!bar.isHidden && bar.state.query == "café"
+                    && bar.state.replacement == "name" && bar.state.isReplacing
+                    && bar.state.options.caseSensitive && bar.state.options.wholeWord
+                    && bar.state.currentRange == savedRange,
+                   "returning to a tab lost its independent find state")
+        try expect(editor.searchMatches.allSatisfy {
+            (source as NSString).substring(with: $0) == "café"
+        }, "restored underlines do not address actual matches")
+        pane.hideFindBar()
+        pane.activate(index: 1)
+        try expect(!bar.isHidden && bar.state.query == "y" && !bar.state.isReplacing,
+                   "closing find in one tab affected the other tab")
+        pane.activate(index: 0)
+        try expect(bar.isHidden && editor.searchMatches.isEmpty,
+                   "a closed find bar reopened when switching tabs")
+        editor.setSelectedRange(word)
+        pane.showFindBar(seed: "let")
+        try expect(input.stringValue == "let", "selection overwrote an explicit search seed")
+        pane.close(index: 0)
+        pane.open(url: first)
+        try expect(bar.isHidden && editor.searchMatches.isEmpty,
+                   "closing a tab retained its find state when reopened")
+    }
+
     private static func testPanelAffordances() throws {
         // Search: the empty result area says what the panel does, and what the
         // three toggles above it mean, instead of showing a blank well.
@@ -483,31 +575,35 @@ enum RegressionTests {
         try expect(fileRow == Theme.treeRowHeight() && fileRow == 31,
                    "a search row is \(fileRow)pt against the tree's \(Theme.treeRowHeight())pt")
 
-        // The highlight is painted behind the whole row, not attached to the
-        // glyphs.
+        // The panel marks the match by drawing, not by an attribute on the
+        // text: a background attribute would re-ink the preview.
         let cell = SearchHitCellProbe()
         try expect(cell.fillsRowHeightForTesting,
                    "the highlight is a glyph-height attribute again")
-        try expect(Theme.matchCornerRadius == 5,
-                   "the match highlight lost its corner radius")
 
         func luma(_ color: NSColor) -> CGFloat {
             guard let c = color.usingColorSpace(.sRGB) else { return 0 }
             return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
         }
-        // Nothing is painted over the text any more, so the only requirement on
-        // the outline is that it is visible against the surfaces it is drawn on.
-        let outlineLuma = luma(Theme.matchOutline)
-        try expect(abs(outlineLuma - luma(Theme.editorBackground)) > 0.1,
-                   "the outline does not separate from the editor")
-        try expect(abs(outlineLuma - luma(Theme.panelBackground)) > 0.1,
-                   "the outline does not separate from the panel")
-        // Stepping through matches still reads: the current one is drawn with a
-        // heavier pen, in the same colour.
-        try expect(Theme.currentMatchOutlineWidth > Theme.matchOutlineWidth,
-                   "the current match is drawn no differently from the others")
-        // In the editor the highlight is the full configured row, not the glyph
-        // box it used to be — that is what the 5pt corners are drawn on.
+        // Matches are underlined, so the only requirement on the colours is
+        // that they read against the surfaces they are drawn on. Nothing is
+        // painted over the text, and nothing sits behind it.
+        try expect(abs(luma(Theme.matchUnderline) - luma(Theme.editorBackground)) > 0.1,
+                   "the match underline does not separate from the editor")
+        try expect(abs(luma(Theme.matchUnderline) - luma(Theme.panelBackground)) > 0.1,
+                   "the match underline does not separate from the panel")
+        guard let rule = Theme.matchUnderline.usingColorSpace(.sRGB),
+              let currentRule = Theme.currentMatchUnderline.usingColorSpace(.sRGB) else {
+            throw Failure(description: "match colours are not sRGB")
+        }
+        try expect(rule.redComponent > 0.6
+                    && rule.redComponent > rule.greenComponent + 0.2
+                    && rule.redComponent > rule.blueComponent + 0.2,
+                   "the match underline is not red")
+        try expect(currentRule.redComponent > 0.6 && currentRule.greenComponent > 0.5
+                    && currentRule.blueComponent < currentRule.greenComponent - 0.2,
+                   "the current-match underline is not yellow")
+
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         // Real documents carry the theme's paragraph style, which is what makes
         // a line fragment the configured row height.
@@ -517,31 +613,45 @@ enum RegressionTests {
         let bar = FindBarView(frame: .zero)
         bar.attach(to: textView)
         bar.setQuery("let")
+        // The bar starts on the match nearest the caret; clear that first, so
+        // what is measured here is a plain match.
+        textView.currentMatchIndex = nil
         let rects = textView.matchHighlightRectsForTesting()
-        try expect(rects.count == 2, "the editor highlighted \(rects.count) of 2 matches")
-        let rowHeight = Theme.lineMetrics().target
-        // The glyph box was ~14pt against a 27pt row; the fragment can round a
-        // point above the configured height, so allow for that but nothing near
-        // the old band.
-        try expect(rects.allSatisfy { $0.height >= rowHeight && $0.height <= rowHeight + 2 },
-                   "a match highlight is \(rects.map(\.height)) tall, not the \(rowHeight)pt row")
-        try expect(rects.allSatisfy { $0.width > 0 },
-                   "a match highlight has no width")
+        try expect(rects.count == 2, "the editor underlined \(rects.count) of 2 matches")
+        try expect(rects.allSatisfy { $0.height == Theme.matchUnderlineWidth && $0.width > 0 },
+                   "a match rule is \(rects.map(\.height))pt tall, not "
+                     + "\(Theme.matchUnderlineWidth)pt")
+        // The current match is the same rule in the accent colour: stepping
+        // through matches must not move anything.
+        textView.currentMatchIndex = 0
+        let stepped = textView.matchHighlightRectsForTesting()
+        try expect(stepped == rects,
+                   "the current match is drawn at a different size or place")
+        // Under the text and inside the row: a rule hanging below the fragment
+        // would read as belonging to the line beneath it. Measured against the
+        // fragment TextKit actually produced, since the row height is a setting.
+        guard let manager = textView.layoutManager else {
+            throw Failure(description: "the text view has no layout manager")
+        }
+        let fragment = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        let rowTop = textView.textContainerInset.height + fragment.minY
+        try expect(rects[0].minY > rowTop + fragment.height / 2,
+                   "the rule is not under the text")
+        try expect(rects[0].maxY <= rowTop + fragment.height + 0.01,
+                   "the rule spilled into the line below")
 
 
 
-        // The current match has to stand apart from the other matches and from
-        // the selection, or ↑↓ looks like it does nothing.
+        // A match can sit inside a selection — the caret is left on the one the
+        // user stopped at — so both rules have to read on that surface too.
         func luminance(_ color: NSColor) -> CGFloat {
             guard let c = color.usingColorSpace(.sRGB) else { return 0 }
             return 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
         }
-        // Matches are outlined, so what has to hold is that the outline reads
-        // against the editor and against the selection it may sit inside.
-        try expect(abs(luminance(Theme.matchOutline) - luminance(Theme.editorBackground)) > 0.1,
-                   "the match outline is invisible on the editor background")
-        try expect(abs(luminance(Theme.matchOutline) - luminance(Theme.selection)) > 0.08,
-                   "the match outline disappears inside a selection")
+        try expect(abs(luminance(Theme.matchUnderline) - luminance(Theme.selection)) > 0.08,
+                   "the match underline disappears inside a selection")
+        try expect(abs(luminance(Theme.currentMatchUnderline) - luminance(Theme.selection)) > 0.08,
+                   "the current-match underline disappears inside a selection")
 
         // The commit box explains itself and takes ⌘↩.
         let commit = CommitMessageTextView()
@@ -1439,6 +1549,439 @@ enum RegressionTests {
 
     }
 
+    private static func testMediaFilesPlayInsteadOfLoading() throws {
+        let directory = try temporaryDirectory("media")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // Deliberately past the limit that governs every other document. A
+        // media file is never read into a buffer, so the size gate must not
+        // apply to it at all; a sparse file costs nothing to create on APFS.
+        let videoURL = directory.appendingPathComponent("clip.mp4")
+        FileManager.default.createFile(atPath: videoURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: videoURL)
+        try handle.truncate(atOffset: UInt64(Document.maxImageFileBytes) + 1)
+        try handle.close()
+
+        let video = Document(url: videoURL)
+        try expect(video.isMedia && video.isVideoMedia,
+                   "a video did not open on the media path")
+        try expect(!video.isUnsupported,
+                   "a video was rejected by the in-memory size limit")
+        try expect(video.isReadOnly && video.isPreviewOnly,
+                   "a media document is not read-only")
+        try expect(video.storage.length < 200,
+                   "a media document read the file instead of describing it")
+        do {
+            try video.save()
+            throw Failure(description: "saving a media document unexpectedly succeeded")
+        } catch let error as Failure {
+            throw error
+        } catch {}
+
+        let audioURL = directory.appendingPathComponent("tone.mp3")
+        try Data([0xFF, 0xFB, 0x90, 0x00]).write(to: audioURL)
+        let audio = Document(url: audioURL)
+        try expect(audio.isMedia && !audio.isVideoMedia,
+                   "an audio file did not open as audio")
+
+        // Containers AVFoundation cannot decode stay on the honest
+        // "unsupported binary" path instead of opening a player that fails.
+        let mkvURL = directory.appendingPathComponent("clip.mkv")
+        try Data([0x1A, 0x45, 0xDF, 0xA3, 0x00]).write(to: mkvURL)
+        try expect(!Document(url: mkvURL).isMedia,
+                   "an undecodable container was handed to the player")
+
+        // .ts is TypeScript here, whatever the bundle's public.movie claim
+        // leads Launch Services to believe.
+        let typescriptURL = directory.appendingPathComponent("module.ts")
+        try Data("export const value = 1\n".utf8).write(to: typescriptURL)
+        let typescript = Document(url: typescriptURL)
+        try expect(!typescript.isMedia && !typescript.isReadOnly,
+                   "a TypeScript file was captured by the media path")
+
+        let missingURL = directory.appendingPathComponent("gone.mp4")
+        try expect(!Document(url: missingURL).isMedia,
+                   "a missing file opened a player instead of reporting itself")
+
+        let preview = MediaPreviewView(frame: NSRect(x: 0, y: 0, width: 720, height: 500))
+        preview.show(url: audioURL, caption: audio.text, isVideo: false)
+        try expect(preview.hasPlayerForTesting && preview.showsAudioLayoutForTesting,
+                   "the media preview built no player, or used the video layout")
+        try expect(!preview.usesSystemPlayerViewForTesting,
+                   "audio uses the video player backdrop")
+        preview.layoutSubtreeIfNeeded()
+        let transportFrame = preview.transportFrameForTesting
+        try expect(transportFrame.minY < 100 && transportFrame.width <= 420,
+                   "the audio controls are not compact and near the bottom")
+        if let bitmap = preview.bitmapImageRepForCachingDisplay(in: preview.bounds) {
+            preview.cacheDisplay(in: preview.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(
+                to: URL(fileURLWithPath: "/tmp/puzzle-audio-preview.png"))
+            let scale = CGFloat(bitmap.pixelsWide) / preview.bounds.width
+            let x = Int((transportFrame.minX + 1) * scale)
+            let y = Int((preview.bounds.height - transportFrame.maxY + 1) * scale)
+            try expect(sameColor(bitmap.colorAt(x: x, y: y), bitmap.colorAt(x: 10, y: 10)),
+                       "the audio controller paints a rectangular background patch")
+        }
+        preview.show(url: videoURL, caption: video.text, isVideo: true)
+        try expect(!preview.showsAudioLayoutForTesting,
+                   "switching to a video kept the audio layout")
+        // Switching tabs and back must not restart a file that is playing.
+        let player = preview.hasPlayerForTesting
+        preview.show(url: videoURL, caption: video.text, isVideo: true)
+        try expect(player && preview.loadedURL == videoURL,
+                   "re-activating the same tab rebuilt the player")
+        preview.clear()
+        try expect(!preview.hasPlayerForTesting && preview.loadedURL == nil,
+                   "clearing a media preview left the player decoding")
+
+        try expect(MediaPreviewView.formattedDuration(CMTime(seconds: 222, preferredTimescale: 1))
+                    == "3:42",
+                   "a duration under an hour formatted wrongly")
+        try expect(MediaPreviewView.formattedDuration(CMTime(seconds: 3725, preferredTimescale: 1))
+                    == "1:02:05",
+                   "a duration over an hour formatted wrongly")
+        try expect(MediaPreviewView.formattedDuration(.indefinite) == nil,
+                   "an indefinite duration was written into the caption")
+    }
+
+    private static func testPDFPreview() throws {
+        let directory = try temporaryDirectory("pdf-preview")
+        let previousPositions = UserDefaults.standard.object(forKey: "PuzzlePDFPages")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            UserDefaults.standard.set(previousPositions, forKey: "PuzzlePDFPages")
+        }
+        let url = directory.appendingPathComponent("guide.PDF")
+        let pdf = PDFDocument()
+        for index in 0..<2 {
+            let image = NSImage(size: NSSize(width: 420, height: 594), flipped: false) { rect in
+                NSColor.white.setFill()
+                rect.fill()
+                ("PDF preview — Page \(index + 1)" as NSString).draw(
+                    at: NSPoint(x: 32, y: 510), withAttributes: [
+                        .font: NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.black,
+                    ])
+                ("Scroll, select and read your documents in Puzzle." as NSString).draw(
+                    at: NSPoint(x: 32, y: 465), withAttributes: [
+                        .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.darkGray,
+                    ])
+                return true
+            }
+            guard let page = PDFPage(image: image) else { throw Failure(description: "PDF fixture failed") }
+            pdf.insert(page, at: index)
+        }
+        try expect(pdf.write(to: url), "could not write PDF fixture")
+        let document = Document(url: url)
+        try expect(document.isPDF && document.isReadOnly && document.isPreviewOnly
+                    && !document.isUnsupported && document.storage.length < 200,
+                   "PDF was loaded as text or remained editable")
+        do {
+            try document.save()
+            throw Failure(description: "PDF caption could overwrite the document")
+        } catch let error as Failure { throw error } catch {}
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { pane.prepareForClose(); window.close() }
+        pane.open(url: url)
+        window.setContentSize(NSSize(width: 800, height: 600))
+        pane.view.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        guard let preview = pane.pdfPreviewForTesting else {
+            throw Failure(description: "opening a PDF did not create the reader")
+        }
+        try expect(!preview.isHidden && preview.pageCountForTesting == 2
+                    && preview.pageLabelForTesting == "1 / 2",
+                   "PDF reader did not render the expected pages")
+        try expect(preview.bounds.height > 300, "PDF preview collapsed to its header")
+        try expect(preview.thumbnailSizeForTesting.width == 150
+                    && preview.thumbnailSizeForTesting.height > 300,
+                   "PDF thumbnail view has no space to render its pages")
+        if let bitmap = pane.view.bitmapImageRepForCachingDisplay(in: pane.view.bounds) {
+            pane.view.cacheDisplay(in: pane.view.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(
+                to: URL(fileURLWithPath: "/tmp/puzzle-pdf-preview.png"))
+        }
+        preview.goToNextPageForTesting()
+        try expect(preview.pageIndexForTesting == 1 && preview.pageLabelForTesting == "2 / 2",
+                   "PDF page navigation did not advance")
+        preview.toggleThumbnailsForTesting()
+        try expect(!preview.showsThumbnailsForTesting, "PDF thumbnail toggle did not hide the sidebar")
+        let text = directory.appendingPathComponent("notes.txt")
+        try Data("A text tab".utf8).write(to: text)
+        pane.open(url: text)
+        try expect(preview.isHidden && preview.pageCountForTesting == 0,
+                   "leaving a PDF retained visible pages or rendering resources")
+        pane.activate(index: 0)
+        try expect(preview.pageIndexForTesting == 1, "PDF reading position was not restored")
+        let invalid = directory.appendingPathComponent("invalid.pdf")
+        try Data("not a PDF".utf8).write(to: invalid)
+        pane.open(url: invalid)
+        try expect(preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 0,
+                   "an invalid PDF left stale pages instead of an error notice")
+        let locked = directory.appendingPathComponent("locked.pdf")
+        try expect(pdf.write(to: locked, withOptions: [.ownerPasswordOption: "owner",
+                                                      .userPasswordOption: "reader"]),
+                   "could not write locked PDF fixture")
+        pane.open(url: locked)
+        try expect(preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 0,
+                   "a locked PDF opened an empty reader without explaining why")
+        pane.activate(index: 0)
+        try expect(!preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 2,
+                   "returning from a locked PDF did not restore readable pages")
+    }
+
+    // MARK: - EPUB
+
+    /// Build a ZIP in memory so the reader's own inflate path is exercised
+    /// rather than stubbed: entries marked `deflate` go through the system
+    /// compressor, which is what a real book's chapters arrive as.
+    private static func makeZip(_ files: [(path: String, bytes: Data, deflate: Bool)]) -> Data {
+        var output = Data()
+        var directory = Data()
+        func append16(_ value: Int, to data: inout Data) {
+            data.append(UInt8(value & 0xFF))
+            data.append(UInt8((value >> 8) & 0xFF))
+        }
+        func append32(_ value: Int, to data: inout Data) {
+            for shift in [0, 8, 16, 24] { data.append(UInt8((value >> shift) & 0xFF)) }
+        }
+        for file in files {
+            let name = Data(file.path.utf8)
+            var payload = file.bytes
+            var method = 0
+            if file.deflate, !file.bytes.isEmpty {
+                var destination = Data(count: max(64, file.bytes.count * 2))
+                let written = destination.withUnsafeMutableBytes { out -> Int in
+                    file.bytes.withUnsafeBytes { source -> Int in
+                        compression_encode_buffer(
+                            out.bindMemory(to: UInt8.self).baseAddress!, out.count,
+                            source.bindMemory(to: UInt8.self).baseAddress!, file.bytes.count,
+                            nil, COMPRESSION_ZLIB)
+                    }
+                }
+                if written > 0 {
+                    payload = destination.prefix(written)
+                    method = 8
+                }
+            }
+            let localOffset = output.count
+            append32(0x0403_4b50, to: &output)
+            append16(20, to: &output)               // version needed
+            append16(0, to: &output)                // flags
+            append16(method, to: &output)
+            append16(0, to: &output)                // mod time
+            append16(0, to: &output)                // mod date
+            append32(0, to: &output)                // crc32, unchecked by the reader
+            append32(payload.count, to: &output)
+            append32(file.bytes.count, to: &output)
+            append16(name.count, to: &output)
+            append16(0, to: &output)                // extra length
+            output.append(name)
+            output.append(payload)
+
+            append32(0x0201_4b50, to: &directory)
+            append16(20, to: &directory)            // version made by
+            append16(20, to: &directory)            // version needed
+            append16(0, to: &directory)             // flags
+            append16(method, to: &directory)
+            append16(0, to: &directory)
+            append16(0, to: &directory)
+            append32(0, to: &directory)
+            append32(payload.count, to: &directory)
+            append32(file.bytes.count, to: &directory)
+            append16(name.count, to: &directory)
+            append16(0, to: &directory)             // extra
+            append16(0, to: &directory)             // comment
+            append16(0, to: &directory)             // disk
+            append16(0, to: &directory)             // internal attributes
+            append32(0, to: &directory)             // external attributes
+            append32(localOffset, to: &directory)
+            directory.append(name)
+        }
+        let directoryOffset = output.count
+        output.append(directory)
+        append32(0x0605_4b50, to: &output)
+        append16(0, to: &output)                    // this disk
+        append16(0, to: &output)                    // disk with the directory
+        append16(files.count, to: &output)
+        append16(files.count, to: &output)
+        append32(directory.count, to: &output)
+        append32(directoryOffset, to: &output)
+        append16(0, to: &output)                    // comment length
+        return output
+    }
+
+    private static func sampleBook() -> Data {
+        let container = """
+        <?xml version="1.0"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OEBPS/content.opf"
+            media-type="application/oebps-package+xml"/></rootfiles>
+        </container>
+        """
+        let opf = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>A Test Book</dc:title><dc:creator>A. Tester</dc:creator>
+          </metadata>
+          <manifest>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+            <item id="c1" href="text/one.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="text/two.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+        </package>
+        """
+        let nav = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+        <body><nav epub:type="toc"><ol>
+          <li><a href="text/one.xhtml">First Chapter</a>
+            <ol><li><a href="text/one.xhtml#later">A Subsection</a></li></ol></li>
+          <li><a href="text/two.xhtml">Second Chapter</a></li>
+        </ol></nav></body></html>
+        """
+        let one = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title>
+        <style>p { color: red }</style><script>alert(1)</script></head>
+        <body><h1>First Chapter</h1>
+        <p>An <em>emphasised</em> word and a caf&eacute; with na&iuml;ve
+           &ldquo;quotes&rdquo;.</p>
+        <h2 id="later">A Subsection</h2>
+        <blockquote><p>Quoted paragraph.</p></blockquote>
+        <ol><li>First item</li><li>Second item</li></ol>
+        </body></html>
+        """
+        let two = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml"><body>
+        <h1>Second Chapter</h1><p>The end.</p></body></html>
+        """
+        return makeZip([
+            ("mimetype", Data("application/epub+zip".utf8), false),
+            ("META-INF/container.xml", Data(container.utf8), true),
+            ("OEBPS/content.opf", Data(opf.utf8), true),
+            ("OEBPS/nav.xhtml", Data(nav.utf8), true),
+            ("OEBPS/text/one.xhtml", Data(one.utf8), true),
+            ("OEBPS/text/two.xhtml", Data(two.utf8), true),
+        ])
+    }
+
+    private static func testEPUBReading() throws {
+        let directory = try temporaryDirectory("epub")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("book.epub")
+        try sampleBook().write(to: url)
+
+        // The archive: stored and deflated entries both come back whole.
+        guard let archive = ZipArchive(url: url) else {
+            throw Failure(description: "the EPUB was not recognised as a ZIP archive")
+        }
+        try expect(String(data: archive.data(for: "mimetype") ?? Data(), encoding: .utf8)
+                    == "application/epub+zip",
+                   "a stored ZIP entry did not read back")
+        let chapter = archive.data(for: "OEBPS/text/one.xhtml")
+        try expect(chapter != nil && chapter!.count > 200,
+                   "a deflated ZIP entry did not inflate")
+        try expect(archive.data(for: "OEBPS/missing.xhtml") == nil,
+                   "a missing ZIP entry produced data")
+
+        // Paths inside a package resolve against the package's own folder, and
+        // `../` is what every book uses to reach its images.
+        try expect(EPUBBook.resolve("../images/a.png", against: "OEBPS/text")
+                    == "OEBPS/images/a.png",
+                   "a relative href did not resolve out of its folder")
+        try expect(EPUBBook.resolve("text/a%20b.xhtml", against: "OEBPS")
+                    == "OEBPS/text/a b.xhtml",
+                   "a percent-encoded href did not decode")
+
+        guard let book = EPUBBook(url: url) else {
+            throw Failure(description: "the package document did not parse")
+        }
+        try expect(book.title == "A Test Book" && book.author == "A. Tester",
+                   "the book's metadata did not come through: \(book.title)")
+        try expect(book.chapters.count == 2,
+                   "the spine did not produce two chapters")
+        try expect(book.chapters[0].title == "First Chapter",
+                   "a spine entry was not named after its contents entry")
+        try expect(book.contents.count == 3,
+                   "the navigation document produced \(book.contents.count) entries, not 3")
+        try expect(book.contents[1].level == 1 && book.contents[1].chapterIndex == 0,
+                   "a nested contents entry lost its depth or its target")
+
+        // Rendering: structure kept, markup and stylesheets dropped, entities
+        // resolved, and words not fused to the tags beside them.
+        guard let xhtml = book.data(at: book.chapters[0].path) else {
+            throw Failure(description: "the first chapter is not in the archive")
+        }
+        let rendered = EPUBRenderer.render(xhtml: xhtml,
+                                           chapterPath: book.chapters[0].path, book: book)
+        let text = rendered.text.string
+        try expect(text.contains("An emphasised word"),
+                   "inline markup fused its words together: \(text.prefix(120))")
+        try expect(text.contains("café") && text.contains("naïve")
+                    && text.contains("\u{201C}quotes\u{201D}"),
+                   "entities did not resolve: \(text.prefix(160))")
+        try expect(!text.contains("color: red") && !text.contains("alert(1)"),
+                   "a stylesheet or script was rendered as text")
+        try expect(text.contains("1. First item") && text.contains("2. Second item"),
+                   "an ordered list lost its numbering")
+        try expect(rendered.anchors["later"] != nil,
+                   "an element id was not recorded as a link target")
+
+        // A quoted paragraph is drawn as a paragraph, so the quote's indent has
+        // to reach it rather than stopping at the blockquote.
+        let quoted = (text as NSString).range(of: "Quoted paragraph.")
+        let style = rendered.text.attribute(.paragraphStyle, at: quoted.location,
+                                            effectiveRange: nil) as? NSParagraphStyle
+        try expect((style?.headIndent ?? 0) > 0,
+                   "a paragraph inside a blockquote was not indented")
+
+        // The reader itself, including moving between chapters.
+        let reader = EPUBReaderView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        try expect(reader.show(url: url), "the reader refused a valid book")
+        try expect(reader.chapterCountForTesting == 2
+                    && reader.contentsRowCountForTesting == 3,
+                   "the reader did not take the book's structure")
+        try expect(reader.titleForTesting.contains("A Test Book"),
+                   "the reader did not show the book's title")
+        try expect(reader.chapterTextForTesting.contains("First Chapter"),
+                   "the reader did not render the opening chapter")
+        reader.goToNextChapterForTesting()
+        try expect(reader.chapterIndexForTesting == 1
+                    && reader.chapterTextForTesting.contains("The end."),
+                   "stepping to the next chapter did not render it")
+        reader.selectContentsRowForTesting(0)
+        try expect(reader.chapterIndexForTesting == 0,
+                   "clicking the contents did not go back to the chapter")
+        reader.clear()
+        try expect(reader.chapterTextForTesting.isEmpty && reader.chapterCountForTesting == 0,
+                   "clearing the reader kept the laid-out chapter")
+
+        // The document side: described, never read, and never writable.
+        let document = Document(url: url)
+        try expect(document.isEPUB && document.isReadOnly && document.isPreviewOnly,
+                   "an EPUB did not open as a read-only book")
+        try expect(!document.isUnsupported && document.storage.length < 200,
+                   "an EPUB was read into a buffer instead of described")
+
+        // A file named .epub that is not an archive must not open an empty
+        // reader; the pane falls back to the text path for it.
+        let brokenURL = directory.appendingPathComponent("broken.epub")
+        try Data("not a zip".utf8).write(to: brokenURL)
+        try expect(ZipArchive(url: brokenURL) == nil && EPUBBook(url: brokenURL) == nil,
+                   "a file that is not an archive was accepted as a book")
+        let fallbackReader = EPUBReaderView(frame: .zero)
+        try expect(!fallbackReader.show(url: brokenURL),
+                   "the reader claimed a file it cannot read")
+    }
+
     private static func testMarkdownLiveEditing() throws {
         let directory = try temporaryDirectory("markdown-live-editing")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1694,13 +2237,35 @@ enum RegressionTests {
         guard let wrappedRow = document.markdownTables[0].rows.first(where: {
             NSLocationInRange(wrappedLocation, $0.sourceRange)
         }) else { throw Failure(description: "wrapped table row metadata was missing") }
-        let rowAnchor = wrappedRow.lineRange.length > wrappedRow.sourceRange.length
-            ? NSMaxRange(wrappedRow.lineRange) - 1 : wrappedRow.sourceRange.location
-        let wrappedGlyph = tableLayout.glyphIndexForCharacter(at: rowAnchor)
-        let wrappedFragment = tableLayout.lineFragmentRect(
-            forGlyphAt: wrappedGlyph, effectiveRange: nil)
+        // Anchoring, exactly as `drawMarkdownTables` does it: a hidden row's
+        // terminator belongs to the *next* fragment, so geometry has to be read
+        // from the row's first character.
+        func rowFragment(_ row: MarkdownTableDecoration.Row) -> NSRect {
+            let glyph = tableLayout.glyphIndexForCharacter(at: row.sourceRange.location)
+            return tableLayout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        }
+        let wrappedFragment = rowFragment(wrappedRow)
         try expect(wrappedFragment.height > Theme.lineMetrics().target,
                    "TextKit did not apply the measured Markdown table row height")
+        guard let headerRow = document.markdownTables[0].rows.first(where: \.isHeader)
+        else { throw Failure(description: "table header row metadata was missing") }
+        let headerFragment = rowFragment(headerRow)
+        // The header used to anchor onto the collapsed delimiter line below it,
+        // a 1pt fragment, which drew the header text outside the table.
+        try expect(headerFragment.height >= Theme.lineMetrics().target,
+                   "Markdown table header row collapsed onto the delimiter line")
+        try expect(headerFragment.maxY <= wrappedFragment.minY + 0.5,
+                   "Markdown table header row was not laid out above the body rows")
+        try expect(document.markdownTables[0].leadsWithBlankLine,
+                   "blank line above the table was not recorded")
+        try expect(headerFragment.height >= Theme.lineMetrics().target * 2,
+                   "first table row did not absorb the blank line above the table")
+        let trailingTerminator = NSMaxRange(document.markdownTables[0].rows.last!.sourceRange)
+        let terminatorFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: tableLayout.glyphIndexForCharacter(at: trailingTerminator),
+            effectiveRange: nil)
+        try expect(terminatorFragment.height < Theme.lineMetrics().target,
+                   "the table's trailing terminator drew as an extra blank line")
         document.storage.removeLayoutManager(tableLayout)
 
         pane.prepareForClose()
@@ -1882,6 +2447,110 @@ enum RegressionTests {
         try expect(index.start(ofLine: 99) == index.length,
                    "a line past the end did not clamp")
         try expect(index.longestLine == 5, "longest line is \(index.longestLine)")
+    }
+
+    /// Minified JSON is laid out on the way into the buffer, the way a browser
+    /// lays it out before showing it. The file on disk is not touched.
+    private static func testMinifiedJSONOpensFormatted() throws {
+        let directory = try temporaryDirectory("json-format")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let minified = """
+            {"name":"puzzle","version":"2.0","private":true,\
+            "scripts":{"build":"./build.sh"},"keywords":["editor","swift"],\
+            "empty":{},"list":[],"numbers":[1,2.50,1e3,-0.5],"escaped":"a\\"b: {x}",\
+            "nested":{"a":{"b":null}}}
+            """
+        let url = directory.appendingPathComponent("payload.json")
+        try Data(minified.utf8).write(to: url)
+
+        let store = DocumentStore()
+        let document = store.document(for: url)
+        try expect(document.isDisplayFormatted,
+                   "a one-line JSON payload was left as one line")
+        try expect(!document.isModified,
+                   "formatting for display marked the buffer dirty, so autosave "
+                     + "would rewrite a file the user never edited")
+        try expect(!document.isReadOnly && !document.isMinifiedPreview,
+                   "formatted JSON stayed on the read-only minified path")
+        let formatted = document.text
+        try expect(formatted.components(separatedBy: "\n").count > 10,
+                   "the payload was not laid out over lines")
+        try expect(formatted.contains("\n  \"name\": \"puzzle\","),
+                   "two-space indentation is missing: \(formatted)")
+        // Order, spelling and escapes survive: this re-spaces the source, it
+        // does not re-encode it. JSONSerialization would sort the keys and
+        // rewrite 2.50 as 2.5.
+        let keys = ["name", "version", "private", "scripts", "keywords",
+                    "empty", "list", "numbers", "escaped", "nested"]
+        var cursor = formatted.startIndex
+        for key in keys {
+            guard let found = formatted.range(of: "\"\(key)\":", range: cursor..<formatted.endIndex)
+            else { throw Failure(description: "key \(key) is out of order or missing") }
+            cursor = found.upperBound
+        }
+        try expect(formatted.contains("2.50") && formatted.contains("1e3"),
+                   "number literals were re-encoded rather than copied")
+        try expect(formatted.contains("\"a\\\"b: {x}\""),
+                   "an escaped quote or a brace inside a string broke the printer")
+        try expect(formatted.contains("\"empty\": {}") && formatted.contains("\"list\": []"),
+                   "empty containers were split over lines")
+        // The bytes on disk are the user's, until the user edits them.
+        let onDisk = String(data: try Data(contentsOf: url), encoding: .utf8)
+        try expect(onDisk == minified, "opening the file rewrote it")
+        // An external write of the same bytes must not paste the minified
+        // source back over the formatted buffer.
+        try Data(minified.utf8).write(to: url)
+        _ = document.reloadFromDiskIfLatest()
+        try expect(document.text == formatted,
+                   "re-reading the unchanged file replaced the formatted buffer")
+
+        // Already readable JSON is left exactly as the author wrote it, four
+        // space indents and all.
+        let pretty = "{\n    \"a\": 1,\n    \"b\": [2]\n}\n"
+        let prettyURL = directory.appendingPathComponent("pretty.json")
+        try Data(pretty.utf8).write(to: prettyURL)
+        let prettyDocument = store.document(for: prettyURL)
+        try expect(prettyDocument.text == pretty && !prettyDocument.isDisplayFormatted,
+                   "a hand-formatted file was reformatted")
+
+        // A single huge string value survives formatting as one huge line. The
+        // file still opens: it is laid out everywhere else, and that line costs
+        // TextKit milliseconds, not the seconds the preview path exists for.
+        let long = "{\"note\":\"" + String(repeating: "A", count: 250_000)
+            + "\",\"b\":1,\"c\":2,\"d\":[1,2,3],\"e\":{\"f\":4}}"
+        let longURL = directory.appendingPathComponent("long-value.json")
+        try Data(long.utf8).write(to: longURL)
+        let longDocument = store.document(for: longURL)
+        try expect(longDocument.isDisplayFormatted && !longDocument.isMinifiedPreview
+                    && !longDocument.isReadOnly,
+                   "a formatted file with one long string value opened read-only")
+
+        // One long line inside a laid-out file is the author's formatting, not a
+        // machine's, and is left alone.
+        let pairs: [String] = (1...20).map { "  \"k\($0)\": \($0)" }
+        let blob = "{\n  \"data\": \"" + String(repeating: "A", count: 400) + "\",\n"
+            + pairs.joined(separator: ",\n") + "\n}\n"
+        let blobURL = directory.appendingPathComponent("blob.json")
+        try Data(blob.utf8).write(to: blobURL)
+        let blobDocument = store.document(for: blobURL)
+        try expect(blobDocument.text == blob && !blobDocument.isDisplayFormatted,
+                   "a laid-out file with one long value was reformatted")
+
+        // Not JSON, however long the line: nothing is guessed at.
+        let broken = "{\"a\": " + String(repeating: "1", count: 300) + ",}"
+        let brokenURL = directory.appendingPathComponent("broken.json")
+        try Data(broken.utf8).write(to: brokenURL)
+        let brokenDocument = store.document(for: brokenURL)
+        try expect(brokenDocument.text == broken && !brokenDocument.isDisplayFormatted,
+                   "invalid JSON was rewritten")
+        try expect(JSONFormatter.pretty("[1, 2") == nil
+                    && JSONFormatter.pretty("{\"a\":1} trailing") == nil
+                    && JSONFormatter.pretty("") == nil,
+                   "the printer accepted something that is not one JSON document")
+        try expect(JSONFormatter.pretty("[[1]]") == "[\n  [\n    1\n  ]\n]\n",
+                   "nested arrays are laid out wrong: "
+                     + "\(JSONFormatter.pretty("[[1]]") ?? "nil")")
     }
 
     private static func testFileTreeSurvivesReentrantReload() throws {
@@ -2590,6 +3259,61 @@ enum RegressionTests {
                    "the same project through a symlinked path was treated as new")
         try expect(AppDelegate.projectIndex(matching: root, in: roots) == nil,
                    "an unopened folder matched an existing window")
+
+        // Exercise the file-picker callback itself, not just path matching.
+        // A callback that unconditionally calls makeWindow passes the checks
+        // above while still opening duplicate workspaces in the actual app.
+        let app = AppDelegate()
+        defer { app.windowsForTesting.forEach { $0.window?.close() } }
+        try expect(app.openURLs([outer]), "could not open the initial project")
+        guard let outerWindow = app.window(showingProject: outer) else {
+            throw Failure(description: "initial project window was not registered")
+        }
+        let sibling = outer.appendingPathComponent("sibling.swift")
+        try Data("let sibling = 1\n".utf8).write(to: sibling)
+        outerWindow.openSelection([file, sibling])
+        try expect(app.windowsForTesting.count == 1 && outerWindow.editor.openURLs.count == 2,
+                   "the file picker created another window for files inside an open project")
+        outerWindow.openSelection([outer, sibling])
+        try expect(app.windowsForTesting.count == 1 && outerWindow.editor.openURLs.count == 2,
+                   "reselecting an open folder or file created a duplicate window/tab")
+
+        app.openURLs([other])
+        guard let otherWindow = app.window(showingProject: other) else {
+            throw Failure(description: "could not open a second independent project")
+        }
+        otherWindow.openSelection([sibling])
+        try expect(app.windowsForTesting.count == 2
+                    && outerWindow.editor.currentURL == sibling.resolvingSymlinksInPath()
+                    && otherWindow.editor.openURLs.isEmpty,
+                   "the picker did not route a file to its existing project from another window")
+        otherWindow.openSelection([outer])
+        try expect(app.windowsForTesting.count == 2,
+                   "opening an existing project from another window duplicated it")
+
+        let alias = root.appendingPathComponent("outer-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: outer)
+        otherWindow.openSelection([alias.appendingPathComponent("sibling.swift")])
+        try expect(app.windowsForTesting.count == 2 && outerWindow.editor.openURLs.count == 2,
+                   "a symlinked file path duplicated its project or tab")
+
+        app.openURLs([inner])
+        otherWindow.openSelection([file])
+        try expect(app.windowsForTesting.count == 3
+                    && app.window(showingProject: inner)?.editor.currentURL == file.resolvingSymlinksInPath(),
+                   "the picker ignored the deepest open project")
+
+        // A mixed selection must establish the chosen root before opening its
+        // nested file, even if the panel reports that file first.
+        let fresh = root.appendingPathComponent("fresh", isDirectory: true)
+        let child = fresh.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let freshFile = child.appendingPathComponent("sample.txt")
+        try Data("sample".utf8).write(to: freshFile)
+        otherWindow.openSelection([freshFile, fresh])
+        try expect(app.windowsForTesting.count == 4
+                    && app.window(showingProject: fresh)?.editor.openURLs.count == 1,
+                   "a mixed file/folder selection created two windows for one project")
     }
 
     private static func testActiveLineSpansTheGutter() throws {

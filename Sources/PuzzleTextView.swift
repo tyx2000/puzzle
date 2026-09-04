@@ -68,6 +68,7 @@ final class PuzzleTextView: NSTextView {
     /// *above* the current-line band instead of being hidden by it.
     var searchMatches: [NSRange] = [] { didSet { needsDisplay = true } }
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
+    var searchResultLineLocation: Int? { didSet { needsDisplay = true } }
 
     private(set) var bracketMatchRanges: [NSRange] = []
     private var jsxTagMatches: [JSXTagMatch] = []
@@ -199,10 +200,24 @@ final class PuzzleTextView: NSTextView {
         var metrics: [MarkdownTableRowMetric] = []
         for table in markdownTables {
             let widths = markdownTableColumnWidths(for: table)
-            for row in table.rows {
+            for (index, row) in table.rows.enumerated() {
+                // The metric covers the row's characters, not its line: a
+                // hidden line's terminator floats into the *next* fragment, and
+                // a fragment holding nothing but that terminator would take the
+                // row's height a second time.
+                let leading = index == 0 && table.leadsWithBlankLine
+                    ? Theme.lineMetrics().target : 0
                 metrics.append(MarkdownTableRowMetric(
-                    range: row.lineRange,
-                    height: markdownTableRowHeight(row, widths: widths)))
+                    range: row.sourceRange,
+                    height: markdownTableRowHeight(row, widths: widths) + leading))
+            }
+            // The last row's terminator has no row after it to float into, so
+            // it forms a fragment of its own and would read as a blank line the
+            // source does not have.
+            if let last = table.rows.last, last.lineRange.length > last.sourceRange.length {
+                metrics.append(MarkdownTableRowMetric(
+                    range: NSRange(location: NSMaxRange(last.sourceRange), length: 1),
+                    height: 1))
             }
         }
         for image in markdownImages {
@@ -397,6 +412,10 @@ final class PuzzleTextView: NSTextView {
     // drawBackground alongside the bands.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        // After the glyphs, not before: AppKit paints the selection background
+        // over anything the view drew in `drawBackground`, which would swallow
+        // the rule under whichever match the caret was left on.
+        drawSearchUnderlines()
         drawMarkdownTables(in: dirtyRect)
         drawMarkdownImages(in: dirtyRect)
         drawMarkdownLineMarkers(in: dirtyRect)
@@ -623,7 +642,6 @@ final class PuzzleTextView: NSTextView {
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
         drawCurrentLineBand()
-        drawSearchMatches()
     }
 
     private func drawMarkdownCodeBlocks(in dirtyRect: NSRect) {
@@ -692,17 +710,23 @@ final class PuzzleTextView: NSTextView {
                     continue
                 }
                 guard row.sourceRange.length > 0 else { continue }
-                // Rendered table source glyphs are null. Anchor geometry to the
-                // still-visible line terminator so TextKit returns the dynamic
-                // logical-row fragment rather than a zero-width null glyph run.
-                let anchor = row.lineRange.length > row.sourceRange.length
-                    ? NSMaxRange(row.lineRange) - 1 : row.sourceRange.location
-                let glyph = layoutManager.glyphIndexForCharacter(at: anchor)
+                // Anchor on the row's first source character, not on its line
+                // terminator: TextKit starts a fragment *at* the preceding
+                // terminator, so the terminator of a row belongs to the next
+                // fragment and reading geometry from it drew every row one line
+                // too low — and put the header on the collapsed delimiter line,
+                // a 1pt fragment.
+                let glyph = layoutManager.glyphIndexForCharacter(
+                    at: row.sourceRange.location)
                 let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
                                                                effectiveRange: nil)
+                // The fragment can be taller than the row when it also carries
+                // the blank line above the table. The row occupies its bottom.
+                let rowHeight = min(fragment.height,
+                                    markdownTableRowHeight(row, widths: widths))
                 let rowRect = NSRect(x: inset.width,
-                                     y: fragment.minY + inset.height,
-                                     width: tableWidth, height: fragment.height)
+                                     y: fragment.maxY - rowHeight + inset.height,
+                                     width: tableWidth, height: rowHeight)
                 guard rowRect.intersects(dirtyRect) else { continue }
 
                 // Cover the source row first, then paint the rendered cells.
@@ -944,7 +968,11 @@ final class PuzzleTextView: NSTextView {
         }
     }
 
-    private func drawSearchMatches() {
+    /// Every match gets a heavy rule under it, in the accent yellow for the one
+    /// the ↑↓ buttons are on and in red for the rest. Underlining is the only
+    /// marking that leaves the code exactly as it was: the glyphs keep their
+    /// syntax colours, and a selection sitting on the match keeps its own.
+    private func drawSearchUnderlines() {
         guard !searchMatches.isEmpty,
               let layoutManager, let container = textContainer else { return }
         let inset = textContainerInset
@@ -963,59 +991,55 @@ final class PuzzleTextView: NSTextView {
             let glyphRange = layoutManager.glyphRange(forCharacterRange: clamped,
                                                       actualCharacterRange: nil)
             guard glyphRange.length > 0 else { continue }
-            Theme.matchOutline.setStroke()
-            let outlineWidth = index == currentMatchIndex
-                ? Theme.currentMatchOutlineWidth : Theme.matchOutlineWidth
+            (index == self.currentMatchIndex
+                ? Theme.currentMatchUnderline : Theme.matchUnderline).setFill()
 
             layoutManager.enumerateEnclosingRects(
                 forGlyphRange: glyphRange,
                 withinSelectedGlyphRange: notSelected,
                 in: container
             ) { enclosing, _ in
-                // The highlight is the whole row: a glyph-height band left the
-                // configured line height showing above and below it, which read
-                // as a stripe rather than a highlighted line.
-                var eff = NSRange()
-                let frag = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location,
-                                                          effectiveRange: &eff)
-                var r = enclosing
-                r.origin.y = frag.minY
-                r.size.height = frag.height
-                r = r.offsetBy(dx: inset.width, dy: inset.height)
-                // Inset by half the pen so the stroke lands inside the row
-                // instead of straddling the line below it.
-                let path = NSBezierPath(roundedRect: r.insetBy(dx: outlineWidth / 2,
-                                                               dy: outlineWidth / 2),
-                                        xRadius: Theme.matchCornerRadius,
-                                        yRadius: Theme.matchCornerRadius)
-                path.lineWidth = outlineWidth
-                path.stroke()
+                self.underlineRect(for: enclosing).fill()
             }
         }
     }
 
-    /// The rects `drawSearchMatches` would fill, ignoring what is on screen.
+    /// The rule for one run of matched glyphs, positioned off the text baseline
+    /// rather than off the line fragment: the configured row is twice the
+    /// height of the glyphs, and a rule at the bottom of the row would float
+    /// halfway to the line below.
+    private func underlineRect(for enclosing: NSRect) -> NSRect {
+        guard let layoutManager, let container = textContainer else { return .zero }
+        let inset = textContainerInset
+        let glyph = layoutManager.glyphIndex(for: NSPoint(x: enclosing.midX,
+                                                          y: enclosing.midY),
+                                             in: container)
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let baseline = fragment.minY + layoutManager.location(forGlyphAt: glyph).y
+        let pen = Theme.matchUnderlineWidth
+        // The row height is a setting: on a tight one the rule rides up against
+        // the baseline rather than hanging into the line below.
+        let top = min(baseline + Theme.matchUnderlineOffset, fragment.maxY - pen)
+            + inset.height
+        return NSRect(x: enclosing.minX + inset.width, y: top,
+                      width: enclosing.width, height: pen)
+    }
+
+    /// The rules `drawSearchUnderlines` would fill, ignoring what is on screen.
     /// Keeps the highlight geometry checkable without a live scroll view.
     func matchHighlightRectsForTesting() -> [NSRect] {
         guard let layoutManager, let container = textContainer else { return [] }
-        let inset = textContainerInset
         var rects: [NSRect] = []
         for range in searchMatches {
             let glyphs = layoutManager.glyphRange(forCharacterRange: range,
                                                   actualCharacterRange: nil)
             guard glyphs.length > 0 else { continue }
-            var effective = NSRange()
-            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyphs.location,
-                                                          effectiveRange: &effective)
             layoutManager.enumerateEnclosingRects(
                 forGlyphRange: glyphs,
                 withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                 in: container
             ) { enclosing, _ in
-                var rect = enclosing
-                rect.origin.y = fragment.minY
-                rect.size.height = fragment.height
-                rects.append(rect.offsetBy(dx: inset.width, dy: inset.height))
+                rects.append(self.underlineRect(for: enclosing))
             }
         }
         return rects
@@ -1033,10 +1057,10 @@ final class PuzzleTextView: NSTextView {
     /// The line fragment the caret sits in, handling the trailing empty line —
     /// which lives in `extraLineFragmentRect` and is never visited by
     /// `enumerateLineFragments`, so the band used to be missing there.
-    private func caretLineFragment() -> NSRect? {
+    private func caretLineFragment(at resultLocation: Int? = nil) -> NSRect? {
         guard let layoutManager, let container = textContainer else { return nil }
         let ns = string as NSString
-        let location = min(selectedRange().location, ns.length)
+        let location = min(resultLocation ?? selectedRange().location, ns.length)
 
         // Caret past the final newline => the extra (empty) line fragment.
         if layoutManager.extraLineFragmentTextContainer === container,
@@ -1062,9 +1086,11 @@ final class PuzzleTextView: NSTextView {
     }
 
     func currentLineBandRect() -> NSRect? {
-        guard showsCurrentLineBand,
-              selectedRanges.count == 1, selectedRange().length == 0,
-              let fragment = caretLineFragment() else { return nil }
+        if searchResultLineLocation == nil {
+            guard showsCurrentLineBand,
+                  selectedRanges.count == 1, selectedRange().length == 0 else { return nil }
+        }
+        guard let fragment = caretLineFragment(at: searchResultLineLocation) else { return nil }
         return NSRect(x: 0,
                       y: fragment.minY + textContainerInset.height,
                       width: max(bounds.width, textContainer?.size.width ?? bounds.width),

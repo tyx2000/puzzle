@@ -25,7 +25,16 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 "$ROOT_DIR/build.sh" "$BUILD_MODE"
 
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  local launch_bundle="$APP_BUNDLE"
+  local installed_bundle="/Applications/$APP_NAME.app"
+  # Finder's default file associations point to the installed copy. Keep that
+  # copy current and launch it too, so development and Finder opens share one
+  # running application and its project-window registry.
+  if [[ -d "$installed_bundle" ]] && [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$installed_bundle/Contents/Info.plist" 2>/dev/null)" == "$BUNDLE_ID" ]]; then
+    /usr/bin/ditto "$APP_BUNDLE" "$installed_bundle"
+    launch_bundle="$installed_bundle"
+  fi
+  /usr/bin/open "$launch_bundle"
 }
 
 case "$MODE" in

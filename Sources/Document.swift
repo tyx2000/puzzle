@@ -35,11 +35,42 @@ final class Document {
     private(set) var image: NSImage?
     var isImage: Bool { image != nil }
 
+    /// True when the file is played rather than read. Unlike every other
+    /// document, none of its bytes are loaded: AVFoundation streams them off
+    /// disk itself, which is the only reason a two-gigabyte video can open.
+    private(set) var isMedia = false
+    /// Video gets the whole pane; audio gets a controls bar.
+    private(set) var isVideoMedia = false
+
+    /// True when the file is a book the reader pane opens. Like media, none of
+    /// it is loaded here: the reader maps the archive and inflates one chapter
+    /// at a time.
+    private(set) var isEPUB = false
+    /// PDFKit owns rendering; the text storage only holds the file caption.
+    private(set) var isPDF = false
+
+    /// True when a preview view owns the pane — the picture, the player — and
+    /// the buffer holds a caption rather than the file. Everything that reads
+    /// the buffer as source (definitions, blame, folding) has to skip these.
+    var isPreviewOnly: Bool { isImage || isMedia || isEPUB || isPDF }
+
     /// Image formats AppKit can decode and we're happy to preview.
     static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",
         "heic", "heif", "webp", "ico", "icns",
     ]
+    /// Media AVFoundation decodes on its own. Deliberately narrow: mkv, avi,
+    /// webm and ogg would mean bundling ffmpeg or VLCKit — tens of megabytes
+    /// into an app that ships at four — so they stay on the "unsupported
+    /// binary" path instead of opening a player that fails.
+    static let videoExtensions: Set<String> = ["mp4", "m4v", "mov"]
+    static let audioExtensions: Set<String> = [
+        "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac",
+    ]
+    static let mediaExtensions: Set<String> = videoExtensions.union(audioExtensions)
+    /// EPUB is the one book format that is an open container of XHTML. Kindle's
+    /// .mobi/.azw3 are a different, proprietary format and stay unsupported.
+    static let bookExtensions: Set<String> = ["epub"]
     /// TextKit materialises several representations of a buffer. Refuse files
     /// large enough to turn one accidental click on a generated log into a
     /// hundreds-of-megabytes allocation spike.
@@ -53,7 +84,7 @@ final class Document {
     private(set) var isVirtual = false
     /// Images, generated diffs and unreadable/unsupported files must never be
     /// written back from their display-only placeholder.
-    var isReadOnly: Bool { isUnsupported || isVirtual || isImage }
+    var isReadOnly: Bool { isUnsupported || isVirtual || isPreviewOnly }
     /// Preserve the encoding that was decoded instead of silently converting a
     /// Latin-1 source file to UTF-8 on its first save.
     private var textEncoding: String.Encoding = .utf8
@@ -148,7 +179,43 @@ final class Document {
         self.languageSpec = SyntaxHighlighter.spec(for: url)
         self.lastKnownDiskModificationDate = Self.modificationDate(for: url)
 
-        let hasImageExtension = Self.imageExtensions.contains(url.pathExtension.lowercased())
+        let ext = url.pathExtension.lowercased()
+
+        // Media is claimed ahead of the size gate on purpose. The limits below
+        // bound what is read into a buffer, and a media file is never read: the
+        // player is handed the URL and streams it. A successful size lookup
+        // doubles as the existence check, so a missing file still falls through
+        // to the unreadable-file message rather than to a player that fails.
+        if Self.mediaExtensions.contains(ext),
+           let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = values.fileSize {
+            isMedia = true
+            isVideoMedia = Self.videoExtensions.contains(ext)
+            let bytes = ByteCountFormatter.string(
+                fromByteCount: Int64(fileSize), countStyle: .file)
+            storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(bytes)")
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                  range: NSRange(location: 0, length: storage.length))
+            return
+        }
+
+        // Books take the media path for the same reason: the reader maps the
+        // archive and inflates single chapters, so the whole-file limits below
+        // would only stop a large book from opening at all.
+        if Self.bookExtensions.contains(ext) || ext == "pdf",
+           let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = values.fileSize {
+            isEPUB = Self.bookExtensions.contains(ext)
+            isPDF = ext == "pdf"
+            let bytes = ByteCountFormatter.string(
+                fromByteCount: Int64(fileSize), countStyle: .file)
+            storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(bytes)")
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                                  range: NSRange(location: 0, length: storage.length))
+            return
+        }
+
+        let hasImageExtension = Self.imageExtensions.contains(ext)
         let byteLimit = hasImageExtension ? Self.maxImageFileBytes : Self.maxTextFileBytes
         if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
            let fileSize = values.fileSize, fileSize > byteLimit {
@@ -202,7 +269,7 @@ final class Document {
             return
         }
 
-        let text: String
+        var text: String
         if let utf8 = String(data: data, encoding: .utf8), !Self.looksBinary(data) {
             text = utf8
         } else if let latin = String(data: data, encoding: .isoLatin1), !Self.looksBinary(data) {
@@ -212,11 +279,32 @@ final class Document {
             isUnsupported = true
             text = Self.unsupportedMessage(for: url, byteCount: data.count)
         }
+        // Minified JSON is unreadable for the same reason a browser refuses to
+        // show it raw, so it is laid out before it reaches the buffer. This is
+        // display only: `isModified` stays false, so nothing is written back
+        // until the user edits the file themselves.
+        let longestLine: Int
+        if languageSpec?.name == "json", !isUnsupported,
+           Self.longestLineLength(in: data) > JSONFormatter.readableLineLength,
+           data.count <= JSONFormatter.maxFormattedBytes,
+           let formatted = JSONFormatter.pretty(text), formatted != text,
+           JSONFormatter.worthFormatting(source: text, formatted: formatted) {
+            text = formatted
+            isDisplayFormatted = true
+            // Measured again on the laid-out text: no amount of indenting
+            // breaks a string, so one enormous value stays one enormous line.
+            // A line TextKit can still lay out promptly is kept — that is the
+            // whole point of formatting the file — and anything past that goes
+            // back on the bounded preview path.
+            let residual = Self.longestLineLength(inUTF8: text.utf8)
+            longestLine = residual > JSONFormatter.maxFormattedLineLength ? residual : 0
+        } else {
+            longestLine = Self.longestLineLength(in: data)
+        }
         // One enormous line — a source map, a minified bundle — is laid out by
         // TextKit as a single unit: 2.5 seconds of frozen main thread for a 5 MB
         // map, measured. Show a bounded prefix instead, read-only so the rest of
         // the file can never be lost by saving what is on screen.
-        let longestLine = Self.longestLineLength(in: data)
         if longestLine > Self.maxDisplayLineLength, data.count > Self.minifiedPreviewLength {
             isUnsupported = true
             isMinifiedPreview = true
@@ -237,21 +325,28 @@ final class Document {
     static let minifiedPreviewLength = 200_000
     /// True when only a prefix is on screen.
     private(set) var isMinifiedPreview = false
+    /// True when the buffer holds a re-indented copy of the file rather than
+    /// its bytes. The gutter's Git baseline is put through the same formatter,
+    /// or every line of a minified file would be marked as changed.
+    private(set) var isDisplayFormatted = false
 
     /// Longest run between newlines, straight off the bytes: a newline byte
     /// cannot appear inside a UTF-8 sequence, so this needs no decoding and
     /// costs a few milliseconds on a file that takes half a second to bridge.
     static func longestLineLength(in data: Data) -> Int {
+        data.withUnsafeBytes { longestLineLength(inUTF8: $0) }
+    }
+
+    static func longestLineLength<Bytes: Sequence>(inUTF8 bytes: Bytes) -> Int
+        where Bytes.Element == UInt8 {
         var longest = 0
         var current = 0
-        data.withUnsafeBytes { raw in
-            for byte in raw {
-                if byte == 0x0A {
-                    longest = max(longest, current)
-                    current = 0
-                } else {
-                    current += 1
-                }
+        for byte in bytes {
+            if byte == 0x0A {
+                longest = max(longest, current)
+                current = 0
+            } else {
+                current += 1
             }
         }
         return max(longest, current)
@@ -365,7 +460,7 @@ final class Document {
 
     func refreshCodeBlocks() {
         let refreshed: [CodeBlock]
-        if isVirtual || isUnsupported || isImage {
+        if isVirtual || isUnsupported || isPreviewOnly {
             refreshed = []
         } else {
             refreshed = CodeBlockAnalyzer.analyze(
@@ -495,7 +590,13 @@ final class Document {
               let decoded = Self.decodeText(data) else { return false }
 
         let diskDate = Self.modificationDate(for: url) ?? observedAt
-        if decoded.text == text {
+        // A display-formatted buffer never equals the bytes on disk, so the
+        // incoming text is put through the same formatter before anything is
+        // compared or replaced. Without this, every external-change check would
+        // report a difference and paste the minified file back on screen.
+        let incoming = isDisplayFormatted
+            ? (JSONFormatter.pretty(decoded.text) ?? decoded.text) : decoded.text
+        if incoming == text {
             let stateChanged = isModified || lastLocalEditAt != nil
             lastKnownDiskModificationDate = diskDate
             lastLocalEditAt = nil
@@ -528,7 +629,7 @@ final class Document {
         isApplyingExternalChange = true
         storage.beginEditing()
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
-                                  with: decoded.text)
+                                  with: incoming)
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
         storage.endEditing()

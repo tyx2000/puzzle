@@ -95,23 +95,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         memoryPressureSource = source
     }
 
-    /// Paths handed to an ALREADY-RUNNING instance (Finder "Open With", or the
-    /// `pz` command). Each opens in its own window, so `pz` never has to spawn a
-    /// second copy of the app — one process, one window per invocation.
+    /// Finder and `pz` use the same routing as the in-app file picker.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         // This can be the first delegate call of the process, before any
         // window — and therefore any cached colour — exists.
         prepareSettings()
+        let handled = openURLs(filenames.map { URL(fileURLWithPath: $0) })
+        NSApp.activate(ignoringOtherApps: true)
+        sender.reply(toOpenOrPrint: handled ? .success : .failure)
+    }
+
+    /// Reuse an owning project before considering the requesting welcome
+    /// window or creating a workspace. Every external/open-panel entry point
+    /// goes through this method so it cannot create duplicate project windows.
+    @discardableResult
+    func openURLs(_ urls: [URL], from source: WorkspaceWindowController? = nil) -> Bool {
         var handled = false
-        for path in filenames {
+        // Open explicitly selected folders before their files, regardless of
+        // the order returned by a multiple-selection panel or Finder.
+        let items = urls.compactMap { url -> (url: URL, isDirectory: Bool)? in
             var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { continue }
-            let url = URL(fileURLWithPath: path)
-            if isDir.boolValue {
+            guard url.isFileURL,
+                  FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+            return (url.standardizedFileURL.resolvingSymlinksInPath(), isDir.boolValue)
+        }
+        for item in items.filter(\.isDirectory) + items.filter({ !$0.isDirectory }) {
+            let url = item.url
+            let welcome = source.flatMap { $0.hasProject ? nil : $0 }
+                ?? windows.first { !$0.hasProject }
+            if item.isDirectory {
                 // The project may already be open: raise that window instead of
                 // stacking a second copy of the same workspace.
                 let target = window(showingProject: url)
-                    ?? windows.first { !$0.hasProject }
+                    ?? welcome
                     ?? makeWindow()
                 if target.projectURL == nil { target.openProject(url) }
                 target.window?.makeKeyAndOrderFront(nil)
@@ -120,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // carries its own editor, tree and Git state, so spawning one per
                 // file cost ~60 MB a time and split the project across windows.
                 let target = window(containing: url)
-                    ?? windows.first { !$0.hasProject }
+                    ?? welcome
                     ?? makeWindow()
                 if target.projectURL == nil {
                     target.openProject(url.deletingLastPathComponent())
@@ -130,9 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             handled = true
         }
-        NSApp.activate(ignoringOtherApps: true)
-        sender.reply(toOpenOrPrint: handled ? .success : .failure)
+        return handled
     }
+
+    var windowsForTesting: [WorkspaceWindowController] { windows }
 
     /// The window whose project is exactly this folder.
     func window(showingProject url: URL) -> WorkspaceWindowController? {
@@ -205,15 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onClose = { [weak self] closed in
             self?.windows.removeAll { $0 === closed }
         }
-        // Opening a folder gets its own window, unless this one is still the
-        // empty welcome screen (then filling it in place is what you'd expect).
-        controller.onOpenFolderRequested = { [weak self, weak controller] url in
-            guard let self else { return }
-            if let controller, !controller.hasProject {
-                controller.openProject(url)
-            } else {
-                self.makeWindow().openProject(url)
-            }
+        controller.onOpenRequested = { [weak self, weak controller] urls in
+            self?.openURLs(urls, from: controller)
         }
         windows.append(controller)
         controller.showWindow(nil)
@@ -320,9 +330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
-        fileMenu.addItem(withTitle: "Open Folder…",
+        fileMenu.addItem(withTitle: "Open…",
                          action: #selector(WorkspaceWindowController.openFolder(_:)), keyEquivalent: "o")
-        // Open Recent ▸ — each entry opens that project in a NEW window.
+        // Open Recent uses the same project-window matching as Open.
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         recentMenu.delegate = self
         recentItem.submenu = recentMenu
@@ -461,10 +471,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    /// Recent projects open in a new window, leaving the current one alone.
+    /// Raise an existing project window when opening it again from Recents.
     @objc private func openRecent(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        makeWindow().openProject(url)
+        openURLs([url], from: activeController)
     }
 
     @objc private func removeRecent(_ sender: NSMenuItem) {

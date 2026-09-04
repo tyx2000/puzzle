@@ -79,6 +79,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     private let findBar = FindBarView()
     private var findBarHeight: NSLayoutConstraint!
+    private var findStates: [URL: FindBarView.State] = [:]
+    /// The document actually bound to the shared bar, even while tab indices change.
+    private var findBarURL: URL?
     /// Shown above a git diff: its file path, and the controls that step through
     /// its changes.
     private let diffHeader = DiffHeaderView()
@@ -90,6 +93,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private static var diffMode: DiffHeaderView.Mode = .unified
     /// Shown instead of the text view when the active document is a picture.
     private var imagePreview: ImagePreviewView?
+    /// Shown instead of the text view when the active document is audio/video.
+    private var mediaPreview: MediaPreviewView?
+    /// Shown instead of the text view when the active document is an EPUB.
+    private var epubReader: EPUBReaderView?
+    private var pdfPreview: PDFPreviewView?
     /// Shown instead of the text view for a file-history table tab.
     private var fileHistoryView: FileHistoryView?
 
@@ -141,6 +149,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         textView.onExplicitCaretInteraction = { [weak self] in
             guard let self, let url = self.currentURL else { return }
+            self.textView.searchResultLineLocation = nil
             self.lineActivatedURLs.insert(url)
             self.textView.showsCurrentLineBand = self.currentDocument?.languageSpec?.name
                 != "markdown"
@@ -262,8 +271,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         let generation = gitLineChangeGeneration + 1
         gitLineChangeGeneration = generation
+        // A re-indented buffer is compared against a re-indented HEAD: the
+        // marks answer "what did you change", not "what did the formatter do".
+        let formatted = document.isDisplayFormatted
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let baseline = GitLineChanges.baseline(for: url, in: root)
+            var baseline = GitLineChanges.baseline(for: url, in: root)
+            if formatted, let lines = baseline, !lines.isEmpty,
+               let pretty = JSONFormatter.pretty(lines.joined(separator: "\n")) {
+                baseline = GitLineChanges.lines(of: pretty)
+            }
             DispatchQueue.main.async {
                 guard let self, self.gitLineChangeGeneration == generation,
                       self.currentURL == url else { return }
@@ -506,6 +522,56 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return preview
     }
 
+    private func ensureMediaPreview() -> MediaPreviewView {
+        if let mediaPreview { return mediaPreview }
+        let preview = MediaPreviewView()
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.isHidden = true
+        view.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            preview.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        mediaPreview = preview
+        return preview
+    }
+
+    private func ensureEPUBReader() -> EPUBReaderView {
+        if let epubReader { return epubReader }
+        let reader = EPUBReaderView()
+        reader.translatesAutoresizingMaskIntoConstraints = false
+        reader.isHidden = true
+        view.addSubview(reader)
+        NSLayoutConstraint.activate([
+            reader.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            reader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            reader.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            reader.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        epubReader = reader
+        return reader
+    }
+
+    private func ensurePDFPreview() -> PDFPreviewView {
+        if let pdfPreview { return pdfPreview }
+        let preview = PDFPreviewView()
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.isHidden = true
+        view.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            preview.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        pdfPreview = preview
+        return preview
+    }
+
+    var pdfPreviewForTesting: PDFPreviewView? { pdfPreview }
+
     private func ensureFileHistoryView() -> FileHistoryView {
         if let fileHistoryView { return fileHistoryView }
         let history = FileHistoryView()
@@ -525,12 +591,40 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     // MARK: - Find bar
 
     func showFindBar(seed: String? = nil, replacing: Bool = false) {
+        guard let currentURL else { return }
+        // Capture the selection before attaching/recomputing: an empty query
+        // collapses the old selection, and a previous query can move it.
+        let selected = textView.selectedRange()
+        let source = textView.string as NSString
+        let selectionSeed: String? = selected.length > 0 && NSMaxRange(selected) <= source.length
+            ? source.substring(with: selected) : nil
+        let query = seed ?? selectionSeed.flatMap {
+            $0.rangeOfCharacter(from: .newlines) == nil ? $0 : nil
+        } ?? findBar.state.query
         findBar.isHidden = false
-        findBar.attach(to: textView)
+        findBarURL = currentURL
+        var state = findBar.state
+        state.query = query
+        state.currentRange = nil
+        findBar.restore(state, to: textView)
+        findBar.setQuery(query)
         findBar.setReplaceVisible(replacing)
         findBarHeight.constant = findBar.preferredHeight
-        if let seed { findBar.setQuery(seed) }
         if !replacing { findBar.focus() }
+    }
+
+    private func saveFindState() {
+        guard let url = findBarURL, openURLs.contains(url) else { return }
+        findStates[url] = findBar.state
+    }
+
+    private func restoreFindState(for url: URL?) {
+        if findBarURL != url && findBar.hasKeyboardFocus {
+            view.window?.makeFirstResponder(textView)
+        }
+        findBarURL = url
+        findBar.restore(url.flatMap { findStates[$0] } ?? .init(), to: textView)
+        findBarHeight.constant = findBar.isHidden ? 0 : findBar.preferredHeight
     }
 
     func hideFindBar() {
@@ -556,6 +650,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func pathRenamed(from oldBase: URL, to newBase: URL) {
+        saveFindState()
         let oldPath = oldBase.standardizedFileURL.path
         let oldPrefix = oldPath.hasSuffix("/") ? oldPath : oldPath + "/"
         var replacements: [(index: Int, old: URL, new: URL)] = []
@@ -597,6 +692,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func moveState(from oldURL: URL, to newURL: URL) {
+        if let value = findStates.removeValue(forKey: oldURL) { findStates[newURL] = value }
+        if findBarURL == oldURL { findBarURL = newURL }
         if let value = selections.removeValue(forKey: oldURL) { selections[newURL] = value }
         if lineActivatedURLs.remove(oldURL) != nil { lineActivatedURLs.insert(newURL) }
         if let value = foldedBlocks.removeValue(forKey: oldURL) { foldedBlocks[newURL] = value }
@@ -613,6 +710,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func activate(index: Int) {
         guard openURLs.indices.contains(index) else { return }
+        saveFindState()
+        // These character offsets belong to the outgoing storage only.
+        findBar.clearHighlights()
         // Remember where the caret was in the outgoing document, and write it
         // out: moving to another tab is leaving this one.
         if let prev = currentURL {
@@ -681,27 +781,69 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             images: doc.markdownImages,
             activeSourceRange: markdownReveal)
 
+        if !doc.isPDF {
+            pdfPreview?.clear()
+            pdfPreview?.isHidden = true
+        }
         // Synthetic file-history tabs use a real four-column table. Keep this
         // check ahead of images/text so only one primary content view is shown.
         if let historyModel = fileHistoryProvider?(url) {
             let history = ensureFileHistoryView()
             history.configure(historyModel)
             history.isHidden = false
-            imagePreview?.clear()
-            imagePreview?.isHidden = true
+            hidePreviews()
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if let image = doc.image {
             fileHistoryView?.isHidden = true
+            mediaPreview?.clear()
+            mediaPreview?.isHidden = true
+            epubReader?.clear()
+            epubReader?.isHidden = true
             let imagePreview = ensureImagePreview()
             imagePreview.show(image: image, caption: doc.text)
             imagePreview.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
-        } else {
+        } else if doc.isMedia {
             fileHistoryView?.isHidden = true
             imagePreview?.clear()
             imagePreview?.isHidden = true
+            epubReader?.clear()
+            epubReader?.isHidden = true
+            let mediaPreview = ensureMediaPreview()
+            mediaPreview.show(url: url, caption: doc.text, isVideo: doc.isVideoMedia)
+            mediaPreview.isHidden = false
+            scrollView.isHidden = true
+            showDiffHeader(for: nil)
+        } else if doc.isPDF {
+            fileHistoryView?.isHidden = true
+            imagePreview?.clear()
+            imagePreview?.isHidden = true
+            mediaPreview?.clear()
+            mediaPreview?.isHidden = true
+            epubReader?.clear()
+            epubReader?.isHidden = true
+            let preview = ensurePDFPreview()
+            preview.show(url: url, caption: doc.text)
+            preview.isHidden = false
+            scrollView.isHidden = true
+            showDiffHeader(for: nil)
+        } else if doc.isEPUB, ensureEPUBReader().show(url: url) {
+            // A file that claims to be an EPUB but is not a readable archive
+            // falls through to the text path, where it reports itself as an
+            // unsupported binary instead of showing an empty reader.
+            fileHistoryView?.isHidden = true
+            imagePreview?.clear()
+            imagePreview?.isHidden = true
+            mediaPreview?.clear()
+            mediaPreview?.isHidden = true
+            epubReader?.isHidden = false
+            scrollView.isHidden = true
+            showDiffHeader(for: nil)
+        } else {
+            fileHistoryView?.isHidden = true
+            hidePreviews()
             scrollView.isHidden = false
             // Rendered Markdown reads like a document, not a source listing:
             // no gutter, and a column of readable width instead of the full
@@ -714,6 +856,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             showDiffHeader(for: doc.diffLineNumbers.isEmpty ? nil : url)
         }
 
+        restoreFindState(for: url)
         reloadTabs()
         refreshGitLineChanges()
         scrollView.verticalRulerView?.needsDisplay = true
@@ -734,6 +877,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             if closedURLs.count > Self.reopenableTabs { closedURLs.removeFirst() }
         }
         selections.removeValue(forKey: url)
+        findStates.removeValue(forKey: url)
         lineActivatedURLs.remove(url)
         foldedBlocks.removeValue(forKey: url)
         defer { onTabClosed?(url) }
@@ -741,6 +885,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             activeIndex = nil
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             blankStorage.addLayoutManager(layoutManager)
+            restoreFindState(for: nil)
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
             textView.updateCodeBlocks([], resetFolds: false)
@@ -748,8 +893,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             layoutManager.updateMarkdownSyntaxRanges([], revealing: nil)
             textView.updateMarkdownDecorations(
                 codeBlocks: [], tables: [], tasks: [], activeSourceRange: nil)
-            imagePreview?.clear()
-            imagePreview?.isHidden = true
+            hidePreviews()
             fileHistoryView?.isHidden = true
             scrollView.isHidden = false
             reloadTabs()
@@ -783,8 +927,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let doomedSet = Set(doomed)
         let closed = doomed.compactMap { openURLs.indices.contains($0) ? openURLs[$0] : nil }
         guard confirmClose(urls: closed) else { return }
+        saveFindState()
         closed.forEach {
             selections.removeValue(forKey: $0)
+            findStates.removeValue(forKey: $0)
             lineActivatedURLs.remove($0)
             foldedBlocks.removeValue(forKey: $0)
         }
@@ -908,6 +1054,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // spilling into the next one.
         let offset = column.map { min(max(0, $0 - 1), lineLength) } ?? 0
         let target = NSRange(location: min(location + offset, length), length: 0)
+        textView.searchResultLineLocation = nil
         if let url = currentURL { lineActivatedURLs.insert(url) }
         textView.showsCurrentLineBand = currentDocument?.languageSpec?.name != "markdown"
         textView.setSelectedRange(target)
@@ -922,7 +1069,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               sourceURL.isFileURL,
               let root = repositoryRoot,
               let document = currentDocument,
-              !document.isVirtual, !document.isUnsupported, document.image == nil else {
+              !document.isVirtual, !document.isUnsupported, !document.isPreviewOnly else {
             return false
         }
         let source = textView.string
@@ -966,7 +1113,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               let sourceURL = currentURL,
               let root = repositoryRoot,
               let document = currentDocument,
-              !document.isVirtual, !document.isUnsupported, document.image == nil else {
+              !document.isVirtual, !document.isUnsupported, !document.isPreviewOnly else {
             clearDefinitionHover()
             return
         }
@@ -1037,22 +1184,44 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         blameCache.removeAll()
         blameOrder.removeAll()
         imagePreview?.clear()
+        mediaPreview?.clear()
+        epubReader?.clear()
         textView.updateCodeBlocks([], resetFolds: false)
+        pdfPreview?.clear()
         textView.updateJSXTagMatches([])
         detachFromDocument()
         let urls = openURLs
         openURLs.removeAll()
         activeIndex = nil
         selections.removeAll()
+        findStates.removeAll()
+        restoreFindState(for: nil)
         lineActivatedURLs.removeAll()
         foldedBlocks.removeAll()
         urls.forEach { onTabClosed?($0) }
+    }
+
+    /// Put both preview views away. They are mutually exclusive with the text
+    /// view and with each other, and clearing is what stops a video decoding
+    /// (and an audio file playing) once its tab is no longer the visible one.
+    private func hidePreviews() {
+        pdfPreview?.clear()
+        pdfPreview?.isHidden = true
+        imagePreview?.clear()
+        imagePreview?.isHidden = true
+        mediaPreview?.clear()
+        mediaPreview?.isHidden = true
+        epubReader?.clear()
+        epubReader?.isHidden = true
     }
 
     /// Release view-owned payloads that are not currently visible. Documents
     /// themselves are handled separately by `DocumentStore`.
     func releaseTransientMemory() {
         if imagePreview?.isHidden != false { imagePreview?.clear() }
+        if mediaPreview?.isHidden != false { mediaPreview?.clear() }
+        if epubReader?.isHidden != false { epubReader?.clear() }
+        if pdfPreview?.isHidden != false { pdfPreview?.clear() }
         if findBar.isHidden { findBar.clearHighlights() }
     }
 
@@ -1074,6 +1243,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffHeader.refreshAppearance()
         sideBySideDiff?.refreshAppearance()
         imagePreview?.refreshFonts()
+        mediaPreview?.refreshFonts()
+        pdfPreview?.refreshFonts()
+        epubReader?.refreshFonts()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         reloadTabs()
@@ -1302,7 +1474,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let doc = DocumentStore.shared.document(for: url)
         // A modified buffer has line numbers that no longer match what git
         // knows about, so any annotation would be attributed to the wrong line.
-        guard !doc.isVirtual, !doc.isUnsupported, doc.image == nil, !doc.isModified else {
+        guard !doc.isVirtual, !doc.isUnsupported, !doc.isPreviewOnly,
+              !doc.isModified else {
             clearInlineBlameRequest()
             return
         }

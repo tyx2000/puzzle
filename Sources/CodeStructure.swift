@@ -571,11 +571,15 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
                let metric = markdownTableRowMetrics.first(where: {
                    NSLocationInRange(representative, $0.range)
                }) {
-                let height = max(Theme.lineMetrics().target, metric.height)
+                // Heights arrive measured, including the deliberate 1pt one
+                // that swallows a rendered table's trailing terminator.
+                let height = metric.height
                 lineFragmentRect.pointee.size.height = height
                 lineFragmentUsedRect.pointee.size.height = height
-                baselineOffset.pointee = (height - Theme.lineMetrics().natural) / 2
-                    + Theme.editorFont().ascender
+                baselineOffset.pointee = height < Theme.lineMetrics().target
+                    ? 0
+                    : (height - Theme.lineMetrics().natural) / 2
+                        + Theme.editorFont().ascender
                 return true
             }
         }

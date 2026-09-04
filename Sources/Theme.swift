@@ -50,14 +50,16 @@ enum Theme {
     static let hover = hex(0x1c212b)
     /// active file in the tree
     static let activeRow = hex(0x232a36)
-    /// matched text in search results
-    /// A match, wherever it is found: drawn as a rounded outline, never a fill.
-    /// Nothing is painted over the text, so code keeps its syntax colours and a
-    /// result row keeps its own contrast.
-    static let matchOutline = hex(0x8a6f22)
-    static let matchOutlineWidth: CGFloat = 1
-    /// The match the ↑↓ buttons are on gets the same colour, drawn heavier.
-    static let currentMatchOutlineWidth: CGFloat = 2
+    /// A match, wherever it is found, is underlined — never boxed and never
+    /// washed. An outline steals a couple of points on every side of the text
+    /// and a background competes with both the syntax colours over it and the
+    /// selection under it; a rule below the baseline touches neither.
+    static let matchUnderline = red
+    static let matchUnderlineWidth: CGFloat = 2
+    /// The match the ↑↓ buttons are on: the same rule in the accent yellow.
+    static let currentMatchUnderline = yellow
+    /// How far under the text baseline the first rule sits.
+    static let matchUnderlineOffset: CGFloat = 2
 
     // Text
     static let foreground = hex(0xbfbdb6)
@@ -79,9 +81,6 @@ enum Theme {
     static let diffRemovedText = hex(0xf26d78)
     static let diffAddedBackground = hex(0x18251b)
     static let diffRemovedBackground = hex(0x2a1a1d)
-
-    /// Corner radius shared by every match highlight.
-    static let matchCornerRadius: CGFloat = 5
 
     // Accent hues. These name a *hue*: the panels use them for git status,
     // links and markers.

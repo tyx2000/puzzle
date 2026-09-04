@@ -96,6 +96,9 @@ swiftc \
   -target "$TARGET" \
   -framework AppKit \
   -framework CoreServices \
+  -framework AVKit \
+  -framework AVFoundation \
+  -framework PDFKit \
   -import-objc-header "$ROOT/Sources/ts_bridge.h" \
   -Xcc -I"$TS_INC" \
   -o "$APP/Contents/MacOS/Puzzle" \
@@ -242,6 +245,38 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.image</string>
+            </array>
+        </dict>
+        <!-- Audio and video play in an AVKit player, so Viewer as well.
+             public.movie covers .ts (MPEG-2 transport stream) as far as Launch
+             Services is concerned; Puzzle still opens a .ts file as TypeScript,
+             because what a document *is* is decided by extension in Document,
+             not by the type Finder used to route the open. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Media</string>
+            <key>CFBundleTypeRole</key>    <string>Viewer</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.movie</string>
+                <string>public.audio</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>    <string>PDF Document</string>
+            <key>CFBundleTypeRole</key>    <string>Viewer</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>com.adobe.pdf</string></array>
+        </dict>
+        <!-- Books open in the reader pane, which cannot edit them either. -->
+        <dict>
+            <key>CFBundleTypeName</key>    <string>Book</string>
+            <key>CFBundleTypeRole</key>    <string>Viewer</string>
+            <key>LSHandlerRank</key>       <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.idpf.epub-container</string>
             </array>
         </dict>
         <!-- Files Launch Services cannot type at all — a Dockerfile, a

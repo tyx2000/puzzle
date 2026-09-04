@@ -3,6 +3,14 @@ import AppKit
 /// In-file find bar. Uses the same styled input as the project search panel
 /// (no system focus ring), plus match count, prev/next and close.
 final class FindBarView: FlatView {
+    struct State {
+        var isVisible = false
+        var query = ""
+        var options = SearchOptions()
+        var replacement = ""
+        var isReplacing = false
+        var currentRange: NSRange?
+    }
     var onClose: (() -> Void)?
     /// The bar grew or shrank a row; the pane re-lays its content.
     var onHeightChanged: (() -> Void)?
@@ -39,6 +47,7 @@ final class FindBarView: FlatView {
         input.translatesAutoresizingMaskIntoConstraints = false
         input.onChange = { [weak self] text, options in self?.recompute(text, options) }
         input.onSubmit = { [weak self] _, _ in self?.step(1) }
+        input.onNavigate = { [weak self] delta in self?.step(delta) }
         input.onCancel = { [weak self] in self?.onClose?() }
 
         countLabel.font = Theme.uiFont(10.5)
@@ -152,6 +161,29 @@ final class FindBarView: FlatView {
 
     // MARK: - API
 
+    var state: State {
+        State(isVisible: !isHidden, query: input.stringValue, options: input.options,
+              replacement: replaceInput.stringValue, isReplacing: !replaceRow.isHidden,
+              currentRange: matches.indices.contains(current) ? matches[current] : nil)
+    }
+
+    var hasKeyboardFocus: Bool {
+        input.hasKeyboardFocus || replaceInput.currentEditor() != nil
+    }
+
+    func restore(_ state: State, to textView: PuzzleTextView) {
+        clearHighlights()
+        self.textView = textView
+        input.stringValue = state.query
+        input.setOptions(state.options, notify: false)
+        replaceInput.stringValue = state.replacement
+        setReplaceVisible(state.isReplacing, focus: false)
+        isHidden = !state.isVisible
+        if state.isVisible {
+            recompute(state.query, state.options, preferredRange: state.currentRange, reveal: false)
+        }
+    }
+
     func attach(to textView: PuzzleTextView) {
         self.textView = textView
         recompute(input.stringValue, input.options)
@@ -164,13 +196,6 @@ final class FindBarView: FlatView {
     }
 
     func focus() {
-        // Seed from the selection, like a native find bar.
-        if let tv = textView, tv.selectedRange().length > 0,
-           let text = (tv.string as NSString?)?.substring(with: tv.selectedRange()),
-           !text.contains("\n") {
-            input.stringValue = text
-            recompute(text, input.options)
-        }
         input.focus()
     }
 
@@ -258,7 +283,7 @@ final class FindBarView: FlatView {
         setReplaceVisible(replaceRow.isHidden)
     }
 
-    func setReplaceVisible(_ visible: Bool) {
+    func setReplaceVisible(_ visible: Bool, focus: Bool = true) {
         guard replaceRow.isHidden == visible else { return }
         replaceRow.isHidden = !visible
         heightConstraint.constant = visible ? 76 : 42
@@ -267,7 +292,7 @@ final class FindBarView: FlatView {
             accessibilityDescription: "Toggle replace")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
         onHeightChanged?()
-        if visible { window?.makeFirstResponder(replaceInput) }
+        if visible && focus { window?.makeFirstResponder(replaceInput) }
     }
 
     /// One row for find, two when replace is showing.
@@ -289,7 +314,8 @@ final class FindBarView: FlatView {
 
     // MARK: - Matching
 
-    private func recompute(_ query: String, _ options: SearchOptions) {
+    private func recompute(_ query: String, _ options: SearchOptions,
+                           preferredRange: NSRange? = nil, reveal: Bool = true) {
         matches = []
         totalMatches = 0
         current = -1
@@ -300,7 +326,7 @@ final class FindBarView: FlatView {
             // editor. Once the query is empty it is no longer a result, so
             // collapse the selection as well as clearing the painted ranges.
             let selection = tv.selectedRange()
-            if selection.length > 0 {
+            if reveal && selection.length > 0 {
                 tv.setSelectedRange(NSRange(location: NSMaxRange(selection), length: 0))
             }
             return
@@ -341,8 +367,9 @@ final class FindBarView: FlatView {
         if !matches.isEmpty {
             // Start from the match nearest the caret.
             let caret = tv.selectedRange().location
-            current = matches.firstIndex { $0.location >= caret } ?? 0
-            select(current)
+            current = preferredRange.flatMap { matches.firstIndex(of: $0) }
+                ?? matches.firstIndex { $0.location >= caret } ?? 0
+            if reveal { select(current) }
         }
     }
 
@@ -394,6 +421,9 @@ final class FindBarView: FlatView {
     private func highlight() {
         textView?.searchMatches = matches
         textView?.currentMatchIndex = matches.isEmpty ? nil : current
+        textView?.searchResultLineLocation = matches.indices.contains(current)
+            ? matches[current].location : nil
+        textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
 
     func clearHighlights() {
@@ -402,6 +432,8 @@ final class FindBarView: FlatView {
         current = -1
         textView?.searchMatches = []
         textView?.currentMatchIndex = nil
+        textView?.searchResultLineLocation = nil
+        textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
         countLabel.stringValue = ""
     }
 

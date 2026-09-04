@@ -7,9 +7,11 @@ struct MarkdownCodeBlockDecoration: Equatable {
 
 struct MarkdownTableDecoration: Equatable {
     struct Row: Equatable {
+        /// The row's own characters, terminator excluded. TextKit gives this
+        /// range one dynamic-height fragment, and the renderer anchors on its
+        /// first character.
         let sourceRange: NSRange
-        /// Complete logical line including its terminator. TextKit uses this
-        /// range to give the rendered row one dynamic-height fragment.
+        /// Complete logical line including its terminator.
         let lineRange: NSRange
         let cells: [String]
         let isHeader: Bool
@@ -17,6 +19,11 @@ struct MarkdownTableDecoration: Equatable {
     let sourceRange: NSRange
     let rows: [Row]
     let columnCount: Int
+    /// True when a blank line sits directly above the table. Such a line has no
+    /// glyphs of its own and TextKit folds it into the first row's fragment, so
+    /// the first row carries its height and the table is drawn at the bottom of
+    /// that fragment — otherwise the table clamps onto the block above it.
+    let leadsWithBlankLine: Bool
 }
 
 struct MarkdownTaskDecoration: Equatable {
@@ -167,6 +174,13 @@ enum MarkdownLiveStyler {
         }
 
         mutating func collapse(_ line: NSRange) { collapsed.append(line) }
+
+        /// True when the line above `line` holds nothing but its terminator.
+        func precededByBlankLine(_ line: NSRange) -> Bool {
+            guard line.location > 0 else { return false }
+            let previous = self.line(at: line.location - 1)
+            return MarkdownLiveStyler.lineContentRange(previous, in: source).length == 0
+        }
 
         func dim(_ range: NSRange) { style(marker, range) }
 
@@ -417,12 +431,18 @@ enum MarkdownLiveStyler {
                         MarkdownLiveStyler.renderedCell(source.substring(with: $0.range))
                     }
                     columns = max(columns, cells.count)
+                    // The header node carries its line terminator and a body row
+                    // does not. Both are stored as the line's *content*, so the
+                    // renderer can tell "row has a terminator to anchor to" from
+                    // the two ranges and treats every row alike.
+                    let rowLine = line(at: child.range.location)
+                    let content = MarkdownLiveStyler.lineContentRange(rowLine, in: source)
                     rows.append(MarkdownTableDecoration.Row(
-                        sourceRange: child.range,
-                        lineRange: line(at: child.range.location),
+                        sourceRange: content,
+                        lineRange: rowLine,
                         cells: cells,
                         isHeader: child.type == "pipe_table_header"))
-                    hide(child.range)
+                    hide(content)
                 case "pipe_table_delimiter_row":
                     // The dashes are layout, not content: the row leaves the
                     // display entirely.
@@ -441,7 +461,8 @@ enum MarkdownLiveStyler {
                     isHeader: $0.isHeader)
             }
             tables.append(MarkdownTableDecoration(
-                sourceRange: node.range, rows: padded, columnCount: columns))
+                sourceRange: node.range, rows: padded, columnCount: columns,
+                leadsWithBlankLine: precededByBlankLine(padded[0].lineRange)))
         }
 
         // MARK: Inlines

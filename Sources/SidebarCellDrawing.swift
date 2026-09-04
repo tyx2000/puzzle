@@ -88,18 +88,25 @@ enum SidebarCellDrawing {
     }
 
     static func attributedText(_ string: NSAttributedString, in rect: NSRect) {
-        guard rect.width > 0, rect.height > 0, string.length > 0 else { return }
+        guard let lineRect = textLineRect(string, in: rect) else { return }
+        string.draw(with: lineRect,
+                    options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                    context: nil)
+    }
+
+    /// Where `attributedText` puts the line. Callers that draw *along* the text
+    /// — a rule under a search match — need the same rectangle, measured the
+    /// same way, or the two drift apart at other font sizes.
+    static func textLineRect(_ string: NSAttributedString, in rect: NSRect) -> NSRect? {
+        guard rect.width > 0, rect.height > 0, string.length > 0 else { return nil }
         let measured = string.boundingRect(
             with: NSSize(width: rect.width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         let height = max(1, ceil(measured.height))
-        let lineRect = NSRect(x: rect.minX,
-                              y: floor(rect.midY - height / 2),
-                              width: rect.width,
-                              height: height + 2)
-        string.draw(with: lineRect,
-                    options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                    context: nil)
+        return NSRect(x: rect.minX,
+                      y: floor(rect.midY - height / 2),
+                      width: rect.width,
+                      height: height + 2)
     }
 
     /// Draw a row's icon. Material icons carry their own colours, so they are

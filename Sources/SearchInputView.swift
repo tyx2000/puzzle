@@ -7,14 +7,23 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
     var onChange: ((String, SearchOptions) -> Void)?
     var onSubmit: ((String, SearchOptions) -> Void)?
     var onCancel: (() -> Void)?
+    var onNavigate: ((Int) -> Void)?
 
     /// Set the toggles programmatically (⌥⌘F seeding, tests).
-    func setOptions(_ newOptions: SearchOptions) { options = newOptions }
+    func setOptions(_ newOptions: SearchOptions, notify: Bool = true) {
+        suppressOptionChange = !notify
+        options = newOptions
+        suppressOptionChange = false
+    }
+    private var suppressOptionChange = false
 
     private(set) var options = SearchOptions() {
         didSet {
             guard options != oldValue else { return }
-            onChange?(stringValue, options)
+            for (toggle, enabled) in zip(toggles, [options.caseSensitive, options.wholeWord, options.regex]) {
+                toggle.setOn(enabled)
+            }
+            if !suppressOptionChange { onChange?(stringValue, options) }
         }
     }
 
@@ -137,6 +146,8 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         if selectAll { field.currentEditor()?.selectAll(nil) }
     }
 
+    var hasKeyboardFocus: Bool { field.currentEditor() != nil }
+
     /// Empty the query the way the Escape key does, without closing anything.
     func clear() {
         guard !field.stringValue.isEmpty else { return }
@@ -181,6 +192,12 @@ final class SearchInputView: NSView, NSTextFieldDelegate {
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             onSubmit?(field.stringValue, options); return true
+        case #selector(NSResponder.moveUp(_:)):
+            guard let onNavigate else { return false }
+            onNavigate(-1); return true
+        case #selector(NSResponder.moveDown(_:)):
+            guard let onNavigate else { return false }
+            onNavigate(1); return true
         case #selector(NSResponder.cancelOperation(_:)):
             onCancel?(); return true
         default:
@@ -279,6 +296,11 @@ private final class GlyphToggle: NSView {
         heightAnchor.constraint(equalToConstant: 18).isActive = true
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    func setOn(_ enabled: Bool) {
+        isOn = enabled
+        needsDisplay = true
+    }
 
     override func mouseDown(with event: NSEvent) {
         isOn.toggle()

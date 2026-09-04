@@ -614,24 +614,20 @@ final class SearchHitCell: DrawnSidebarCell {
 
     override func draw(_ dirtyRect: NSRect) {
         let textWidth = max(0, bounds.width - 4)
-        if let box = highlightBox(width: textWidth) {
-            // An outline, not a fill: the preview keeps its own contrast and
-            // nothing is painted over the matched text.
-            Theme.matchOutline.setStroke()
-            let pen = Theme.matchOutlineWidth
-            let path = NSBezierPath(
-                roundedRect: NSRect(x: box.minX, y: 0,
-                                    width: box.width, height: bounds.height)
-                    .insetBy(dx: pen / 2, dy: pen / 2),
-                xRadius: Theme.matchCornerRadius, yRadius: Theme.matchCornerRadius)
-            path.lineWidth = pen
-            path.stroke()
-        }
+        let textRect = NSRect(x: 0, y: 0, width: textWidth, height: bounds.height)
         // Gutter number and source text are intentionally one attributed line:
         // tab stops and a shared baseline make vertical drift impossible.
-        SidebarCellDrawing.attributedText(
-            content,
-            in: NSRect(x: 0, y: 0, width: textWidth, height: bounds.height))
+        SidebarCellDrawing.attributedText(content, in: textRect)
+        // A rule under the match, the same one the editor draws: nothing is
+        // painted over the preview, so the row keeps its own contrast.
+        if let box = highlightBox(width: textWidth),
+           let line = SidebarCellDrawing.textLineRect(content, in: textRect) {
+            Theme.matchUnderline.setFill()
+            NSRect(x: box.minX,
+                   y: line.maxY - Theme.matchUnderlineWidth - 1,
+                   width: box.width,
+                   height: Theme.matchUnderlineWidth).fill()
+        }
     }
 
     var contentForTesting: NSAttributedString { content }

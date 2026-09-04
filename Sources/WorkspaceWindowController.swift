@@ -138,7 +138,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenSettings = { [weak self] in self?.openSettings() }
-        editor.onOpenRecent = { [weak self] url in self?.openProject(url) }
+        editor.onOpenRecent = { [weak self] url in self?.openSelection([url]) }
         editor.onDocumentSaved = { [weak self] url in
             guard let self else { return }
             // The file changed on disk, so its cached blame is stale.
@@ -300,9 +300,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         Document.imageExtensions.contains((path as NSString).pathExtension.lowercased())
     }
 
+    /// Media is the same case: `git diff` on a video says "Binary files
+    /// differ", and the player is what anyone clicking the row wanted.
+    private static func isPlayable(_ path: String) -> Bool {
+        Document.mediaExtensions.contains((path as NSString).pathExtension.lowercased())
+    }
+
     func showDiff(for entry: GitService.Status.Entry, in directory: URL) {
-        // Images preview instead of diffing — same view the file tree gives.
-        if Self.isImage(entry.path) {
+        // Images and media preview instead of diffing — the same view the file
+        // tree gives.
+        if Self.isImage(entry.path) || Self.isPlayable(entry.path) {
             let fileURL = directory.appendingPathComponent(entry.path)
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 editor.open(url: fileURL)
@@ -842,23 +849,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// "Open Folder" fills this window instead of spawning another empty one.
     var hasProject: Bool { projectURL != nil }
 
-    /// Asked to open a folder; the app decides which window receives it.
-    var onOpenFolderRequested: ((URL) -> Void)?
+    /// The app routes both files and folders to an existing project first.
+    var onOpenRequested: (([URL]) -> Void)?
+
+    func openSelection(_ urls: [URL]) {
+        if let handler = onOpenRequested {
+            handler(urls)
+            return
+        }
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+            if isDirectory.boolValue {
+                openProject(url)
+            } else {
+                if !hasProject { openProject(url.deletingLastPathComponent()) }
+                editor.open(url: url)
+            }
+        }
+    }
 
     @objc func openFolder(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
         panel.prompt = "Open"
-        panel.message = "Choose a project folder"
+        panel.message = "Choose files or a project folder"
         panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            if let handler = self.onOpenFolderRequested {
-                handler(url)
-            } else {
-                self.openProject(url)
-            }
+            guard response == .OK else { return }
+            self?.openSelection(panel.urls)
         }
     }
 
