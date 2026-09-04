@@ -4634,11 +4634,33 @@ enum RegressionTests {
         textView.string = "one\n    indented line\nthree"
         textView.setSelectedRange(NSRange(location: 12, length: 0))    // inside "indented"
         textView.scrollToBeginningOfDocument(nil)
-        try expect(textView.selectedRange().location == 4,
-                   "Home went to \(textView.selectedRange().location), not the line start")
+        try expect(textView.selectedRange().location == 8,
+                   "Home did not skip the line's indentation")
+        textView.scrollToBeginningOfDocument(nil)
+        try expect(textView.selectedRange().location == 8,
+                   "repeated Home moved into indentation")
         textView.scrollToEndOfDocument(nil)
         try expect(textView.selectedRange().location == 21,
                    "End went to \(textView.selectedRange().location), not the line end")
+
+        let homeCases: [(String, Int, Int)] = [
+            ("    value", 1, 4),                 // from inside indentation
+            ("first\n\t  中文", 10, 9),            // tabs and Unicode text
+            ("\t\u{3000}😀word", 7, 2),           // Unicode whitespace and surrogate pair
+            ("head\r\n \t  \r\ntail", 9, 6),     // blank CRLF line
+            ("head\n\ntail", 5, 5),              // empty line
+            ("head\n  ", 7, 5),                 // whitespace-only final line
+            ("head\n", 5, 5),                   // empty final line
+            ("", 0, 0),                         // empty document
+            ("  " + String(repeating: "word ", count: 100), 200, 2), // wrapped logical line
+        ]
+        for (text, caret, expected) in homeCases {
+            textView.string = text
+            textView.setSelectedRange(NSRange(location: caret, length: 0))
+            textView.scrollToBeginningOfDocument(nil)
+            try expect(textView.selectedRange() == NSRange(location: expected, length: 0),
+                       "Home target wrong for \(text.debugDescription): \(textView.selectedRange())")
+        }
 
         // The caret has to be placed on a line TextKit has actually laid out.
         // Non-contiguous layout leaves a freshly edited line unlaid until

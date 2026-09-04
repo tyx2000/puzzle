@@ -1163,7 +1163,24 @@ final class PuzzleTextView: NSTextView {
     /// is what ⌘↑ and ⌘↓ are for; every other editor on this machine puts them
     /// on the line's ends, and those keep their own bindings.
     override func scrollToBeginningOfDocument(_ sender: Any?) {
-        moveToBeginningOfLine(sender)
+        let source = string as NSString
+        let caret = min(selectedRange().location, source.length)
+        var start = 0
+        var contentEnd = 0
+        source.getLineStart(&start, end: nil, contentsEnd: &contentEnd,
+                            for: NSRange(location: caret, length: 0))
+        var target = start
+        while target < contentEnd,
+              let scalar = UnicodeScalar(source.character(at: target)),
+              CharacterSet.whitespaces.contains(scalar) {
+            target += 1
+        }
+        // Whitespace-only lines have no text to target. Stay at their column
+        // zero, without stepping across a newline or toggling on repeated Home.
+        if target == contentEnd { target = start }
+        let selection = NSRange(location: target, length: 0)
+        setSelectedRange(selection)
+        scrollRangeToVisible(selection)
     }
 
     override func scrollToEndOfDocument(_ sender: Any?) {
