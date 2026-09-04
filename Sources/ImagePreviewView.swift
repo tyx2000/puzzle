@@ -15,37 +15,82 @@ final class ImagePreviewView: FlatView {
 
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.imageAlignment = .alignCenter
-        imageView.translatesAutoresizingMaskIntoConstraints = false
 
         caption.font = Theme.uiFont(10.5)
         caption.textColor = Theme.dimText
         caption.alignment = .center
         caption.lineBreakMode = .byTruncatingMiddle
-        caption.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(imageView)
         addSubview(caption)
-        NSLayoutConstraint.activate([
-            imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -14),
-            imageView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
-            imageView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
-            imageView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 24),
-
-            caption.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 12),
-            caption.centerXAnchor.constraint(equalTo: centerXAnchor),
-            caption.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 16),
-            caption.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            caption.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -16),
-        ])
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private var widthConstraint: NSLayoutConstraint?
-    private var heightConstraint: NSLayoutConstraint?
-    private var aspectConstraint: NSLayoutConstraint?
+    // Child frames are local to this viewport. An image's intrinsic dimensions
+    // must never feed Auto Layout's window minimum-size calculation.
+    private var imagePixelSize = NSSize.zero
+
+    private var source: PreviewImageSource?
+    private var decodedMaximum = 0
+    private var resizeWork: DispatchWorkItem?
+
+    func show(source: PreviewImageSource, caption text: String) {
+        clear()
+        self.source = source
+        caption.stringValue = text
+        imagePixelSize = source.pixelSize
+        needsLayout = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard imagePixelSize.width > 0, imagePixelSize.height > 0 else { return }
+        let fit = min(1, max(0, bounds.width - 48) / imagePixelSize.width,
+                      max(0, bounds.height - 80) / imagePixelSize.height)
+        let size = NSSize(width: imagePixelSize.width * fit, height: imagePixelSize.height * fit)
+        imageView.frame = NSRect(x: bounds.midX - size.width / 2,
+                                 y: bounds.midY - size.height / 2 + 14,
+                                 width: size.width, height: size.height)
+        caption.frame = NSRect(x: 16, y: max(0, imageView.frame.minY - 30),
+                               width: max(0, bounds.width - 32), height: 18)
+        needsDisplay = true
+        guard source != nil, size.width > 0, size.height > 0 else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixels = max(size.width, size.height) * scale
+        let target = min(4096, Int(ceil(pixels / 64)) * 64)
+        resizeWork?.cancel()
+        resizeWork = nil
+        guard target != decodedMaximum else { return }
+        if imageView.image != nil {
+            // Also debounce custom edge drags, which do not set inLiveResize.
+            // Keep scaling the current bitmap until pointer movement settles.
+            let work = DispatchWorkItem { [weak self] in self?.decode(maximum: target) }
+            resizeWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        } else {
+            decode(maximum: target)
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+    }
+
+    private func decode(maximum: Int) {
+        guard let source else { return }
+        imageView.image = source.decode(maximum: maximum)
+        decodedMaximum = maximum
+        needsDisplay = true
+    }
 
     func show(image: NSImage, caption text: String) {
+        clear()
         imageView.image = image
         caption.stringValue = text
 
@@ -53,40 +98,32 @@ final class ImagePreviewView: FlatView {
         let rep = image.representations.first
         let pixelSize = NSSize(width: CGFloat(rep?.pixelsWide ?? Int(image.size.width)),
                                height: CGFloat(rep?.pixelsHigh ?? Int(image.size.height)))
-        widthConstraint?.isActive = false
-        heightConstraint?.isActive = false
-        aspectConstraint?.isActive = false
-        // Cap at natural size; the ≤ constraints above shrink it to fit.
-        let w = imageView.widthAnchor.constraint(lessThanOrEqualToConstant: max(1, pixelSize.width))
-        let h = imageView.heightAnchor.constraint(lessThanOrEqualToConstant: max(1, pixelSize.height))
-        // Preserve aspect ratio while scaling down.
-        let aspect = imageView.widthAnchor.constraint(
-            equalTo: imageView.heightAnchor,
-            multiplier: pixelSize.width / max(1, pixelSize.height))
-        NSLayoutConstraint.activate([w, h, aspect])
-        widthConstraint = w
-        heightConstraint = h
-        aspectConstraint = aspect
-        needsDisplay = true
+        imagePixelSize = pixelSize
+        needsLayout = true
     }
 
     /// Release the decoded bitmap as soon as the preview is no longer visible.
     /// The document can decode/reload it again if its tab is revisited.
     func clear() {
+        resizeWork?.cancel()
+        resizeWork = nil
+        source = nil
+        decodedMaximum = 0
         imageView.image = nil
         caption.stringValue = ""
-        NSLayoutConstraint.deactivate(
-            [widthConstraint, heightConstraint, aspectConstraint].compactMap { $0 })
-        widthConstraint = nil
-        heightConstraint = nil
-        aspectConstraint = nil
+        imagePixelSize = .zero
+        imageView.frame = .zero
         needsDisplay = true
     }
 
-    var hasImageForTesting: Bool { imageView.image != nil }
-    var dynamicConstraintCountForTesting: Int {
-        [widthConstraint, heightConstraint, aspectConstraint].compactMap { $0 }.count
+    var decodedPixelsForTesting: Int {
+        guard let frame = imageView.image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return 0 }
+        return frame.width * frame.height
     }
+
+    var hasImageForTesting: Bool { imageView.image != nil }
+    var imageFrameForTesting: NSRect { imageView.frame }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)

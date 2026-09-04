@@ -30,10 +30,10 @@ final class Document {
     /// object files…). Such documents show a placeholder and are read-only.
     private(set) var isUnsupported = false
 
-    /// Decoded image, when the file is a previewable picture. Shown instead of
+    /// Image metadata, when the file is a previewable picture. Shown instead of
     /// the text view rather than being reported as an unsupported binary.
-    private(set) var image: NSImage?
-    var isImage: Bool { image != nil }
+    private(set) var previewImage: PreviewImageSource?
+    var isImage: Bool { previewImage != nil }
 
     /// True when the file is played rather than read. Unlike every other
     /// document, none of its bytes are loaded: AVFoundation streams them off
@@ -76,7 +76,7 @@ final class Document {
     /// hundreds-of-megabytes allocation spike.
     static let maxTextFileBytes = 16 * 1024 * 1024
     /// Compressed pictures need a little more input headroom; their decoded
-    /// dimensions are bounded separately by `decodePreviewImage`.
+    /// dimensions are bounded separately by `PreviewImageSource`.
     static let maxImageFileBytes = 32 * 1024 * 1024
 
     /// A generated, read-only buffer (a git diff) rather than a file on disk.
@@ -251,10 +251,9 @@ final class Document {
         // image must remain read-only instead of falling through to the very
         // permissive Latin-1 text decoder.
         if hasImageExtension {
-            if let (decoded, pixelWidth, pixelHeight) = Self.decodePreviewImage(data),
-               decoded.size.width > 0 {
-                image = decoded
-                let px = "\(pixelWidth) × \(pixelHeight)"
+            if let source = PreviewImageSource(url: url, data: data) {
+                previewImage = source
+                let px = "\(Int(source.pixelSize.width)) × \(Int(source.pixelSize.height))"
                 let bytes = ByteCountFormatter.string(
                     fromByteCount: Int64(data.count), countStyle: .file)
                 storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(px)  ·  \(bytes)")
@@ -373,36 +372,6 @@ final class Document {
         data.prefix(8192).contains(0)
     }
 
-    /// Decode pictures at a bounded resolution. `NSImage(data:)` can keep a
-    /// full-resolution decoded bitmap alive; one 8K photo is hundreds of MB.
-    /// The editor is a preview, so dimensions above 4096 px are downsampled
-    /// while the caption still reports the original size.
-    private static func decodePreviewImage(_ data: Data) -> (NSImage, Int, Int)? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let rawProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-                as? [CFString: Any],
-              let width = (rawProperties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-              let height = (rawProperties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-              width > 0, height > 0 else {
-            return NSImage(data: data).map {
-                ($0, Int($0.size.width.rounded()), Int($0.size.height.rounded()))
-            }
-        }
-
-        // Always materialise one bounded frame. `NSImage(data:)` can retain all
-        // frames/representations of a GIF or ICNS even when its dimensions are
-        // small, defeating the pixel cap.
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 4096,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
-            source, 0, options as CFDictionary) else { return nil }
-        return (NSImage(cgImage: thumbnail, size: .zero), width, height)
-    }
-
     private static func unsupportedMessage(for url: URL, byteCount: Int) -> String {
         let ext = url.pathExtension.isEmpty ? "" : ".\(url.pathExtension.lowercased())"
         let size = ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
@@ -506,18 +475,11 @@ final class Document {
     /// more than its UTF-16 characters because syntax runs retain attributes.
     var estimatedMemoryCost: Int {
         let textCost = storage.length.multipliedReportingOverflow(by: 6)
-        var total = textCost.overflow ? Int.max : textCost.partialValue
-        if let rep = image?.representations.first {
-            let pixels = rep.pixelsWide.multipliedReportingOverflow(by: rep.pixelsHigh)
-            let bytes = pixels.partialValue.multipliedReportingOverflow(by: 4)
-            if pixels.overflow || bytes.overflow { return Int.max }
-            total = total.addingReportingOverflow(bytes.partialValue).partialValue
-        }
-        return max(total, 1024)
+        return max(textCost.overflow ? Int.max : textCost.partialValue, 1024)
     }
 
-    /// True when the file changed underneath an edited buffer. Puzzle keeps the
-    /// buffer (the edits exist nowhere else) and asks at save time.
+    /// True when the disk changed underneath an edited buffer. Background saves
+    /// defer this conflict; an explicit Save writes the current buffer.
     private(set) var hasDiskConflict = false
 
     /// The file changed on disk while this buffer had unsaved edits.
@@ -578,9 +540,7 @@ final class Document {
         isModified = true
     }
 
-    /// Replace the buffer when the disk write is newer than the latest local
-    /// edit. No conflict UI is involved: whichever side has the later write
-    /// time is authoritative.
+    /// Refresh clean buffers from disk while preserving unsaved local edits.
     @discardableResult
     func reloadFromDiskIfLatest(observedAt: Date = Date()) -> Bool {
         guard url.isFileURL, !isReadOnly else { return false }
@@ -601,15 +561,19 @@ final class Document {
             lastKnownDiskModificationDate = diskDate
             lastLocalEditAt = nil
             isModified = false
+            hasDiskConflict = false
             textEncoding = decoded.encoding
             return stateChanged
         }
 
         // Unsaved edits are the only copy that exists, so an external write
         // never replaces them. Record the conflict instead: the buffer keeps
-        // what the user typed, and saving asks before overwriting the newer
-        // file on disk.
+        // what the user typed until an explicit save or reload.
         if isModified {
+            // FSEvents also reports parent-directory changes and delayed events
+            // from our own saves. Different buffer text alone is just an edit,
+            // not evidence that the file on disk changed since the last sync.
+            guard diskDate != lastKnownDiskModificationDate else { return false }
             hasDiskConflict = true
             lastKnownDiskModificationDate = diskDate
             NotificationCenter.default.post(name: Document.didDetectDiskConflict, object: self)
@@ -833,6 +797,7 @@ final class DocumentStore {
             docs.removeValue(forKey: url)
         }
         order = order.filter { docs[$0] != nil }
+        HighlightService.shared.discardParseTrees()
         let stillNeeded = Set(docs.values.compactMap { $0.languageSpec?.name })
         HighlightService.shared.evictUnused(keeping: stillNeeded)
     }
@@ -876,6 +841,7 @@ final class HighlightService {
         }
         let text = storage.string
         guard text.utf8.count <= maxBytes else {
+            cache[spec.name]?.discardParseTree()
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
             return
@@ -897,10 +863,15 @@ final class HighlightService {
         doc.updateJSXTagMatches(tags)
     }
 
-    /// Release parsers/queries for languages nothing has open any more. Each
-    /// cached `SyntaxHighlighter` holds a TSParser plus compiled TSQuery objects.
+    /// Memory pressure can discard incremental state without changing text.
+    func discardParseTrees() {
+        cache.values.forEach { $0.discardParseTree() }
+    }
+
+    /// Release parsers/queries for languages nothing has open any more.
     func evictUnused(keeping languages: Set<String>) {
         for key in cache.keys where !languages.contains(key) { cache.removeValue(forKey: key) }
+        cache.values.forEach { $0.discardUnownedParseTree() }
         SyntaxHighlighter.unloadDefinitions(keeping: languages)
     }
 

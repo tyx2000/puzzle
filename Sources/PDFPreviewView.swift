@@ -67,7 +67,6 @@ final class PDFPreviewView: FlatView {
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(pdfView)
 
-        thumbnails.pdfView = pdfView
         thumbnails.thumbnailSize = NSSize(width: 108, height: 140)
         thumbnails.backgroundColor = Theme.panelBackground
         thumbnails.translatesAutoresizingMaskIntoConstraints = false
@@ -179,6 +178,7 @@ final class PDFPreviewView: FlatView {
         thumbnailWidth.constant = showsThumbnails ? Self.thumbnailColumnWidth : 0
         thumbnails.isHidden = !showsThumbnails
         pdfView.document = document
+        thumbnails.pdfView = pdfView
 
         let savedIndex = min(max(0, Self.savedPage(for: url)), document.pageCount - 1)
         if let page = document.page(at: savedIndex) {
@@ -208,6 +208,7 @@ final class PDFPreviewView: FlatView {
         rememberPage()
         if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
         pageObserver = nil
+        thumbnails.pdfView = nil
         pdfView.document = nil
         loadedURL = nil
         titleLabel.stringValue = ""
@@ -261,12 +262,17 @@ final class PDFPreviewView: FlatView {
     @objc private func previousPage() { pdfView.goToPreviousPage(nil) }
     @objc private func nextPage() { pdfView.goToNextPage(nil) }
 
-    @objc private func toggleThumbnails() {
-        showsThumbnails.toggle()
-        thumbnailWidth.constant = showsThumbnails ? Self.thumbnailColumnWidth : 0
-        thumbnails.isHidden = !showsThumbnails || pdfView.isHidden
-        needsLayout = true
+    var thumbnailsVisible: Bool {
+        get { showsThumbnails }
+        set {
+            showsThumbnails = newValue
+            thumbnailWidth.constant = showsThumbnails ? Self.thumbnailColumnWidth : 0
+            thumbnails.isHidden = !showsThumbnails || pdfView.isHidden
+            needsLayout = true
+        }
     }
+
+    @objc private func toggleThumbnails() { thumbnailsVisible.toggle() }
 
     // MARK: - Appearance
 

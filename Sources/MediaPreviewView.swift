@@ -15,7 +15,7 @@ import AVFoundation
 /// media tab costs a caption's worth of memory when it is idle and why a video
 /// far larger than the editor's in-memory limit can open at all.
 final class MediaPreviewView: FlatView {
-    private let playerView = AVPlayerView()
+    private var playerView: AVPlayerView?
     /// Stands in for the missing picture on an audio-only file.
     private let icon = NSImageView()
     private let transport = MediaTransportView()
@@ -36,11 +36,6 @@ final class MediaPreviewView: FlatView {
         super.init(frame: frameRect)
         fillColor = Theme.editorBackground
 
-        playerView.controlsStyle = .inline
-        playerView.videoGravity = .resizeAspect
-        playerView.showsFullScreenToggleButton = true
-        playerView.translatesAutoresizingMaskIntoConstraints = false
-
         icon.image = Theme.symbol("waveform", accessibilityDescription: "Audio file",
                                   pointSize: 40, weight: .thin)
         icon.contentTintColor = Theme.dimText
@@ -57,7 +52,6 @@ final class MediaPreviewView: FlatView {
         transport.isHidden = true
 
         addSubview(icon)
-        addSubview(playerView)
         addSubview(transport)
         addSubview(caption)
         NSLayoutConstraint.activate([
@@ -66,13 +60,6 @@ final class MediaPreviewView: FlatView {
             caption.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
             caption.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
         ])
-
-        videoConstraints = [
-            playerView.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            playerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            playerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            playerView.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -12),
-        ]
 
         // The bar keeps its natural width and sits low in the pane, where the
         // controls over a video would be, rather than centred in open space.
@@ -94,6 +81,25 @@ final class MediaPreviewView: FlatView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    private func makeVideoView() -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.controlsStyle = .inline
+        playerView.videoGravity = .resizeAspect
+        playerView.showsFullScreenToggleButton = true
+        playerView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(playerView)
+        videoConstraints = [
+            playerView.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            playerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            playerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            playerView.bottomAnchor.constraint(equalTo: caption.topAnchor, constant: -12),
+        ]
+
+        NSLayoutConstraint.activate(videoConstraints)
+        self.playerView = playerView
+        return playerView
+    }
+
     /// Build a player for `url`. Playback never starts on its own: opening a
     /// file in an editor should not make noise.
     func show(url: URL, caption text: String, isVideo: Bool) {
@@ -105,14 +111,12 @@ final class MediaPreviewView: FlatView {
 
         icon.isHidden = isVideo
         transport.isHidden = isVideo
-        playerView.isHidden = !isVideo
-        NSLayoutConstraint.deactivate(isVideo ? audioConstraints : videoConstraints)
-        NSLayoutConstraint.activate(isVideo ? videoConstraints : audioConstraints)
+        if !isVideo { NSLayoutConstraint.activate(audioConstraints) }
 
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
         if isVideo {
-            playerView.player = player
+            makeVideoView().player = player
         } else {
             transport.player = player
         }
@@ -129,8 +133,12 @@ final class MediaPreviewView: FlatView {
     /// file keeps playing, from a tab nobody is looking at.
     func clear() {
         statusObservation = nil
-        playerView.player?.pause()
-        playerView.player = nil
+        playerView?.player?.pause()
+        playerView?.player = nil
+        NSLayoutConstraint.deactivate(videoConstraints + audioConstraints)
+        videoConstraints.removeAll()
+        playerView?.removeFromSuperview()
+        playerView = nil
         transport.player?.pause()
         transport.player = nil
         loadedURL = nil
@@ -141,7 +149,7 @@ final class MediaPreviewView: FlatView {
     }
 
     private func describe(_ item: AVPlayerItem, isVideo: Bool) {
-        guard item === (playerView.player ?? transport.player)?.currentItem else { return }
+        guard item === (playerView?.player ?? transport.player)?.currentItem else { return }
         switch item.status {
         case .readyToPlay:
             var parts = [baseCaption]
@@ -175,9 +183,9 @@ final class MediaPreviewView: FlatView {
             : String(format: "%d:%02d", minutes, seconds)
     }
 
-    var hasPlayerForTesting: Bool { playerView.player != nil || transport.player != nil }
+    var hasPlayerForTesting: Bool { playerView?.player != nil || transport.player != nil }
     /// Audio must never build an `AVPlayerView`: that is what draws the slab.
-    var usesSystemPlayerViewForTesting: Bool { playerView.player != nil }
+    var usesSystemPlayerViewForTesting: Bool { playerView != nil }
     var captionForTesting: String { caption.stringValue }
     var showsAudioLayoutForTesting: Bool { !icon.isHidden }
     var transportFrameForTesting: NSRect { transport.frame }

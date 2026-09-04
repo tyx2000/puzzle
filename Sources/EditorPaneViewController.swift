@@ -98,6 +98,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Shown instead of the text view when the active document is an EPUB.
     private var epubReader: EPUBReaderView?
     private var pdfPreview: PDFPreviewView?
+    private var pdfThumbnailsVisible = true
+    private var epubContentsVisible = true
     /// Shown instead of the text view for a file-history table tab.
     private var fileHistoryView: FileHistoryView?
 
@@ -541,6 +543,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func ensureEPUBReader() -> EPUBReaderView {
         if let epubReader { return epubReader }
         let reader = EPUBReaderView()
+        reader.contentsVisible = epubContentsVisible
         reader.translatesAutoresizingMaskIntoConstraints = false
         reader.isHidden = true
         view.addSubview(reader)
@@ -557,6 +560,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func ensurePDFPreview() -> PDFPreviewView {
         if let pdfPreview { return pdfPreview }
         let preview = PDFPreviewView()
+        preview.thumbnailsVisible = pdfThumbnailsVisible
         preview.translatesAutoresizingMaskIntoConstraints = false
         preview.isHidden = true
         view.addSubview(preview)
@@ -782,8 +786,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             activeSourceRange: markdownReveal)
 
         if !doc.isPDF {
-            pdfPreview?.clear()
-            pdfPreview?.isHidden = true
+            releasePDFPreview()
         }
         // Synthetic file-history tabs use a real four-column table. Keep this
         // check ahead of images/text so only one primary content view is shown.
@@ -794,23 +797,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             hidePreviews()
             scrollView.isHidden = true
             showDiffHeader(for: nil)
-        } else if let image = doc.image {
+        } else if let source = doc.previewImage {
             fileHistoryView?.isHidden = true
-            mediaPreview?.clear()
-            mediaPreview?.isHidden = true
-            epubReader?.clear()
-            epubReader?.isHidden = true
+            releaseMediaPreview()
+            releaseEPUBReader()
             let imagePreview = ensureImagePreview()
-            imagePreview.show(image: image, caption: doc.text)
+            imagePreview.show(source: source, caption: doc.text)
             imagePreview.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isMedia {
             fileHistoryView?.isHidden = true
-            imagePreview?.clear()
-            imagePreview?.isHidden = true
-            epubReader?.clear()
-            epubReader?.isHidden = true
+            releaseImagePreview()
+            releaseEPUBReader()
             let mediaPreview = ensureMediaPreview()
             mediaPreview.show(url: url, caption: doc.text, isVideo: doc.isVideoMedia)
             mediaPreview.isHidden = false
@@ -818,12 +817,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             showDiffHeader(for: nil)
         } else if doc.isPDF {
             fileHistoryView?.isHidden = true
-            imagePreview?.clear()
-            imagePreview?.isHidden = true
-            mediaPreview?.clear()
-            mediaPreview?.isHidden = true
-            epubReader?.clear()
-            epubReader?.isHidden = true
+            releaseImagePreview()
+            releaseMediaPreview()
+            releaseEPUBReader()
             let preview = ensurePDFPreview()
             preview.show(url: url, caption: doc.text)
             preview.isHidden = false
@@ -834,10 +830,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // falls through to the text path, where it reports itself as an
             // unsupported binary instead of showing an empty reader.
             fileHistoryView?.isHidden = true
-            imagePreview?.clear()
-            imagePreview?.isHidden = true
-            mediaPreview?.clear()
-            mediaPreview?.isHidden = true
+            releaseImagePreview()
+            releaseMediaPreview()
             epubReader?.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
@@ -944,7 +938,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func save() {
         guard let doc = currentDocument, !doc.isReadOnly else { return }
-        persist(doc, notify: true, presentErrors: true)
+        persist(doc, notify: true, presentErrors: true, overwriteDiskChanges: true)
     }
 
     /// Write the buffer the user is leaving, the way Zed's
@@ -954,7 +948,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Silent by design. A save that cannot go through — the file changed on
     /// disk underneath the edit — leaves the document dirty and says nothing,
     /// rather than throwing a modal at someone who has already looked away.
-    /// They get the question the next time they save or close it deliberately.
+    /// Explicit Save writes the current buffer; closing can ask about a conflict.
     func autosaveIfNeeded() {
         guard let document = currentDocument, document.isModified,
               !document.isReadOnly, !document.isVirtual else { return }
@@ -963,12 +957,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     @discardableResult
     private func persist(_ document: Document, notify: Bool,
-                         presentErrors: Bool) -> Bool {
+                         presentErrors: Bool, overwriteDiskChanges: Bool = false) -> Bool {
         guard document.isModified, !document.isReadOnly else { return true }
-        // Something else wrote this file while it was being edited. Saving would
-        // replace their version; reloading would replace the user's edits. Only
-        // the user can choose, so ask before either.
-        if document.hasDiskConflict || document.diskChangedSinceLastSync {
+        // Cmd+S explicitly chooses the current buffer. Background saves still
+        // defer external conflicts, and closing offers a choice before leaving.
+        if !overwriteDiskChanges && (document.hasDiskConflict || document.diskChangedSinceLastSync) {
             guard presentErrors else { return false }
             switch resolveDiskConflict(for: document) {
             case .overwrite: document.resolveDiskConflict()
@@ -1183,11 +1176,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         blameWork = nil
         blameCache.removeAll()
         blameOrder.removeAll()
-        imagePreview?.clear()
-        mediaPreview?.clear()
-        epubReader?.clear()
+        releaseImagePreview()
+        releaseMediaPreview()
+        releaseEPUBReader()
         textView.updateCodeBlocks([], resetFolds: false)
-        pdfPreview?.clear()
+        releasePDFPreview()
         textView.updateJSXTagMatches([])
         detachFromDocument()
         let urls = openURLs
@@ -1201,27 +1194,51 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         urls.forEach { onTabClosed?($0) }
     }
 
-    /// Put both preview views away. They are mutually exclusive with the text
-    /// view and with each other, and clearing is what stops a video decoding
-    /// (and an audio file playing) once its tab is no longer the visible one.
-    private func hidePreviews() {
-        pdfPreview?.clear()
-        pdfPreview?.isHidden = true
+    /// Tear down inactive previews, including framework-owned view caches.
+    private func releaseImagePreview() {
         imagePreview?.clear()
         imagePreview?.isHidden = true
+        imagePreview?.removeFromSuperview()
+        imagePreview = nil
+    }
+
+    private func releaseMediaPreview() {
         mediaPreview?.clear()
         mediaPreview?.isHidden = true
+        mediaPreview?.removeFromSuperview()
+        mediaPreview = nil
+    }
+
+    private func releaseEPUBReader() {
+        if let epubReader { epubContentsVisible = epubReader.contentsVisible }
         epubReader?.clear()
         epubReader?.isHidden = true
+        epubReader?.removeFromSuperview()
+        epubReader = nil
+    }
+
+    private func releasePDFPreview() {
+        if let pdfPreview { pdfThumbnailsVisible = pdfPreview.thumbnailsVisible }
+        pdfPreview?.clear()
+        pdfPreview?.isHidden = true
+        pdfPreview?.removeFromSuperview()
+        pdfPreview = nil
+    }
+
+    private func hidePreviews() {
+        releasePDFPreview()
+        releaseImagePreview()
+        releaseMediaPreview()
+        releaseEPUBReader()
     }
 
     /// Release view-owned payloads that are not currently visible. Documents
     /// themselves are handled separately by `DocumentStore`.
     func releaseTransientMemory() {
-        if imagePreview?.isHidden != false { imagePreview?.clear() }
-        if mediaPreview?.isHidden != false { mediaPreview?.clear() }
-        if epubReader?.isHidden != false { epubReader?.clear() }
-        if pdfPreview?.isHidden != false { pdfPreview?.clear() }
+        if imagePreview?.isHidden != false { releaseImagePreview() }
+        if mediaPreview?.isHidden != false { releaseMediaPreview() }
+        if epubReader?.isHidden != false { releaseEPUBReader() }
+        if pdfPreview?.isHidden != false { releasePDFPreview() }
         if findBar.isHidden { findBar.clearHighlights() }
     }
 

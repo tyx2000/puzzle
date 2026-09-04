@@ -295,12 +295,17 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         load(chapter: chapterIndex + 1)
     }
 
-    @objc private func toggleContents() {
-        showsContents.toggle()
-        contentsWidth.constant = showsContents ? 240 : 0
-        contentsScroll.isHidden = !showsContents
-        needsLayout = true
+    var contentsVisible: Bool {
+        get { showsContents }
+        set {
+            showsContents = newValue
+            contentsWidth.constant = showsContents ? 240 : 0
+            contentsScroll.isHidden = !showsContents
+            needsLayout = true
+        }
     }
+
+    @objc private func toggleContents() { contentsVisible.toggle() }
 
     @objc private func contentsRowClicked() {
         guard let book else { return }

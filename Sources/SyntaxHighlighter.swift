@@ -189,6 +189,80 @@ final class SyntaxHighlighter {
 
     // MARK: Instance
 
+    private var previousTree: OpaquePointer?
+    private var previousBytes: [UInt8] = []
+    private weak var previousStorage: NSTextStorage?
+    private(set) var incrementalParseCount = 0
+    private(set) var fullParseCount = 0
+    private(set) var lastParseDuration: TimeInterval = 0
+
+    func discardParseTree() {
+        if let previousTree { ts_tree_delete(previousTree) }
+        previousTree = nil
+        previousBytes = []
+        previousStorage = nil
+    }
+
+    func discardUnownedParseTree() {
+        if previousStorage == nil { discardParseTree() }
+    }
+
+    /// Tree-sitter points use UTF-8 byte columns, not UTF-16 offsets.
+    private static func point(in bytes: [UInt8], at offset: Int) -> TSPoint {
+        var row: UInt32 = 0
+        var column: UInt32 = 0
+        for byte in bytes.prefix(offset) {
+            if byte == 10 { row += 1; column = 0 } else { column += 1 }
+        }
+        return TSPoint(row: row, column: column)
+    }
+
+    private func parse(bytes: UnsafeBufferPointer<UInt8>, cstr: UnsafePointer<CChar>,
+                       storage: NSTextStorage) -> OpaquePointer? {
+        if previousStorage !== storage { discardParseTree() }
+        if let previousTree, previousBytes.elementsEqual(bytes) { return previousTree }
+        let nextBytes = Array(bytes)
+        if let previousTree {
+            var start = 0
+            let sharedCount = min(previousBytes.count, nextBytes.count)
+            while start < sharedCount && previousBytes[start] == nextBytes[start] { start += 1 }
+            // A changed scalar may share leading bytes with the old scalar.
+            while start > 0 && start < nextBytes.count && nextBytes[start] & 0xC0 == 0x80 {
+                start -= 1
+            }
+            var oldEnd = previousBytes.count
+            var newEnd = nextBytes.count
+            while oldEnd > start && newEnd > start && previousBytes[oldEnd - 1] == nextBytes[newEnd - 1] {
+                oldEnd -= 1; newEnd -= 1
+            }
+            while newEnd < nextBytes.count && nextBytes[newEnd] & 0xC0 == 0x80 {
+                oldEnd += 1; newEnd += 1
+            }
+            var edit = TSInputEdit(start_byte: UInt32(start), old_end_byte: UInt32(oldEnd),
+                new_end_byte: UInt32(newEnd), start_point: Self.point(in: previousBytes, at: start),
+                old_end_point: Self.point(in: previousBytes, at: oldEnd),
+                new_end_point: Self.point(in: nextBytes, at: newEnd))
+            ts_tree_edit(previousTree, &edit)
+            incrementalParseCount += 1
+        } else {
+            fullParseCount += 1
+        }
+        let started = CFAbsoluteTimeGetCurrent()
+        let tree = ts_parser_parse_string(parser, previousTree, cstr, UInt32(bytes.count))
+        lastParseDuration = CFAbsoluteTimeGetCurrent() - started
+        if let previousTree { ts_tree_delete(previousTree) }
+        previousTree = tree
+        previousBytes = tree == nil ? [] : nextBytes
+        previousStorage = tree == nil ? nil : storage
+        return tree
+    }
+
+    var treeDescriptionForTesting: String? {
+        guard let previousTree, let string = ts_node_string(ts_tree_root_node(previousTree)) else { return nil }
+        defer { free(string) }
+        return String(cString: string)
+    }
+
     private let parser: OpaquePointer
     private let definition: LanguageDefinition
     private var queries: [OpaquePointer] = []
@@ -239,6 +313,7 @@ final class SyntaxHighlighter {
     }
 
     deinit {
+        discardParseTree()
         queries.forEach { ts_query_delete($0) }
         ts_parser_delete(parser)
     }
@@ -253,12 +328,13 @@ final class SyntaxHighlighter {
     func highlight(text: String, storage: NSTextStorage,
                    fullRange: NSRange) -> [JSXTagMatch] {
         let byteCount = text.utf8.count
-        guard byteCount > 0 else { return [] }
+        guard byteCount > 0, byteCount <= 500_000 else {
+            discardParseTree()
+            return []
+        }
         var tagMatches: [JSXTagMatch] = []
-        // One pass over the text, not two: `Array(text.utf8)` copied the whole
-        // file and `withCString` copied it again, so a 500 KB file allocated a
-        // megabyte of transient buffers on every highlight. The C string that
-        // tree-sitter needs is also the byte buffer the predicates need.
+        // Queries share the parser's UTF-8 buffer. Only the last parsed source
+        // is retained, bounded by the highlighting limit, for the next edit.
         text.withCString { cstr in
             cstr.withMemoryRebound(to: UInt8.self, capacity: byteCount) { raw in
                 let bytes = UnsafeBufferPointer(start: raw, count: byteCount)
@@ -274,9 +350,7 @@ final class SyntaxHighlighter {
                            storage: NSTextStorage,
                            fullRange: NSRange) -> [JSXTagMatch] {
         let byteCount = bytes.count
-        guard let tree = ts_parser_parse_string(
-            parser, nil, cstr, UInt32(byteCount)) else { return [] }
-        defer { ts_tree_delete(tree) }
+        guard let tree = parse(bytes: bytes, cstr: cstr, storage: storage) else { return [] }
         let rootNode = ts_tree_root_node(tree)
 
         // byte-offset -> UTF-16 offset mapping (identity fast-path for ASCII).

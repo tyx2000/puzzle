@@ -40,6 +40,8 @@ enum RegressionTests {
         try testPreviewPayloadsAreReleased()
         try testMediaFilesPlayInsteadOfLoading()
         try testPDFPreview()
+        try testIncrementalParsing()
+        try testImageDownsampling()
         try testEPUBReading()
         try testMarkdownLiveEditing()
         try testFindMatchesAreComplete()
@@ -1424,10 +1426,45 @@ enum RegressionTests {
         let notAutoSaved = try String(contentsOf: url, encoding: .utf8)
         try expect(notAutoSaved == "before\n" && document.isModified,
                    "editor changes were written without an explicit save")
+        _ = store.reloadExternalChanges(at: [directory])
+        try expect(!document.hasDiskConflict && document.isModified,
+                   "a directory notification misclassified a local edit as a disk conflict")
         pane.save()
         let manuallySaved = try String(contentsOf: url, encoding: .utf8)
         try expect(manuallySaved == "visible outside Puzzle\n" && !document.isModified,
                    "manual editor save did not persist the buffer")
+
+        // Explicit Save is authoritative for both observed conflicts and writes
+        // that arrive before the file monitor has delivered its notification.
+        for observed in [true, false] {
+            document.storage.setAttributedString(NSAttributedString(string: "my current content\n"))
+            document.markLocalEdit()
+            try "external content\n".write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)],
+                                                 ofItemAtPath: url.path)
+            if observed {
+                _ = store.reloadExternalChanges(at: [url])
+                try expect(document.hasDiskConflict, "external write was not detected")
+            } else {
+                try expect(document.diskChangedSinceLastSync, "unobserved disk write was not detected")
+            }
+            pane.autosaveIfNeeded()
+            let backgroundSaved = try String(contentsOf: url, encoding: .utf8)
+            try expect(backgroundSaved == "external content\n",
+                       "background autosave overwrote a conflicting disk version")
+            pane.save()
+            let explicitlySaved = try String(contentsOf: url, encoding: .utf8)
+            try expect(explicitlySaved == "my current content\n",
+                       "Cmd+S did not write the current buffer over the disk version")
+            try expect(!document.isModified && !document.hasDiskConflict,
+                       "manual save left dirty/conflict state behind")
+        }
+        // A delayed event after saving must not turn the next edit into a conflict.
+        document.storage.setAttributedString(NSAttributedString(string: "visible outside Puzzle\n"))
+        document.markLocalEdit()
+        _ = store.reloadExternalChanges(at: [directory])
+        try expect(!document.hasDiskConflict, "delayed save notification created a conflict")
+        pane.save()
 
         document.storage.replaceCharacters(
             in: NSRange(location: 0, length: document.storage.length),
@@ -1535,16 +1572,17 @@ enum RegressionTests {
     }
 
     private static func testPreviewPayloadsAreReleased() throws {
-        let imagePreview = ImagePreviewView(frame: .zero)
+        let imagePreview = ImagePreviewView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         imagePreview.show(image: NSImage(size: NSSize(width: 100, height: 50)),
                           caption: "first")
         imagePreview.show(image: NSImage(size: NSSize(width: 50, height: 100)),
                           caption: "second")
-        try expect(imagePreview.dynamicConstraintCountForTesting == 3,
-                   "image preview accumulated sizing constraints")
+        imagePreview.layoutSubtreeIfNeeded()
+        try expect(imagePreview.imageFrameForTesting.size == NSSize(width: 50, height: 100),
+                   "image preview lost natural size or aspect ratio when changing images")
         imagePreview.clear()
         try expect(!imagePreview.hasImageForTesting
-                   && imagePreview.dynamicConstraintCountForTesting == 0,
+                   && imagePreview.imageFrameForTesting == .zero,
                    "clearing an image preview retained its bitmap or constraints")
 
     }
@@ -1631,7 +1669,11 @@ enum RegressionTests {
         preview.show(url: videoURL, caption: video.text, isVideo: true)
         try expect(player && preview.loadedURL == videoURL,
                    "re-activating the same tab rebuilt the player")
+        preview.show(url: audioURL, caption: audio.text, isVideo: false)
+        try expect(!preview.usesSystemPlayerViewForTesting,
+                   "video view survived the switch back to audio")
         preview.clear()
+        try expect(!preview.usesSystemPlayerViewForTesting, "cleared preview retained video view")
         try expect(!preview.hasPlayerForTesting && preview.loadedURL == nil,
                    "clearing a media preview left the player decoding")
 
@@ -1690,7 +1732,7 @@ enum RegressionTests {
         window.setContentSize(NSSize(width: 800, height: 600))
         pane.view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        guard let preview = pane.pdfPreviewForTesting else {
+        guard var preview = pane.pdfPreviewForTesting else {
             throw Failure(description: "opening a PDF did not create the reader")
         }
         try expect(!preview.isHidden && preview.pageCountForTesting == 2
@@ -1716,6 +1758,9 @@ enum RegressionTests {
         try expect(preview.isHidden && preview.pageCountForTesting == 0,
                    "leaving a PDF retained visible pages or rendering resources")
         pane.activate(index: 0)
+        try expect(preview.superview == nil, "inactive PDF view remained attached")
+        preview = pane.pdfPreviewForTesting!
+        try expect(!preview.showsThumbnailsForTesting, "PDF sidebar preference was lost on rebuild")
         try expect(preview.pageIndexForTesting == 1, "PDF reading position was not restored")
         let invalid = directory.appendingPathComponent("invalid.pdf")
         try Data("not a PDF".utf8).write(to: invalid)
@@ -1732,6 +1777,130 @@ enum RegressionTests {
         pane.activate(index: 0)
         try expect(!preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 2,
                    "returning from a locked PDF did not restore readable pages")
+    }
+
+    private static func testIncrementalParsing() throws {
+        let definition = LanguageDefinition(name: "json", language: tree_sitter_json()!,
+            querySources: ["(string) @string (number) @number (true) @constant.builtin"],
+            extensions: ["json"], display: "JSON")
+        let incremental = SyntaxHighlighter(definition: definition)!
+        let storage = NSTextStorage()
+        let samples = ["{\"你好\": [1, 2], \"emoji\": \"😀\"}",
+                       "{\"你妹\": [1, 23],\n \"emoji\": \"😁\"}",
+                       "{\"你妹\": [1],\n \"emoji\": true}",
+                       "{\"你妹\": [1],\n \"emoji\": true", "{}", "", "{\"值\": 9}"]
+        for text in samples {
+            storage.setAttributedString(NSAttributedString(string: text, attributes:
+                Theme.textAttributes(color: Theme.foreground)))
+            let range = NSRange(location: 0, length: storage.length)
+            incremental.highlight(text: text, storage: storage, fullRange: range)
+            let fresh = SyntaxHighlighter(definition: definition)!
+            let expected = NSTextStorage(string: text, attributes: Theme.textAttributes(color: Theme.foreground))
+            fresh.highlight(text: text, storage: expected, fullRange: range)
+            try expect(incremental.treeDescriptionForTesting == fresh.treeDescriptionForTesting,
+                       "incremental tree differs after Unicode/newline/deletion edits")
+            try expect(storage.isEqual(to: expected), "incremental highlight differs from fresh parse")
+        }
+        try expect(incremental.incrementalParseCount >= 4, "edits never reused their tree")
+        let count = incremental.fullParseCount + incremental.incrementalParseCount
+        incremental.highlight(text: storage.string, storage: storage,
+                              fullRange: NSRange(location: 0, length: storage.length))
+        try expect(count == incremental.fullParseCount + incremental.incrementalParseCount,
+                   "unchanged source was parsed again")
+        let other = NSTextStorage(string: "[1]")
+        incremental.highlight(text: other.string, storage: other,
+                              fullRange: NSRange(location: 0, length: other.length))
+        try expect(incremental.fullParseCount == 3, "a different buffer reused the old tree")
+        incremental.discardParseTree()
+        try expect(incremental.treeDescriptionForTesting == nil, "memory pressure retained a tree")
+    }
+
+    private static func testImageDownsampling() throws {
+        let directory = try temporaryDirectory("image-downsampling")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("large.jpg")
+        try autoreleasepool {
+            let image = NSImage(size: NSSize(width: 4096, height: 2048), flipped: false) { rect in
+                NSColor.systemOrange.setFill(); rect.fill(); return true
+            }
+            let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
+            try bitmap.representation(using: .jpeg, properties: [:])!.write(to: url)
+        }
+        try testImageWindowResize(url: url)
+        let document = Document(url: url)
+        try expect(document.isImage && document.estimatedMemoryCost < 4096,
+                   "image document retained decoded bitmap bytes")
+        let preview = ImagePreviewView(frame: NSRect(x: 0, y: 0, width: 500, height: 350))
+        preview.show(source: document.previewImage!, caption: document.text)
+        preview.layoutSubtreeIfNeeded()
+        let small = preview.decodedPixelsForTesting
+        try expect(small > 0 && small < 2_000_000, "small viewport decoded an oversized bitmap")
+        preview.setFrameSize(NSSize(width: 1400, height: 900))
+        preview.needsLayout = true
+        preview.layoutSubtreeIfNeeded()
+        try expect(preview.decodedPixelsForTesting == small,
+                   "resize decoded synchronously instead of scaling the existing frame")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        try expect(preview.decodedPixelsForTesting > small, "enlarging image did not increase detail")
+        preview.setFrameSize(NSSize(width: 500, height: 350))
+        preview.needsLayout = true
+        preview.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        try expect(preview.decodedPixelsForTesting == small, "shrinking retained oversized bitmap")
+        preview.clear()
+        try expect(preview.decodedPixelsForTesting == 0, "clearing retained bitmap")
+
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        autoreleasepool { pane.open(url: url); pane.view.layoutSubtreeIfNeeded() }
+        weak let oldPreview = pane.view.subviews.first { $0 is ImagePreviewView }
+        let text = directory.appendingPathComponent("text.txt")
+        try Data("text".utf8).write(to: text)
+        autoreleasepool {
+            pane.open(url: text)
+            pane.view.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(oldPreview == nil, "leaving image tab retained preview hierarchy")
+        pane.prepareForClose()
+    }
+
+    private static func testImageWindowResize(url: URL) throws {
+        let workspace = WorkspaceWindowController()
+        let window = workspace.window!
+        defer { workspace.editor.activePaneForTesting?.prepareForClose(); window.close() }
+        let visible = window.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let initial = NSRect(x: visible.minX + 40, y: visible.minY + 40,
+                             width: min(1000, visible.width - 80),
+                             height: min(600, visible.height - 80))
+        window.setFrame(initial, display: false)
+        workspace.editor.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        try expect(abs(window.frame.width - initial.width) < 1
+                    && abs(window.frame.height - initial.height) < 1,
+                   "opening an image changed the window frame: \(window.frame), expected \(initial)")
+        let handles = window.contentView!.subviews.first { $0 is WindowResizeHandleView }!
+        for edge: WindowResizeHandleView.Edges in [.left, .right, .top, .bottom] {
+            window.setFrame(initial, display: false)
+            window.contentView?.layoutSubtreeIfNeeded()
+            let requested = WindowResizeHandleView.resizedFrame(initial, edges: edge,
+                deltaX: edge == .left ? 80 : -80, deltaY: edge == .bottom ? 60 : -60,
+                minimumSize: window.minSize)
+            window.setFrame(requested, display: true)
+            window.contentView?.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            try expect(abs(window.frame.width - requested.width) < 1
+                        && abs(window.frame.height - requested.height) < 1
+                        && abs(window.frame.minX - requested.minX) < 1
+                        && abs(window.frame.minY - requested.minY) < 1,
+                       "image layout overrode edge resize or moved the window: \(window.frame), expected \(requested)")
+            let point = edge == .top ? NSPoint(x: handles.frame.midX, y: handles.frame.maxY - 2)
+                : edge == .bottom ? NSPoint(x: handles.frame.midX, y: handles.frame.minY + 2)
+                : edge == .left ? NSPoint(x: handles.frame.minX + 2, y: handles.frame.midY)
+                : NSPoint(x: handles.frame.maxX - 2, y: handles.frame.midY)
+            try expect(handles.hitTest(point) === handles, "image intercepted a window resize edge")
+        }
     }
 
     // MARK: - EPUB
