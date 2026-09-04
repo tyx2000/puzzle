@@ -5328,5 +5328,30 @@ enum RegressionTests {
         try expect(storage.string == swift,
                    "visual folding changed the shared document text")
         try expect(textView.isFolded(blocks[0]), "fold state was not reflected in the gutter model")
+
+        // Searching inside a folded block opens it. Marking the result where it
+        // lay would have drawn a rule across the whole collapsed line: folded
+        // text has no glyph run of its own to underline.
+        let hiddenMatch = swiftSource.range(of: "nested")
+        try expect(NSIntersectionRange(hiddenMatch, blocks[0].hiddenRange).length > 0,
+                   "the fixture's match is not inside the folded block")
+        let bar = FindBarView(frame: .zero)
+        bar.attach(to: textView)
+        bar.setQuery("nested")
+        try expect(!textView.isFolded(blocks[0]),
+                   "a search result inside a fold left the block collapsed")
+        layout.ensureLayout(for: container)
+        try expect(!layout.isCharacterHidden(at: hiddenMatch.location),
+                   "the result stayed hidden after its fold was opened")
+        let rules = textView.matchHighlightRectsForTesting()
+        try expect(rules.count == 1, "\(rules.count) rules for one visible result")
+        try expect(rules[0].width < container.size.width / 2,
+                   "the rule is \(rules[0].width)pt wide: it spans the line, not the match")
+
+        // A fold with no result in it is left alone.
+        textView.toggleFold(blocks[1])
+        bar.setQuery("after")
+        try expect(textView.isFolded(blocks[1]),
+                   "searching opened a fold that held no result")
     }
 }

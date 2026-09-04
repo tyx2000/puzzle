@@ -322,6 +322,26 @@ final class PuzzleTextView: NSTextView {
         refreshFoldingDisplay()
     }
 
+    /// Open every fold hiding one of `ranges`, and say whether anything moved.
+    ///
+    /// A search result inside a fold has no geometry to mark — its glyphs are
+    /// null — and a result nobody can see is not a result. Finding one opens
+    /// the block it is in, which is what the user would have done by hand.
+    @discardableResult
+    func revealFolds(covering ranges: [NSRange]) -> Bool {
+        guard let foldingManager, !ranges.isEmpty else { return false }
+        var opened = false
+        for block in codeBlocks where foldingManager.isFolded(block) {
+            guard ranges.contains(where: {
+                NSIntersectionRange($0, block.hiddenRange).length > 0
+            }) else { continue }
+            foldingManager.toggle(block)
+            opened = true
+        }
+        if opened { refreshFoldingDisplay() }
+        return opened
+    }
+
     func unfoldAllCodeBlocks() {
         foldingManager?.unfoldAll()
         refreshFoldingDisplay()
@@ -987,7 +1007,12 @@ final class PuzzleTextView: NSTextView {
             let clamped = NSIntersectionRange(range,
                                               NSRange(location: 0, length: (string as NSString).length))
             guard clamped.length > 0,
-                  NSIntersectionRange(clamped, visibleCharacters).length > 0 else { continue }
+                  NSIntersectionRange(clamped, visibleCharacters).length > 0,
+                  // Hidden text — a fold that stayed shut, Markdown syntax the
+                  // renderer suppressed — has no glyph run to underline, and
+                  // asking for one back gives the whole line fragment.
+                  foldingManager?.isCharacterHidden(at: clamped.location) != true
+            else { continue }
             let glyphRange = layoutManager.glyphRange(forCharacterRange: clamped,
                                                       actualCharacterRange: nil)
             guard glyphRange.length > 0 else { continue }

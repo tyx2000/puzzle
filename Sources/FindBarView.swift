@@ -364,6 +364,10 @@ final class FindBarView: FlatView {
                 searchStart = found.location + max(1, found.length)
             }
         }
+        // A result inside a collapsed block is opened rather than marked in
+        // place: folded text has no glyphs to underline, and a result nobody
+        // can see is not a result.
+        tv.revealFolds(covering: matches)
         if !matches.isEmpty {
             // Start from the match nearest the caret.
             let caret = tv.selectedRange().location
