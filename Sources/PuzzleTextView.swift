@@ -1141,6 +1141,35 @@ final class PuzzleTextView: NSTextView {
         super.drawInsertionPoint(in: caretRect(from: rect), color: color, turnedOn: flag)
     }
 
+    /// Lay the caret's own line out before the caret is placed on it.
+    ///
+    /// Non-contiguous layout is on, so TextKit is free to leave a freshly
+    /// edited line unlaid until something asks. NSTextView does not ask: it
+    /// reads the insertion point's rect straight from the layout manager and
+    /// gets the stale answer — which is why Return on an indented line drew the
+    /// caret at column zero, on the line above, until the next keystroke forced
+    /// the layout and it jumped to where it had been all along.
+    override func updateInsertionPointStateAndRestartTimer(_ restartFlag: Bool) {
+        if let layoutManager, layoutManager.allowsNonContiguousLayout {
+            let source = string as NSString
+            let caret = min(selectedRange().location, source.length)
+            layoutManager.ensureLayout(
+                forCharacterRange: source.lineRange(for: NSRange(location: caret, length: 0)))
+        }
+        super.updateInsertionPointStateAndRestartTimer(restartFlag)
+    }
+
+    /// Home and End. AppKit binds them to the document ends, which in an editor
+    /// is what ⌘↑ and ⌘↓ are for; every other editor on this machine puts them
+    /// on the line's ends, and those keep their own bindings.
+    override func scrollToBeginningOfDocument(_ sender: Any?) {
+        moveToBeginningOfLine(sender)
+    }
+
+    override func scrollToEndOfDocument(_ sender: Any?) {
+        moveToEndOfLine(sender)
+    }
+
     override func mouseDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers == [.command],

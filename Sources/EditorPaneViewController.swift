@@ -337,10 +337,61 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     /// The little diff behind a gutter mark.
+    /// Put one gutter mark's lines back the way HEAD has them.
+    ///
+    /// Edited through the text view rather than the storage, so this is one
+    /// ⌘Z away like any other edit, and the marks, the tab's modified dot and
+    /// the autosave that follows all behave as they do for typing.
+    @discardableResult
+    func revertGitChange(_ change: GitLineChanges.Change) -> Bool {
+        guard let document = currentDocument, !document.isReadOnly else { return false }
+        let text = textView.string as NSString
+        let index = document.lineIndex
+        func start(ofLine line: Int) -> Int {
+            index.start(ofLine: max(1, min(line, index.lineCount + 1)))
+        }
+        let target: NSRange
+        switch change.kind {
+        case .added, .modified:
+            let from = start(ofLine: change.lines.lowerBound)
+            let to = start(ofLine: change.lines.upperBound + 1)
+            target = NSRange(location: from, length: max(0, to - from))
+        case .deleted:
+            // The removed lines belonged above the line the mark is pinned to,
+            // so this is an insertion, not a replacement.
+            target = NSRange(location: start(ofLine: change.lines.lowerBound), length: 0)
+        }
+        guard NSMaxRange(target) <= text.length else { return false }
+        var replacement = change.removed.joined(separator: "\n")
+        // Keep the file's line structure: a replaced run of whole lines ends
+        // with a terminator, unless it was the last line and that line had
+        // none of its own.
+        if !replacement.isEmpty {
+            let replacedTerminator = target.length > 0
+                && text.character(at: NSMaxRange(target) - 1) == 0x0A
+            if replacedTerminator || target.length == 0 { replacement += "\n" }
+        }
+        // Through `insertText`, the same door typing comes through: it asks the
+        // delegate, opens and closes one undo group, marks the document, and
+        // leaves the caret where a person editing that line would have left it.
+        // Calling `shouldChangeText` as well would register the change twice
+        // and the undo would put the lines back twice over.
+        guard textView.isEditable else { return false }
+        textView.insertText(replacement, replacementRange: target)
+        textView.setSelectedRange(NSRange(location: target.location, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
+        return true
+    }
+
     private func showGitChange(_ change: GitLineChanges.Change, from rect: NSRect) {
         guard let ruler = scrollView.verticalRulerView else { return }
         gitChangePopover?.close()
         let controller = GitChangePopoverController(change: change)
+        controller.canRevert = currentDocument.map { !$0.isReadOnly } ?? false
+        controller.onRevert = { [weak self] in
+            self?.gitChangePopover?.close()
+            self?.revertGitChange(change)
+        }
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = controller
@@ -459,6 +510,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     // MARK: - Regression-test surface
 
     var gitLineChangesForTesting: [GitLineChanges.Change] { gitLineChanges }
+    var gitChangePopoverSizeForTesting: NSSize? { gitChangePopover?.contentSize }
+    var gitChangePopoverControllerForTesting: GitChangePopoverController? {
+        gitChangePopover?.contentViewController as? GitChangePopoverController
+    }
+    var gitChangePopoverContentForTesting: String? {
+        (gitChangePopover?.contentViewController as? GitChangePopoverController)?
+            .contentForTesting
+    }
     var editorBackgroundForTesting: NSColor { textView.backgroundColor }
     var diffHeaderForTesting: DiffHeaderView { diffHeader }
     var verticalScrollerForTesting: NSScroller? { scrollView.verticalScroller }
@@ -470,6 +529,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: 0, length: textView.string.count))
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
+    var textViewForTesting: PuzzleTextView { textView }
     @discardableResult
     func focusEditorForTesting() -> Bool { view.window?.makeFirstResponder(textView) ?? false }
     func insertTextForTesting(_ text: String) {
@@ -956,9 +1016,57 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     @discardableResult
+    /// Write an edited diff back into the file it describes.
+    ///
+    /// The diff is replayed over the pre-image it was taken against rather than
+    /// merged into the file as it stands: the new side of the diff *is* the
+    /// file the user is asking for, and everything the diff does not mention is
+    /// carried through from the pre-image untouched.
+    private func applyEditedDiff(_ document: Document, presentErrors: Bool) -> Bool {
+        guard let source = document.editableDiff else { return true }
+        let diff = document.text
+        let file = source.directory.appendingPathComponent(source.path)
+        let preimage = GitService.diffPreimage(diff, path: source.path, in: source.directory)
+        guard let updated = UnifiedDiff.apply(diff, to: preimage) else {
+            if presentErrors {
+                let alert = NSAlert()
+                alert.messageText = "Cannot apply this diff"
+                alert.informativeText =
+                    "The hunks no longer line up with \(source.path). Check that "
+                    + "each @@ header still sits above the lines it describes, or "
+                    + "close this tab and edit the file itself."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+            return false
+        }
+        // Through the open buffer when there is one, so the file's own tab,
+        // its gutter marks and its undo stack all see the change arrive.
+        let store = DocumentStore.shared
+        do {
+            if let open = store.cachedDocument(for: file) {
+                open.storage.replaceCharacters(
+                    in: NSRange(location: 0, length: open.storage.length), with: updated)
+                try open.save()
+            } else {
+                try Data(updated.utf8).write(to: file, options: .atomic)
+            }
+        } catch {
+            if presentErrors { self.presentError(error) }
+            return false
+        }
+        document.markSaved()
+        reloadTabs()
+        onDocumentSaved?(file)
+        return true
+    }
+
     private func persist(_ document: Document, notify: Bool,
                          presentErrors: Bool, overwriteDiskChanges: Bool = false) -> Bool {
         guard document.isModified, !document.isReadOnly else { return true }
+        if document.editableDiff != nil {
+            return applyEditedDiff(document, presentErrors: presentErrors)
+        }
         // Cmd+S explicitly chooses the current buffer. Background saves still
         // defer external conflicts, and closing offers a choice before leaving.
         if !overwriteDiskChanges && (document.hasDiskConflict || document.diskChangedSinceLastSync) {

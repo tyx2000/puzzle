@@ -48,6 +48,7 @@ enum RegressionTests {
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
+        try testRevertAndDiffWriteBack()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
         try testMinifiedJSONOpensFormatted()
@@ -3992,10 +3993,64 @@ enum RegressionTests {
 
         // The popover shows what HEAD had and what is there now.
         let popover = GitChangePopoverController(change: modified)
+        popover.canRevert = true
         _ = popover.view
         try expect(popover.contentForTesting.contains("two")
                     && popover.contentForTesting.contains("TWO CHANGED"),
                    "the popover does not show both sides: \(popover.contentForTesting)")
+        try expect(popover.revertButtonForTesting.isHidden == false,
+                   "the popover offers no way to put the change back")
+        // A trailing newline gives the layout manager an empty last line to
+        // place, and the popover grows a blank row above the button that the
+        // top edge has no twin for. Lines are separated, not terminated.
+        try expect(!popover.contentForTesting.hasSuffix("\n"),
+                   "the popover ends on an empty line, so its padding is lopsided")
+        // NSPopover obeys the content view's own layout, not `contentSize`,
+        // whenever that view uses Auto Layout. A scroll view has no intrinsic
+        // size and the Revert button is 44pt wide, so a content view that does
+        // not state its size opens as an empty sliver beside the gutter.
+        let fresh = GitChangePopoverController(change: modified)
+        fresh.canRevert = true
+        _ = fresh.view
+        let bare = fresh.view.fittingSize
+        try expect(bare.width >= GitChangePopoverController.minimumWidth && bare.height >= 60,
+                   "the popover lays out at \(bare) before it is measured")
+        let wanted = fresh.preferredSize
+        let fitting = fresh.view.fittingSize
+        try expect(abs(fitting.width - wanted.width) < 1
+                    && abs(fitting.height - wanted.height) < 1,
+                   "the popover wants \(wanted) but lays out at \(fitting)")
+        // The width follows the content: a one-word change must not open the
+        // same box a long line does.
+        let short = GitChangePopoverController(change: GitLineChanges.Change(
+            kind: .modified, lines: 2...2, removed: ["a"], added: ["b"]))
+        short.canRevert = true
+        _ = short.view
+        let long = GitChangePopoverController(change: GitLineChanges.Change(
+            kind: .modified, lines: 2...2,
+            removed: [String(repeating: "wide ", count: 40)],
+            added: [String(repeating: "wider ", count: 40)]))
+        long.canRevert = true
+        _ = long.view
+        try expect(short.preferredSize.width < long.preferredSize.width,
+                   "every change opens at \(short.preferredSize.width)pt regardless of content")
+        try expect(short.preferredSize.width == GitChangePopoverController.minimumWidth,
+                   "a one-word change opens at \(short.preferredSize.width)pt")
+        try expect(long.preferredSize.width <= 720,
+                   "a long line opened a \(long.preferredSize.width)pt popover")
+        // Pressing Return while editing adds a line with nothing on it. A lone
+        // "+" in the popover reads as one that failed to load, so the line is
+        // named instead.
+        let blank = GitChangePopoverController(change: GitLineChanges.Change(
+            kind: .added, lines: 3...3, removed: [], added: [""]))
+        _ = blank.view
+        try expect(blank.contentForTesting.contains("(blank line)"),
+                   "an added blank line shows as \(blank.contentForTesting.debugDescription)")
+        let spaces = GitChangePopoverController(change: GitLineChanges.Change(
+            kind: .added, lines: 3...3, removed: [], added: ["    "]))
+        _ = spaces.view
+        try expect(spaces.contentForTesting.contains("(whitespace only)"),
+                   "an added whitespace line shows as \(spaces.contentForTesting.debugDescription)")
 
         // Committing clears them.
         _ = GitService.commit("second", in: root)
@@ -4574,6 +4629,54 @@ enum RegressionTests {
         textView.setSelectedRange(NSRange(location: 0, length: 3))
         try expect(textView.duplicateCurrentLine() && textView.string == "a\nb\na\nb\nc",
                    "Command-D over a selection: \(textView.string.debugDescription)")
+
+        // Home and End work on the line, not on the document.
+        textView.string = "one\n    indented line\nthree"
+        textView.setSelectedRange(NSRange(location: 12, length: 0))    // inside "indented"
+        textView.scrollToBeginningOfDocument(nil)
+        try expect(textView.selectedRange().location == 4,
+                   "Home went to \(textView.selectedRange().location), not the line start")
+        textView.scrollToEndOfDocument(nil)
+        try expect(textView.selectedRange().location == 21,
+                   "End went to \(textView.selectedRange().location), not the line end")
+
+        // The caret has to be placed on a line TextKit has actually laid out.
+        // Non-contiguous layout leaves a freshly edited line unlaid until
+        // something asks, and NSTextView does not ask: it read the insertion
+        // point's rect from the layout manager and got the stale answer, which
+        // drew the caret at column zero on the line above until the next
+        // keystroke forced the layout. Measured through a pane, because a bare
+        // text view lays its short buffer out eagerly and never shows this.
+        let caretDirectory = try temporaryDirectory("caret-indent")
+        defer { try? FileManager.default.removeItem(at: caretDirectory) }
+        let caretFile = caretDirectory.appendingPathComponent("indent.swift")
+        let source = "func f() {\n    let value = 1\n}\n"
+        try Data(source.utf8).write(to: caretFile)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: caretFile)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let editor = pane.textViewForTesting
+        _ = window.makeFirstResponder(editor)
+        pane.setCaretForTesting(NSMaxRange((source as NSString).range(of: "let value = 1")))
+        editor.insertNewline(nil)
+        editor.updateInsertionPointStateAndRestartTimer(true)
+        guard let manager = editor.layoutManager, let box = editor.textContainer else {
+            throw Failure(description: "the editor has no layout manager")
+        }
+        let carried = editor.selectedRange().location
+        let carriedGlyph = manager.glyphIndexForCharacter(at: carried)
+        let placed = manager.lineFragmentRect(forGlyphAt: carriedGlyph, effectiveRange: nil)
+        manager.ensureLayout(for: box)
+        let settled = manager.lineFragmentRect(forGlyphAt: carriedGlyph, effectiveRange: nil)
+        try expect(abs(placed.minY - settled.minY) < 0.5,
+                   "the caret was placed at y=\(placed.minY) on a line that lays out at "
+                     + "y=\(settled.minY)")
+        try expect(manager.location(forGlyphAt: carriedGlyph).x > 0,
+                   "the caret sits at column zero on an indented line")
     }
 
     /// The gutter marks the buffer, not the file on disk. They used to appear
@@ -5276,6 +5379,144 @@ enum RegressionTests {
     /// it refreshes, so it can collide with itself over `.git/index.lock` —
     /// "Another git process seems to be running in this repository", from an
     /// app the user only asked to commit.
+    /// The gutter mark's popover can put its own lines back, and an edited diff
+    /// tab is written through to the file it describes.
+    private static func testRevertAndDiffWriteBack() throws {
+        // Replaying a diff over its pre-image, which is what saving a diff tab
+        // does. Context lines come from the diff, not from the pre-image: an
+        // edited context line is an edit like any other.
+        let preimage = "one\ntwo\nthree\nfour\n"
+        let diff = """
+            diff --git a/f.txt b/f.txt
+            index 1111111..2222222 100644
+            --- a/f.txt
+            +++ b/f.txt
+            @@ -1,3 +1,4 @@
+             one
+            -two
+            +TWO
+            +two and a half
+             three
+            """
+        try expect(UnifiedDiff.apply(diff, to: preimage)
+                    == "one\nTWO\ntwo and a half\nthree\nfour\n",
+                   "replaying the diff produced "
+                     + "\(UnifiedDiff.apply(diff, to: preimage) ?? "nil")")
+        try expect(UnifiedDiff.oldBlob(in: diff) == "1111111",
+                   "the pre-image blob was not read off the index header")
+        // A hunk that starts before the lines already emitted cannot be laid
+        // over the file: nothing partial is written.
+        let overlapping = "@@ -3,1 +3,1 @@\n-three\n+THREE\n@@ -1,1 +1,1 @@\n-one\n+ONE\n"
+        try expect(UnifiedDiff.apply(overlapping, to: preimage) == nil,
+                   "out-of-order hunks were applied anyway")
+        try expect(UnifiedDiff.apply("not a diff at all\n", to: preimage) == nil,
+                   "text with no hunks was treated as a diff")
+        // A new file: no pre-image, every line added.
+        try expect(UnifiedDiff.apply("@@ -0,0 +1,2 @@\n+alpha\n+beta\n", to: "")
+                    == "alpha\nbeta\n",
+                   "a new file's diff did not rebuild the file")
+
+        let root = try temporaryDirectory("diff-writeback")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+        try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
+                   "diff fixture init failed")
+        _ = GitService.run(["config", "user.name", "Diff Test"], in: repository)
+        _ = GitService.run(["config", "user.email", "diff@example.invalid"], in: repository)
+        let file = repository.appendingPathComponent("source.txt")
+        let committed = "alpha\nbravo\ncharlie\ndelta\n"
+        try Data(committed.utf8).write(to: file)
+        try expect(GitService.commit("initial", in: repository).code == 0,
+                   "diff fixture commit failed")
+
+        // Reverting one mark restores exactly that mark's lines.
+        let pane = EditorPaneViewController()
+        // In a window: an NSTextView takes its undo manager from the responder
+        // chain, so a detached pane records no undo at all.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.repositoryRoot = repository
+        pane.open(url: file)
+        pane.selectAllForTesting()
+        pane.insertTextForTesting("alpha\nBRAVO\ncharlie\nadded\ndelta\n")
+        let edited = GitLineChanges.lines(of: pane.textForTesting)
+        let changes = GitLineChanges.changes(from: GitLineChanges.lines(of: committed),
+                                             to: edited)
+        try expect(changes.count == 2,
+                   "expected a modification and an addition, got \(changes.map(\.kind))")
+        guard let modification = changes.first(where: { $0.kind == .modified }),
+              let addition = changes.first(where: { $0.kind == .added }) else {
+            throw Failure(description: "the fixture did not produce both kinds of change")
+        }
+        // A run-loop turn is what a real click provides. NSTextView groups undo
+        // per pass, so without one every edit here would land in one group.
+        func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        settle()
+        try expect(pane.revertGitChange(addition), "reverting an added line failed")
+        try expect(pane.textForTesting == "alpha\nBRAVO\ncharlie\ndelta\n",
+                   "reverting the addition gave \(pane.textForTesting.debugDescription)")
+        // One ⌘Z away, like any other edit.
+        settle()
+        pane.undoForTesting()
+        try expect(pane.textForTesting == "alpha\nBRAVO\ncharlie\nadded\ndelta\n",
+                   "a revert could not be undone: \(pane.textForTesting.debugDescription)")
+        settle()
+        try expect(pane.revertGitChange(addition), "reverting an added line failed twice")
+        settle()
+        try expect(pane.revertGitChange(modification), "reverting a modified line failed")
+        try expect(pane.textForTesting == committed,
+                   "reverting the modification gave \(pane.textForTesting.debugDescription)")
+
+        // A deletion is put back above the line it is pinned to.
+        pane.selectAllForTesting()
+        pane.insertTextForTesting("alpha\ndelta\n")
+        let afterDeletion = GitLineChanges.changes(
+            from: GitLineChanges.lines(of: committed),
+            to: GitLineChanges.lines(of: pane.textForTesting))
+        guard let deletion = afterDeletion.first(where: { $0.kind == .deleted }) else {
+            throw Failure(description: "deleting two lines produced no deletion mark")
+        }
+        try expect(pane.revertGitChange(deletion), "reverting a deletion failed")
+        try expect(pane.textForTesting == committed,
+                   "reverting the deletion gave \(pane.textForTesting.debugDescription)")
+        try expect(pane.persistForTesting(DocumentStore.shared.document(for: file)),
+                   "saving after a revert failed")
+
+        // Editing the diff tab and saving it writes through to the file.
+        try Data("alpha\nBRAVO\ncharlie\ndelta\n".utf8).write(to: file)
+        _ = GitService.stageAll(in: repository)
+        guard let entry = GitService.status(in: repository).entries
+            .first(where: { $0.path == "source.txt" }) else {
+            throw Failure(description: "the modified file was not reported by status")
+        }
+        let diffText = GitService.diff(for: entry, in: repository)
+        try expect(diffText.contains("+BRAVO"), "the fixture diff is \(diffText)")
+        let diffURL = URL(string: "puzzle-diff:///\(repository.path)/source.txt")!
+        let diffDocument = DocumentStore.shared.setVirtualDocument(
+            url: diffURL, text: diffText, displayName: "source.txt (diff)")
+        diffDocument.makeDiffEditable(directory: repository, path: "source.txt")
+        try expect(!diffDocument.isReadOnly,
+                   "the working-tree diff tab is still read-only")
+        pane.open(url: diffURL)
+        pane.selectAllForTesting()
+        pane.insertTextForTesting(diffText.replacingOccurrences(of: "+BRAVO", with: "+EDITED"))
+        try expect(pane.persistForTesting(diffDocument),
+                   "saving the edited diff failed")
+        let written = String(data: try Data(contentsOf: file), encoding: .utf8)
+        try expect(written == "alpha\nEDITED\ncharlie\ndelta\n",
+                   "the file holds \(written.debugDescription) after saving the diff")
+        try expect(!diffDocument.isModified,
+                   "the diff tab still reports unsaved changes after writing through")
+
+        // A diff of a past commit has no file of that shape to write back to.
+        let historic = DocumentStore.shared.setVirtualDocument(
+            url: URL(string: "puzzle-diff:///\(repository.path)/source.txt?commit=abc")!,
+            text: diffText, displayName: "source.txt @ abc")
+        try expect(historic.isReadOnly, "a commit's diff was made editable")
+    }
+
     private static func testIndexLockContention() throws {
         // Which subcommands are guarded, decided from the arguments as spawned.
         try expect(GitService.writesIndex(["add", "-A", "--", "."]),

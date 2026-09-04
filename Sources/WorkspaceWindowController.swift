@@ -323,9 +323,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 guard let self, self.projectURL == directory else { return }
                 let url = self.diffPreviewURL(in: directory, path: entry.path)
                 // Replace any previous diff for this file so re-clicking refreshes.
-                DocumentStore.shared.setVirtualDocument(
+                let document = DocumentStore.shared.setVirtualDocument(
                     url: url, text: text,
                     displayName: "\((entry.path as NSString).lastPathComponent) (diff)")
+                // The uncommitted diff is editable: what the user types on its
+                // new side is replayed into the file when the tab is saved.
+                document.makeDiffEditable(directory: directory, path: entry.path)
                 self.editor.open(url: url, replacingContent: true)
             }
         }

@@ -82,9 +82,28 @@ final class Document {
     /// A generated, read-only buffer (a git diff) rather than a file on disk.
     /// Never saved, and coloured by the diff painter instead of tree-sitter.
     private(set) var isVirtual = false
+    /// A working-tree diff is editable, and saving it replays the new side
+    /// into the file the diff is about. Set only for the uncommitted diff: a
+    /// diff of a past commit describes a file that no longer exists in that
+    /// form, so there is nothing to write it back to.
+    private(set) var editableDiff: (directory: URL, path: String)?
+
     /// Images, generated diffs and unreadable/unsupported files must never be
     /// written back from their display-only placeholder.
-    var isReadOnly: Bool { isUnsupported || isVirtual || isPreviewOnly }
+    var isReadOnly: Bool {
+        isUnsupported || (isVirtual && editableDiff == nil) || isPreviewOnly
+    }
+
+    func makeDiffEditable(directory: URL, path: String) {
+        editableDiff = (directory, path)
+    }
+
+    /// An edited diff has no file of its own to write: it is saved by replaying
+    /// it into its source, and this is how that reports back.
+    func markSaved() {
+        isModified = false
+        lastLocalEditAt = nil
+    }
     /// Preserve the encoding that was decoded instead of silently converting a
     /// Latin-1 source file to UTF-8 on its first save.
     private var textEncoding: String.Encoding = .utf8
@@ -416,6 +435,10 @@ final class Document {
     /// existing layout manager still owns the old one.
     func replaceVirtualContent(_ text: String, displayName: String?) {
         guard isVirtual else { return }
+        // An edited diff is the user's work, not a cached render. Re-opening
+        // the same file must not throw it away behind their back; saving is
+        // what turns it back into a plain rendered diff.
+        guard !isModified else { return }
         self.displayName = displayName
         storage.setAttributedString(NSAttributedString(string: text))
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),

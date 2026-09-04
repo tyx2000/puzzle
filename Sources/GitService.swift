@@ -1106,6 +1106,23 @@ enum GitService {
         return text
     }
 
+    /// The pre-image a diff was taken against, for replaying an edited diff
+    /// back into its file.
+    ///
+    /// The diff names its own old blob in the `index a..b` header, which is
+    /// exact: it says HEAD's copy or the index's copy without this code having
+    /// to work out which one the diff was asked for. A new file names the
+    /// all-zero hash and has no pre-image; a hand-mangled header falls back to
+    /// HEAD's copy of the path.
+    static func diffPreimage(_ diff: String, path: String, in directory: URL) -> String {
+        if let blob = UnifiedDiff.oldBlob(in: diff) {
+            let result = run(["--no-pager", "cat-file", "blob", blob], in: directory)
+            if result.code == 0 { return result.out }
+        }
+        let head = run(["--no-pager", "show", "HEAD:" + path], in: directory)
+        return head.code == 0 ? head.out : ""
+    }
+
     /// One file touched by a commit.
     struct CommitFile {
         let status: String      // A, M, D, R…
