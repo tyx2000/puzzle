@@ -1026,10 +1026,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func save() {
-        guard let doc = currentDocument, !doc.isReadOnly else { return }
-        // Explicit Save puts its own errors on screen, so there is no result
-        // left for the caller to act on.
-        _ = persist(doc, notify: true, presentErrors: true, overwriteDiskChanges: true)
+        guard let doc = currentDocument else { return }
+        saveCoordinator.save(doc, because: .explicit)
     }
 
     /// Write the buffer the user is leaving, the way Zed's
@@ -1042,126 +1040,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Explicit Save writes the current buffer; closing can ask about a conflict.
     func autosaveIfNeeded() {
         idleSaveWork?.cancel()
-        guard let document = currentDocument, document.isModified,
-              !document.isReadOnly, !document.isVirtual else { return }
-        // Silent by design, as the comment above says: a refused autosave
-        // leaves the document dirty and says nothing.
-        _ = persist(document, notify: true, presentErrors: false)
-    }
-
-    @discardableResult
-    /// Write an edited diff back into the file it describes.
-    ///
-    /// The diff is replayed over the pre-image it was taken against rather than
-    /// merged into the file as it stands: the new side of the diff *is* the
-    /// file the user is asking for, and everything the diff does not mention is
-    /// carried through from the pre-image untouched.
-    private func applyEditedDiff(_ document: Document, presentErrors: Bool) -> Bool {
-        guard let source = document.editableDiff else { return true }
-        let diff = document.text
-        let file = source.directory.appendingPathComponent(source.path)
-        guard let preimage = GitService.diffPreimage(diff, path: source.path,
-                                                     in: source.directory) else {
-            if presentErrors {
-                let alert = NSAlert()
-                alert.messageText = "Cannot apply this diff"
-                alert.informativeText =
-                    "Git could not produce the version of \(source.path) this diff "
-                    + "was taken against, so there is nothing to replay it over. "
-                    + "Edit the file itself instead."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
-            return false
-        }
-        guard let updated = UnifiedDiff.apply(diff, to: preimage) else {
-            if presentErrors {
-                let alert = NSAlert()
-                alert.messageText = "Cannot apply this diff"
-                alert.informativeText =
-                    "The hunks no longer line up with \(source.path). Check that "
-                    + "each @@ header still sits above the lines it describes, or "
-                    + "close this tab and edit the file itself."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
-            return false
-        }
-        // Through the open buffer when there is one, so the file's own tab,
-        // its gutter marks and its undo stack all see the change arrive.
-        let store = DocumentStore.shared
-        do {
-            if let open = store.cachedDocument(for: file) {
-                open.storage.replaceCharacters(
-                    in: NSRange(location: 0, length: open.storage.length), with: updated)
-                try open.save()
-            } else {
-                try Data(updated.utf8).write(to: file, options: .atomic)
-            }
-        } catch {
-            if presentErrors { self.presentError(error) }
-            return false
-        }
-        document.markSaved()
-        reloadTabs()
-        onDocumentSaved?(file)
-        return true
-    }
-
-    private func persist(_ document: Document, notify: Bool,
-                         presentErrors: Bool, overwriteDiskChanges: Bool = false) -> Bool {
-        guard document.isModified, !document.isReadOnly else { return true }
-        if document.editableDiff != nil {
-            return applyEditedDiff(document, presentErrors: presentErrors)
-        }
-        // Cmd+S explicitly chooses the current buffer. Background saves still
-        // defer external conflicts, and closing offers a choice before leaving.
-        if !overwriteDiskChanges && (document.hasDiskConflict || document.diskChangedSinceLastSync) {
-            guard presentErrors else { return false }
-            switch resolveDiskConflict(for: document) {
-            case .overwrite: document.resolveDiskConflict()
-            case .reload:
-                document.discardEditsAndReloadFromDisk()
-                reloadTabs()
-                return true
-            case .cancel: return false
-            }
-        }
-        do {
-            try document.save()
-            reloadTabs()
-            refreshGitLineChanges(reloadBaseline: false)
-            if notify { onDocumentSaved?(document.url) }
-            return true
-        } catch {
-            if presentErrors { self.presentError(error) }
-            return false
-        }
-    }
-
-
-    private enum DiskConflictChoice { case overwrite, reload, cancel }
-
-    private func resolveDiskConflict(for document: Document) -> DiskConflictChoice {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "“\(document.name)” changed on disk since you started editing"
-        alert.informativeText = "File:\n\(document.url.path)\n\n"
-            + "Saving replaces the version on disk with what is in this editor. "
-            + "Reloading replaces what is in this editor with the version on disk, "
-            + "discarding your unsaved edits. Neither can be undone."
-        alert.addButton(withTitle: "Save Anyway")
-        alert.addButton(withTitle: "Reload from Disk")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: return .overwrite
-        case .alertSecondButtonReturn: return .reload
-        default: return .cancel
-        }
+        // Virtual buffers are excluded here and only here: leaving a diff tab
+        // is not a reason to replay it into a source file. Closing one is.
+        guard let document = currentDocument, !document.isVirtual else { return }
+        saveCoordinator.save(document, because: .leaving)
     }
 
     func persistForTesting(_ document: Document) -> Bool {
-        persist(document, notify: false, presentErrors: false)
+        saveCoordinator.save(document, because: .test)
     }
 
     /// Write every modified document before mutating tab ownership.
@@ -1181,10 +1067,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func confirmClose(urls: [URL]) -> Bool {
         var seen = Set<URL>()
         for url in urls where seen.insert(url).inserted {
-            guard let document = DocumentStore.shared.cachedDocument(for: url),
-                  document.isModified, !document.isReadOnly else { continue }
-            if persist(document, notify: true, presentErrors: false) { continue }
-            guard persist(document, notify: true, presentErrors: true) else { return false }
+            guard let document = DocumentStore.shared.cachedDocument(for: url) else { continue }
+            guard saveCoordinator.save(document, because: .closing) else { return false }
         }
         return true
     }
@@ -1492,10 +1376,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard document.isModified, !document.isReadOnly else { return }
         let work = DispatchWorkItem { [weak self, weak document] in
             guard let self, let document else { return }
-            // Silent, exactly like the focus-change save: a refusal (a disk
-            // conflict, a read-only file) leaves the buffer dirty and says
-            // nothing, and ⌘S is where the user gets told.
-            _ = self.persist(document, notify: true, presentErrors: false)
+            // The same reason as the focus-change save: the user is still at
+            // the keyboard, so nothing interrupts them.
+            self.saveCoordinator.save(document, because: .leaving)
         }
         idleSaveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleSaveDelay, execute: work)
@@ -1631,6 +1514,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var gitBaselineURL: URL?
     private var liveMarkWork: DispatchWorkItem?
     private var idleSaveWork: DispatchWorkItem?
+    /// The one place that decides when a buffer is written and what it asks.
+    private lazy var saveCoordinator: DocumentSaveCoordinator = {
+        let coordinator = DocumentSaveCoordinator()
+        coordinator.host = self
+        return coordinator
+    }()
     /// Long enough that a burst of typing is one diff, short enough that the
     /// ribbon appears while the line is still the one being written.
     static let liveMarkDelay: TimeInterval = 0.25
@@ -1773,4 +1662,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func textViewDidChangeTypingAttributes(_ notification: Notification) {}
+}
+
+extension EditorPaneViewController: DocumentSaveHost {
+    func presentSaveError(_ error: Error) { presentError(error) }
+
+    func documentDidPersist(_ document: Document, writtenTo url: URL) {
+        reloadTabs()
+        // The gutter follows the buffer that was written, and a diff buffer has
+        // no gutter of its own — the file it was replayed into refreshes when
+        // the container hands the save on.
+        if !document.isVirtual { refreshGitLineChanges(reloadBaseline: false) }
+        onDocumentSaved?(url)
+    }
+
+    func documentDidReloadFromDisk(_ document: Document) { reloadTabs() }
 }

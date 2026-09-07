@@ -56,6 +56,7 @@ enum RegressionTests {
         try testSettingsRejectUnusableNumbers()
         try testSearchStopsWhenCancelled()
         try testDiffBuffersAreRebuiltAfterEviction()
+        try testSavePolicyIsOnePlace()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -5524,6 +5525,56 @@ enum RegressionTests {
     /// A diff buffer is synthetic, so nothing could read it back and it was
     /// excluded from eviction altogether. It carries everything it is made of
     /// in its own URL, so it can be dropped and built again like any other.
+    /// Every door into a save — ⌘S, leaving the buffer, the typing stopping,
+    /// closing, quitting — goes through one policy, and the reason it names is
+    /// the only thing that changes. Only the explicit one writes over a change
+    /// that arrived on disk underneath the edit; the silent ones defer to it
+    /// and leave the buffer dirty rather than interrupting anyone.
+    private static func testSavePolicyIsOnePlace() throws {
+        let directory = try temporaryDirectory("save-policy")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("note.txt")
+        try Data("committed\n".utf8).write(to: file)
+
+        // No host: the policy is the whole object under test, and it needs no
+        // window to make its decisions.
+        let coordinator = DocumentSaveCoordinator()
+        let document = Document(url: file)
+        document.storage.replaceCharacters(
+            in: NSRange(location: 0, length: document.storage.length), with: "edited\n")
+        document.markLocalEdit()
+
+        // Something else writes the file while the edit is unsaved.
+        Thread.sleep(forTimeInterval: 1.1)      // a coarser mtime than ours
+        try Data("from elsewhere\n".utf8).write(to: file)
+        try expect(document.diskChangedSinceLastSync,
+                   "the fixture did not produce a change on disk")
+
+        try expect(!coordinator.save(document, because: .leaving),
+                   "a silent save wrote over a change that arrived on disk")
+        try expect(document.isModified, "the refused save cleared the modified flag")
+        let afterRefusal = try String(contentsOf: file, encoding: .utf8)
+        try expect(afterRefusal == "from elsewhere\n",
+                   "the file on disk was overwritten by a silent save: \(afterRefusal)")
+
+        // ⌘S is the user choosing this buffer over that one, and says so.
+        try expect(coordinator.save(document, because: .explicit),
+                   "an explicit save did not go through")
+        let afterSave = try String(contentsOf: file, encoding: .utf8)
+        try expect(afterSave == "edited\n",
+                   "an explicit save did not write the buffer: \(afterSave)")
+        try expect(!document.isModified, "the buffer stayed dirty after a save")
+
+        // Nothing to write is success, not failure: closing must not be blocked
+        // by a clean buffer, and a read-only one has nothing to offer either.
+        try expect(coordinator.save(document, because: .closing),
+                   "closing a clean buffer reported a refusal")
+        let preview = Document(url: directory.appendingPathComponent("missing.bin"))
+        try expect(preview.isReadOnly, "the fixture is not read-only")
+        try expect(coordinator.save(preview, because: .explicit),
+                   "a read-only buffer reported a refusal instead of nothing to do")
+    }
+
     private static func testDiffBuffersAreRebuiltAfterEviction() throws {
         let root = try temporaryDirectory("diff-rebuild")
         defer { try? FileManager.default.removeItem(at: root) }
