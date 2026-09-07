@@ -616,13 +616,13 @@ final class PuzzleTextView: NSTextView {
         Theme.red.withAlphaComponent(0.9).setStroke()
         let path = NSBezierPath()
         path.lineWidth = 1.5
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
+        path.lineCapStyle = .butt
+        path.lineJoinStyle = .miter
 
         if let box = geometry.box {
-            path.appendRoundedRect(box, xRadius: 5, yRadius: 5)
+            path.appendRect(box)
         } else {
-            appendRoundedPolyline(geometry.polyline, radius: 5, to: path)
+            appendPolyline(geometry.polyline, to: path)
         }
         for cap in geometry.viewportCaps where cap.count == 2 {
             path.move(to: cap[0])
@@ -631,54 +631,13 @@ final class PuzzleTextView: NSTextView {
         path.stroke()
     }
 
-    /// Append a polyline whose corners use a geometric radius independent of
-    /// stroke width. `lineJoinStyle = .round` alone only rounds by roughly half
-    /// the 1.5pt stroke and is visually indistinguishable from a sharp corner.
-    private func appendRoundedPolyline(_ points: [NSPoint], radius: CGFloat,
-                                       to path: NSBezierPath) {
+    /// The scope outline is drawn as a plain polyline: the corners are the
+    /// corners of the code it encloses, and a radius there reads as decoration
+    /// rather than as structure.
+    private func appendPolyline(_ points: [NSPoint], to path: NSBezierPath) {
         guard let first = points.first else { return }
-        guard points.count > 2 else {
-            path.move(to: first)
-            if let last = points.last, last != first { path.line(to: last) }
-            return
-        }
-
         path.move(to: first)
-        for index in 1..<(points.count - 1) {
-            let previous = points[index - 1]
-            let corner = points[index]
-            let next = points[index + 1]
-            let incoming = NSPoint(x: corner.x - previous.x,
-                                   y: corner.y - previous.y)
-            let outgoing = NSPoint(x: next.x - corner.x,
-                                   y: next.y - corner.y)
-            let incomingLength = hypot(incoming.x, incoming.y)
-            let outgoingLength = hypot(outgoing.x, outgoing.y)
-            guard incomingLength > 0, outgoingLength > 0 else {
-                path.line(to: corner)
-                continue
-            }
-
-            let resolvedRadius = min(radius, incomingLength / 2, outgoingLength / 2)
-            let before = NSPoint(
-                x: corner.x - incoming.x / incomingLength * resolvedRadius,
-                y: corner.y - incoming.y / incomingLength * resolvedRadius)
-            let after = NSPoint(
-                x: corner.x + outgoing.x / outgoingLength * resolvedRadius,
-                y: corner.y + outgoing.y / outgoingLength * resolvedRadius)
-            path.line(to: before)
-
-            // Convert a quadratic curve with `corner` as its control point to
-            // the cubic representation exposed by NSBezierPath.
-            let control1 = NSPoint(
-                x: before.x + (corner.x - before.x) * 2 / 3,
-                y: before.y + (corner.y - before.y) * 2 / 3)
-            let control2 = NSPoint(
-                x: after.x + (corner.x - after.x) * 2 / 3,
-                y: after.y + (corner.y - after.y) * 2 / 3)
-            path.curve(to: after, controlPoint1: control1, controlPoint2: control2)
-        }
-        if let last = points.last { path.line(to: last) }
+        for point in points.dropFirst() { path.line(to: point) }
     }
 
     override func drawBackground(in rect: NSRect) {
@@ -1495,15 +1454,126 @@ final class PuzzleTextView: NSTextView {
         return end
     }
 
-    /// A new line inherits the indentation of the one it came from. Without
-    /// this every Return in indented code sent the caret back to column zero.
-    override func insertNewline(_ sender: Any?) {
-        let indent = carriedIndent(at: min(selectedRange().location, (string as NSString).length))
-        guard !indent.isEmpty else {
-            super.insertNewline(sender)
+    /// Whether Return deepens the indent after a `{`, `[` or `(`.
+    ///
+    /// Off for prose — a Markdown paragraph ending in a bracket is not opening
+    /// a block — and for files with no language at all.
+    var usesBracketIndent = true
+
+    /// The characters that open a block, and what closes each of them.
+    private static let brackets: [(open: Character, close: Character)] =
+        [("{", "}"), ("[", "]"), ("(", ")")]
+
+    /// One level of indentation, in whatever the line is already written in: a
+    /// tab where the indent is tabs, `tab_size` spaces otherwise.
+    private func indentUnit(matching indent: String) -> String {
+        indent.contains("\t") ? "\t" : String(repeating: " ", count: max(1, Settings.shared.tabSize))
+    }
+
+    /// The bracket the line opens with, reading back from `location` over any
+    /// trailing whitespace. Nil when the line ends on anything else.
+    private func openerEndingLine(before location: Int) -> Character? {
+        guard usesBracketIndent else { return nil }
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: location, length: 0))
+        var index = min(location, NSMaxRange(line))
+        while index > line.location {
+            let character = source.character(at: index - 1)
+            guard character == 0x20 || character == 0x09 else { break }
+            index -= 1
+        }
+        guard index > line.location,
+              let scalar = UnicodeScalar(source.character(at: index - 1)) else { return nil }
+        let previous = Character(scalar)
+        return Self.brackets.first { $0.open == previous }?.open
+    }
+
+    /// True when `closer` is the next thing after `location`, give or take
+    /// spaces: the caret is sitting between a pair.
+    private func closerFollows(_ closer: Character, after location: Int) -> Bool {
+        let source = string as NSString
+        var index = location
+        while index < source.length {
+            let character = source.character(at: index)
+            if character == 0x20 || character == 0x09 { index += 1; continue }
+            guard let scalar = UnicodeScalar(character) else { return false }
+            return Character(scalar) == closer
+        }
+        return false
+    }
+
+    /// Typing a closing bracket on an otherwise empty line pulls that line back
+    /// one level, so a block closes where it opened.
+    ///
+    /// This is the other half of the rule Return applies — VS Code calls the
+    /// pair `increaseIndentPattern` / `decreaseIndentPattern`, and every editor
+    /// that auto-indents does both. One level less, rather than hunting for the
+    /// matching opener: the structure model is rebuilt on a debounce and would
+    /// be a keystroke behind, while the line in front of the caret is not.
+    ///
+    /// The whitespace and the bracket are replaced together, so the dedent is
+    /// part of typing the character and one ⌘Z takes both back.
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        guard usesBracketIndent, selectedRange().length == 0,
+              let typed = (string as? String) ?? (string as? NSAttributedString)?.string,
+              typed.count == 1, let character = typed.first,
+              Self.brackets.contains(where: { $0.close == character }) else {
+            super.insertText(string, replacementRange: replacementRange)
             return
         }
-        insertText("\n" + indent, replacementRange: selectedRange())
+        let source = self.string as NSString
+        let caret = min(selectedRange().location, source.length)
+        let line = source.lineRange(for: NSRange(location: caret, length: 0))
+        let prefix = source.substring(with: NSRange(location: line.location,
+                                                    length: caret - line.location))
+        guard !prefix.isEmpty,
+              prefix.allSatisfy({ $0 == " " || $0 == "\t" }) else {
+            super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+        let unit = indentUnit(matching: prefix)
+        guard prefix.hasSuffix(unit) else {
+            super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+        let dedented = String(prefix.dropLast(unit.count))
+        super.insertText(dedented + typed,
+                         replacementRange: NSRange(location: line.location,
+                                                   length: caret - line.location))
+    }
+
+    /// A new line inherits the indentation of the one it came from, and one
+    /// level more when that line opened a block. Splitting a pair puts the
+    /// closer on a line of its own, which is what every editor does:
+    ///
+    ///     if x {|}        →      if x {
+    ///                                |
+    ///                            }
+    override func insertNewline(_ sender: Any?) {
+        let caret = min(selectedRange().location, (string as NSString).length)
+        let indent = carriedIndent(at: caret)
+        guard let opener = openerEndingLine(before: caret) else {
+            guard !indent.isEmpty else {
+                super.insertNewline(sender)
+                return
+            }
+            insertText("\n" + indent, replacementRange: selectedRange())
+            return
+        }
+        let inner = indent + indentUnit(matching: indent)
+        let closer = Self.brackets.first { $0.open == opener }!.close
+        guard closerFollows(closer, after: caret) else {
+            insertText("\n" + inner, replacementRange: selectedRange())
+            return
+        }
+        // The closer goes to its own line at the outer indent, and the caret
+        // stays on the empty line between them.
+        let text = "\n" + inner + "\n" + indent
+        let replaced = selectedRange()
+        insertText(text, replacementRange: replaced)
+        setSelectedRange(NSRange(location: replaced.location + 1 + (inner as NSString).length,
+                                 length: 0))
+        scrollRangeToVisible(selectedRange())
     }
 
     /// Shift-Return: open a line under the current one, indented like it, from
@@ -1512,8 +1582,14 @@ final class PuzzleTextView: NSTextView {
     func insertLineBelow() -> Bool {
         let source = string as NSString
         let caret = min(selectedRange().location, source.length)
-        let indent = indentOfLine(at: caret)
+        var indent = indentOfLine(at: caret)
         let insertion = endOfLineContent(at: caret)
+        // Same rule as Return: a line that opened a block gets its body one
+        // level in. There is no pair to split here — the line below is opened
+        // from wherever the caret happens to be.
+        if openerEndingLine(before: insertion) != nil {
+            indent += indentUnit(matching: indent)
+        }
         let text = "\n" + indent
         guard shouldChangeText(in: NSRange(location: insertion, length: 0),
                                replacementString: text) else { return false }

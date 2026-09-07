@@ -857,6 +857,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let lineIsActive = lineActivatedURLs.contains(url)
         textView.showsCurrentLineBand = lineIsActive
             && doc.languageSpec?.name != "markdown"
+        // Brackets open blocks in code. In prose, and in a file with no
+        // language at all, a line ending in "(" is just a line ending in "(".
+        textView.usesBracketIndent = doc.languageSpec != nil
+            && doc.languageSpec?.name != "markdown"
         if !lineIsActive { clearInlineBlameRequest() }
         textView.diffBands = doc.diffBands
         textView.diffLineNumbers = doc.diffLineNumbers

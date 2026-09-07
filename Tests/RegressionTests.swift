@@ -4703,6 +4703,86 @@ enum RegressionTests {
         try expect(textView.duplicateCurrentLine() && textView.string == "a\nb\na\nb\nc",
                    "Command-D over a selection: \(textView.string.debugDescription)")
 
+        // A line that opens a block indents its body one level further. Every
+        // editor does this; copying the opener's own indent left the body
+        // flush with the line that opened it.
+        textView.usesBracketIndent = true
+        // The level added is the file's own: `tab_size` from settings.json.
+        let unit = String(repeating: " ", count: Settings.shared.tabSize)
+        textView.string = "func f() {"
+        textView.setSelectedRange(NSRange(location: 10, length: 0))
+        textView.insertNewline(nil)
+        try expect(textView.string == "func f() {\n" + unit,
+                   "Return after an opener did not indent: "
+                     + "\(textView.string.debugDescription)")
+
+        // Splitting a pair puts the closer on its own line at the outer indent,
+        // with the caret on the empty line between them.
+        textView.string = "    if x {}"
+        textView.setSelectedRange(NSRange(location: 10, length: 0))   // between { and }
+        textView.insertNewline(nil)
+        try expect(textView.string == "    if x {\n    " + unit + "\n    }",
+                   "Return between a pair: \(textView.string.debugDescription)")
+        try expect(textView.selectedRange().location == 15 + unit.count,
+                   "the caret is not on the opened line: \(textView.selectedRange())")
+
+        // Tabs stay tabs: the level added is the one the line is written in.
+        textView.string = "\tif x {"
+        textView.setSelectedRange(NSRange(location: 7, length: 0))
+        textView.insertNewline(nil)
+        try expect(textView.string == "\tif x {\n\t\t",
+                   "a tab-indented line gained spaces: "
+                     + "\(textView.string.debugDescription)")
+
+        // Shift-Return follows the same rule, from anywhere on the line.
+        textView.string = "  while (true) {\nbody"
+        textView.setSelectedRange(NSRange(location: 4, length: 0))
+        try expect(textView.insertLineBelow()
+                    && textView.string == "  while (true) {\n  " + unit + "\nbody",
+                   "Shift-Return after an opener: \(textView.string.debugDescription)")
+
+        // Typing the closing bracket on an otherwise empty line pulls it back
+        // one level, so the block closes where it opened.
+        textView.string = "func f() {"
+        textView.setSelectedRange(NSRange(location: 10, length: 0))
+        textView.insertNewline(nil)
+        textView.insertText("}", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(textView.string == "func f() {\n}",
+                   "the closing bracket did not dedent: "
+                     + "\(textView.string.debugDescription)")
+
+        // Only on a line that holds nothing else: a bracket after code is just
+        // a bracket, and re-indenting there would move text the user typed.
+        textView.string = "    call(a"
+        textView.setSelectedRange(NSRange(location: 10, length: 0))
+        textView.insertText(")", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(textView.string == "    call(a)",
+                   "a bracket after code moved the line: "
+                     + "\(textView.string.debugDescription)")
+
+        // And never past column zero.
+        textView.string = "}"
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.insertText("}", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(textView.string == "}}",
+                   "an unindented line was dedented: "
+                     + "\(textView.string.debugDescription)")
+
+        // Prose is not code: a paragraph ending in a bracket opens nothing.
+        textView.usesBracketIndent = false
+        textView.string = "  a sentence ("
+        textView.setSelectedRange(NSRange(location: 14, length: 0))
+        textView.insertNewline(nil)
+        try expect(textView.string == "  a sentence (\n  ",
+                   "prose gained a code indent: \(textView.string.debugDescription)")
+        textView.string = "  "
+        textView.setSelectedRange(NSRange(location: 2, length: 0))
+        textView.insertText(")", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(textView.string == "  )",
+                   "prose was dedented by a bracket: "
+                     + "\(textView.string.debugDescription)")
+        textView.usesBracketIndent = true
+
         // Home and End work on the line, not on the document.
         textView.string = "one\n    indented line\nthree"
         textView.setSelectedRange(NSRange(location: 12, length: 0))    // inside "indented"
