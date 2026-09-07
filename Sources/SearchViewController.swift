@@ -15,6 +15,8 @@ final class SearchViewController: NSViewController {
     private let placeholderLabel = NSTextField(labelWithString: "")
     private let outline = NSOutlineView()
     private var searchWork: DispatchWorkItem?
+    /// Cancels the query that is already running, which the work item cannot.
+    private var searchToken: CancellationToken?
     /// Cancellation alone is not an identity check: an old task can finish
     /// after `searchWork` already points at a newer, non-cancelled task.
     private var searchGeneration = 0
@@ -187,6 +189,12 @@ final class SearchViewController: NSViewController {
         let generation = searchGeneration
         searchWork?.cancel()
         searchWork = nil
+        // Cancel the query that is already running, not just the one still
+        // waiting out the debounce: `DispatchWorkItem.cancel()` only stops an
+        // item that has not started, and a project-wide search that has started
+        // runs for as long as the tree is big.
+        searchToken?.cancel()
+        searchToken = nil
         guard query.count >= 2, let directory else {
             groups = []; hitRowCache.removeAll(); outline.reloadData()
             summaryLabel.stringValue = query.isEmpty ? "" : "Type at least 2 characters"
@@ -205,10 +213,14 @@ final class SearchViewController: NSViewController {
         // immutable strings instead of stale disk content.
         let bufferSnapshots = Dictionary(uniqueKeysWithValues:
             DocumentStore.shared.modifiedTextSnapshots(in: directory).map { ($0.url, $0.text) })
+        let token = CancellationToken()
+        searchToken = token
         let work = DispatchWorkItem { [weak self] in
+            guard !token.isCancelled else { return }
             let found = Self.search(
                 query: query, in: directory, options: options,
-                inMemoryFiles: bufferSnapshots)
+                inMemoryFiles: bufferSnapshots, cancellation: token)
+            guard !token.isCancelled else { return }
             DispatchQueue.main.async {
                 guard let self, self.searchGeneration == generation else { return }
                 self.searchWork = nil
@@ -224,7 +236,9 @@ final class SearchViewController: NSViewController {
             }
         }
         searchWork = work
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
+        // One search at a time. Two full scans of the same tree cost twice the
+        // peak memory and only the newer one's results are ever shown.
+        Self.searchQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     @objc private func rowClicked() {
@@ -253,6 +267,10 @@ final class SearchViewController: NSViewController {
 
     // MARK: - Search backends
 
+    /// Serial: the backend work for one query at a time.
+    private static let searchQueue = DispatchQueue(label: "app.puzzle.search",
+                                                   qos: .userInitiated)
+
     private static let ripgrepPath: String? = {
         ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
@@ -260,10 +278,15 @@ final class SearchViewController: NSViewController {
 
     static func search(query: String, in directory: URL,
                        options: SearchOptions = SearchOptions(),
-                       inMemoryFiles: [URL: String] = [:]) -> [FileGroup] {
+                       inMemoryFiles: [URL: String] = [:],
+                       cancellation: CancellationToken = .none) -> [FileGroup] {
         guard let matcher = SearchMatcher(query: query, options: options) else { return [] }
-        let diskHits = ripgrepPath.map { ripgrep(rg: $0, query: query, in: directory, options: options) }
-            ?? nativeSearch(query: query, in: directory, options: options)
+        let diskHits = ripgrepPath.map {
+            ripgrep(rg: $0, query: query, in: directory, options: options,
+                    cancellation: cancellation)
+        } ?? nativeSearch(query: query, in: directory, options: options,
+                          cancellation: cancellation)
+        guard !cancellation.isCancelled else { return [] }
         let snapshots: [(relative: String, text: String)] = inMemoryFiles.compactMap { url, text in
             relativePath(for: url, in: directory).map { ($0, text) }
         }.sorted { $0.relative < $1.relative }
@@ -326,7 +349,8 @@ final class SearchViewController: NSViewController {
     }
 
     private static func ripgrep(rg: String, query: String, in directory: URL,
-                                options: SearchOptions) -> [(String, Int, String)] {
+                                options: SearchOptions,
+                                cancellation: CancellationToken) -> [(String, Int, String)] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: rg)
         // JSON framing keeps paths containing colons or newlines unambiguous.
@@ -344,8 +368,12 @@ final class SearchViewController: NSViewController {
         // pipe here can deadlock on a tree with many permission errors.
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch {
-            return nativeSearch(query: query, in: directory, options: options)
+            return nativeSearch(query: query, in: directory, options: options,
+                                cancellation: cancellation)
         }
+        // Cancelling abandons the results; the child has to go with them, or a
+        // fast typist leaves a queue of ripgreps chewing through the tree.
+        cancellation.whenCancelled { [weak process] in process?.terminate() }
 
         // Read incrementally and stop once we have enough. `readDataToEndOfFile`
         // buffered ripgrep's ENTIRE output first — a common word in a big repo
@@ -356,6 +384,7 @@ final class SearchViewController: NSViewController {
         var done = false
         var skippingOversizedRecord = false
         while !done {
+            if cancellation.isCancelled { break }
             let chunk = handle.availableData
             if chunk.isEmpty { break }
             buffer.append(chunk)
@@ -488,7 +517,8 @@ final class SearchViewController: NSViewController {
     }
 
     private static func nativeSearch(query: String, in directory: URL,
-                                     options: SearchOptions) -> [(String, Int, String)] {
+                                     options: SearchOptions,
+                                     cancellation: CancellationToken) -> [(String, Int, String)] {
         var out: [(String, Int, String)] = []
         let fm = FileManager.default
         guard let e = fm.enumerator(at: directory,
@@ -501,6 +531,12 @@ final class SearchViewController: NSViewController {
         var finished = false
         while !finished {
             autoreleasepool {
+                // Once per file: the unit of work small enough to abandon
+                // promptly and large enough that checking costs nothing.
+                guard !cancellation.isCancelled else {
+                    finished = true
+                    return
+                }
                 guard let url = e.nextObject() as? URL else {
                     finished = true
                     return

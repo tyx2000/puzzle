@@ -53,6 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.shared.upgradeFileIfNeeded()
         setupMenu()
         setupMemoryPressureHandling()
+        // Diff buffers are synthetic, so nothing could read one back once it was
+        // dropped and they were excluded from eviction entirely. With a way to
+        // rebuild them from their URL they take part like every other buffer.
+        WorkspaceWindowController.registerDiffContentProvider()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(settingsChanged),

@@ -273,18 +273,42 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // A re-indented buffer is compared against a re-indented HEAD: the
         // marks answer "what did you change", not "what did the formatter do".
         let formatted = document.isDisplayFormatted
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        // Superseded work is abandoned before it starts a subprocess, not after
+        // it has finished one: switching through a dozen tabs used to queue a
+        // dozen `git show`s and throw away eleven answers.
+        gitBaselineToken?.cancel()
+        let token = CancellationToken()
+        gitBaselineToken = token
+        GitService.workQueue.async { [weak self] in
+            guard !token.isCancelled else { return }
             var baseline = GitLineChanges.baseline(for: url, in: root)
-            if formatted, let lines = baseline, !lines.isEmpty,
+            if formatted, case .lines(let lines) = baseline, !lines.isEmpty,
                let pretty = JSONFormatter.pretty(lines.joined(separator: "\n")) {
-                baseline = GitLineChanges.lines(of: pretty)
+                baseline = .lines(GitLineChanges.lines(of: pretty))
             }
+            guard !token.isCancelled else { return }
             DispatchQueue.main.async {
                 guard let self, self.gitLineChangeGeneration == generation,
                       self.currentURL == url else { return }
-                self.gitBaseline = baseline
-                self.gitBaselineURL = url
-                self.recomputeGitLineChanges()
+                switch baseline {
+                case .lines(let lines):
+                    self.gitBaseline = lines
+                    self.gitBaselineURL = url
+                    self.recomputeGitLineChanges()
+                case .untracked:
+                    self.gitBaseline = nil
+                    self.gitBaselineURL = url
+                    self.recomputeGitLineChanges()
+                case .unavailable:
+                    // Not an answer, so it must not be shown as "no changes".
+                    // Marks already up for this same file stay; anything left
+                    // over from another file goes, and no baseline is recorded,
+                    // so the next refresh asks again.
+                    guard self.gitBaselineURL != url else { return }
+                    self.gitBaseline = nil
+                    self.gitBaselineURL = nil
+                    self.applyGitLineChanges([], for: url)
+                }
             }
         }
     }
@@ -316,9 +340,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // thread while the user keeps typing into the storage.
         guard let snapshot = (textView.string as NSString).copy() as? NSString else { return }
         let generation = gitLineChangeGeneration
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let changes = GitLineChanges.changes(from: baseline,
-                                                 to: GitLineChanges.lines(of: snapshot as String))
+        // Same rule as the baseline lookup and the project search: superseded
+        // work is stopped, not merely ignored when it finishes. No subprocess
+        // here, but a buffer's worth of lines is copied and walked twice over.
+        liveMarkToken?.cancel()
+        let token = CancellationToken()
+        liveMarkToken = token
+        Self.liveMarkQueue.async { [weak self] in
+            guard !token.isCancelled,
+                  let changes = GitLineChanges.changes(
+                    from: baseline, to: GitLineChanges.lines(of: snapshot as String),
+                    cancellation: token)
+            else { return }
             DispatchQueue.main.async {
                 guard let self, self.gitLineChangeGeneration == generation,
                       self.currentURL == url else { return }
@@ -1584,6 +1617,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var gitLineChangesURL: URL?
     private var gitChangePopover: NSPopover?
     private var gitLineChangeGeneration = 0
+    /// Stops a baseline lookup that is already running, which the generation
+    /// counter alone cannot: it only decides whether to keep the answer.
+    private var gitBaselineToken: CancellationToken?
+    private var liveMarkToken: CancellationToken?
+    /// Serial: marking the buffer twice at once holds two copies of its lines
+    /// and only the newer answer is ever shown.
+    private static let liveMarkQueue = DispatchQueue(label: "app.puzzle.line-marks",
+                                                     qos: .utility)
     /// HEAD's copy of the file on screen, kept so an edit can be marked without
     /// asking Git again.
     private var gitBaseline: [String]?

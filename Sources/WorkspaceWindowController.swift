@@ -431,6 +431,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         return components.url ?? directory.appendingPathComponent(".puzzle-diff-preview")
     }
 
+    /// Teach the store how to rebuild a diff buffer from its URL, so those
+    /// buffers can be evicted under memory pressure like any other.
+    ///
+    /// Registered once, at launch. History rebuilds byte for byte — a commit
+    /// and a path name an immutable diff. A working-tree diff rebuilds as the
+    /// diff *now*, which is the same thing clicking its row again would show.
+    static func registerDiffContentProvider() {
+        DocumentStore.shared.virtualContentProvider = { url in
+            guard url.scheme == DocumentStore.diffScheme,
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let path = components.queryItems?
+                    .first(where: { $0.name == "path" })?.value,
+                  !path.isEmpty else { return nil }
+            let directory = URL(fileURLWithPath:
+                (url.path as NSString).deletingLastPathComponent)
+            let name = (path as NSString).lastPathComponent
+            let commit = components.queryItems?
+                .first(where: { $0.name == "commit" })?.value
+            if let commit, !commit.isEmpty {
+                return DocumentStore.VirtualContent(
+                    text: GitService.diff(inCommit: commit, path: path, in: directory),
+                    displayName: "\(name) @ \(commit)", editableSource: nil)
+            }
+            guard let text = GitService.diff(forPath: path, in: directory) else { return nil }
+            return DocumentStore.VirtualContent(
+                text: text, displayName: "\(name) (diff)",
+                editableSource: (directory: directory, path: path))
+        }
+    }
+
     /// Preserve the repository path below the per-commit temp directory. Using
     /// only `lastPathComponent` made `assets/icon.png` collide with
     /// `docs/icon.png`, so opening one could show the other's cached image.

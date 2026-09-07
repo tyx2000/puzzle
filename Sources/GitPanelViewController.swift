@@ -88,6 +88,10 @@ final class GitPanelViewController: NSViewController {
     private var refreshDirectory: URL?
     /// Serialize panel-owned Git commands so refresh staging cannot race a
     /// commit, checkout, pull, or other index/worktree mutation.
+    /// Deliberately *not* `GitService.workQueue`. That queue carries the short
+    /// reads the UI fires off by itself — a gutter baseline on every tab switch
+    /// — while this one carries push, fetch and pull, which are allowed 300
+    /// seconds. Sharing one queue would put that behind a gutter refresh.
     private let gitQueue = DispatchQueue(label: "app.puzzle.git-panel", qos: .userInitiated)
     private var activeOperationID: UUID?
     private var operationLocksMessage = false

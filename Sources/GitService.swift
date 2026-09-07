@@ -292,6 +292,20 @@ enum GitService {
                              stdoutTruncated: stdout.truncated)
     }
 
+    /// One Git read at a time for the work the UI starts on its own — the
+    /// gutter baseline on every tab switch, and anything else driven by typing
+    /// or navigation rather than by a click.
+    ///
+    /// Serialising is what bounds Git here: local commands get no deadline of
+    /// their own, because a slow `status` on a large repository — or one behind
+    /// a clean/smudge filter — is slow rather than stuck, and a deadline short
+    /// enough to catch a hang is short enough to abandon a legitimate result.
+    /// Network operations keep their own timeout, where a stall really can be
+    /// permanent, and run on the Git panel's own queue so a 300-second push
+    /// never sits in front of a gutter refresh. Callers that no longer want
+    /// their answer cancel instead of waiting for it.
+    static let workQueue = DispatchQueue(label: "app.puzzle.git", qos: .userInitiated)
+
     static let maxDiffBytes = 8 * 1024 * 1024
     static let maxBlobBytes = Document.maxImageFileBytes
     static let maxProcessStderrBytes = 1024 * 1024
@@ -1055,6 +1069,28 @@ enum GitService {
 
     /// Unified diff for one path. Untracked files have no diff against the
     /// index, so they're rendered as an all-additions diff of the file itself.
+    /// The diff for one working-tree path, without taking a status snapshot.
+    ///
+    /// This runs when a diff tab whose buffer was dropped is opened again, on
+    /// the main thread, so it asks Git about one path rather than scanning the
+    /// repository. Nil when the path no longer has a change to show.
+    static func diff(forPath path: String, in directory: URL) -> String? {
+        for args in [["--no-pager", "diff", "--no-color", "--", path],
+                     ["--no-pager", "diff", "--no-color", "--cached", "--", path]] {
+            let result = runDiff(args, in: directory)
+            if !result.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return result.out
+            }
+        }
+        // Git prints nothing for an untracked file; the panel shows the whole
+        // file as an addition instead, and so must this.
+        let untracked = run(["ls-files", "--others", "--error-unmatch", "--", path],
+                            in: directory)
+        guard untracked.code == 0 else { return nil }
+        return diff(for: Status.Entry(code: "??", path: path, originalPath: nil),
+                    in: directory)
+    }
+
     static func diff(for entry: Status.Entry, in directory: URL) -> String {
         if entry.isUntracked {
             let url = directory.appendingPathComponent(entry.path)

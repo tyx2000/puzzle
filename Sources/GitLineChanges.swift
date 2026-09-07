@@ -103,6 +103,8 @@ enum GitLineChanges {
         return changes
     }
 
+    private static let cancellationCheckStride = 1024
+
     /// `@@ -12,3 +12,0 @@` → old (12, 3), new (12, 0).
     private static func hunkRanges(_ line: String)
         -> (oldStart: Int, oldCount: Int, newStart: Int, newCount: Int)? {
@@ -122,11 +124,25 @@ enum GitLineChanges {
 
     // MARK: - Live marks
 
-    /// HEAD's copy of a file, split into lines. `nil` when Git has nothing to
-    /// compare against — the path is untracked or ignored — which is also the
-    /// case where `git diff` reports nothing and the gutter stays clean.
-    static func baseline(for file: URL, in repository: URL) -> [String]? {
-        guard let relative = relativePath(for: file, in: repository) else { return nil }
+    /// What HEAD offers to compare a buffer against.
+    ///
+    /// The third case is the point: "Git could not tell us" is not "there are
+    /// no changes". Collapsing the two painted a clean gutter over a file that
+    /// may be full of them, and a clean gutter is what Revert reads.
+    enum Baseline: Equatable {
+        /// HEAD's lines. Empty means a path Git knows about that HEAD does not
+        /// — new in its entirety.
+        case lines([String])
+        /// Nothing to compare against, and that is the answer: untracked,
+        /// ignored, binary, or outside this project.
+        case untracked
+        /// No answer. The marks that are up stay up, and the next refresh asks
+        /// again rather than treating the gap as settled.
+        case unavailable
+    }
+
+    static func baseline(for file: URL, in repository: URL) -> Baseline {
+        guard let relative = relativePath(for: file, in: repository) else { return .untracked }
         // Through GitService rather than `git show HEAD:<relative>` directly:
         // that spelling resolves from the repository root while `relative` is
         // relative to the open project, so a project opened on a subdirectory
@@ -139,22 +155,21 @@ enum GitLineChanges {
             // A binary blob has no lines to mark, and splitting one would only
             // produce noise.
             let text = String(decoding: data, as: UTF8.self)
-            guard !text.utf16.contains(0) else { return nil }
-            return lines(of: text)
+            guard !text.utf16.contains(0) else { return .untracked }
+            return .lines(lines(of: text))
         case .tooLarge:
             // The open file is small enough to edit; the version behind it need
-            // not be. No baseline is better than a truncated one — the gutter
-            // stays clean rather than marking against half a file.
-            return nil
+            // not be. Marking against half a file is worse than not marking.
+            return .unavailable
         case .unavailable:
             // Not in HEAD yet. A path Git already knows about — Puzzle stages
-            // new files as they are created — is new in its entirety; anything
-            // else is none of the gutter's business.
+            // new files as they are created — is new in its entirety; a path it
+            // does not know is none of the gutter's business. A failure to ask
+            // is neither.
             let tracked = GitService.run(["ls-files", "--", relative], in: repository)
-            guard tracked.code == 0,
-                  !tracked.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { return nil }
-            return []
+            guard tracked.code == 0 else { return .unavailable }
+            return tracked.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? .untracked : .lines([])
         }
     }
 
@@ -171,8 +186,14 @@ enum GitLineChanges {
     /// unsaved. Grouping matches the parser above: a run of removals with
     /// replacements is one modification, a run without them is a deletion
     /// pinned to the line it sat above.
-    static func changes(from base: [String], to current: [String]) -> [Change] {
+    /// Nil when the caller cancelled partway through — never an empty result,
+    /// because "cancelled" read as "no changes" is how a gutter goes silently
+    /// clean over a file full of edits.
+    static func changes(from base: [String], to current: [String],
+                        cancellation: CancellationToken = .none) -> [Change]? {
         guard base != current else { return [] }
+        // The difference itself is one library call and cannot be interrupted;
+        // the walk below it can, and it is the part that scales with the file.
         let difference = current.difference(from: base)
         guard !difference.isEmpty else { return [] }
         var removedAt = Set<Int>()
@@ -211,7 +232,15 @@ enum GitLineChanges {
                                   removed: removed, added: added))
         }
 
+        // Checked on a stride rather than per line: the token takes a lock, and
+        // this loop runs once per line of the buffer.
+        var untilCancellationCheck = cancellationCheckStride
         while oldIndex < base.count || newIndex < current.count {
+            untilCancellationCheck -= 1
+            if untilCancellationCheck <= 0 {
+                untilCancellationCheck = cancellationCheckStride
+                if cancellation.isCancelled { return nil }
+            }
             if oldIndex < base.count, removedAt.contains(oldIndex) {
                 removed.append(base[oldIndex])
                 oldIndex += 1

@@ -54,6 +54,8 @@ enum RegressionTests {
         try testReplaceAllPastTheMatchCache()
         try testExternalRefreshKeepsBoundedPreview()
         try testSettingsRejectUnusableNumbers()
+        try testSearchStopsWhenCancelled()
+        try testDiffBuffersAreRebuiltAfterEviction()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -4785,9 +4787,12 @@ enum RegressionTests {
 
         // The in-process diff has to agree with the one Git prints, or the
         // marks would move under the user the moment they saved.
-        let baseline = GitLineChanges.baseline(for: file, in: root)
-        try expect(baseline == ["one", "two", "three", "four"],
-                   "HEAD's copy did not come back: \(String(describing: baseline))")
+        let baselineResult = GitLineChanges.baseline(for: file, in: root)
+        try expect(baselineResult == .lines(["one", "two", "three", "four"]),
+                   "HEAD's copy did not come back: \(baselineResult)")
+        guard case .lines(let baseline) = baselineResult else {
+            throw Failure(description: "no baseline to compare the marks against")
+        }
         for edited in ["one\nTWO\nthree\nfour\n",
                        "one\ntwo\nthree\nfour\nfive\n",
                        "one\nfour\n",
@@ -4796,8 +4801,8 @@ enum RegressionTests {
             try Data(edited.utf8).write(to: file)
             _ = GitService.stageAll(in: root)
             let fromGit = GitLineChanges.changes(for: file, in: root)
-            let inProcess = GitLineChanges.changes(from: baseline ?? [],
-                                                   to: GitLineChanges.lines(of: edited))
+            let inProcess = GitLineChanges.changes(from: baseline,
+                                                   to: GitLineChanges.lines(of: edited)) ?? []
             try expect(fromGit == inProcess,
                        "the in-process diff disagrees with git for "
                         + "\(edited.debugDescription):\n  git: \(fromGit)\n  ours: \(inProcess)")
@@ -5480,6 +5485,95 @@ enum RegressionTests {
     /// Walking that tree recursively took the main thread into its stack guard.
     /// Three ways the diff a tab holds could be replayed into the wrong file.
     /// All of them wrote their result to disk and marked the tab saved.
+    /// Cancellation has to stop the work, not just discard its answer: a
+    /// generation counter checked on delivery leaves a full project scan — and
+    /// its ripgrep — running for as long as the tree is big.
+    private static func testSearchStopsWhenCancelled() throws {
+        let directory = try temporaryDirectory("search-cancel")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<50 {
+            try Data("needle \(index)\n".utf8)
+                .write(to: directory.appendingPathComponent("file\(index).txt"))
+        }
+        try expect(!SearchViewController.search(query: "needle", in: directory).isEmpty,
+                   "the fixture produced no results to begin with")
+
+        let token = CancellationToken()
+        token.cancel()
+        try expect(SearchViewController.search(query: "needle", in: directory,
+                                               cancellation: token).isEmpty,
+                   "a cancelled search still returned results")
+
+        // The in-process line diff answers the same way, and says "cancelled"
+        // rather than "no changes" — the two must never be the same value.
+        let base = (0..<5_000).map { "line \($0)" }
+        var edited = base
+        edited[2_500] = "changed"
+        try expect(GitLineChanges.changes(from: base, to: edited, cancellation: token) == nil,
+                   "a cancelled line diff reported a result instead of nothing")
+        try expect(GitLineChanges.changes(from: base, to: edited)?.count == 1,
+                   "the same diff without a cancelled token lost its change")
+
+        // A handler registered after the fact still runs, so a process started
+        // in the window between cancelling and launching cannot outlive it.
+        var tornDown = false
+        token.whenCancelled { tornDown = true }
+        try expect(tornDown, "a late handler was never run on an already-cancelled token")
+    }
+
+    /// A diff buffer is synthetic, so nothing could read it back and it was
+    /// excluded from eviction altogether. It carries everything it is made of
+    /// in its own URL, so it can be dropped and built again like any other.
+    private static func testDiffBuffersAreRebuiltAfterEviction() throws {
+        let root = try temporaryDirectory("diff-rebuild")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        GitService.forgetRepositoryInfo()
+        let file = root.appendingPathComponent("source.txt")
+        try Data("one\ntwo\n".utf8).write(to: file)
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-qm", "base"], in: root)
+        try Data("one\nTWO\n".utf8).write(to: file)
+
+        var components = URLComponents()
+        components.scheme = DocumentStore.diffScheme
+        components.host = ""
+        components.path = "/" + root.path + "/.puzzle-diff-preview"
+        components.queryItems = [URLQueryItem(name: "path", value: "source.txt")]
+        guard let url = components.url else {
+            throw Failure(description: "could not build a diff preview URL")
+        }
+
+        WorkspaceWindowController.registerDiffContentProvider()
+        let store = DocumentStore.shared
+        let opened = store.setVirtualDocument(url: url, text: "placeholder\n")
+        opened.makeDiffEditable(directory: root, path: "source.txt")
+        try expect(store.cachedDocument(for: url) != nil, "the diff buffer was not stored")
+
+        // Nothing is displaying it, so releasing transient memory should drop it.
+        store.releaseTransientMemory()
+        try expect(store.cachedDocument(for: url) == nil,
+                   "a rebuildable diff buffer was kept out of eviction")
+
+        let rebuilt = store.document(for: url)
+        try expect(rebuilt.text.contains("-two") && rebuilt.text.contains("+TWO"),
+                   "the diff was not rebuilt from its URL: \(rebuilt.text)")
+        try expect(!rebuilt.isReadOnly,
+                   "the rebuilt diff came back read-only, so saving it would do nothing")
+
+        // An edited diff is the only copy of what the user typed, so it stays.
+        rebuilt.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: " ")
+        rebuilt.markLocalEdit()
+        store.releaseTransientMemory()
+        try expect(store.cachedDocument(for: url) != nil,
+                   "an edited diff buffer was evicted")
+        store.setVirtualDocument(url: url, text: "reset\n").markSaved()
+        store.releaseTransientMemory()
+        GitService.forgetRepositoryInfo()
+    }
+
     private static func testDiffWriteBackEdgeCases() throws {
         // 1. A deleted line that itself begins with "-- " arrives as "--- " and
         //    was read as a file header: the hunk was cut off there and the half
@@ -5679,10 +5773,10 @@ enum RegressionTests {
         _ = GitService.run(["commit", "-qm", "init"], in: root)
 
         let baseline = GitLineChanges.baseline(for: file, in: project)
-        try expect(baseline == ["sub one", "sub two"],
-                   "the gutter baseline came from the wrong file: \(String(describing: baseline))")
-        try expect(GitLineChanges.changes(from: baseline ?? [],
-                                          to: ["sub one", "sub two"]).isEmpty,
+        try expect(baseline == .lines(["sub one", "sub two"]),
+                   "the gutter baseline came from the wrong file: \(baseline)")
+        try expect(GitLineChanges.changes(from: ["sub one", "sub two"],
+                                          to: ["sub one", "sub two"])?.isEmpty == true,
                    "an unmodified file in a subdirectory project was marked as changed")
 
         // A file Git knows about but HEAD does not is new in its entirety, and
@@ -5690,8 +5784,21 @@ enum RegressionTests {
         let added = project.appendingPathComponent("added.txt")
         try Data("fresh\n".utf8).write(to: added)
         _ = GitService.run(["add", "-A"], in: root)
-        try expect(GitLineChanges.baseline(for: added, in: project) == [],
+        try expect(GitLineChanges.baseline(for: added, in: project) == .lines([]),
                    "a newly staged file did not report an empty baseline")
+
+        // The three answers have to stay distinct: "nothing to compare" is a
+        // clean gutter, "could not ask" must not be shown as one.
+        let ignored = project.appendingPathComponent("scratch.tmp")
+        try Data("temp\n".utf8).write(to: ignored)
+        try expect(GitLineChanges.baseline(for: ignored, in: project) == .untracked,
+                   "an untracked file did not report an empty comparison")
+        let notARepository = try temporaryDirectory("not-a-repo")
+        defer { try? FileManager.default.removeItem(at: notARepository) }
+        let orphan = notARepository.appendingPathComponent("file.txt")
+        try Data("x\n".utf8).write(to: orphan)
+        try expect(GitLineChanges.baseline(for: orphan, in: notARepository) == .unavailable,
+                   "a failed Git lookup was reported as a clean file")
         GitService.forgetRepositoryInfo()
     }
 
@@ -5756,8 +5863,10 @@ enum RegressionTests {
         pane.selectAllForTesting()
         pane.insertTextForTesting("alpha\nBRAVO\ncharlie\nadded\ndelta\n")
         let edited = GitLineChanges.lines(of: pane.textForTesting)
-        let changes = GitLineChanges.changes(from: GitLineChanges.lines(of: committed),
-                                             to: edited)
+        guard let changes = GitLineChanges.changes(
+            from: GitLineChanges.lines(of: committed), to: edited) else {
+            throw Failure(description: "the in-process diff reported itself cancelled")
+        }
         try expect(changes.count == 2,
                    "expected a modification and an addition, got \(changes.map(\.kind))")
         guard let modification = changes.first(where: { $0.kind == .modified }),
@@ -5789,7 +5898,7 @@ enum RegressionTests {
         let afterDeletion = GitLineChanges.changes(
             from: GitLineChanges.lines(of: committed),
             to: GitLineChanges.lines(of: pane.textForTesting))
-        guard let deletion = afterDeletion.first(where: { $0.kind == .deleted }) else {
+        guard let deletion = afterDeletion?.first(where: { $0.kind == .deleted }) else {
             throw Failure(description: "deleting two lines produced no deletion mark")
         }
         try expect(pane.revertGitChange(deletion), "reverting a deletion failed")

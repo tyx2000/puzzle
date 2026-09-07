@@ -764,11 +764,23 @@ final class DocumentStore {
 
     func document(for url: URL) -> Document {
         if let existing = docs[url] { touch(url); return existing }
-        // A diff tab whose buffer was released must not be read from disk —
-        // its URL is synthetic. Hand back an empty virtual doc instead.
+        // A diff tab whose buffer was released must not be read from disk — its
+        // URL is synthetic. It is not lost either: the URL names the repository,
+        // the path and, for history, the commit, which is everything the diff is
+        // made of, so it is built again here.
         if url.scheme == Self.diffScheme {
-            return setVirtualDocument(url: url, text: "No diff available.\n",
-                                      displayName: url.lastPathComponent + " (diff)")
+            guard let content = virtualContentProvider?(url) else {
+                return setVirtualDocument(url: url, text: "No diff available.\n",
+                                          displayName: url.lastPathComponent + " (diff)")
+            }
+            let rebuilt = setVirtualDocument(url: url, text: content.text,
+                                             displayName: content.displayName)
+            // Without this the tab comes back read-only, because what makes a
+            // diff editable is this pairing and not the text.
+            if let source = content.editableSource {
+                rebuilt.makeDiffEditable(directory: source.directory, path: source.path)
+            }
+            return rebuilt
         }
         let doc = Document(url: url)
         docs[url] = doc
@@ -798,7 +810,8 @@ final class DocumentStore {
             guard docs.count > maxCachedDocuments || cachedBytes > maxCachedBytes else { break }
             guard url != protectedURL else { continue }
             guard let doc = docs[url] else { continue }
-            guard !doc.isModified, !doc.isVirtual else { continue }
+            guard !doc.isModified else { continue }
+            guard !doc.isVirtual || isRegenerable(url) else { continue }
             guard doc.storage.layoutManagers.isEmpty else { continue }
             HighlightService.shared.cancelPending(for: url)
             docs.removeValue(forKey: url)
@@ -810,6 +823,27 @@ final class DocumentStore {
 
     /// Register (or replace) an in-memory document, e.g. a git diff. Replacing
     /// matters because re-clicking a file should show its *current* diff.
+    /// What a synthetic URL stands for, rebuilt from the URL alone.
+    struct VirtualContent {
+        let text: String
+        let displayName: String?
+        /// Set for a working-tree diff, which is editable and replays into the
+        /// file it describes. Nil for a commit diff, which is history.
+        let editableSource: (directory: URL, path: String)?
+    }
+
+    /// Registered once at launch. Its presence is what allows a virtual buffer
+    /// to be evicted at all: a buffer that cannot be rebuilt must not be
+    /// dropped, because there is nowhere to read it back from.
+    var virtualContentProvider: ((URL) -> VirtualContent?)?
+
+    /// A synthetic buffer may be dropped only if it can be built again. An
+    /// edited one never qualifies — the eviction rules keep every modified
+    /// document, and an edited diff is the only copy of what the user typed.
+    private func isRegenerable(_ url: URL) -> Bool {
+        url.scheme == Self.diffScheme && virtualContentProvider != nil
+    }
+
     @discardableResult
     func setVirtualDocument(url: URL, text: String, displayName: String? = nil) -> Document {
         if let existing = docs[url], existing.isVirtual {
@@ -851,8 +885,8 @@ final class DocumentStore {
     /// retain their URLs and transparently reload these documents when selected.
     func releaseTransientMemory() {
         for (url, doc) in docs {
-            guard !doc.isModified, !doc.isVirtual,
-                  doc.storage.layoutManagers.isEmpty else { continue }
+            guard !doc.isModified, doc.storage.layoutManagers.isEmpty,
+                  !doc.isVirtual || isRegenerable(url) else { continue }
             HighlightService.shared.cancelPending(for: url)
             docs.removeValue(forKey: url)
         }
