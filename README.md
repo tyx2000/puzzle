@@ -7,11 +7,11 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 - **Zed-matched layout, one palette** — Ayu Dark throughout, fixed: it does not
   follow the system appearance and there is nothing to configure. Monaco 12 with
   configurable exact code/tree row heights.
-  Zed-style header (tabs beside the traffic lights), full-width bottom status bar
-  with a left **activity bar** (project · search · git) and
-  right branch · line/col · language, editor tabs with an active accent, compact
-  file tree with Material Icon Theme file/folder icons + git-dirty markers,
-  aligned gutter, current-line highlight. Fully flat — no Liquid Glass.
+  Zed-style header (tabs beside the traffic lights), the panel switcher
+  (project · search · git) in the sidebar's bottom action bar, the branch beside
+  the project name, editor tabs with an active accent, compact file tree with
+  Material Icon Theme file/folder icons + git-dirty markers, aligned gutter,
+  current-line highlight. Fully flat — no Liquid Glass.
 - **Tree ↔ tab sync** — the active tab's file gets a persistent background row in
   the tree; the tree also shows git-dirty coloring.
 - **No status bar** — one evenly-spaced button per panel (project · search ·
@@ -43,15 +43,17 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   are written whenever they are left — another tab, another window, another app,
   or closing them — so nothing asks about unsaved changes. A file that changed
   on disk under an edit still asks, because only you can pick a side.
-- **External changes** — project files are monitored with FSEvents; disk and
-  local edits use last-write-wins ordering with no conflict prompt.
+- **External changes** — project files are monitored with FSEvents. A buffer
+  with no unsaved edits follows the file; one with edits keeps them and reports
+  the conflict, which is the one case saving stops to ask about.
 - **Syntax highlighting** — vendored **tree-sitter** grammars for JSON, YAML,
   Bash, TypeScript/JS, and Markdown, with `#eq?`/`#match?`/`#any-of?` predicate
-  evaluation and a One Dark capture→color map. Adding a language is one entry in
+  evaluation and an Ayu Dark capture→color map. Adding a language is one entry in
   `SyntaxHighlighter.languages` + a bundled `highlights.scm`.
 - **Find in file** — native incremental find bar (⌘F).
 - **Find in folder** — project-wide search via ripgrep (built-in fallback).
-- **Git** — branch in the status bar, dirty files marked, status sheet (⌘G).
+- **Git** — branch beside the project name, dirty files marked in the tree,
+  per-line gutter marks with revert, and a git panel (⌘G).
 
 ## Build
 ```bash
@@ -121,5 +123,6 @@ with every property documented inline. Keys and defaults:
 - `NSTextView` is great for normal source files; multi-hundred-MB files are the
   wall that pushed Zed to a custom GPU renderer. Highlighting is skipped above
   ~500 KB to stay responsive.
-- Highlighting re-parses the whole document on edit (debounced). Fine for basic
-  editing; incremental `ts_tree_edit` reparsing would be the next optimization.
+- Highlighting reparses incrementally: an edit is handed to `ts_tree_edit` and
+  the previous tree is reused, so a keystroke costs the changed range rather
+  than the whole document. The parse is still debounced.

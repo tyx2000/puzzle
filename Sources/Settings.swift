@@ -37,7 +37,13 @@ final class Settings {
 
     private func contents() -> String {
         func num(_ v: CGFloat) -> String {
-            v == v.rounded() ? String(Int(v)) : String(format: "%g", Double(v))
+            // `Int(v)` traps on anything the integer cannot hold, and this
+            // rewrites the settings file at launch: one absurd number in it
+            // meant the app crashed on the way up, every time, until the file
+            // was edited by hand.
+            guard v.isFinite else { return "0" }
+            guard v == v.rounded(), abs(v) < 1e15 else { return String(format: "%g", Double(v)) }
+            return String(Int(v))
         }
         return """
         {
@@ -195,13 +201,24 @@ final class Settings {
                 "puzzle: \(Self.fileURL.path) is not valid JSON; keeping current settings\n".utf8))
             return
         }
+        apply(json)
+    }
 
+    /// Take the values from a parsed settings object. Separate from reading the
+    /// file so the validation can be exercised without one.
+    func apply(_ json: [String: Any]) {
         func number(_ key: String) -> CGFloat? {
+            // NaN and the infinities compare false against every bound below,
+            // so they are rejected by the range checks rather than smuggled
+            // past them.
             (json[key] as? NSNumber).map { CGFloat($0.doubleValue) }
         }
         if let v = json["buffer_font_family"] as? String, !v.isEmpty { fontFamily = v }
         if let v = number("buffer_font_size"), v >= 6, v <= 72 { fontSize = v }
-        if let v = number("buffer_font_weight") { fontWeight = v }
+        // Weights are CSS-style: 400 is regular, 700 bold. Validated like every
+        // other number here, so nothing outside the range reaches a font
+        // descriptor — or the writer above.
+        if let v = number("buffer_font_weight"), v >= 1, v <= 1000 { fontWeight = v }
         if let v = number("code_line_height") ?? number("buffer_line_height") {
             if v >= 8, v <= 200 {
                 codeLineHeight = v
@@ -215,7 +232,7 @@ final class Settings {
 
         if let v = json["ui_font_family"] as? String, !v.isEmpty { uiFontFamily = v }
         if let v = number("ui_font_size"), v >= 8, v <= 32 { uiFontSize = v }
-        if let v = number("ui_font_weight") { uiFontWeight = v }
+        if let v = number("ui_font_weight"), v >= 1, v <= 1000 { uiFontWeight = v }
         if let v = number("tree_line_height") ?? number("ui_line_height") {
             if v >= 8, v <= 200 {
                 treeLineHeight = v

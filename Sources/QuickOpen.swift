@@ -100,8 +100,12 @@ enum QuickOpen {
     static func lineTarget(_ query: String) -> (line: Int, column: Int?)? {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
-        let parts = trimmed.split(separator: ":", maxSplits: 1).map(String.init)
-        guard let line = Int(parts[0]), line > 0 else { return nil }
+        // Empty fields are kept rather than dropped: ":" split with the default
+        // options is an *empty array*, and reading its first element crashed the
+        // panel. Keeping them also settles ":12", which is not line 12.
+        let parts = trimmed.split(separator: ":", maxSplits: 1,
+                                  omittingEmptySubsequences: false).map(String.init)
+        guard let first = parts.first, let line = Int(first), line > 0 else { return nil }
         guard parts.count == 2 else { return (line, nil) }
         guard let column = Int(parts[1]), column > 0 else { return (line, nil) }
         return (line, column)

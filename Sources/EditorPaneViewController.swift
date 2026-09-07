@@ -4,7 +4,6 @@ import AppKit
 /// independent (own tabs) but share document buffers via DocumentStore.
 final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onActiveDocumentChanged: ((URL?) -> Void)?
-    var onBecameActive: ((EditorPaneViewController) -> Void)?
     var onEmptied: ((EditorPaneViewController) -> Void)?
     var onDocumentEdited: (() -> Void)?
     var onDocumentSaved: ((URL) -> Void)?
@@ -12,7 +11,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// A tab was closed here. The container decides whether the buffer is still
     /// open elsewhere before releasing it — a pane can't see its siblings.
     var onTabClosed: ((URL) -> Void)?
-    var onTabBarHeightChanged: ((CGFloat) -> Void)?
     /// Supplied by the editor container for synthetic file-history tabs.
     var fileHistoryProvider: ((URL) -> FileHistoryModel?)?
 
@@ -75,6 +73,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var currentDocument: Document? { currentURL.map { DocumentStore.shared.document(for: $0) } }
 
     /// Highlight the tab strip when this pane has focus.
+    /// The strip's height as laid out, which follows the window's traffic-light
+    /// geometry. Read by the tests that check that alignment.
+    var tabBarHeight: CGFloat { tabBar.currentHeight }
     var isActivePane = false { didSet { tabBar.paneActive = isActivePane } }
 
     private let findBar = FindBarView()
@@ -197,10 +198,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.onClose = { [weak self] in self?.close(index: $0) }
         tabBar.onCloseOthers = { [weak self] in self?.closeOtherTabs(around: $0) }
         tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
-        tabBar.onHeightChanged = { [weak self] height in
-            self?.onTabBarHeightChanged?(height)
-        }
-
         container.addSubview(tabBar)
         container.addSubview(scrollView)
         findBar.translatesAutoresizingMaskIntoConstraints = false
@@ -916,7 +913,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scrollView.verticalRulerView?.needsDisplay = true
         textView.needsDisplay = true
         onActiveDocumentChanged?(url)
-        onBecameActive?(self)
         if lineIsActive { scheduleInlineBlame() }
     }
 
@@ -998,7 +994,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func save() {
         guard let doc = currentDocument, !doc.isReadOnly else { return }
-        persist(doc, notify: true, presentErrors: true, overwriteDiskChanges: true)
+        // Explicit Save puts its own errors on screen, so there is no result
+        // left for the caller to act on.
+        _ = persist(doc, notify: true, presentErrors: true, overwriteDiskChanges: true)
     }
 
     /// Write the buffer the user is leaving, the way Zed's
@@ -1010,9 +1008,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// rather than throwing a modal at someone who has already looked away.
     /// Explicit Save writes the current buffer; closing can ask about a conflict.
     func autosaveIfNeeded() {
+        idleSaveWork?.cancel()
         guard let document = currentDocument, document.isModified,
               !document.isReadOnly, !document.isVirtual else { return }
-        persist(document, notify: true, presentErrors: false)
+        // Silent by design, as the comment above says: a refused autosave
+        // leaves the document dirty and says nothing.
+        _ = persist(document, notify: true, presentErrors: false)
     }
 
     @discardableResult
@@ -1026,7 +1027,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let source = document.editableDiff else { return true }
         let diff = document.text
         let file = source.directory.appendingPathComponent(source.path)
-        let preimage = GitService.diffPreimage(diff, path: source.path, in: source.directory)
+        guard let preimage = GitService.diffPreimage(diff, path: source.path,
+                                                     in: source.directory) else {
+            if presentErrors {
+                let alert = NSAlert()
+                alert.messageText = "Cannot apply this diff"
+                alert.informativeText =
+                    "Git could not produce the version of \(source.path) this diff "
+                    + "was taken against, so there is nothing to replay it over. "
+                    + "Edit the file itself instead."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+            return false
+        }
         guard let updated = UnifiedDiff.apply(diff, to: preimage) else {
             if presentErrors {
                 let alert = NSAlert()
@@ -1428,6 +1442,30 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             activeSourceRange: reveal)
         textView.refreshBracketMatches()
         scheduleGitLineChanges()
+        scheduleIdleSave(for: doc)
+    }
+
+    /// Write the buffer once the typing stops.
+    ///
+    /// Focus changes and ⌘S still save; this covers the case neither of them
+    /// does — a long editing session in one window, where the file on disk
+    /// stays as it was when the tab was opened.
+    ///
+    /// The document is captured rather than looked up when the timer fires: by
+    /// then the pane may be showing a different tab, and the buffer that was
+    /// edited is the one that has to be written.
+    private func scheduleIdleSave(for document: Document) {
+        idleSaveWork?.cancel()
+        guard document.isModified, !document.isReadOnly else { return }
+        let work = DispatchWorkItem { [weak self, weak document] in
+            guard let self, let document else { return }
+            // Silent, exactly like the focus-change save: a refusal (a disk
+            // conflict, a read-only file) leaves the buffer dirty and says
+            // nothing, and ⌘S is where the user gets told.
+            _ = self.persist(document, notify: true, presentErrors: false)
+        }
+        idleSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleSaveDelay, execute: work)
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -1457,7 +1495,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scheduleInlineBlame()
     }
 
-    var tabBarHeight: CGFloat { tabBar.currentHeight }
     func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
     var hasActiveLineForTesting: Bool { textView.showsCurrentLineBand }
     var inlineBlameForTesting: String? { textView.inlineBlame }
@@ -1501,6 +1538,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: location, length: 0))
         suppressSelectionSideEffects = false
         textView.undoManager?.removeAllActions()
+        // The reload re-decides whether this file can be shown in full, so the
+        // buffer may have just become a read-only preview — or stopped being one.
+        textView.isEditable = !document.isReadOnly
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
@@ -1549,9 +1589,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var gitBaseline: [String]?
     private var gitBaselineURL: URL?
     private var liveMarkWork: DispatchWorkItem?
+    private var idleSaveWork: DispatchWorkItem?
     /// Long enough that a burst of typing is one diff, short enough that the
     /// ribbon appears while the line is still the one being written.
     static let liveMarkDelay: TimeInterval = 0.25
+    /// How long the typing has to stop before the buffer is written.
+    ///
+    /// One second, which is what VS Code writes on (`files.autoSaveDelay`) and
+    /// what Zed's `after_delay` is usually set to. Shorter turns a pause mid
+    /// sentence into a write; much longer and the file on disk lags behind what
+    /// the user is looking at, which is the thing autosave exists to prevent.
+    /// JetBrains' 15 seconds is the outlier, and it leans on save-on-focus-loss
+    /// the way this editor did before this.
+    static let idleSaveDelay: TimeInterval = 1
 
     private var blameWork: DispatchWorkItem?
     private var blameGeneration = 0
@@ -1682,17 +1732,4 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     func textViewDidChangeTypingAttributes(_ notification: Notification) {}
-
-    /// Track focus so the container knows which pane is active.
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(focusChanged),
-            name: NSWindow.didUpdateNotification, object: view.window)
-    }
-
-    @objc private func focusChanged() {
-        guard let responder = view.window?.firstResponder as? NSView else { return }
-        if responder === textView && !isActivePane { onBecameActive?(self) }
-    }
 }

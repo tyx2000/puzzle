@@ -148,7 +148,19 @@ final class PuzzleTextView: NSTextView {
     private var markdownLineMarkers: [MarkdownLineMarkerDecoration] = []
     private var markdownRules: [MarkdownRuleDecoration] = []
     private var markdownImages: [MarkdownImageDecoration] = []
-    private var markdownImageCache: [URL: NSImage] = [:]
+    /// Decoded at the size they are drawn at, not the size they were saved at,
+    /// and only while the document's pictures together stay under a budget: a
+    /// three-line Markdown file can reference a folder full of camera JPEGs, and
+    /// full-resolution frames for all of them are hundreds of megabytes.
+    private struct CachedImage {
+        let image: NSImage
+        let bytes: Int
+    }
+    private var markdownImageCache: [URL: CachedImage] = [:]
+    /// Enough for the widest measure on a Retina display; the drawn box is at
+    /// most 320pt tall, so a larger frame would only be thrown away by `draw`.
+    private static let markdownImagePixels = 1600
+    private static let markdownImageByteBudget = 48 * 1024 * 1024
     private var markdownActiveSourceRange: NSRange?
     private var measuredMarkdownTableWidth: CGFloat = -1
 
@@ -281,9 +293,21 @@ final class PuzzleTextView: NSTextView {
 
     private func markdownImage(_ decoration: MarkdownImageDecoration) -> NSImage? {
         guard let url = decoration.url, url.isFileURL else { return nil }
-        if let cached = markdownImageCache[url] { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        markdownImageCache[url] = image
+        if let cached = markdownImageCache[url] { return cached.image }
+        let used = markdownImageCache.values.reduce(0) { $0 + $1.bytes }
+        // Past the budget the picture falls back to its alt text rather than
+        // being decoded. `draw` already has that path for images it cannot read.
+        guard used < Self.markdownImageByteBudget,
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let source = PreviewImageSource(url: url, data: data),
+              let image = source.decode(maximum: Self.markdownImagePixels) else { return nil }
+        // The decoded frame keeps the file's logical size, so every measurement
+        // below is unchanged; only the bitmap behind it is smaller.
+        let longest = max(source.pixelSize.width, source.pixelSize.height)
+        let scale = longest > 0 ? min(1, CGFloat(Self.markdownImagePixels) / longest) : 1
+        let bytes = Int(source.pixelSize.width * scale)
+            * Int(source.pixelSize.height * scale) * 4
+        markdownImageCache[url] = CachedImage(image: image, bytes: bytes)
         return image
     }
 

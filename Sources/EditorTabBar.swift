@@ -7,7 +7,6 @@ final class EditorTabBar: NSView {
     var onClose: ((Int) -> Void)?
     var onCloseOthers: ((Int) -> Void)?
     var onCloseRight: ((Int) -> Void)?
-    var onHeightChanged: ((CGFloat) -> Void)?
 
 
     var paneActive = true { didSet { needsDisplay = true } }
@@ -51,7 +50,6 @@ final class EditorTabBar: NSView {
         invalidateIntrinsicContentSize()
         needsLayout = true
         layoutPills()
-        onHeightChanged?(currentHeight)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -117,7 +115,6 @@ final class EditorTabBar: NSView {
         if abs(height - contentHeight) > 0.5 {
             contentHeight = height
             invalidateIntrinsicContentSize()
-            onHeightChanged?(max(rowHeight, height))
         }
     }
 

@@ -49,6 +49,12 @@ enum RegressionTests {
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
         try testRevertAndDiffWriteBack()
+        try testDeepSyntaxTreesDoNotOverflow()
+        try testDiffWriteBackEdgeCases()
+        try testReplaceAllPastTheMatchCache()
+        try testExternalRefreshKeepsBoundedPreview()
+        try testSettingsRejectUnusableNumbers()
+        try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
         try testMinifiedJSONOpensFormatted()
@@ -366,6 +372,14 @@ enum RegressionTests {
         try expect(QuickOpen.lineTarget("0") == nil && QuickOpen.lineTarget("abc") == nil
                     && QuickOpen.lineTarget("") == nil,
                    "a non-line query was accepted")
+        // A query that is nothing but separators used to leave `split` with an
+        // empty array, and reading its first field crashed the app outright.
+        try expect(QuickOpen.lineTarget(":") == nil && QuickOpen.lineTarget("::") == nil
+                    && QuickOpen.lineTarget(" : ") == nil && QuickOpen.lineTarget(":12") == nil,
+                   "a query with no line number in front of the colon was accepted")
+        try expect(QuickOpen.lineTarget("12:")?.line == 12
+                    && QuickOpen.lineTarget("12:")?.column == nil,
+                   "a trailing colon did not fall back to the whole line")
 
         // The jump respects the column and clamps past the end of the line.
         let file = directory.appendingPathComponent("lines.swift")
@@ -1320,6 +1334,41 @@ enum RegressionTests {
                    "project search did not snapshot the modified editor buffer")
         document.isModified = false
         store.release(staleURL, stillOpen: false)
+
+        // Minified and generated output is not searched: a hit on a 200,000
+        // character line points at nothing anyone can read, and one bundle can
+        // fill the panel on its own. The rule is per line, so a generated file
+        // that also has readable lines still answers for those.
+        try expect(SearchViewController.isGeneratedArtifact("app.min.js")
+                    && SearchViewController.isGeneratedArtifact("APP.MIN.CSS")
+                    && SearchViewController.isGeneratedArtifact("bundle.js.map"),
+                   "build output was not recognised by name")
+        try expect(!SearchViewController.isGeneratedArtifact("minified.swift")
+                    && !SearchViewController.isGeneratedArtifact("map.ts"),
+                   "a hand-written file was mistaken for build output")
+        let bundle = directory.appendingPathComponent("app.min.js")
+        try Data("var needle=1;\n".utf8).write(to: bundle)
+        let long = directory.appendingPathComponent("payload.js")
+        try Data(("var x=\"" + String(repeating: "needle,", count: 400) + "\";\n"
+                    + "const readable = needle\n").utf8).write(to: long)
+        let filtered = SearchViewController.search(query: "needle", in: directory)
+        try expect(filtered.allSatisfy { $0.url != bundle },
+                   "a .min.js file was searched")
+        let readable = filtered.first(where: { $0.url == long })
+        try expect(readable?.hits.count == 1 && readable?.hits.first?.line == 2,
+                   "the minified line was returned, or the readable one was not: "
+                     + "\(readable?.hits.map { ($0.line, $0.preview) } ?? [])")
+        try? FileManager.default.removeItem(at: bundle)
+        try? FileManager.default.removeItem(at: long)
+        // The same exclusions reach ripgrep, which this machine may not have to
+        // run: the flags are checked instead of the results.
+        let flags = SearchViewController.ripgrepArguments(
+            query: "needle", options: SearchOptions())
+        try expect(flags.contains("--glob") && flags.contains("!*.min.js")
+                    && flags.contains("!*.map"),
+                   "ripgrep was not told to skip build output: \(flags)")
+        try expect(flags.last == "." && flags[flags.count - 2] == "needle",
+                   "the query and path are no longer the last arguments: \(flags)")
     }
 
     private static func testReadOnlyAndEncodingProtection() throws {
@@ -4162,7 +4211,7 @@ enum RegressionTests {
 
         let log = GitService.log(in: root, limit: 40)
         try expect(log.count == 6, "the log did not come back whole: \(log.map(\.subject))")
-        guard let mergeIndex = log.firstIndex(where: { $0.parents.count == 2 }) else {
+        guard log.contains(where: { $0.parents.count == 2 }) else {
             throw Failure(description: "no merge commit carried two parents: "
                             + "\(log.map { ($0.subject, $0.parents) })")
         }
@@ -4536,6 +4585,27 @@ enum RegressionTests {
                    "losing focus did not save the file: \(onDisk.debugDescription)")
         field.removeFromSuperview()
 
+        // Typing and then stopping writes the buffer on its own: neither ⌘S nor
+        // a focus change is needed, which is the case a long session in one
+        // window used to miss entirely.
+        pane.activate(index: 1)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("IDLE ")
+        onDisk = try String(contentsOf: second, encoding: .utf8)
+        try expect(onDisk == "AGAIN second\n",
+                   "the buffer was written before the typing stopped: "
+                     + "\(onDisk.debugDescription)")
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            EditorPaneViewController.idleSaveDelay + 0.4))
+        onDisk = try String(contentsOf: second, encoding: .utf8)
+        try expect(onDisk == "IDLE AGAIN second\n",
+                   "the idle save did not write the file: \(onDisk.debugDescription)")
+        try expect(!pane.isModifiedForTesting,
+                   "the buffer is still dirty after the idle save")
+        try expect(EditorPaneViewController.idleSaveDelay <= 2,
+                   "the idle save waits \(EditorPaneViewController.idleSaveDelay)s, "
+                     + "long enough for the file on disk to lag behind the screen")
+
         // Leaving the window writes every pane's buffer — what
         // `windowDidResignKey` calls when the user clicks another window or
         // switches apps.
@@ -4544,7 +4614,7 @@ enum RegressionTests {
         pane.insertTextForTesting("LEFT ")
         editor.autosaveAll()
         onDisk = try String(contentsOf: second, encoding: .utf8)
-        try expect(onDisk == "LEFT AGAIN second\n",
+        try expect(onDisk == "LEFT IDLE AGAIN second\n",
                    "leaving the window did not save: \(onDisk.debugDescription)")
 
         // A file that changed underneath the edit is never overwritten in
@@ -5403,6 +5473,228 @@ enum RegressionTests {
     /// app the user only asked to commit.
     /// The gutter mark's popover can put its own lines back, and an edited diff
     /// tab is written through to the file it describes.
+    /// Syntax-tree depth follows the source, not the file size: `a + b + c + …`
+    /// nests one binary expression per term, so a few thousand of them build a
+    /// tree thousands of levels deep out of 48 KB of text with no line longer
+    /// than a dozen characters — under every size limit the editor applies.
+    /// Walking that tree recursively took the main thread into its stack guard.
+    /// Three ways the diff a tab holds could be replayed into the wrong file.
+    /// All of them wrote their result to disk and marked the tab saved.
+    private static func testDiffWriteBackEdgeCases() throws {
+        // 1. A deleted line that itself begins with "-- " arrives as "--- " and
+        //    was read as a file header: the hunk was cut off there and the half
+        //    of it already parsed was applied on its own.
+        let lua = "local a = 1\n-- comment\nlocal b = 2\n"
+        let deletion = """
+        diff --git a/x.lua b/x.lua
+        index 1111111..2222222 100644
+        --- a/x.lua
+        +++ b/x.lua
+        @@ -1,3 +1,2 @@
+         local a = 1
+        --- comment
+         local b = 2
+
+        """
+        try expect(UnifiedDiff.apply(deletion, to: lua) == "local a = 1\nlocal b = 2\n",
+                   "deleting a comment line produced "
+                     + "\(UnifiedDiff.apply(deletion, to: lua) ?? "nil")")
+
+        // 2. A hunk with no old lines inserts *between* two of them, so it does
+        //    not step back the way a replacement does.
+        let three = "one\ntwo\nthree\n"
+        let insertion = "@@ -2,0 +3 @@\n+inserted\n"
+        try expect(UnifiedDiff.apply(insertion, to: three) == "one\ntwo\ninserted\nthree\n",
+                   "a zero-context insertion landed at "
+                     + "\(UnifiedDiff.apply(insertion, to: three) ?? "nil")")
+        // A normal hunk still counts from the line the header names.
+        try expect(UnifiedDiff.apply("@@ -2,1 +2,1 @@\n-two\n+2\n", to: three)
+                    == "one\n2\nthree\n",
+                   "an ordinary hunk moved")
+
+        // 3. The marker says which side has no final newline. Reading that off
+        //    the baseline took a newly added one straight back off.
+        let unterminated = "alpha\nomega"
+        let gainsNewline = """
+        @@ -1,2 +1,2 @@
+         alpha
+        -omega
+        \\ No newline at end of file
+        +omega!
+
+        """
+        try expect(UnifiedDiff.apply(gainsNewline, to: unterminated) == "alpha\nomega!\n",
+                   "the diff added a final newline and it was dropped: "
+                     + "\(UnifiedDiff.apply(gainsNewline, to: unterminated) ?? "nil")")
+        let losesNewline = """
+        @@ -1,2 +1,2 @@
+         alpha
+        -omega
+        +omega!
+        \\ No newline at end of file
+
+        """
+        try expect(UnifiedDiff.apply(losesNewline, to: "alpha\nomega\n") == "alpha\nomega!",
+                   "the diff removed the final newline and it came back")
+    }
+
+    /// Replace All used to walk the same capped list the bar paints from, so a
+    /// file with more matches than the cap kept the ones past it.
+    private static func testReplaceAllPastTheMatchCache() throws {
+        let count = FindBarView.maxRetainedMatches + 500
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        textView.string = String(repeating: "x", count: count)
+        let bar = FindBarView(frame: .zero)
+        bar.attach(to: textView)
+        bar.setQuery("x")
+        try expect(bar.totalMatchCountForTesting == count,
+                   "\(bar.totalMatchCountForTesting) matches counted, not \(count)")
+        try expect(bar.retainedMatchCountForTesting == FindBarView.maxRetainedMatches,
+                   "the painted range cache is no longer bounded")
+        bar.setReplacementForTesting("y")
+        bar.replaceAllForTesting()
+        try expect(!textView.string.contains("x"),
+                   "\(textView.string.filter { $0 == "x" }.count) matches survived Replace All")
+        try expect(textView.string.count == count, "Replace All changed the length")
+    }
+
+    /// A file that opened as a bounded read-only preview must not become a
+    /// fully editable one-line buffer because something rewrote it in the
+    /// background — and must come back when the file is readable again.
+    private static func testExternalRefreshKeepsBoundedPreview() throws {
+        let directory = try temporaryDirectory("external-preview")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("bundle.js")
+        try Data("hello\n".utf8).write(to: file)
+        let document = Document(url: file)
+        try expect(!document.isUnsupported && document.text == "hello\n",
+                   "the small file did not open normally")
+
+        try Data(String(repeating: "a", count: 1_000_000).utf8).write(to: file)
+        _ = document.reloadFromDiskIfLatest(observedAt: Date())
+        try expect(document.isUnsupported && document.isReadOnly,
+                   "a one-line megabyte arrived as an editable buffer")
+        try expect(document.storage.length < 2 * Document.minifiedPreviewLength,
+                   "the whole line went into the buffer: \(document.storage.length)")
+
+        try Data("hello again\n".utf8).write(to: file)
+        _ = document.reloadFromDiskIfLatest(observedAt: Date())
+        try expect(!document.isUnsupported && document.text == "hello again\n",
+                   "the buffer stayed a preview after the file became readable again")
+    }
+
+    /// A number that is legal JSON but not a legal font weight reached
+    /// `Int(_:)` while the settings file was being rewritten at launch, which
+    /// crashed the app on the way up until the file was edited by hand.
+    private static func testSettingsRejectUnusableNumbers() throws {
+        let settings = Settings.shared
+        let weight = settings.fontWeight
+        let uiWeight = settings.uiFontWeight
+        defer {
+            settings.fontWeight = weight
+            settings.uiFontWeight = uiWeight
+        }
+        settings.apply(["buffer_font_weight": 1e100, "ui_font_weight": -1e100])
+        try expect(settings.fontWeight == weight && settings.uiFontWeight == uiWeight,
+                   "an out-of-range weight was accepted: \(settings.fontWeight)")
+        settings.apply(["buffer_font_weight": 700])
+        try expect(settings.fontWeight == 700, "a legitimate weight was rejected")
+
+        // And the writer holds up even if such a value gets in another way.
+        settings.fontWeight = 1e100
+        settings.uiFontWeight = .nan
+        let written = settings.documentedContentsForTesting
+        try expect(!written.contains("nan") && !written.contains("inf"),
+                   "the settings file was written with a value it cannot read back")
+    }
+
+    private static func testDeepSyntaxTreesDoNotOverflow() throws {
+        let definition = LanguageDefinition(
+            name: "tsx", language: tree_sitter_tsx()!,
+            querySources: ["(string) @string"], extensions: ["tsx"], display: "TSX")
+        guard let highlighter = SyntaxHighlighter(definition: definition) else {
+            throw Failure(description: "the tsx grammar did not load")
+        }
+        func highlight(_ text: String) -> [JSXTagMatch] {
+            let storage = NSTextStorage(
+                string: text, attributes: Theme.textAttributes(color: Theme.foreground))
+            return highlighter.highlight(
+                text: text, storage: storage,
+                fullRange: NSRange(location: 0, length: storage.length))
+        }
+
+        let depth = 8_000
+        let chain = "const s = \"a\"\n" + String(repeating: "  + \"a\"\n", count: depth) + ";\n"
+        try expect(chain.utf8.count < 500_000, "the chain fixture is past the highlight limit")
+        try expect(highlight(chain).isEmpty, "a chain of additions produced JSX tags")
+
+        // Nested elements reach the same depth, and every one of them is still
+        // reported: the walk is iterative now, not shallower.
+        let nested = "const a = " + String(repeating: "<div>", count: depth)
+            + "x" + String(repeating: "</div>", count: depth) + ";\n"
+        let tags = highlight(nested)
+        try expect(tags.count == depth,
+                   "\(tags.count) of \(depth) nested JSX elements were matched")
+
+        // The book renderer builds, walks and releases a node tree of its own.
+        let directory = try temporaryDirectory("epub-depth")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("book.epub")
+        try sampleBook().write(to: url)
+        guard let book = EPUBBook(url: url) else {
+            throw Failure(description: "the sample book did not parse")
+        }
+        let deep = "<html><body>" + String(repeating: "<div>", count: 20_000)
+            + "deep" + String(repeating: "</div>", count: 20_000) + "</body></html>"
+        _ = EPUBRenderer.render(xhtml: Data(deep.utf8),
+                                chapterPath: book.chapters[0].path, book: book)
+        let shallow = "<html><body><p>after</p></body></html>"
+        let after = EPUBRenderer.render(xhtml: Data(shallow.utf8),
+                                        chapterPath: book.chapters[0].path, book: book)
+        try expect(after.text.string.contains("after"),
+                   "the renderer stopped working after a deeply nested chapter")
+    }
+
+    /// A project opened on a subdirectory of a repository still asks Git for
+    /// its own files. `HEAD:<path>` resolves from the repository root, so the
+    /// gutter used to read whichever file the root held by that name — and, in
+    /// its absence, marked the whole file as newly added, which Revert would
+    /// then have written into the buffer.
+    private static func testSubdirectoryProjectGutterBaseline() throws {
+        let root = try temporaryDirectory("git-subdir")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        GitService.forgetRepositoryInfo()
+
+        // Same name at the root and in the project, with different contents:
+        // reading the wrong one is silent, and answers with exit code 0.
+        let file = project.appendingPathComponent("file.txt")
+        try Data("sub one\nsub two\n".utf8).write(to: file)
+        try Data("root one\nroot two\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-qm", "init"], in: root)
+
+        let baseline = GitLineChanges.baseline(for: file, in: project)
+        try expect(baseline == ["sub one", "sub two"],
+                   "the gutter baseline came from the wrong file: \(String(describing: baseline))")
+        try expect(GitLineChanges.changes(from: baseline ?? [],
+                                          to: ["sub one", "sub two"]).isEmpty,
+                   "an unmodified file in a subdirectory project was marked as changed")
+
+        // A file Git knows about but HEAD does not is new in its entirety, and
+        // that branch has to stay reachable now that the lookup is correct.
+        let added = project.appendingPathComponent("added.txt")
+        try Data("fresh\n".utf8).write(to: added)
+        _ = GitService.run(["add", "-A"], in: root)
+        try expect(GitLineChanges.baseline(for: added, in: project) == [],
+                   "a newly staged file did not report an empty baseline")
+        GitService.forgetRepositoryInfo()
+    }
+
     private static func testRevertAndDiffWriteBack() throws {
         // Replaying a diff over its pre-image, which is what saving a diff tab
         // does. Context lines come from the diff, not from the pre-image: an

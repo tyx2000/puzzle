@@ -66,10 +66,17 @@ enum EPUBRenderer {
         return result
     }
 
-    private static func children(of node: TSNode, mapper: ByteMapper) -> [Node] {
+    /// Real books nest a handful of elements deep. Building this tree recurses,
+    /// so does walking it, and so does *releasing* it — a generated chapter with
+    /// thousands of nested tags overflowed the stack in all three directions.
+    /// Content deeper than this is dropped rather than taking the app down.
+    private static let maxNodeDepth = 200
+
+    private static func children(of node: TSNode, mapper: ByteMapper,
+                                 depth: Int = 0) -> [Node] {
         var built: [Node] = []
         let count = ts_node_child_count(node)
-        guard count > 0 else { return built }
+        guard count > 0, depth < maxNodeDepth else { return built }
         for index in 0..<count {
             let child = ts_node_child(node, index)
             guard ts_node_is_named(child) else { continue }
@@ -78,7 +85,8 @@ enum EPUBRenderer {
                   end >= start else { continue }
             built.append(Node(type: String(cString: ts_node_type(child)),
                               range: NSRange(location: start, length: end - start),
-                              children: children(of: child, mapper: mapper)))
+                              children: children(of: child, mapper: mapper,
+                                                 depth: depth + 1)))
         }
         return built
     }
@@ -143,6 +151,13 @@ enum EPUBRenderer {
         /// Blocks are separated when the *next* one starts, not when the last
         /// one ends: that way a run of empty or skipped elements cannot leave a
         /// stack of blank lines behind.
+        /// Decoded pictures for this chapter, by archive path. A book that
+        /// repeats one image on every page decoded it again for every `<img>`,
+        /// and the attachments hold each copy for as long as the chapter is on
+        /// screen; past the budget the alt text stands in for the picture.
+        private var decodedImages: [String: NSImage] = [:]
+        private var decodedImageBytes = 0
+        private static let imageByteBudget = 48 * 1024 * 1024
         private var needsSeparator = false
         private var blockStart = 0
         private var currentBlock: Block?
@@ -450,11 +465,20 @@ enum EPUBRenderer {
 
         // MARK: Elements needing the archive
 
+        private mutating func decodedImage(at path: String) -> NSImage? {
+            if let hit = decodedImages[path] { return hit }
+            guard decodedImageBytes < Self.imageByteBudget,
+                  let data = book.data(at: path),
+                  let image = EPUBRenderer.decodeBounded(data) else { return nil }
+            decodedImages[path] = image
+            decodedImageBytes += Int(image.size.width) * Int(image.size.height) * 4
+            return image
+        }
+
         private mutating func image(source href: String?, alt: String?, inline: Inline) {
             guard let href, !href.isEmpty else { return }
             let path = EPUBBook.resolve(EPUBBook.stripFragment(href), against: directory)
-            guard let data = book.data(at: path),
-                  let image = EPUBRenderer.decodeBounded(data) else {
+            guard let image = decodedImage(at: path) else {
                 // A picture that will not decode still occupied a place in the
                 // text; say so rather than dropping it silently.
                 if let alt = alt, !alt.isEmpty {

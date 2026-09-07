@@ -13,7 +13,6 @@ final class EditorViewController: NSViewController {
     /// editor area should simply be empty until a file is picked.
     var hasProject = false { didSet { updatePlaceholder() } }
     var onOpenRecent: ((URL) -> Void)?
-    var onTabBarHeightChanged: ((CGFloat) -> Void)?
 
     private var pane: EditorPaneViewController!
     private let welcome = WelcomeView()
@@ -33,7 +32,6 @@ final class EditorViewController: NSViewController {
         tabRowHeight = height
         settingsButtonTop?.constant = (height - 20) / 2
         pane?.setTabRowHeight(height)
-        onTabBarHeightChanged?(pane?.tabBarHeight ?? height)
     }
 
     override func loadView() {
@@ -137,10 +135,6 @@ final class EditorViewController: NSViewController {
             DocumentStore.shared.unregisterOpen(url, owner: pane)
             self?.fileHistories.removeValue(forKey: url)
         }
-        pane.onTabBarHeightChanged = { [weak self] height in
-            self?.onTabBarHeightChanged?(height)
-        }
-
         addChild(pane)
         pane.isActivePane = true
         self.pane = pane

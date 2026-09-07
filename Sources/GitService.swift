@@ -327,9 +327,23 @@ enum GitService {
     }
 
     /// A file's contents as of a commit (`git show <hash>:<path>`).
+    ///
+    /// `path` is project-relative, as everything outside this type is. The
+    /// translation matters: `HEAD:x` names `x` at the *repository* root, so a
+    /// project opened on a subdirectory that skips it asks for the wrong file —
+    /// and is answered, successfully, with a different file's contents whenever
+    /// the root holds one by the same name.
     static func blob(inCommit hash: String, path: String, in directory: URL) -> BlobResult {
-        let repoPath = repositoryRelativePath(path, in: directory)
-        let object = "\(hash):\(repoPath)"
+        blob(object: "\(hash):\(repositoryRelativePath(path, in: directory))", in: directory)
+    }
+
+    /// One Git object, read with a ceiling on it.
+    ///
+    /// The size is asked for first so an oversized blob is reported rather than
+    /// half-read: the working file may be small while the history behind it is
+    /// not, and the limits that bound an open document say nothing about what
+    /// `HEAD` still holds.
+    static func blob(object: String, in directory: URL) -> BlobResult {
         let sizeResult = run(["cat-file", "-s", object], in: directory)
         guard sizeResult.code == 0,
               let size = Int(sizeResult.out.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -338,7 +352,7 @@ enum GitService {
         guard size <= maxBlobBytes else { return .tooLarge(size) }
         guard let data = runData(["--no-pager", "show", object],
                                  in: directory, limit: maxBlobBytes) else {
-            return .unavailable("Git could not read the image blob.")
+            return .unavailable("Git could not read the blob.")
         }
         return .data(data)
     }
@@ -1114,13 +1128,26 @@ enum GitService {
     /// to work out which one the diff was asked for. A new file names the
     /// all-zero hash and has no pre-image; a hand-mangled header falls back to
     /// HEAD's copy of the path.
-    static func diffPreimage(_ diff: String, path: String, in directory: URL) -> String {
-        if let blob = UnifiedDiff.oldBlob(in: diff) {
-            let result = run(["--no-pager", "cat-file", "blob", blob], in: directory)
-            if result.code == 0 { return result.out }
+    /// Nil when the pre-image cannot be established. That is not the same as an
+    /// empty one: a diff that creates a file has an empty pre-image and applies
+    /// perfectly well over it, while a blob that is missing or too large to read
+    /// leaves us with nothing to replay the diff over — and replaying it over
+    /// "" instead would rewrite the file as the additions alone.
+    static func diffPreimage(_ diff: String, path: String, in directory: URL) -> String? {
+        // Both reads go through the bounded blob API: this text is replayed
+        // into a source file, so it is worth a ceiling and worth resolving the
+        // path the way Git does rather than the way the project is opened.
+        if let hash = UnifiedDiff.oldBlob(in: diff) {
+            guard case .data(let data) = blob(object: hash, in: directory) else { return nil }
+            return String(decoding: data, as: UTF8.self)
         }
-        let head = run(["--no-pager", "show", "HEAD:" + path], in: directory)
-        return head.code == 0 ? head.out : ""
+        switch blob(inCommit: "HEAD", path: path, in: directory) {
+        case .data(let data): return String(decoding: data, as: UTF8.self)
+        case .tooLarge: return nil
+        // Not in HEAD and no old blob named: the diff creates this file, and an
+        // empty pre-image is the right thing to replay it over.
+        case .unavailable: return ""
+        }
     }
 
     /// One file touched by a commit.
@@ -1171,12 +1198,6 @@ enum GitService {
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "No changes recorded for \(path) in \(hash).\n"
             : text
-    }
-
-    /// Relative paths of changed files, for marking the tree.
-    static func dirtyPaths(in directory: URL) -> Set<String> {
-        let s = status(in: directory)
-        return Set(s.entries.map { $0.path })
     }
 
     /// Changed paths split by kind, for colouring the file tree the way git

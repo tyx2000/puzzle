@@ -331,13 +331,12 @@ final class SearchViewController: NSViewController {
         process.executableURL = URL(fileURLWithPath: rg)
         // JSON framing keeps paths containing colons or newlines unambiguous.
         // The previous `path:line:text` parser silently discarded valid hits.
-        var args = ["--json", "--max-count", "80",
-                    "--max-columns", "1000", "--max-columns-preview"]
-        if !options.regex { args.append("--fixed-strings") }   // regex is rg's default
-        args.append(options.caseSensitive ? "--case-sensitive" : "--ignore-case")
-        if options.wholeWord { args.append("--word-regexp") }
-        args += ["--", query, "."]
-        process.arguments = args
+        // `--max-columns` does not reach JSON output: ripgrep's JSON printer
+        // emits the whole matching line, so a 2 MB minified line arrives as a
+        // 2 MB record however narrow the preview is meant to be. Bound what rg
+        // will open — the same limit the native backend applies — and bound
+        // what this end is willing to hold in the loop below.
+        process.arguments = ripgrepArguments(query: query, options: options)
         process.currentDirectoryURL = directory
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -355,10 +354,21 @@ final class SearchViewController: NSViewController {
         var buffer = Data()
         let handle = pipe.fileHandleForReading
         var done = false
+        var skippingOversizedRecord = false
         while !done {
             let chunk = handle.availableData
             if chunk.isEmpty { break }
             buffer.append(chunk)
+            if skippingOversizedRecord {
+                // Drop the rest of the record that went over the limit, then
+                // pick the stream back up at the next one.
+                guard let nl = buffer.firstIndex(of: 0x0A) else {
+                    buffer.removeAll(keepingCapacity: true)
+                    continue
+                }
+                buffer.removeSubrange(buffer.startIndex...nl)
+                skippingOversizedRecord = false
+            }
             // Consume whole lines; keep the trailing partial line in `buffer`.
             while let nl = buffer.firstIndex(of: 0x0A) {
                 let lineData = buffer[buffer.startIndex..<nl]
@@ -371,14 +381,39 @@ final class SearchViewController: NSViewController {
                       let textValue = jsonText(payload["lines"]),
                       let no = payload["line_number"] as? Int else { continue }
                 if rel.hasPrefix("./") { rel.removeFirst(2) }
+                // rg's JSON printer emits the whole matching line whatever
+                // `--max-columns` says, so the minified-line rule is applied
+                // here rather than left to the flag.
+                guard textValue.count <= Self.maxSearchableLineLength else { continue }
                 let text = searchPreview(textValue, query: query, options: options)
                 out.append((rel, no, text))
                 if out.count >= maxHits { done = true; break }
+            }
+            // One record this large is a hit on a line no preview would show
+            // anyway. Holding it would mean the JSON, the Data and the String
+            // made from it all at once.
+            if buffer.count > Self.maxSearchRecordBytes {
+                skippingOversizedRecord = true
+                buffer.removeAll(keepingCapacity: true)
             }
         }
         if done { process.terminate() }        // stop ripgrep early
         process.waitUntilExit()
         return out
+    }
+
+    /// Built apart from the process so the flags are regression-testable: this
+    /// machine may have no ripgrep to run them against.
+    static func ripgrepArguments(query: String, options: SearchOptions) -> [String] {
+        var args = ["--json", "--max-count", "80",
+                    "--max-columns", "1000", "--max-columns-preview",
+                    "--max-filesize", "\(maxNativeFileBytes)"]
+        for suffix in generatedSuffixes { args += ["--glob", "!*\(suffix)"] }
+        if !options.regex { args.append("--fixed-strings") }   // regex is rg's default
+        args.append(options.caseSensitive ? "--case-sensitive" : "--ignore-case")
+        if options.wholeWord { args.append("--word-regexp") }
+        args += ["--", query, "."]
+        return args
     }
 
     private static func jsonText(_ value: Any?) -> String? {
@@ -413,6 +448,31 @@ final class SearchViewController: NSViewController {
     private static let maxHits = 500
     private static let maxPreviewChars = 160
     static let maxNativeFileBytes = 2_000_000
+    /// The most one ripgrep JSON record may occupy before it is dropped.
+    static let maxSearchRecordBytes = 1_000_000
+
+    /// A hit on a line this long is a hit inside minified or generated output:
+    /// no preview can show it, the line number points at nothing a person can
+    /// read, and one such file can fill the panel on its own. Dropped from both
+    /// backends, so results do not depend on whether ripgrep is installed.
+    ///
+    /// Deliberately per *line*, not per file: a generated file that also holds
+    /// readable lines still answers for those.
+    static let maxSearchableLineLength = 1_000
+
+    /// Names that say "generated" without opening the file. Kept short and
+    /// literal: `vendor/` and `dist/` are excluded on purpose, since plenty of
+    /// projects keep hand-written source in both.
+    private static let generatedSuffixes = [
+        ".min.js", ".min.mjs", ".min.cjs", ".min.css", ".min.html",
+        "-min.js", "-min.css", ".bundle.js", ".chunk.js", ".map",
+    ]
+
+    /// True for a file whose name marks it as build output.
+    static func isGeneratedArtifact(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        return generatedSuffixes.contains { lowered.hasSuffix($0) }
+    }
 
     private static let skipDirs: Set<String> = [".git", "node_modules", ".build", "build",
                                                 "DerivedData", ".svn", "Pods", ".obj"]
@@ -449,9 +509,15 @@ final class SearchViewController: NSViewController {
                     e.skipDescendants()
                     return
                 }
-                guard shouldLoadForNativeSearch(url),
+                guard !isGeneratedArtifact(url.lastPathComponent),
+                      shouldLoadForNativeSearch(url),
                       let data = try? Data(contentsOf: url),
-                      !data.prefix(1024).contains(0) else { return }
+                      !data.prefix(1024).contains(0),
+                      // The editor's own definition of minified: a file it
+                      // would refuse to lay out has nothing to offer a search
+                      // either, and this is one byte scan with no allocation.
+                      Document.longestLineLength(in: data) <= Document.maxDisplayLineLength
+                else { return }
                 // Not a string subtraction: the enumerator hands back resolved
                 // paths (/private/var/…) while `directory` may still be the
                 // symlink (/var/…), and replacing that as a substring left
@@ -461,6 +527,7 @@ final class SearchViewController: NSViewController {
                 for raw in String(decoding: data, as: UTF8.self)
                     .split(separator: "\n", omittingEmptySubsequences: false) {
                     no += 1
+                    guard raw.count <= Self.maxSearchableLineLength else { continue }
                     if matcher.firstRange(in: String(raw)) != nil {
                         out.append((rel, no,
                                     searchPreview(String(raw), query: query, options: options)))

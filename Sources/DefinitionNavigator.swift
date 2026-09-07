@@ -157,18 +157,38 @@ enum DefinitionNavigator {
         for base in bases {
             for candidate in expandedPathCandidates(base) {
                 let standardized = candidate.standardizedFileURL
-                let values = try? standardized.resourceValues(forKeys: [.isDirectoryKey])
+                // Regular files only: this runs from a ⌘-hover on a serial
+                // queue, and reading a fifo or a device would hold it forever.
+                let values = try? standardized.resourceValues(forKeys: [.isRegularFileKey])
                 guard standardized.path == root.path
                         || standardized.path.hasPrefix(root.path + "/"),
-                      FileManager.default.fileExists(atPath: standardized.path),
-                      values?.isDirectory != true
+                      values?.isRegularFile == true
                 else { continue }
-                let contents = (try? String(contentsOf: standardized, encoding: .utf8)) ?? ""
+                // Line 1 is the top of the file, which needs no reading at all,
+                // and a reference with no line number resolves to exactly that.
+                // Anything else reads a bounded prefix: the file being pointed
+                // at can be far larger than one the editor would ever open, and
+                // this path had no limit of its own.
+                guard requestedLine > 1, let contents = boundedText(of: standardized) else {
+                    return Destination(url: standardized, utf16Location: 0)
+                }
                 return Destination(url: standardized,
                                    utf16Location: location(ofLine: requestedLine, in: contents))
             }
         }
         return nil
+    }
+
+    /// As much of a file as it takes to find a line in it. A path reference can
+    /// name a bundle or a data file of any size, and the whole of one used to be
+    /// read into a string to count newlines in its first few lines.
+    private static let maxLineLookupBytes = 2 * 1024 * 1024
+
+    private static func boundedText(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maxLineLookupBytes) else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func expandedPathCandidates(_ base: URL) -> [URL] {

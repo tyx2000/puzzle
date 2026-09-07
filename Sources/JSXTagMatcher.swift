@@ -34,7 +34,13 @@ enum JSXTagMatcher {
                         mapper: ByteMapper) -> [JSXTagMatch] {
         var result: [JSXTagMatch] = []
 
-        func visit(_ node: TSNode) {
+        // An explicit stack, not recursion: syntax-tree depth follows the
+        // source, and `a + b + c + …` nests one binary expression per term.
+        // A few thousand of them — 48 KB of ordinary generated .tsx, well
+        // under every size limit the editor applies — walked the main thread
+        // straight into its stack guard and took the app down with it.
+        var stack: [TSNode] = [root]
+        while let node = stack.popLast() {
             switch String(cString: ts_node_type(node)) {
             case "jsx_element":
                 if let match = pairedMatch(node, bytes: bytes, mapper: mapper) {
@@ -48,12 +54,15 @@ enum JSXTagMatcher {
                 break
             }
 
-            for index in 0..<ts_node_named_child_count(node) {
-                visit(ts_node_named_child(node, index))
+            // Pushed back to front so children come off the stack in source
+            // order: this walk is a pre-order traversal and callers rely on
+            // matches arriving in the order they appear in the file.
+            var index = ts_node_named_child_count(node)
+            while index > 0 {
+                index -= 1
+                stack.append(ts_node_named_child(node, index))
             }
         }
-
-        visit(root)
         return result
     }
 

@@ -72,6 +72,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// Quitting is not closing a window, and AppKit only sends
+    /// `windowShouldClose` for the latter. Puzzle is not an NSDocument app, so
+    /// nothing else reviews open buffers on the way out: without this, ⌘Q threw
+    /// away every edit made since the last focus change, along with any document
+    /// whose autosave had been held back by a change on disk.
+    ///
+    /// Cancelling one of those conflict questions cancels the quit, the same way
+    /// it keeps a window open.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for controller in windows {
+            guard controller.editor.confirmClose() else { return .terminateCancel }
+        }
+        return .terminateNow
+    }
+
     /// FSEvents normally delivers external Git changes while Puzzle is in the
     /// background. Refresh on activation as a fallback for coalesced/missed
     /// events and for repositories whose metadata directory was replaced.

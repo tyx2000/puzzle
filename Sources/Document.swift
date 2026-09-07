@@ -297,12 +297,45 @@ final class Document {
             isUnsupported = true
             text = Self.unsupportedMessage(for: url, byteCount: data.count)
         }
+        let presentation = Self.presentation(of: data, text: text, url: url,
+                                             spec: languageSpec,
+                                             isUnsupported: isUnsupported)
+        isDisplayFormatted = presentation.isDisplayFormatted
+        if presentation.isMinifiedPreview {
+            isUnsupported = true
+            isMinifiedPreview = true
+        }
+        storage = NSTextStorage(string: presentation.text)
+        storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
+                              range: NSRange(location: 0, length: storage.length))
+    }
+
+    /// What a file's bytes become on screen: the text for the buffer, plus the
+    /// two flags that say the buffer is not simply the file.
+    ///
+    /// Opening a file and reloading one after an external write share this, and
+    /// used not to. The reload checked the total size and nothing else, so a
+    /// background build, a formatter or a code generator could rewrite a file
+    /// that had opened as a bounded read-only preview and hand back a fully
+    /// editable buffer holding the megabyte-long line the preview exists to
+    /// keep out of TextKit.
+    struct Presentation {
+        let text: String
+        let isDisplayFormatted: Bool
+        let isMinifiedPreview: Bool
+    }
+
+    static func presentation(of data: Data, text decoded: String, url: URL,
+                             spec: SyntaxHighlighter.LanguageSpec?,
+                             isUnsupported: Bool) -> Presentation {
         // Minified JSON is unreadable for the same reason a browser refuses to
         // show it raw, so it is laid out before it reaches the buffer. This is
         // display only: `isModified` stays false, so nothing is written back
         // until the user edits the file themselves.
+        var text = decoded
+        var isDisplayFormatted = false
         let longestLine: Int
-        if languageSpec?.name == "json", !isUnsupported,
+        if spec?.name == "json", !isUnsupported,
            Self.longestLineLength(in: data) > JSONFormatter.readableLineLength,
            data.count <= JSONFormatter.maxFormattedBytes,
            let formatted = JSONFormatter.pretty(text), formatted != text,
@@ -324,16 +357,14 @@ final class Document {
         // map, measured. Show a bounded prefix instead, read-only so the rest of
         // the file can never be lost by saving what is on screen.
         if longestLine > Self.maxDisplayLineLength, data.count > Self.minifiedPreviewLength {
-            isUnsupported = true
-            isMinifiedPreview = true
             let prefix = String(text.prefix(Self.minifiedPreviewLength))
-            storage = NSTextStorage(string: Self.minifiedMessage(
-                for: url, byteCount: data.count, longestLine: longestLine) + prefix)
-        } else {
-            storage = NSTextStorage(string: text)
+            return Presentation(
+                text: Self.minifiedMessage(for: url, byteCount: data.count,
+                                           longestLine: longestLine) + prefix,
+                isDisplayFormatted: isDisplayFormatted, isMinifiedPreview: true)
         }
-        storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
-                              range: NSRange(location: 0, length: storage.length))
+        return Presentation(text: text, isDisplayFormatted: isDisplayFormatted,
+                            isMinifiedPreview: false)
     }
 
     /// Past this, a single line stops being something TextKit can lay out
@@ -566,19 +597,22 @@ final class Document {
     /// Refresh clean buffers from disk while preserving unsaved local edits.
     @discardableResult
     func reloadFromDiskIfLatest(observedAt: Date = Date()) -> Bool {
-        guard url.isFileURL, !isReadOnly else { return false }
+        // A bounded preview is read-only, but it still tracks its file: the
+        // build that minified it may well un-minify it again.
+        guard url.isFileURL, !isReadOnly || isMinifiedPreview else { return false }
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
               data.count <= Self.maxTextFileBytes,
               !Self.looksBinary(data),
               let decoded = Self.decodeText(data) else { return false }
 
         let diskDate = Self.modificationDate(for: url) ?? observedAt
-        // A display-formatted buffer never equals the bytes on disk, so the
-        // incoming text is put through the same formatter before anything is
-        // compared or replaced. Without this, every external-change check would
-        // report a difference and paste the minified file back on screen.
-        let incoming = isDisplayFormatted
-            ? (JSONFormatter.pretty(decoded.text) ?? decoded.text) : decoded.text
+        // Put through the same decision the file would get if it were opened
+        // now: a display-formatted buffer never equals the bytes on disk, and a
+        // line too long to lay out is still too long to lay out when it arrives
+        // from a background write rather than from the first read.
+        let presentation = Self.presentation(of: data, text: decoded.text, url: url,
+                                             spec: languageSpec, isUnsupported: false)
+        let incoming = presentation.text
         if incoming == text {
             let stateChanged = isModified || lastLocalEditAt != nil
             lastKnownDiskModificationDate = diskDate
@@ -622,6 +656,9 @@ final class Document {
         storage.endEditing()
         isApplyingExternalChange = false
         invalidateLineIndex()
+        isDisplayFormatted = presentation.isDisplayFormatted
+        isMinifiedPreview = presentation.isMinifiedPreview
+        isUnsupported = presentation.isMinifiedPreview
         textEncoding = decoded.encoding
         lastKnownDiskModificationDate = diskDate
         lastLocalEditAt = nil

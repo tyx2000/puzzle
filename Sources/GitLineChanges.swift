@@ -48,7 +48,6 @@ enum GitLineChanges {
         var changes: [Change] = []
         var removed: [String] = []
         var added: [String] = []
-        var oldStart = 0
         var newStart = 0
         var inHunk = false
 
@@ -80,7 +79,6 @@ enum GitLineChanges {
                     inHunk = false
                     continue
                 }
-                oldStart = hunk.oldStart
                 // A hunk that only deletes reports the line *before* the cut as
                 // its new start, so the mark belongs on the next line.
                 newStart = hunk.newCount == 0 ? hunk.newStart + 1 : hunk.newStart
@@ -100,7 +98,6 @@ enum GitLineChanges {
                 flush()
                 inHunk = false
             }
-            _ = oldStart
         }
         flush()
         return changes
@@ -130,21 +127,35 @@ enum GitLineChanges {
     /// case where `git diff` reports nothing and the gutter stays clean.
     static func baseline(for file: URL, in repository: URL) -> [String]? {
         guard let relative = relativePath(for: file, in: repository) else { return nil }
-        let head = GitService.run(
-            ["--no-pager", "show", "HEAD:" + relative], in: repository)
-        if head.code == 0 {
+        // Through GitService rather than `git show HEAD:<relative>` directly:
+        // that spelling resolves from the repository root while `relative` is
+        // relative to the open project, so a project opened on a subdirectory
+        // read a file at the root instead — a *different* file's contents
+        // whenever one shares the name, and otherwise a miss that dropped
+        // through to the new-file branch below and marked the whole file added.
+        // Reverting such a mark writes that baseline into the buffer.
+        switch GitService.blob(inCommit: "HEAD", path: relative, in: repository) {
+        case .data(let data):
             // A binary blob has no lines to mark, and splitting one would only
             // produce noise.
-            guard !head.out.utf16.contains(0) else { return nil }
-            return lines(of: head.out)
+            let text = String(decoding: data, as: UTF8.self)
+            guard !text.utf16.contains(0) else { return nil }
+            return lines(of: text)
+        case .tooLarge:
+            // The open file is small enough to edit; the version behind it need
+            // not be. No baseline is better than a truncated one — the gutter
+            // stays clean rather than marking against half a file.
+            return nil
+        case .unavailable:
+            // Not in HEAD yet. A path Git already knows about — Puzzle stages
+            // new files as they are created — is new in its entirety; anything
+            // else is none of the gutter's business.
+            let tracked = GitService.run(["ls-files", "--", relative], in: repository)
+            guard tracked.code == 0,
+                  !tracked.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return []
         }
-        // Not in HEAD yet. A path Git already knows about — Puzzle stages new
-        // files as they are created — is new in its entirety; anything else is
-        // none of the gutter's business.
-        let tracked = GitService.run(["ls-files", "--", relative], in: repository)
-        guard tracked.code == 0, !tracked.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-        return []
     }
 
     /// Git's own line splitting: the trailing newline terminates the last line

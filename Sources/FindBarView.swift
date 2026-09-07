@@ -211,6 +211,47 @@ final class FindBarView: FlatView {
 
     /// Replacement text for `range`, expanding $1-style references when the
     /// query is a regular expression so a capture can be reused.
+    /// Every match of `query`, in source order, with the means to expand a
+    /// replacement template against it.
+    ///
+    /// One place, because the number in the label, the ranges the bar paints and
+    /// the text Replace All writes all have to agree about what a match is.
+    private func enumerateMatches(in haystack: NSString, query: String,
+                                  options: SearchOptions,
+                                  body: (_ range: NSRange,
+                                         _ expand: (String) -> String) -> Void) {
+        guard !query.isEmpty else { return }
+        if options.regex {
+            var flags: NSRegularExpression.Options = []
+            if !options.caseSensitive { flags.insert(.caseInsensitive) }
+            let pattern = options.wholeWord ? "\\b(?:\(query))\\b" : query
+            guard let re = try? NSRegularExpression(pattern: pattern, options: flags) else { return }
+            let text = haystack as String
+            re.enumerateMatches(
+                in: text, range: NSRange(location: 0, length: haystack.length)
+            ) { match, _, _ in
+                guard let match, match.range.length > 0 else { return }
+                body(match.range) { template in
+                    re.replacementString(for: match, in: text, offset: 0, template: template)
+                }
+            }
+        } else {
+            var opts: NSString.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
+            opts.insert(.literal)
+            var searchStart = 0
+            while searchStart < haystack.length {
+                let found = haystack.range(of: query, options: opts,
+                                           range: NSRange(location: searchStart,
+                                                          length: haystack.length - searchStart))
+                guard found.location != NSNotFound else { break }
+                if !options.wholeWord || isWholeWord(found, in: haystack) {
+                    body(found) { $0 }
+                }
+                searchStart = found.location + max(1, found.length)
+            }
+        }
+    }
+
     func replacementText(for range: NSRange, with template: String,
                          query: String, options: SearchOptions) -> String {
         guard options.regex, let textView else { return template }
@@ -254,21 +295,31 @@ final class FindBarView: FlatView {
     /// Building the whole new text and swapping it in once is what makes that
     /// true: replacing range by range registers an undo step per match.
     @objc private func replaceAll() {
-        guard let textView, !matches.isEmpty else { return }
+        guard let textView, totalMatches > 0 else { return }
         textView.breakUndoCoalescing()
         textView.undoManager?.beginUndoGrouping()
         defer { textView.undoManager?.endUndoGrouping() }
         let template = replaceInput.stringValue
         let query = input.stringValue
         let options = input.options
-        let result = NSMutableString(string: textView.string)
-        // Back to front, so each range still addresses the same text.
-        for range in matches.reversed() {
-            let text = replacementText(for: range, with: template,
-                                       query: query, options: options)
-            result.replaceCharacters(in: range, with: text)
+        let source = textView.string as NSString
+        // Enumerated afresh rather than walked over `matches`: that list is
+        // capped at `maxRetainedMatches` so the bar's painted ranges cannot
+        // grow without bound, and replacing only the ones it kept left every
+        // match past the cap sitting in the file.
+        let result = NSMutableString(capacity: source.length)
+        var cursor = 0
+        enumerateMatches(in: source, query: query, options: options) { range, expand in
+            guard range.location >= cursor else { return }
+            result.append(source.substring(
+                with: NSRange(location: cursor, length: range.location - cursor)))
+            result.append(expand(template))
+            cursor = NSMaxRange(range)
         }
-        let full = NSRange(location: 0, length: (textView.string as NSString).length)
+        if cursor < source.length {
+            result.append(source.substring(from: cursor))
+        }
+        let full = NSRange(location: 0, length: source.length)
         let replacement = result as String
         guard textView.shouldChangeText(in: full, replacementString: replacement) else { return }
         textView.textStorage?.replaceCharacters(in: full, with: replacement)
@@ -333,36 +384,12 @@ final class FindBarView: FlatView {
         }
         let haystack = tv.string as NSString
 
-        if options.regex {
-            var flags: NSRegularExpression.Options = []
-            if !options.caseSensitive { flags.insert(.caseInsensitive) }
-            let pattern = options.wholeWord ? "\\b(?:\(query))\\b" : query
-            guard let re = try? NSRegularExpression(pattern: pattern, options: flags) else { return }
-            re.enumerateMatches(
-                in: haystack as String,
-                range: NSRange(location: 0, length: haystack.length)
-            ) { m, _, stop in
-                guard let r = m?.range, r.length > 0 else { return }
-                totalMatches += 1
-                guard matches.count < Self.maxRetainedMatches else { return }
-                matches.append(r)
-                _ = stop
-            }
-        } else {
-            var opts: NSString.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
-            opts.insert(.literal)
-            var searchStart = 0
-            while searchStart < haystack.length {
-                let found = haystack.range(of: query, options: opts,
-                                           range: NSRange(location: searchStart,
-                                                          length: haystack.length - searchStart))
-                guard found.location != NSNotFound else { break }
-                if !options.wholeWord || isWholeWord(found, in: haystack) {
-                    totalMatches += 1
-                    if matches.count < Self.maxRetainedMatches { matches.append(found) }
-                }
-                searchStart = found.location + max(1, found.length)
-            }
+        enumerateMatches(in: haystack, query: query, options: options) { range, _ in
+            totalMatches += 1
+            // Only a bounded prefix is kept: these ranges are painted, and a
+            // minified file can hold hundreds of thousands of them. The count
+            // above stays exact, and Replace All enumerates for itself.
+            if matches.count < Self.maxRetainedMatches { matches.append(range) }
         }
         // A result inside a collapsed block is opened rather than marked in
         // place: folded text has no glyphs to underline, and a result nobody
