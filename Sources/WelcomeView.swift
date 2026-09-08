@@ -71,7 +71,10 @@ final class WelcomeView: FlatView {
         }
         guard !recents.isEmpty else { return }
 
-        for url in recents.prefix(8) {
+        // Everything the store keeps, which is the same list the Dock menu
+        // shows: a start page that hides half of them sends the reader to the
+        // menu to find the rest.
+        for url in recents.prefix(RecentProjects.displayLimit) {
             recentStack.addArrangedSubview(RecentRowView(
                 url: url,
                 action: { [weak self] in self?.onOpenRecent?(url) },

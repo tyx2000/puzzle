@@ -344,13 +344,6 @@ final class LineNumberRulerView: NSRulerView {
         let visibleRect = textView.visibleRect
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
 
-        // The active line is one row across the whole editor, so the gutter
-        // paints the same band behind its number. The rect comes from the text
-        // view so the two can never drift apart.
-        if let band = currentLineBandRect(in: visibleRect) {
-            Theme.lineHighlight.setFill()
-            band.fill()
-        }
 
         let diffNumbers = textView.diffLineNumbers
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
@@ -383,12 +376,23 @@ final class LineNumberRulerView: NSRulerView {
             }
             if let shown {
                 let value = "\(shown)" as NSString
-                let attributes = lineNo == caretLine ? active : normal
-                let textHeight = value.size(withAttributes: attributes).height
+                let isActive = lineNo == caretLine
+                let attributes = isActive ? active : normal
+                let size = value.size(withAttributes: attributes)
                 let box = NSRect(x: numbers.start,
-                                 y: y + (fragRect.height - textHeight) / 2,
+                                 y: y + (fragRect.height - size.height) / 2,
                                  width: numbers.end - numbers.start,
-                                 height: textHeight)
+                                 height: size.height)
+                // The caret's line is ringed rather than banded: a filled row
+                // behind the number repeated the band already drawn behind the
+                // code, and the two together read as one wide stripe.
+                if isActive {
+                    let rule = Self.activeUnderline(around: box, textWidth: size.width,
+                                                    rowHeight: fragRect.height)
+                    Theme.red.setFill()
+                    rule.fill()
+                    self.drawnActiveMarkForTesting = rule
+                }
                 value.draw(in: box, withAttributes: attributes)
             }
             // The change ribbon runs along the outer edge of the gutter. It used
@@ -441,13 +445,19 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    /// The active-line band as it falls inside the gutter, or nil when the text
-    /// view is not showing one (no document, a selection rather than a caret).
-    func currentLineBandRect(in visibleRect: NSRect? = nil) -> NSRect? {
-        guard let textView, let band = textView.currentLineBandRect() else { return nil }
-        let visible = visibleRect ?? textView.visibleRect
-        return NSRect(x: 0, y: band.minY - visible.minY,
-                      width: ruleThickness, height: band.height)
+    /// What the last draw put under the caret's line number, so the mark can be
+    /// checked without reading pixels out of a bitmap.
+    private(set) var drawnActiveMarkForTesting: NSRect?
+
+    /// The rule under the caret's line number: as wide as the digits, right
+    /// aligned with them so it does not shift as the caret moves between lines
+    /// of different widths, and always inside the row.
+    static func activeUnderline(around box: NSRect, textWidth: CGFloat,
+                                rowHeight: CGFloat) -> NSRect {
+        let thickness: CGFloat = 1.5
+        let width = max(ceil(textWidth), 6)
+        let top = min(box.maxY + 1, box.midY + rowHeight / 2 - thickness)
+        return NSRect(x: box.maxX - width, y: top, width: width, height: thickness)
     }
 
     private func drawFoldArrow(in rect: NSRect, folded: Bool) {

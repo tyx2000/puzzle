@@ -147,6 +147,24 @@ enum RegressionTests {
             recents.add(project)
         }
 
+        // The start page offers twenty, and the store keeps exactly that many:
+        // a page that showed eight of twelve sent the reader to the Dock menu
+        // to find the rest.
+        try expect(RecentProjects.displayLimit == 20,
+                   "the start page offers \(RecentProjects.displayLimit) recent projects")
+        let deep = RecentProjects(defaults: defaults, key: "deep-recents")
+        for index in 0..<25 {
+            let project = directory.appendingPathComponent("deep-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: project,
+                                                    withIntermediateDirectories: true)
+            deep.add(project)
+        }
+        try expect(deep.urls.count == RecentProjects.displayLimit,
+                   "the store kept \(deep.urls.count) projects")
+        try expect(deep.urls.first?.lastPathComponent == "deep-24",
+                   "the most recent project is not first: "
+                     + "\(deep.urls.first?.lastPathComponent ?? "none")")
+
         // Invalid paths are filtered before applying the Dock's ten-item cap.
         let missing = directory.appendingPathComponent("missing", isDirectory: true)
         recents.add(missing)
@@ -325,8 +343,17 @@ enum RegressionTests {
             guideX: 12, visibleRect: NSRect(x: 0, y: 0, width: 100, height: 100))
         try expect(multiline.box == nil && multiline.polyline.count == 4,
                    "a multiline bracket pair did not produce a scope contour")
-        try expect(multiline.viewportCaps.count == 2,
-                   "an offscreen bracket pair did not mark both viewport continuations")
+        // Nothing in the outline is measured from the viewport. The caps that
+        // used to mark where the scope ran off the top and bottom of the screen
+        // were drawn at the visible rect's edges, and the text view's
+        // copy-on-scroll left them behind at every height it had scrolled
+        // through: one pair looked like several.
+        let scrolled = BracketScopeGeometry.make(
+            opening: NSRect(x: 80, y: -30, width: 8, height: 14),
+            closing: NSRect(x: 20, y: 130, width: 8, height: 14),
+            guideX: 12, visibleRect: NSRect(x: 0, y: 500, width: 100, height: 100))
+        try expect(scrolled.polyline == multiline.polyline,
+                   "scrolling changed the outline: \(scrolled.polyline)")
         try expect(multiline.polyline[1].x == multiline.polyline[2].x,
                    "the scope contour's indentation guide was not vertical")
     }
@@ -3571,20 +3598,43 @@ enum RegressionTests {
         guard let ruler = pane.lineNumberRulerForTesting else {
             throw Failure(description: "the editor has no line-number gutter")
         }
-        guard let text = pane.currentLineBandRectForTesting,
-              let gutter = ruler.currentLineBandRect() else {
+        guard let text = pane.currentLineBandRectForTesting else {
             throw Failure(description: "no active-line band while a document is open")
         }
-        // One row: the gutter band covers the full gutter width and lines up
-        // with the band behind the code, so nothing shows through in front of
-        // the line number.
-        try expect(gutter.minX == 0 && gutter.width == ruler.ruleThickness,
-                   "the gutter band does not span the line-number column: \(gutter)")
-        try expect(abs(gutter.height - text.height) <= 0.5,
-                   "the gutter band is \(gutter.height)pt against the code's \(text.height)pt")
-        let expectedY = text.minY - ruler.clientViewVisibleRectForTesting.minY
-        try expect(abs(gutter.minY - expectedY) <= 0.5,
-                   "the gutter band sits at \(gutter.minY), the code's row at \(expectedY)")
+        try expect(text.height > 0, "the code's active row has no height")
+
+        // The caret's line number is underlined, not banded. A filled row behind
+        // the number repeated the band already drawn behind the code, and the
+        // two together read as one wide stripe across the window.
+        let box = NSRect(x: 20, y: 100, width: 24, height: 14)
+        let rule = LineNumberRulerView.activeUnderline(around: box, textWidth: 10, rowHeight: 27)
+        try expect(rule.height == 1.5, "the rule is \(rule.height)pt, not 1.5pt")
+        try expect(rule.minY >= box.maxY, "the rule is not under the number")
+        try expect(rule.maxY <= box.midY + 27 / 2,
+                   "the rule hangs below the row: \(rule) in a 27pt row")
+        try expect(rule.maxX <= box.maxX + 0.5,
+                   "the rule is not right-aligned with the number it marks")
+        // A wider number widens the rule.
+        let wide = LineNumberRulerView.activeUnderline(around: box, textWidth: 30, rowHeight: 27)
+        try expect(wide.width > rule.width && wide.width >= 30,
+                   "a three-digit number does not get a wider rule: \(wide)")
+
+        // And nothing paints the gutter behind it: sample the column left of
+        // the numbers, on the caret's row, in a real render of the ruler.
+        ruler.needsDisplay = true
+        if let bitmap = ruler.bitmapImageRepForCachingDisplay(in: ruler.bounds) {
+            ruler.cacheDisplay(in: ruler.bounds, to: bitmap)
+            if let drawn = ruler.drawnActiveMarkForTesting {
+                try expect(drawn.maxX <= ruler.ruleThickness && drawn.minX >= 0,
+                           "the rule was drawn outside the gutter: \(drawn)")
+            }
+            let row = text.minY - ruler.clientViewVisibleRectForTesting.minY
+            let sample = NSPoint(x: 3, y: row + text.height / 2)
+            if let colour = bitmap.colorAt(x: Int(sample.x * 2), y: Int(sample.y * 2)) {
+                try expect(!sameColor(colour, Theme.lineHighlight),
+                           "the gutter still fills the active row with the band colour")
+            }
+        }
 
         // Folding still hides a block's body when the document lays out on
         // demand (source files do; Markdown and diffs keep full layout because
@@ -3621,11 +3671,11 @@ enum RegressionTests {
         try expect(pane.undoLevelsForTesting == EditorPaneViewController.undoLevels,
                    "undo levels are \(String(describing: pane.undoLevelsForTesting))")
 
-        // With a selection rather than a caret there is no band at all, in the
-        // gutter or behind the code.
+        // With a selection rather than a caret there is no active row at all,
+        // so neither the band behind the code nor the ring in the gutter is
+        // drawn — both are keyed off the same caret line.
         pane.selectAllForTesting()
-        try expect(pane.currentLineBandRectForTesting == nil
-                    && ruler.currentLineBandRect() == nil,
+        try expect(pane.currentLineBandRectForTesting == nil,
                    "a selection still painted an active-line band")
     }
 

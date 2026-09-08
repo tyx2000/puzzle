@@ -8,11 +8,14 @@ final class RecentProjects {
 
     private let defaults: UserDefaults
     private let key: String
+    /// How many projects the start page and the Dock menu offer. Twenty is
+    /// what fits the window without turning the page into a file browser.
+    static let displayLimit = 20
     private let limit: Int
 
     init(defaults: UserDefaults = .standard,
          key: String = "PuzzleRecentProjects",
-         limit: Int = 12) {
+         limit: Int = RecentProjects.displayLimit) {
         self.defaults = defaults
         self.key = key
         self.limit = limit

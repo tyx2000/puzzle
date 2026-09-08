@@ -6,8 +6,14 @@ import AppKit
 struct BracketScopeGeometry {
     let box: NSRect?
     let polyline: [NSPoint]
-    let viewportCaps: [[NSPoint]]
 
+    /// The outline is anchored to the text, never to the viewport.
+    ///
+    /// It used to carry short horizontal caps drawn at the top and bottom edges
+    /// of the visible rect, to say the scope continued past them. The text view
+    /// scrolls by copying pixels and repainting only what is newly exposed, so
+    /// those caps stayed behind at whatever height they were drawn: a single
+    /// pair ended up looking like several, with stray ticks across the guide.
     static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
                      visibleRect: NSRect) -> BracketScopeGeometry {
         // A pair on one visual row reads best as one compact enclosure. A
@@ -15,13 +21,11 @@ struct BracketScopeGeometry {
         // such as Zed: opening row -> indentation guide -> closing row.
         if abs(opening.midY - closing.midY) < 0.5 {
             let union = opening.union(closing).insetBy(dx: -2, dy: -2)
-            return BracketScopeGeometry(box: union, polyline: [], viewportCaps: [])
+            return BracketScopeGeometry(box: union, polyline: [])
         }
 
         let openingY = opening.maxY + 1
         let closingY = closing.maxY + 1
-        let topY = min(openingY, closingY)
-        let bottomY = max(openingY, closingY)
         let resolvedGuideX = min(guideX, opening.minX - 3, closing.minX - 3)
         let polyline = [
             NSPoint(x: opening.maxX + 2, y: openingY),
@@ -30,19 +34,7 @@ struct BracketScopeGeometry {
             NSPoint(x: closing.maxX + 2, y: closingY),
         ]
 
-        var caps: [[NSPoint]] = []
-        let capWidth: CGFloat = 7
-        if topY < visibleRect.minY, bottomY > visibleRect.minY {
-            let y = visibleRect.minY + 1
-            caps.append([NSPoint(x: resolvedGuideX, y: y),
-                         NSPoint(x: resolvedGuideX + capWidth, y: y)])
-        }
-        if bottomY > visibleRect.maxY, topY < visibleRect.maxY {
-            let y = visibleRect.maxY - 1
-            caps.append([NSPoint(x: resolvedGuideX, y: y),
-                         NSPoint(x: resolvedGuideX + capWidth, y: y)])
-        }
-        return BracketScopeGeometry(box: nil, polyline: polyline, viewportCaps: caps)
+        return BracketScopeGeometry(box: nil, polyline: polyline)
     }
 }
 
@@ -618,7 +610,7 @@ final class PuzzleTextView: NSTextView {
         visibleRect.clip()
         defer { NSGraphicsContext.restoreGraphicsState() }
 
-        Theme.red.withAlphaComponent(0.9).setStroke()
+        Theme.red.setStroke()
         let path = NSBezierPath()
         path.lineWidth = 1.5
         path.lineCapStyle = .butt
@@ -629,16 +621,11 @@ final class PuzzleTextView: NSTextView {
         } else {
             appendPolyline(geometry.polyline, to: path)
         }
-        for cap in geometry.viewportCaps where cap.count == 2 {
-            path.move(to: cap[0])
-            path.line(to: cap[1])
-        }
         path.stroke()
     }
 
-    /// The scope outline is drawn as a plain polyline: the corners are the
-    /// corners of the code it encloses, and a radius there reads as decoration
-    /// rather than as structure.
+    /// The scope outline is a plain polyline: square corners, square ends. The
+    /// corners it draws are the corners of the code it encloses.
     private func appendPolyline(_ points: [NSPoint], to path: NSBezierPath) {
         guard let first = points.first else { return }
         path.move(to: first)

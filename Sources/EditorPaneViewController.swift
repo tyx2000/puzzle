@@ -130,7 +130,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.backgroundColor = Theme.editorBackground
         textView.insertionPointColor = Theme.cursor
         textView.selectedTextAttributes = [.backgroundColor: Theme.selection]
-        textView.textContainerInset = NSSize(width: 6, height: 8)
+        // No padding above the first line: the code starts where the editor
+        // starts, as it does in VS Code, Zed and Xcode. The horizontal inset
+        // stays — without it the first character sits against the gutter.
+        textView.textContainerInset = NSSize(width: 6, height: 0)
         textView.rememberBaseInset()
         // Required for the text view to grow with content (otherwise no scrolling).
         textView.isVerticallyResizable = true
