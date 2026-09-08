@@ -340,6 +340,29 @@ enum GitService {
         return result.code == 0 && !result.stdoutTruncated ? result.stdout : nil
     }
 
+    /// Whether HEAD lists a path at all.
+    ///
+    /// Asked of the tree, which is a different object from the blob: "HEAD has
+    /// no such path" and "the blob is there and will not read" both come back
+    /// from `cat-file` as the same failure, and reading the second as the first
+    /// reports a file that is entirely present as brand new — which is what
+    /// Revert then writes over it.
+    enum HeadPathState { case listed, absent, unknown }
+
+    static func headState(ofProjectPath path: String, in directory: URL) -> HeadPathState {
+        // No commits yet is an answer, not a failure: nothing is in HEAD.
+        guard run(["rev-parse", "--verify", "--quiet", "HEAD"], in: directory).code == 0 else {
+            return .absent
+        }
+        // `--full-tree` because the path is relative to the repository root
+        // rather than to the directory the project was opened on.
+        let listed = run(["ls-tree", "--name-only", "--full-tree", "HEAD", "--",
+                          repositoryRelativePath(path, in: directory)], in: directory)
+        guard listed.code == 0 else { return .unknown }
+        return listed.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? .absent : .listed
+    }
+
     /// A file's contents as of a commit (`git show <hash>:<path>`).
     ///
     /// `path` is project-relative, as everything outside this type is. The
@@ -1180,9 +1203,11 @@ enum GitService {
         switch blob(inCommit: "HEAD", path: path, in: directory) {
         case .data(let data): return String(decoding: data, as: UTF8.self)
         case .tooLarge: return nil
-        // Not in HEAD and no old blob named: the diff creates this file, and an
-        // empty pre-image is the right thing to replay it over.
-        case .unavailable: return ""
+        case .unavailable:
+            // An empty pre-image is right for a file the diff creates, and
+            // catastrophic for one whose blob merely would not read: the whole
+            // file would be rewritten as the additions alone.
+            return headState(ofProjectPath: path, in: directory) == .absent ? "" : nil
         }
     }
 

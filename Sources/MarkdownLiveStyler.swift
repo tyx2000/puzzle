@@ -677,18 +677,33 @@ enum MarkdownLiveStyler {
     /// anything else is resolved against the document, so `./notes.md` opens
     /// the file next to it rather than nothing at all.
     static func resolvedLinkURL(_ destination: String, relativeTo documentURL: URL?) -> URL? {
-        var text = destination
-        if text.hasPrefix("<") && text.hasSuffix(">") { text = String(text.dropFirst().dropLast()) }
-        // A title after the destination — `(url "Title")` — is not part of it.
-        if let space = text.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+        var text = destination.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("<") && text.hasSuffix(">") {
+            // The angle brackets are how Markdown writes a destination that
+            // contains spaces. Splitting one on the first space defeats them.
+            text = String(text.dropFirst().dropLast())
+        } else if let space = text.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+            // A title after the destination — `(url "Title")` — is not part of
+            // it, and a bare destination cannot contain a space anyway.
             text = String(text[text.startIndex..<space])
         }
         guard !text.isEmpty else { return nil }
-        if let url = URL(string: text), url.scheme != nil { return url }
+        if let url = URL(string: text) ?? URL(string: text.addingPercentEncoding(
+                withAllowedCharacters: .urlFragmentAllowed) ?? ""),
+           url.scheme != nil {
+            return url
+        }
         guard let documentURL, !text.hasPrefix("#") else { return nil }
+        // A relative destination is a URI, not a filename: `notes.md#intro`
+        // names a place inside `notes.md`, and asking the file system for a
+        // file called "notes.md#intro" only ever misses.
+        var path = text
+        if let fragment = path.firstIndex(of: "#") { path = String(path[..<fragment]) }
+        if let query = path.firstIndex(of: "?") { path = String(path[..<query]) }
+        guard !path.isEmpty else { return nil }
         let base = documentURL.deletingLastPathComponent()
-        let path = text.removingPercentEncoding ?? text
-        return URL(fileURLWithPath: path, relativeTo: base).standardizedFileURL
+        return URL(fileURLWithPath: path.removingPercentEncoding ?? path,
+                   relativeTo: base).standardizedFileURL
     }
 
     static func lineContentRange(_ line: NSRange, in source: NSString) -> NSRange {

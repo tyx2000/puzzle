@@ -58,6 +58,11 @@ enum RegressionTests {
         try testSearchStopsWhenCancelled()
         try testDiffBuffersAreRebuiltAfterEviction()
         try testSavePolicyIsOnePlace()
+        try testDiffWriteBackNoticesANewerSourceFile()
+        try testUnreadableGitObjectIsNotANewFile()
+        try testMarkdownLinkDestinations()
+        try testVirtualDocumentsObeyTheCacheBudget()
+        try testSearchQuotaSurvivesUnsearchableLines()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -5615,6 +5620,171 @@ enum RegressionTests {
     /// the only thing that changes. Only the explicit one writes over a change
     /// that arrived on disk underneath the edit; the silent ones defer to it
     /// and leave the buffer dirty rather than interrupting anyone.
+    /// Replaying a diff rewrites the whole file from the version it describes,
+    /// so anything written to that file since would go with it. The silent
+    /// doors have to refuse, exactly as they do for an ordinary buffer.
+    private static func testDiffWriteBackNoticesANewerSourceFile() throws {
+        let root = try temporaryDirectory("diff-source-conflict")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        GitService.forgetRepositoryInfo()
+        let file = root.appendingPathComponent("a.txt")
+        try Data("a\nb\nc\n".utf8).write(to: file)
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-qm", "base"], in: root)
+        try Data("a\nedited\nc\n".utf8).write(to: file)
+        guard let diff = GitService.diff(forPath: "a.txt", in: root) else {
+            throw Failure(description: "the fixture produced no diff")
+        }
+
+        let url = URL(string: "puzzle-diff:///\(root.path)/.puzzle-diff-preview?path=a.txt")!
+        let document = DocumentStore.shared.setVirtualDocument(url: url, text: diff)
+        document.makeDiffEditable(directory: root, path: "a.txt")
+        document.markLocalEdit()
+
+        // Something else writes the file while the diff tab sits open.
+        Thread.sleep(forTimeInterval: 1.1)
+        try Data("external changes\n".utf8).write(to: file)
+
+        let coordinator = DocumentSaveCoordinator()
+        try expect(!coordinator.save(document, because: .leaving),
+                   "a silent save replayed a diff over a newer file")
+        let survived = try String(contentsOf: file, encoding: .utf8)
+        try expect(survived == "external changes\n",
+                   "the newer file was overwritten: \(survived)")
+        try expect(document.isModified, "the refused write-back cleared the buffer")
+
+        // With no newer version underneath it, the same door writes.
+        document.makeDiffEditable(directory: root, path: "a.txt")
+        try expect(coordinator.save(document, because: .leaving),
+                   "the write-back was refused with nothing to conflict with")
+        let written = try String(contentsOf: file, encoding: .utf8)
+        try expect(written == "a\nedited\nc\n", "the diff was not replayed: \(written)")
+    }
+
+    /// `cat-file` fails the same way for a path HEAD does not have and for a
+    /// blob that will not read. Only the first is a new file; reading the
+    /// second as one marks every line added, and Revert writes that.
+    private static func testUnreadableGitObjectIsNotANewFile() throws {
+        let root = try temporaryDirectory("unreadable-blob")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        GitService.forgetRepositoryInfo()
+        let file = root.appendingPathComponent("tracked.txt")
+        try Data("one\ntwo\n".utf8).write(to: file)
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-qm", "base"], in: root)
+        try expect(GitLineChanges.baseline(for: file, in: root) == .lines(["one", "two"]),
+                   "the healthy baseline did not come back")
+
+        let hash = GitService.run(["rev-parse", "HEAD:tracked.txt"], in: root)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(hash.count == 40, "no blob hash to remove: \(hash)")
+        try FileManager.default.removeItem(at: root
+            .appendingPathComponent(".git/objects")
+            .appendingPathComponent(String(hash.prefix(2)))
+            .appendingPathComponent(String(hash.dropFirst(2))))
+
+        try expect(GitLineChanges.baseline(for: file, in: root) == .unavailable,
+                   "an unreadable blob was reported as a brand-new file")
+        try expect(GitService.diffPreimage("@@ -1,2 +1,2 @@\n one\n-two\n+2\n",
+                                           path: "tracked.txt", in: root) == nil,
+                   "an unreadable blob produced an empty pre-image to replay over")
+
+        // A file HEAD really does not have is still new in its entirety.
+        let added = root.appendingPathComponent("added.txt")
+        try Data("fresh\n".utf8).write(to: added)
+        _ = GitService.run(["add", "-A"], in: root)
+        try expect(GitLineChanges.baseline(for: added, in: root) == .lines([]),
+                   "a newly staged file stopped reporting an empty baseline")
+        GitService.forgetRepositoryInfo()
+    }
+
+    private static func testMarkdownLinkDestinations() throws {
+        let document = URL(fileURLWithPath: "/tmp/notes/index.md")
+        func resolved(_ destination: String) -> String? {
+            MarkdownLiveStyler.resolvedLinkURL(destination, relativeTo: document)?.path
+        }
+        // Angle brackets are how Markdown writes a destination with a space in
+        // it; splitting one on that space is what the brackets exist to prevent.
+        try expect(resolved("<./My Notes.md>") == "/tmp/notes/My Notes.md",
+                   "a bracketed path lost everything after its space: "
+                     + "\(resolved("<./My Notes.md>") ?? "nil")")
+        try expect(resolved("./My%20Notes.md") == "/tmp/notes/My Notes.md",
+                   "a percent-encoded space did not decode")
+        // A fragment names a place inside the file, not a different filename.
+        try expect(resolved("./NOTES.md#intro") == "/tmp/notes/NOTES.md",
+                   "a fragment was folded into the filename: "
+                     + "\(resolved("./NOTES.md#intro") ?? "nil")")
+        try expect(resolved("./page.md?v=2") == "/tmp/notes/page.md",
+                   "a query was folded into the filename")
+        try expect(resolved("./plain.md") == "/tmp/notes/plain.md",
+                   "an ordinary relative link stopped resolving")
+        try expect(MarkdownLiveStyler.resolvedLinkURL("#anchor", relativeTo: document) == nil,
+                   "a pure anchor resolved to a file")
+        // A title after the destination is still not part of it.
+        try expect(resolved("./plain.md \"Title\"") == "/tmp/notes/plain.md",
+                   "a link title was taken as part of the path")
+        let absolute = MarkdownLiveStyler.resolvedLinkURL("https://example.com/a",
+                                                          relativeTo: document)
+        try expect(absolute?.scheme == "https", "an absolute URL stopped resolving")
+    }
+
+    /// Diff buffers count against the same budget as any other. They used to be
+    /// added by a path that never checked it, so a session spent reading diffs
+    /// and opening no ordinary file kept every one of them.
+    private static func testVirtualDocumentsObeyTheCacheBudget() throws {
+        let store = DocumentStore.shared
+        let budget = store.maxCachedDocuments
+        defer { store.maxCachedDocuments = budget }
+        store.maxCachedDocuments = 2
+        var urls: [URL] = []
+        for index in 0..<8 {
+            guard let url = URL(string:
+                "puzzle-diff:///tmp/budget/.puzzle-diff-preview?path=f\(index).txt") else {
+                throw Failure(description: "could not build a diff URL")
+            }
+            urls.append(url)
+            store.setVirtualDocument(url: url, text: "diff \(index)\n")
+        }
+        let cached = urls.filter { store.cachedDocument(for: $0) != nil }.count
+        try expect(cached <= 3, "\(cached) of 8 diff buffers were kept for a budget of 2")
+        // The one just handed out is never the one evicted.
+        try expect(store.cachedDocument(for: urls[7]) != nil,
+                   "the diff that was just opened was evicted immediately")
+        store.releaseTransientMemory()
+    }
+
+    /// ripgrep's own per-file cap counted matches this end throws away, so a
+    /// file whose first eighty matches were all minified came back empty even
+    /// though a readable one sat below them.
+    private static func testSearchQuotaSurvivesUnsearchableLines() throws {
+        let flags = SearchViewController.ripgrepArguments(query: "needle",
+                                                          options: SearchOptions())
+        try expect(!flags.contains("--max-count"),
+                   "ripgrep still spends its per-file budget on dropped lines: \(flags)")
+
+        let directory = try temporaryDirectory("search-quota")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let long = "needle " + String(repeating: "x", count: 1_200)
+        var lines = Array(repeating: long, count: 90)
+        lines.append("readable needle")
+        try Data((lines.joined(separator: "\n") + "\n").utf8)
+            .write(to: directory.appendingPathComponent("mixed.txt"))
+
+        let groups = SearchViewController.search(query: "needle", in: directory)
+        try expect(groups.count == 1, "the fixture produced \(groups.count) files")
+        try expect(groups[0].hits.count == 1,
+                   "\(groups[0].hits.count) hits: the unsearchable lines are not filtered")
+        try expect(groups[0].hits[0].line == 91,
+                   "the readable line was hidden behind the long ones: "
+                     + "line \(groups[0].hits[0].line)")
+    }
+
     private static func testSavePolicyIsOnePlace() throws {
         let directory = try temporaryDirectory("save-policy")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -5694,6 +5864,14 @@ enum RegressionTests {
                    "a rebuildable diff buffer was kept out of eviction")
 
         let rebuilt = store.document(for: url)
+        // The buffer comes back at once; Git runs off the main thread and the
+        // content lands afterwards, so this getter cannot stall a tab switch.
+        try expect(rebuilt.text.contains("Rebuilding"),
+                   "the rebuild blocked the caller: \(rebuilt.text)")
+        let deadline = Date(timeIntervalSinceNow: 10)
+        while rebuilt.text.contains("Rebuilding"), Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
         try expect(rebuilt.text.contains("-two") && rebuilt.text.contains("+TWO"),
                    "the diff was not rebuilt from its URL: \(rebuilt.text)")
         try expect(!rebuilt.isReadOnly,

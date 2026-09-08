@@ -162,6 +162,11 @@ enum GitLineChanges {
             // not be. Marking against half a file is worse than not marking.
             return .unavailable
         case .unavailable:
+            // `cat-file` fails the same way for "HEAD has no such path" and for
+            // "the blob is there and will not read". Only the first is a new
+            // file; the second is a file whose every line would be marked added.
+            guard GitService.headState(ofProjectPath: relative, in: repository) == .absent
+            else { return .unavailable }
             // Not in HEAD yet. A path Git already knows about — Puzzle stages
             // new files as they are created — is new in its entirety; a path it
             // does not know is none of the gutter's business. A failure to ask

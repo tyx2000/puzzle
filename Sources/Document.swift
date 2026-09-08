@@ -86,7 +86,10 @@ final class Document {
     /// into the file the diff is about. Set only for the uncommitted diff: a
     /// diff of a past commit describes a file that no longer exists in that
     /// form, so there is nothing to write it back to.
-    private(set) var editableDiff: (directory: URL, path: String)?
+    /// The source file, and how it looked when this diff was taken. Replaying
+    /// an edited diff writes the whole file, so a version that arrived
+    /// underneath it has to be noticed rather than flattened.
+    private(set) var editableDiff: (directory: URL, path: String, sourceModified: Date?)?
 
     /// Images, generated diffs and unreadable/unsupported files must never be
     /// written back from their display-only placeholder.
@@ -95,7 +98,17 @@ final class Document {
     }
 
     func makeDiffEditable(directory: URL, path: String) {
-        editableDiff = (directory, path)
+        editableDiff = (directory, path,
+                        Self.modificationDate(for: directory.appendingPathComponent(path)))
+    }
+
+    /// The diff was just replayed into its file, so that write is the version
+    /// it now describes.
+    func diffSourceWasWritten() {
+        guard let source = editableDiff else { return }
+        editableDiff = (source.directory, source.path,
+                        Self.modificationDate(for:
+                            source.directory.appendingPathComponent(source.path)))
     }
 
     /// An edited diff has no file of its own to write: it is saved by replaying
@@ -465,8 +478,13 @@ final class Document {
 
     /// Refresh a generated diff without allocating a second document while an
     /// existing layout manager still owns the old one.
+    /// Counts the times this buffer's content has been swapped out from under
+    /// it, so a rebuild that started earlier can tell it is no longer wanted.
+    private(set) var contentReplacements = 0
+
     func replaceVirtualContent(_ text: String, displayName: String?) {
         guard isVirtual else { return }
+        contentReplacements += 1
         // An edited diff is the user's work, not a cached render. Re-opening
         // the same file must not throw it away behind their back; saving is
         // what turns it back into a plain rendered diff.
@@ -676,7 +694,7 @@ final class Document {
         return nil
     }
 
-    private static func modificationDate(for url: URL) -> Date? {
+    static func modificationDate(for url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate])
             as? Date
     }

@@ -122,6 +122,17 @@ final class DocumentSaveCoordinator {
         guard let source = document.editableDiff else { return true }
         let diff = document.text
         let file = source.directory.appendingPathComponent(source.path)
+        // Replaying a diff writes the whole file: everything the diff does not
+        // mention comes from the pre-image, so a version that arrived on disk
+        // since the diff was taken would be erased without trace. That is the
+        // same question a buffer asks, and it gets the same answer — the silent
+        // doors refuse, and only someone who is looking may overrule it.
+        if let taken = source.sourceModified,
+           let current = Document.modificationDate(for: file), current != taken {
+            guard policy.mayInterrupt, askAboutChangedDiffSource(source.path) else {
+                return false
+            }
+        }
         guard let preimage = GitService.diffPreimage(diff, path: source.path,
                                                      in: source.directory) else {
             report("Git could not produce the version of \(source.path) this diff "
@@ -151,8 +162,22 @@ final class DocumentSaveCoordinator {
             return false
         }
         document.markSaved()
+        document.diffSourceWasWritten()
         if policy.notifies { host?.documentDidPersist(document, writtenTo: file) }
         return true
+    }
+
+    private func askAboutChangedDiffSource(_ path: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(path)” changed since this diff was taken"
+        alert.informativeText =
+            "Saving this diff rewrites the whole file from the version it "
+            + "describes, which would discard whatever was written to it since. "
+            + "Close this tab and open the file itself to keep both."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Replace the File")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     private func report(_ detail: String, _ policy: Policy) {

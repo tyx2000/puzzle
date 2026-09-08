@@ -1400,7 +1400,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// edited is the one that has to be written.
     private func scheduleIdleSave(for document: Document) {
         idleSaveWork?.cancel()
-        guard document.isModified, !document.isReadOnly else { return }
+        // Diff buffers are excluded here for the same reason `autosaveIfNeeded`
+        // excludes them: pausing is not a decision to replay a diff into a
+        // source file. Closing the tab, or ⌘S, is.
+        guard document.isModified, !document.isReadOnly, !document.isVirtual else { return }
         let work = DispatchWorkItem { [weak self, weak document] in
             guard let self, let document else { return }
             // The same reason as the focus-change save: the user is still at

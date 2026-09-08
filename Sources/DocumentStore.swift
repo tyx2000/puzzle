@@ -90,18 +90,35 @@ final class DocumentStore {
         // the path and, for history, the commit, which is everything the diff is
         // made of, so it is built again here.
         if url.scheme == Self.diffScheme {
-            guard let content = virtualContentProvider?(url) else {
+            guard let provider = virtualContentProvider else {
                 return setVirtualDocument(url: url, text: "No diff available.\n",
                                           displayName: url.lastPathComponent + " (diff)")
             }
-            let rebuilt = setVirtualDocument(url: url, text: content.text,
-                                             displayName: content.displayName)
-            // Without this the tab comes back read-only, because what makes a
-            // diff editable is this pairing and not the text.
-            if let source = content.editableSource {
-                rebuilt.makeDiffEditable(directory: source.directory, path: source.path)
+            // The rebuild runs Git, and this getter is called from a tab
+            // activation on the main thread — a repository with a textconv or
+            // an external diff helper would stall the whole window here. The
+            // buffer comes back immediately and fills itself in.
+            let placeholder = setVirtualDocument(
+                url: url, text: "Rebuilding this diff…\n",
+                displayName: url.lastPathComponent + " (diff)")
+            let generation = placeholder.contentReplacements
+            GitService.workQueue.async { [weak self, weak placeholder] in
+                let content = provider(url)
+                DispatchQueue.main.async {
+                    guard let self, let placeholder, self.docs[url] === placeholder,
+                          placeholder.contentReplacements == generation else { return }
+                    // Without the pairing the tab comes back read-only: what
+                    // makes a diff editable is that, not the text.
+                    placeholder.replaceVirtualContent(content?.text ?? "No diff available.\n",
+                                                      displayName: content?.displayName)
+                    if let source = content?.editableSource {
+                        placeholder.makeDiffEditable(directory: source.directory,
+                                                     path: source.path)
+                    }
+                    HighlightService.shared.highlight(placeholder)
+                }
             }
-            return rebuilt
+            return placeholder
         }
         let doc = Document(url: url)
         docs[url] = doc
@@ -177,6 +194,10 @@ final class DocumentStore {
         docs[url] = doc
         touch(url)
         HighlightService.shared.highlight(doc)
+        // Diff buffers count against the same budget as any other, and this is
+        // the only place they arrive: without this, a session spent reading
+        // diffs and opening no ordinary file never reached the budget at all.
+        evictIfNeeded(excluding: url)
         return doc
     }
 

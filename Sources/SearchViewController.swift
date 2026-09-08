@@ -339,10 +339,16 @@ final class SearchViewController: NSViewController {
         to output: inout [(String, Int, String)]
     ) {
         var line = 0
+        var kept = 0
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             line += 1
+            // The same two rules the disk backends apply, so a file does not
+            // change what it can match by having unsaved edits in it.
+            guard rawLine.count <= Self.maxSearchableLineLength else { continue }
             let value = String(rawLine)
             guard matcher.firstRange(in: value) != nil else { continue }
+            kept += 1
+            guard kept <= Self.maxHitsPerFile else { return }
             output.append((relative, line, searchPreview(value, query: query, options: options)))
             if output.count >= maxHits { return }
         }
@@ -379,6 +385,7 @@ final class SearchViewController: NSViewController {
         // buffered ripgrep's ENTIRE output first — a common word in a big repo
         // could be tens of MB of matches we then threw away.
         var out: [(String, Int, String)] = []
+        var perFile: [String: Int] = [:]
         var buffer = Data()
         let handle = pipe.fileHandleForReading
         var done = false
@@ -414,6 +421,12 @@ final class SearchViewController: NSViewController {
                 // `--max-columns` says, so the minified-line rule is applied
                 // here rather than left to the flag.
                 guard textValue.count <= Self.maxSearchableLineLength else { continue }
+                // One file may not fill the result list on its own. Counted
+                // after the line filter, so the lines that are dropped do not
+                // hide the readable ones further down the same file.
+                let kept = perFile[rel, default: 0]
+                guard kept < Self.maxHitsPerFile else { continue }
+                perFile[rel] = kept + 1
                 let text = searchPreview(textValue, query: query, options: options)
                 out.append((rel, no, text))
                 if out.count >= maxHits { done = true; break }
@@ -434,7 +447,11 @@ final class SearchViewController: NSViewController {
     /// Built apart from the process so the flags are regression-testable: this
     /// machine may have no ripgrep to run them against.
     static func ripgrepArguments(query: String, options: SearchOptions) -> [String] {
-        var args = ["--json", "--max-count", "80",
+        // No `--max-count`: ripgrep would spend that budget on the very lines
+        // this end throws away, and a file whose first eighty matches are all
+        // minified came back as no results at all. The per-file cap is applied
+        // below instead, where a discarded line does not count.
+        var args = ["--json",
                     "--max-columns", "1000", "--max-columns-preview",
                     "--max-filesize", "\(maxNativeFileBytes)"]
         for suffix in generatedSuffixes { args += ["--glob", "!*\(suffix)"] }
@@ -475,6 +492,9 @@ final class SearchViewController: NSViewController {
     /// Result caps — the panel can't usefully show more than this, and holding
     /// every hit of a common word was the single largest memory spike measured.
     private static let maxHits = 500
+    /// So one file cannot fill the list. This used to be ripgrep's
+    /// `--max-count`, which counted matches this end never showed.
+    static let maxHitsPerFile = 80
     private static let maxPreviewChars = 160
     static let maxNativeFileBytes = 2_000_000
     /// The most one ripgrep JSON record may occupy before it is dropped.
@@ -560,11 +580,16 @@ final class SearchViewController: NSViewController {
                 // "/private" glued to the front of every result.
                 guard let rel = relativePath(for: url, in: directory) else { return }
                 var no = 0
+                var kept = 0
                 for raw in String(decoding: data, as: UTF8.self)
                     .split(separator: "\n", omittingEmptySubsequences: false) {
                     no += 1
                     guard raw.count <= Self.maxSearchableLineLength else { continue }
+                    // The same per-file cap the ripgrep backend applies, so the
+                    // two answer alike on a file with thousands of matches.
+                    guard kept < Self.maxHitsPerFile else { break }
                     if matcher.firstRange(in: String(raw)) != nil {
+                        kept += 1
                         out.append((rel, no,
                                     searchPreview(String(raw), query: query, options: options)))
                         if out.count >= maxHits {
