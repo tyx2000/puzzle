@@ -1196,10 +1196,13 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         // the row's own background rather than inside the box.
         Theme.panelBackground.setFill()
         bounds.fill()
-        let box = NSRect(x: FileTreeRowLayout.titleX - 4, y: 2,
+        // The field is exactly the row: same height as every file line, square
+        // corners. A shorter rounded pill floated inside the row and made the
+        // list jump where it should have stayed still.
+        let box = NSRect(x: FileTreeRowLayout.titleX - 4, y: 0,
                          width: max(0, bounds.width - FileTreeRowLayout.titleX + 2),
-                         height: max(0, bounds.height - 4)).insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(roundedRect: box, xRadius: 7, yRadius: 7)
+                         height: bounds.height).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(rect: box)
         Theme.inputBackground.setFill()
         path.fill()
         Theme.inputBorderFocused.setStroke()
