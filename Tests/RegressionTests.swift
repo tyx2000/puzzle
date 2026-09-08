@@ -63,6 +63,7 @@ enum RegressionTests {
         try testMarkdownLinkDestinations()
         try testVirtualDocumentsObeyTheCacheBudget()
         try testSearchQuotaSurvivesUnsearchableLines()
+        try testSearchBackendsAgree()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -5762,6 +5763,45 @@ enum RegressionTests {
     /// ripgrep's own per-file cap counted matches this end throws away, so a
     /// file whose first eighty matches were all minified came back empty even
     /// though a readable one sat below them.
+    /// Which backend runs depends on whether the machine has ripgrep, so
+    /// whichever one it has is the only one anybody ever sees. They have to
+    /// answer alike; they used not to, and the difference was invisible until
+    /// someone installed ripgrep.
+    private static func testSearchBackendsAgree() throws {
+        let directory = try temporaryDirectory("search-backends")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // An ordinary file, a file with one line too long to search, and a file
+        // whose readable content sits under a line that is — the last one is
+        // what the two backends disagreed about, because only one of them used
+        // to skip the whole file.
+        try Data("alpha needle\nbeta\n".utf8)
+            .write(to: directory.appendingPathComponent("plain.txt"))
+        try Data(("needle " + String(repeating: "x", count: 1_200) + "\n").utf8)
+            .write(to: directory.appendingPathComponent("wide.txt"))
+        try Data((String(repeating: "z", count: 25_000) + "\nreadable needle\n").utf8)
+            .write(to: directory.appendingPathComponent("mixed.txt"))
+
+        func results(_ backend: SearchViewController.Backend) -> [String] {
+            SearchViewController.forcedBackendForTesting = backend
+            defer { SearchViewController.forcedBackendForTesting = nil }
+            return SearchViewController.search(query: "needle", in: directory)
+                .flatMap { group in group.hits.map { "\(group.relative):\($0.line)" } }
+                .sorted()
+        }
+
+        let native = results(.native)
+        try expect(native == ["mixed.txt:2", "plain.txt:1"],
+                   "the native backend answered \(native)")
+        guard SearchViewController.installedRipgrepPathForTesting != nil else {
+            // Nothing to compare against on a machine without ripgrep; the
+            // assertion above is still the contract both backends must meet.
+            return
+        }
+        let ripgrep = results(.ripgrep)
+        try expect(ripgrep == native,
+                   "the backends disagree — ripgrep: \(ripgrep), native: \(native)")
+    }
+
     private static func testSearchQuotaSurvivesUnsearchableLines() throws {
         let flags = SearchViewController.ripgrepArguments(query: "needle",
                                                           options: SearchOptions())

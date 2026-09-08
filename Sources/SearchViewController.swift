@@ -276,16 +276,29 @@ final class SearchViewController: NSViewController {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }()
 
+    enum Backend { case ripgrep, native }
+
+    /// Which backend a search uses is normally decided by whether this machine
+    /// has ripgrep, which means one of the two goes untested wherever the suite
+    /// runs. The regression suite sets this to exercise both.
+    static var forcedBackendForTesting: Backend?
+
+    static var installedRipgrepPathForTesting: String? { ripgrepPath }
+
     static func search(query: String, in directory: URL,
                        options: SearchOptions = SearchOptions(),
                        inMemoryFiles: [URL: String] = [:],
                        cancellation: CancellationToken = .none) -> [FileGroup] {
         guard let matcher = SearchMatcher(query: query, options: options) else { return [] }
-        let diskHits = ripgrepPath.map {
-            ripgrep(rg: $0, query: query, in: directory, options: options,
-                    cancellation: cancellation)
-        } ?? nativeSearch(query: query, in: directory, options: options,
-                          cancellation: cancellation)
+        let backend = forcedBackendForTesting ?? (ripgrepPath == nil ? .native : .ripgrep)
+        let diskHits: [(String, Int, String)]
+        if backend == .ripgrep, let rg = ripgrepPath {
+            diskHits = ripgrep(rg: rg, query: query, in: directory, options: options,
+                               cancellation: cancellation)
+        } else {
+            diskHits = nativeSearch(query: query, in: directory, options: options,
+                                    cancellation: cancellation)
+        }
         guard !cancellation.isCancelled else { return [] }
         let snapshots: [(relative: String, text: String)] = inMemoryFiles.compactMap { url, text in
             relativePath(for: url, in: directory).map { ($0, text) }
@@ -568,12 +581,13 @@ final class SearchViewController: NSViewController {
                 guard !isGeneratedArtifact(url.lastPathComponent),
                       shouldLoadForNativeSearch(url),
                       let data = try? Data(contentsOf: url),
-                      !data.prefix(1024).contains(0),
-                      // The editor's own definition of minified: a file it
-                      // would refuse to lay out has nothing to offer a search
-                      // either, and this is one byte scan with no allocation.
-                      Document.longestLineLength(in: data) <= Document.maxDisplayLineLength
+                      !data.prefix(1024).contains(0)
                 else { return }
+                // No file-level minified rule here. It used to skip the whole
+                // file, which ripgrep never did: a generated file with one
+                // enormous line and ordinary content around it was searchable
+                // on a machine with ripgrep and invisible on one without. The
+                // per-line rule below is the one both backends apply.
                 // Not a string subtraction: the enumerator hands back resolved
                 // paths (/private/var/…) while `directory` may still be the
                 // symlink (/var/…), and replacing that as a substring left
