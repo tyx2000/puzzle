@@ -48,6 +48,7 @@ enum RegressionTests {
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
+        try testMarkdownLinkHover()
         try testRevertAndDiffWriteBack()
         try testDeepSyntaxTreesDoNotOverflow()
         try testDiffWriteBackEdgeCases()
@@ -2934,8 +2935,12 @@ enum RegressionTests {
                    "inline editor text/caret was not vertically centered")
         try expect(tree.pendingEditorHasIconForTesting == true,
                    "New File editor did not retain a file icon")
-        try expect(sameColor(tree.pendingEditorBackgroundForTesting, .white),
-                   "New File editor did not paint the whole row white")
+        // The row being typed into is a field like the search box, not a white
+        // slab: the panel is dark and a white row read as a rendering fault.
+        try expect(sameColor(tree.pendingEditorBackgroundForTesting, Theme.inputBackground),
+                   "the New File editor is not painted like the search field")
+        try expect(sameColor(tree.pendingEditorTextColorForTesting, Theme.foreground),
+                   "the name being typed is not in the editor's own text colour")
         var openedAfterCreate: URL?
         tree.onOpenFile = { openedAfterCreate = $0 }
         try enter("created.any")
@@ -2947,8 +2952,8 @@ enum RegressionTests {
 
         try invoke(try menuItem("New Folder", for: anchor))
         try expect(tree.pendingEditorHasIconForTesting == true
-                   && sameColor(tree.pendingEditorBackgroundForTesting, .white),
-                   "New Folder editor did not show its icon on a white row")
+                   && sameColor(tree.pendingEditorBackgroundForTesting, Theme.inputBackground),
+                   "New Folder editor did not show its icon beside a themed field")
         try enter("created-folder")
         var isDirectory: ObjCBool = false
         let folder = directory.appendingPathComponent("created-folder", isDirectory: true)
@@ -2969,8 +2974,8 @@ enum RegressionTests {
         try expect(tree.pendingEditRowForTesting == tree.row(for: created),
                    "Rename did not replace the selected row with an editor")
         try expect(tree.pendingEditorHasIconForTesting == true
-                   && sameColor(tree.pendingEditorBackgroundForTesting, .white),
-                   "Rename editor dropped the original icon or white row background")
+                   && sameColor(tree.pendingEditorBackgroundForTesting, Theme.inputBackground),
+                   "Rename editor dropped the original icon or the field styling")
         try enter("renamed.any")
         let renamed = directory.appendingPathComponent("renamed.any")
         try expect(FileManager.default.fileExists(atPath: renamed.path)
@@ -6069,6 +6074,96 @@ enum RegressionTests {
             url: URL(string: "puzzle-diff:///\(repository.path)/source.txt?commit=abc")!,
             text: diffText, displayName: "source.txt @ abc")
         try expect(historic.isReadOnly, "a commit's diff was made editable")
+    }
+
+    /// Hovering a link in a rendered Markdown document says where it goes and
+    /// offers to go there. Nothing is followed without a click.
+    private static func testMarkdownLinkHover() throws {
+        let directory = try temporaryDirectory("markdown-links")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("README.md")
+        let text = """
+            [inline](https://example.com/a) and [reference][docs] and
+            <https://example.com/auto> and bare https://example.com/bare and
+            [neighbour](./NOTES.md).
+
+            [docs]: https://example.com/docs
+
+            """
+        try Data(text.utf8).write(to: url)
+        try Data("notes\n".utf8).write(to: directory.appendingPathComponent("NOTES.md"))
+
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        pane.open(url: url)
+        let document = DocumentStore.shared.document(for: url)
+        let links = document.markdownLinks
+        func link(named label: String) throws -> MarkdownLinkDecoration {
+            let range = (text as NSString).range(of: label)
+            guard let found = links.first(where: {
+                NSIntersectionRange($0.sourceRange, range).length > 0
+            }) else {
+                throw Failure(description: "\(label) was not recorded as a link: "
+                                + "\(links.map { ($0.destination, $0.sourceRange) })")
+            }
+            return found
+        }
+        let inline = try link(named: "inline")
+        let reference = try link(named: "reference")
+        let auto = try link(named: "https://example.com/auto")
+        let bare = try link(named: "https://example.com/bare")
+        try expect(inline.destination == "https://example.com/a",
+                   "an inline link lost its destination")
+        // The definition sits below the paragraph that uses it, which is where
+        // CommonMark allows it and why the resolution happens at the end.
+        try expect(reference.destination == "https://example.com/docs",
+                   "a reference link was not resolved: \(reference.destination)")
+        try expect(auto.url?.host == "example.com", "an autolink was not recorded")
+        try expect(bare.destination == "https://example.com/bare",
+                   "a bare URL was not recorded")
+        // A relative link resolves against the document, so it opens the file
+        // beside it rather than nothing at all.
+        let neighbour = try link(named: "neighbour")
+        try expect(neighbour.url?.isFileURL == true
+                    && neighbour.url?.lastPathComponent == "NOTES.md",
+                   "a relative link resolved to \(String(describing: neighbour.url))")
+        try expect(!document.text.contains("\u{0000}") && document.text == text,
+                   "recording links changed the source")
+
+        var opened = 0
+        // The card is the address itself, in blue, above the link: no arrow
+        // pointing back at the text and no button to read before clicking.
+        let card = MarkdownLinkCard()
+        card.onOpen = { opened += 1 }
+        let size = card.fittingSizeForTesting(inline.destination)
+        try expect(card.destinationForTesting == "https://example.com/a",
+                   "the card does not show the address")
+        try expect(size.width > 100 && size.width <= MarkdownLinkCard.maximumWidth,
+                   "the card is \(size.width)pt wide for a 22 character address")
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let anchor = NSRect(x: 300, y: 400, width: 60, height: 18)
+        let placed = MarkdownLinkCard.frame(size: size, above: anchor, within: screen)
+        try expect(placed.minY >= anchor.maxY,
+                   "the card is not above the link: \(placed) against \(anchor)")
+        try expect(placed.minX == anchor.minX, "the card is not aligned with the link")
+        // At the top of the screen there is nowhere above to go.
+        let atTop = MarkdownLinkCard.frame(
+            size: size, above: NSRect(x: 300, y: 880, width: 60, height: 18), within: screen)
+        try expect(atTop.maxY <= 880, "the card ran off the top of the screen")
+        // And never off the right edge.
+        let atRight = MarkdownLinkCard.frame(
+            size: size, above: NSRect(x: 1400, y: 400, width: 60, height: 18), within: screen)
+        try expect(atRight.maxX <= screen.maxX, "the card ran off the side of the screen")
+        card.clickForTesting()
+        try expect(opened == 1, "clicking the address did not follow the link")
+
+        // A file with no links leaves the editor with none, so a stale card
+        // cannot open something from a document that is no longer showing.
+        let plain = directory.appendingPathComponent("plain.md")
+        try Data("no links here\n".utf8).write(to: plain)
+        pane.open(url: plain)
+        try expect(pane.textViewForTesting.markdownLinks.isEmpty,
+                   "the links of the previous document are still loaded")
     }
 
     private static func testIndexLockContention() throws {

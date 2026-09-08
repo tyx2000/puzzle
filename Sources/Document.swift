@@ -172,6 +172,7 @@ final class Document {
     private(set) var markdownRules: [MarkdownRuleDecoration] = []
     private(set) var markdownImages: [MarkdownImageDecoration] = []
     private(set) var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
+    private(set) var markdownLinks: [MarkdownLinkDecoration] = []
 
     /// Tab label override (diffs show "file.swift (diff)" / "… @ abc1234").
     private(set) var displayName: String?
@@ -511,7 +512,8 @@ final class Document {
                 || presentation.lineMarkers != markdownLineMarkers
                 || presentation.rules != markdownRules
                 || presentation.images != markdownImages
-                || presentation.glyphReplacements != markdownGlyphReplacements else { return }
+                || presentation.glyphReplacements != markdownGlyphReplacements
+                || presentation.links != markdownLinks else { return }
         markdownSyntaxRanges = presentation.hiddenSyntaxRanges
         markdownCollapsedLineRanges = presentation.collapsedLineRanges
         markdownCodeBlocks = presentation.codeBlocks
@@ -521,6 +523,7 @@ final class Document {
         markdownRules = presentation.rules
         markdownImages = presentation.images
         markdownGlyphReplacements = presentation.glyphReplacements
+        markdownLinks = presentation.links
         NotificationCenter.default.post(
             name: Self.structureDidChange, object: self)
     }

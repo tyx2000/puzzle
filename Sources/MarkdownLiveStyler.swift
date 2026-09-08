@@ -53,6 +53,16 @@ struct MarkdownImageDecoration: Equatable {
     let url: URL?
 }
 
+/// A link in the rendered document: the text the reader sees, and where it
+/// points. The destination is kept as written as well as resolved, so a
+/// relative path can still be shown when it resolves to nothing.
+struct MarkdownLinkDecoration: Equatable {
+    /// The visible text — the label, not the `[…](…)` around it.
+    let sourceRange: NSRange
+    let destination: String
+    let url: URL?
+}
+
 struct MarkdownGlyphReplacement: Equatable {
     let sourceRange: NSRange
     let character: UInt16
@@ -68,6 +78,7 @@ struct MarkdownPresentation: Equatable {
     var rules: [MarkdownRuleDecoration] = []
     var images: [MarkdownImageDecoration] = []
     var glyphReplacements: [MarkdownGlyphReplacement] = []
+    var links: [MarkdownLinkDecoration] = []
 }
 
 /// Paints Markdown semantics directly onto the editable source buffer.
@@ -115,6 +126,11 @@ enum MarkdownLiveStyler {
         private var rules: [MarkdownRuleDecoration] = []
         private var images: [MarkdownImageDecoration] = []
         private var glyphs: [MarkdownGlyphReplacement] = []
+        private var links: [MarkdownLinkDecoration] = []
+        /// Reference links resolved once the whole document is known: a
+        /// definition may sit below the paragraph that uses it.
+        private var pendingReferenceLinks: [(range: NSRange, label: String)] = []
+        private var linkDefinitions: [String: String] = [:]
         /// Spans whose text is literal — a code span or a fenced block — so the
         /// GFM bare-URL scan does not link inside them.
         private var literalRanges: [NSRange] = []
@@ -144,7 +160,7 @@ enum MarkdownLiveStyler {
                     collapsed.filter { $0.length > 0 }),
                 codeBlocks: codeBlocks, tables: tables, tasks: tasks,
                 lineMarkers: lineMarkers, rules: rules, images: images,
-                glyphReplacements: glyphs)
+                glyphReplacements: glyphs, links: links)
         }
 
         mutating func run() {
@@ -153,6 +169,7 @@ enum MarkdownLiveStyler {
             walkBlocks(document.blocks, quoteDepth: 0)
             walkInlines(document.inlines)
             bareURLs()
+            resolveReferenceLinks()
             storage.endEditing()
         }
 
@@ -412,7 +429,32 @@ enum MarkdownLiveStyler {
                 sourceRange: span, kind: .footnote(identifier)))
         }
 
+        /// Record one link. The destination is kept verbatim as well as
+        /// resolved: a relative path that points at nothing is still worth
+        /// showing to whoever is hovering it.
+        mutating func note(link range: NSRange, destination: String) {
+            let trimmed = destination.trimmingCharacters(in: .whitespaces)
+            guard range.length > 0, !trimmed.isEmpty else { return }
+            links.append(MarkdownLinkDecoration(
+                sourceRange: range, destination: trimmed,
+                url: MarkdownLiveStyler.resolvedLinkURL(trimmed, relativeTo: documentURL)))
+        }
+
+        /// Reference links, once every definition in the document has been read.
+        mutating func resolveReferenceLinks() {
+            for pending in pendingReferenceLinks {
+                guard let destination =
+                        linkDefinitions[MarkdownLiveStyler.linkKey(pending.label)] else { continue }
+                note(link: pending.range, destination: destination)
+            }
+            pendingReferenceLinks.removeAll()
+        }
+
         mutating func referenceDefinition(_ node: MarkdownNode) {
+            if let label = node.first("link_label"), let target = node.first("link_destination") {
+                linkDefinitions[MarkdownLiveStyler.linkKey(source.substring(with: label.range))]
+                    = source.substring(with: target.range)
+            }
             let definitionLine = line(at: node.range.location)
             dim(node.range)
             hide(node.range)
@@ -490,6 +532,10 @@ enum MarkdownLiveStyler {
                     let inner = NSRange(location: node.range.location + 1,
                                         length: max(0, node.range.length - 2))
                     style(linkStyle, inner)
+                    note(link: inner,
+                         destination: node.type == "email_autolink"
+                            ? "mailto:" + source.substring(with: inner)
+                            : source.substring(with: inner))
                     hide(NSRange(location: node.range.location, length: 1))
                     hide(NSRange(location: NSMaxRange(node.range) - 1, length: 1))
                 case "entity_reference", "numeric_character_reference":
@@ -550,6 +596,13 @@ enum MarkdownLiveStyler {
             // `[^detail]` is a footnote reference, not a link to a label.
             if node.type == "shortcut_link", identifier.hasPrefix("^") {
                 style([.superscript: 1], label.range)
+            } else if let destination = node.first("link_destination") {
+                note(link: label.range, destination: source.substring(with: destination.range))
+            } else {
+                // A reference link names a definition that may not have been
+                // read yet. `[text][label]` names one; `[text]` is its own.
+                let reference = node.first("link_label").map { source.substring(with: $0.range) }
+                pendingReferenceLinks.append((label.range, reference ?? identifier))
             }
             // Everything around the text — brackets, destination, title — is
             // syntax.
@@ -601,12 +654,42 @@ enum MarkdownLiveStyler {
                             || tail == 0x21 || tail == 0x3F else { break }
                     styled.length -= 1
                 }
-                if styled.length > 0 { style(linkStyle, styled) }
+                if styled.length > 0 {
+                    style(linkStyle, styled)
+                    note(link: styled, destination: source.substring(with: styled))
+                }
             }
         }
     }
 
     // MARK: - Shared helpers
+
+    /// Link labels match case-insensitively and ignore surrounding brackets and
+    /// whitespace, which is what CommonMark says about reference labels.
+    static func linkKey(_ label: String) -> String {
+        var text = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("[") { text.removeFirst() }
+        if text.hasSuffix("]") { text.removeLast() }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// What a link destination points at. An absolute URL is taken as written;
+    /// anything else is resolved against the document, so `./notes.md` opens
+    /// the file next to it rather than nothing at all.
+    static func resolvedLinkURL(_ destination: String, relativeTo documentURL: URL?) -> URL? {
+        var text = destination
+        if text.hasPrefix("<") && text.hasSuffix(">") { text = String(text.dropFirst().dropLast()) }
+        // A title after the destination — `(url "Title")` — is not part of it.
+        if let space = text.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+            text = String(text[text.startIndex..<space])
+        }
+        guard !text.isEmpty else { return nil }
+        if let url = URL(string: text), url.scheme != nil { return url }
+        guard let documentURL, !text.hasPrefix("#") else { return nil }
+        let base = documentURL.deletingLastPathComponent()
+        let path = text.removingPercentEncoding ?? text
+        return URL(fileURLWithPath: path, relativeTo: base).standardizedFileURL
+    }
 
     static func lineContentRange(_ line: NSRange, in source: NSString) -> NSRange {
         var end = NSMaxRange(line)

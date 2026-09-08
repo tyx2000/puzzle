@@ -315,6 +315,14 @@ final class FileTreeViewController: NSViewController {
         }
         return cell.hasIconForTesting
     }
+    var pendingEditorTextColorForTesting: NSColor? {
+        guard let row = pendingEditRowForTesting,
+              let cell = outlineView.view(atColumn: 0, row: row,
+                                          makeIfNecessary: true) as? InlineTreeNameCell else {
+            return nil
+        }
+        return cell.textColorForTesting
+    }
     var pendingEditorBackgroundForTesting: NSColor? {
         guard let row = pendingEditRowForTesting,
               let cell = outlineView.view(atColumn: 0, row: row,
@@ -1142,8 +1150,9 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.lineFragmentPadding = 0
         editor.font = Theme.uiFont(12)
-        editor.textColor = .black
-        editor.insertionPointColor = .black
+        editor.textColor = Theme.foreground
+        editor.insertionPointColor = Theme.cursor
+        editor.selectedTextAttributes = [.backgroundColor: Theme.selection]
         editor.delegate = self
         editor.onResign = { [weak self] in self?.editorDidResign() }
         editor.setAccessibilityLabel("File name")
@@ -1168,8 +1177,8 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         editingSessionStarted = false
         editor.string = value
         editor.font = Theme.uiFont(12)
-        editor.textColor = .black
-        editor.insertionPointColor = .black
+        editor.textColor = Theme.foreground
+        editor.insertionPointColor = Theme.cursor
         self.disclosure = disclosure
         self.icon = icon
         self.onSubmit = onSubmit
@@ -1181,8 +1190,21 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.white.setFill()
+        // The row the name is typed into is a text field like the search box,
+        // and is painted like one: the panel behind it, then the field itself
+        // inset from the icon so the disclosure arrow and the file icon stay on
+        // the row's own background rather than inside the box.
+        Theme.panelBackground.setFill()
         bounds.fill()
+        let box = NSRect(x: FileTreeRowLayout.titleX - 4, y: 2,
+                         width: max(0, bounds.width - FileTreeRowLayout.titleX + 2),
+                         height: max(0, bounds.height - 4)).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: box, xRadius: 7, yRadius: 7)
+        Theme.inputBackground.setFill()
+        path.fill()
+        Theme.inputBorderFocused.setStroke()
+        path.lineWidth = 1
+        path.stroke()
         SidebarCellDrawing.image(disclosure, tint: Theme.dimText,
                                  in: FileTreeRowLayout.centeredRect(
                                     x: FileTreeRowLayout.disclosureX,
@@ -1231,7 +1253,8 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         return editor.verticalCenterError
     }
     var hasIconForTesting: Bool { icon != nil }
-    var backgroundColorForTesting: NSColor { .white }
+    var backgroundColorForTesting: NSColor { Theme.inputBackground }
+    var textColorForTesting: NSColor? { editor.textColor }
 }
 
 /// Tree row with a persistent background for the file open in the active pane.

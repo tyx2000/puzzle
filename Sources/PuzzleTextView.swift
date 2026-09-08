@@ -170,7 +170,12 @@ final class PuzzleTextView: NSTextView {
                                    lineMarkers: [MarkdownLineMarkerDecoration] = [],
                                    rules: [MarkdownRuleDecoration] = [],
                                    images: [MarkdownImageDecoration] = [],
+                                   links: [MarkdownLinkDecoration] = [],
                                    activeSourceRange: NSRange?) {
+        if links != markdownLinks {
+            markdownLinks = links
+            hideLinkPopover()
+        }
         guard codeBlocks != markdownCodeBlocks || tables != markdownTables
                 || tasks != markdownTasks
                 || lineMarkers != markdownLineMarkers
@@ -1218,8 +1223,87 @@ final class PuzzleTextView: NSTextView {
     }
 
     override func mouseEntered(with event: NSEvent) { updateCommandHover(with: event) }
-    override func mouseMoved(with event: NSEvent) { updateCommandHover(with: event) }
-    override func mouseExited(with event: NSEvent) { clearCommandHover() }
+    override func mouseMoved(with event: NSEvent) {
+        updateCommandHover(with: event)
+        updateLinkHover(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        clearCommandHover()
+        updateLinkHover(with: nil)
+    }
+
+    // MARK: - Markdown link hover
+
+    /// Links in the rendered document, and the one the pointer is on.
+    private(set) var markdownLinks: [MarkdownLinkDecoration] = []
+    private var hoveredLink: MarkdownLinkDecoration?
+    private let linkCard = MarkdownLinkCard()
+    private var linkHoverWork: DispatchWorkItem?
+    /// Long enough that crossing a link on the way somewhere else does not
+    /// open anything — the delay every editor's hover card uses.
+    private static let linkHoverDelay: TimeInterval = 0.35
+
+    /// Show what a link points at while the pointer rests on it. Nothing here
+    /// follows a link on its own: the address on the card is what is clicked.
+    private func updateLinkHover(with event: NSEvent?) {
+        guard !markdownLinks.isEmpty else {
+            if hoveredLink != nil { hideLinkPopover() }
+            return
+        }
+        let link = event.flatMap { event -> MarkdownLinkDecoration? in
+            guard let index = characterIndex(atWindowPoint: event.locationInWindow) else {
+                return nil
+            }
+            return markdownLinks.first { NSLocationInRange(index, $0.sourceRange) }
+        }
+        guard link?.sourceRange != hoveredLink?.sourceRange else { return }
+        linkHoverWork?.cancel()
+        guard let link else {
+            // The pointer may have travelled onto the card itself, which is a
+            // window of its own and stops sending this view mouse events.
+            guard !pointerIsOverLinkPopover else { return }
+            hideLinkPopover()
+            return
+        }
+        hoveredLink = link
+        let work = DispatchWorkItem { [weak self] in self?.showLinkPopover(for: link) }
+        linkHoverWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.linkHoverDelay, execute: work)
+    }
+
+    private var pointerIsOverLinkPopover: Bool {
+        guard linkCard.isVisible else { return false }
+        return linkCard.screenFrame.insetBy(dx: -6, dy: -6).contains(NSEvent.mouseLocation)
+    }
+
+    private func showLinkPopover(for link: MarkdownLinkDecoration) {
+        guard hoveredLink?.sourceRange == link.sourceRange,
+              let layoutManager, let textContainer, let window else { return }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: link.sourceRange,
+                                              actualCharacterRange: nil)
+        var anchor = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        anchor.origin.x += textContainerOrigin.x
+        anchor.origin.y += textContainerOrigin.y
+        let onScreen = window.convertToScreen(convert(anchor, to: nil))
+        linkCard.onOpen = { [weak self] in
+            self?.hideLinkPopover()
+            self?.onOpenLink?(link)
+        }
+        linkCard.show(destination: link.destination, above: onScreen, in: window)
+    }
+
+    private func hideLinkPopover() {
+        linkHoverWork?.cancel()
+        linkHoverWork = nil
+        hoveredLink = nil
+        linkCard.close()
+    }
+
+    /// What clicking the address on the card does. Set by the pane, which
+    /// owns the decision.
+    var onOpenLink: ((MarkdownLinkDecoration) -> Void)?
+    var linkCardForTesting: MarkdownLinkCard { linkCard }
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)

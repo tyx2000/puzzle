@@ -160,6 +160,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.onCommandClick = { [weak self] location in
             self?.navigateToDefinition(at: location) ?? false
         }
+        textView.onOpenLink = { [weak self] link in self?.openMarkdownLink(link) }
         textView.onCommandHover = { [weak self] location in
             self?.updateDefinitionHover(at: location)
         }
@@ -411,6 +412,26 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: target.location, length: 0))
         textView.scrollRangeToVisible(textView.selectedRange())
         return true
+    }
+
+    /// Follow a link from a rendered Markdown document, at the reader's
+    /// request. A Markdown file next to this one opens in a tab — leaving the
+    /// editor to read the notes it links to would be absurd — and everything
+    /// else is handed to whatever the system opens it with.
+    private func openMarkdownLink(_ link: MarkdownLinkDecoration) {
+        guard let url = link.url else { return }
+        if url.isFileURL {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path,
+                                                 isDirectory: &isDirectory),
+                  !isDirectory.boolValue else {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+                return
+            }
+            open(url: url)
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func showGitChange(_ change: GitLineChanges.Change, from rect: NSRect) {
@@ -877,6 +898,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             tasks: doc.markdownTasks,
             lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
             images: doc.markdownImages,
+            links: doc.markdownLinks,
             activeSourceRange: markdownReveal)
 
         if !doc.isPDF {
@@ -1360,6 +1382,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             tasks: doc.markdownTasks,
             lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
             images: doc.markdownImages,
+            links: doc.markdownLinks,
             activeSourceRange: reveal)
         textView.refreshBracketMatches()
         scheduleGitLineChanges()
@@ -1402,6 +1425,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 lineMarkers: document.markdownLineMarkers,
                 rules: document.markdownRules,
                 images: document.markdownImages,
+                links: document.markdownLinks,
                 activeSourceRange: reveal)
         }
         guard let url = currentURL, lineActivatedURLs.contains(url) else {
@@ -1444,6 +1468,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             tasks: document.markdownTasks,
             lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
             images: document.markdownImages,
+            links: document.markdownLinks,
             activeSourceRange: reveal)
     }
 
@@ -1475,6 +1500,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             tasks: document.markdownTasks,
             lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
             images: document.markdownImages,
+            links: document.markdownLinks,
             activeSourceRange: reveal)
         textView.refreshBracketMatches()
         textView.needsDisplay = true
