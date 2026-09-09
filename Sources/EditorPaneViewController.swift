@@ -1617,6 +1617,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // The reload re-decides whether this file can be shown in full, so the
         // buffer may have just become a read-only preview — or stopped being one.
         textView.isEditable = !document.isReadOnly
+        // The whole buffer was replaced, so every range the find bar is holding
+        // belongs to text that is gone.
+        findBar.invalidateMatches()
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)

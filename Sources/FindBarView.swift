@@ -184,6 +184,14 @@ final class FindBarView: FlatView {
         }
     }
 
+    /// The text was replaced underneath the bar — not by typing, which
+    /// recomputes as it goes, but by the file changing on disk. Every cached
+    /// range describes text that no longer exists, and handing one of them to
+    /// `replaceCharacters` raises an NSRangeException, which is an abort.
+    func invalidateMatches() {
+        recompute(input.stringValue, input.options, reveal: false)
+    }
+
     func attach(to textView: PuzzleTextView) {
         self.textView = textView
         recompute(input.stringValue, input.options)

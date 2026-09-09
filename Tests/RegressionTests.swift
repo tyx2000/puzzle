@@ -64,6 +64,8 @@ enum RegressionTests {
         try testSearchQuotaSurvivesUnsearchableLines()
         try testSearchBackendsAgree()
         try testSubprocessWaitsDoNotRunARunLoop()
+        try testDeeplyNestedMarkdownIsLeftAsPlainText()
+        try testFindBarDropsRangesFromReplacedText()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -5766,6 +5768,93 @@ enum RegressionTests {
     /// NSCollectionView reload — `addSubview:`, the Auto Layout engine — off
     /// the main thread, and AppKit's exception crossing Swift frames aborted
     /// the app rather than raising an error anyone could catch.
+    /// The Markdown grammar's external scanner serialises its stack of open
+    /// containers into a fixed 1 KB buffer and asserts rather than truncating
+    /// when it will not fit — 255 nested block quotes, a 515-byte file, abort
+    /// the process from inside C. Depth is checked before the parser runs.
+    private static func testDeeplyNestedMarkdownIsLeftAsPlainText() throws {
+        try expect(MarkdownSyntaxTree.containerDepth(of: "> > > deep\n") == 3,
+                   "block quote markers were not counted")
+        try expect(MarkdownSyntaxTree.containerDepth(of: "- a\n  - b\n    - c\n") == 2,
+                   "list indentation was not counted")
+        try expect(MarkdownSyntaxTree.containerDepth(of: "plain paragraph\n") == 0,
+                   "an ordinary line was counted as nesting")
+
+        // Well past the measured 255, and well past our own limit.
+        let deep = String(repeating: "> ", count: 600) + "boom\n"
+        let parsed = MarkdownSyntaxTree.parse(deep)
+        try expect(parsed.blocks.isEmpty && parsed.inlines.isEmpty,
+                   "a document too deep to parse was handed to the grammar anyway")
+
+        // The highlighter takes the same door, because it parses Markdown with
+        // the very scanner that asserts.
+        let directory = try temporaryDirectory("deep-markdown")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("deep.md")
+        try Data(deep.utf8).write(to: file)
+        let document = Document(url: file)
+        HighlightService.shared.highlight(document)
+        try expect(document.storage.length == deep.utf16.count,
+                   "the buffer no longer holds the file")
+
+        // Lists nest by indentation rather than by a marker, so they reach the
+        // same stack a different way.
+        let nestedLists = (0..<600).map { String(repeating: " ", count: $0 * 2) + "- item" }
+            .joined(separator: "\n") + "\n"
+        try expect(MarkdownSyntaxTree.containerDepth(of: nestedLists) > 128,
+                   "indentation-nested lists were not counted as depth")
+        let listParsed = MarkdownSyntaxTree.parse(nestedLists)
+        try expect(listParsed.blocks.isEmpty,
+                   "a list nested past the limit was handed to the grammar")
+
+        // An ordinary Markdown file still gets everything.
+        let ordinary = directory.appendingPathComponent("fine.md")
+        try Data("# Title\n\n> quoted\n\n- one\n- two\n".utf8).write(to: ordinary)
+        let readable = MarkdownSyntaxTree.parse(try String(contentsOf: ordinary,
+                                                           encoding: .utf8))
+        try expect(!readable.blocks.isEmpty,
+                   "the depth guard swallowed an ordinary document")
+    }
+
+    /// An external write replaces the whole buffer. Every range the find bar
+    /// cached describes text that no longer exists, and handing one to
+    /// `replaceCharacters` raises NSRangeException — an abort, not an error.
+    private static func testFindBarDropsRangesFromReplacedText() throws {
+        let directory = try temporaryDirectory("stale-find")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("notes.txt")
+        let long = (0..<200).map { "line \($0) needle here" }.joined(separator: "\n") + "\n"
+        try Data(long.utf8).write(to: file)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: file)
+        pane.showFindBar(seed: "needle")
+        let bar = pane.findBarForTesting
+        try expect(bar.totalMatchCountForTesting == 200,
+                   "the fixture did not produce matches: \(bar.totalMatchCountForTesting)")
+
+        // Something else rewrites the file far shorter, and the document
+        // refreshes itself — a build, a formatter, `git checkout`.
+        Thread.sleep(forTimeInterval: 1.1)
+        try Data("x\n".utf8).write(to: file)
+        _ = DocumentStore.shared.reloadExternalChanges(at: [file])
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        try expect(pane.textViewForTesting.string == "x\n",
+                   "the buffer did not take the external change")
+        try expect(bar.retainedMatchCountForTesting == 0,
+                   "\(bar.retainedMatchCountForTesting) ranges survived the replacement")
+        // The lever that used to abort.
+        bar.setReplacementForTesting("y")
+        bar.replaceCurrentForTesting()
+        try expect(pane.textViewForTesting.string == "x\n",
+                   "replacing against a replaced buffer changed it")
+    }
+
     private static func testSubprocessWaitsDoNotRunARunLoop() throws {
         let root = try temporaryDirectory("runloop")
         defer { try? FileManager.default.removeItem(at: root) }

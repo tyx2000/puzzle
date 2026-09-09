@@ -43,6 +43,18 @@ final class HighlightService {
             doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
+        // The same limit, applied before the grammar runs at all: the syntax
+        // highlighter parses Markdown with the very scanner that asserts, so
+        // guarding only the live styler would leave the abort in place one
+        // call earlier. Such a file is shown as plain text.
+        if spec.name == "markdown",
+           MarkdownSyntaxTree.containerDepth(of: storage.string)
+            > MarkdownSyntaxTree.maxContainerDepth {
+            cache[spec.name]?.discardParseTree()
+            doc.updateJSXTagMatches([])
+            doc.updateMarkdownPresentation(MarkdownPresentation())
+            return
+        }
         let tags: [JSXTagMatch]
         if let lang = SyntaxHighlighter.definition(for: spec),
            let hl = highlighter(for: lang) {

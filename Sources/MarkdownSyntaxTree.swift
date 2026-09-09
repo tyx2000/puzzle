@@ -46,8 +46,48 @@ enum MarkdownSyntaxTree {
     private static var blockParser: OpaquePointer?
     private static var inlineParser: OpaquePointer?
 
+    /// How deeply containers may nest before the document is left as plain text.
+    ///
+    /// The block grammar's external scanner serialises the stack of containers
+    /// it has open into a fixed 1 KB buffer and *asserts* rather than
+    /// truncating when it will not fit. 255 nested block quotes — a 515-byte
+    /// file — abort the process from inside C, where no Swift frame can catch
+    /// anything. Measured at 255; this leaves room to spare.
+    static let maxContainerDepth = 128
+
+    /// A cheap over-estimate of the container nesting, straight off the bytes.
+    ///
+    /// Over-estimating is the safe direction: the cost of being wrong is a
+    /// document styled as plain text, and no real document comes close to the
+    /// limit. Indentation counts because that is how lists nest; a `>` resets
+    /// the run of spaces, since the ones between markers are not indentation.
+    static func containerDepth(of text: String) -> Int {
+        var deepest = 0, markers = 0, spaces = 0
+        var inPrefix = true
+        for byte in text.utf8 {
+            if byte == 0x0A {
+                deepest = max(deepest, markers + spaces / 2)
+                markers = 0; spaces = 0; inPrefix = true
+                continue
+            }
+            guard inPrefix else { continue }
+            switch byte {
+            case 0x3E: markers += 1; spaces = 0      // >
+            case 0x20: spaces += 1                   // space
+            case 0x09: spaces += 4                   // tab
+            default: inPrefix = false
+            }
+        }
+        return max(deepest, markers + spaces / 2)
+    }
+
     static func parse(_ text: String) -> Document {
         guard !text.isEmpty else { return Document(blocks: [], inlines: []) }
+        // Checked before the parser sees the text: past this the grammar does
+        // not fail, it aborts.
+        guard containerDepth(of: text) <= maxContainerDepth else {
+            return Document(blocks: [], inlines: [])
+        }
         lock.lock()
         defer { lock.unlock() }
         if blockParser == nil {
