@@ -3,6 +3,14 @@ import ImageIO
 
 /// An open file's buffer. Shared between editor panes so the same file opened in
 /// two panes edits one buffer (Zed behavior) while each pane keeps its own tabs.
+/// The two pictures an SVG diff is about: what Git has, and what the working
+/// tree has. Either can be missing — a new file has no before, a deleted one
+/// has no after.
+struct SVGDiffSides: Equatable {
+    let before: Data?
+    let after: Data?
+}
+
 final class Document {
     static let structureDidChange = Notification.Name("PuzzleDocumentStructureDidChange")
     static let didReloadFromDisk = Notification.Name("PuzzleDocumentDidReloadFromDisk")
@@ -48,6 +56,11 @@ final class Document {
     private(set) var isEPUB = false
     /// PDFKit owns rendering; the text storage only holds the file caption.
     private(set) var isPDF = false
+    /// SVG is source that is also a picture: the buffer is the file, and the
+    /// pane draws what it describes above it.
+    var isSVG: Bool {
+        !isVirtual && Self.vectorImageExtensions.contains(url.pathExtension.lowercased())
+    }
 
     /// True when a preview view owns the pane — the picture, the player — and
     /// the buffer holds a caption rather than the file. Everything that reads
@@ -59,6 +72,9 @@ final class Document {
         "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",
         "heic", "heif", "webp", "ico", "icns",
     ]
+    /// SVG is a picture *and* its own source. It opens as text, with the
+    /// picture drawn above it, so it is deliberately not an image extension.
+    static let vectorImageExtensions: Set<String> = ["svg"]
     /// Media AVFoundation decodes on its own. Deliberately narrow: mkv, avi,
     /// webm and ogg would mean bundling ffmpeg or VLCKit — tens of megabytes
     /// into an app that ships at four — so they stay on the "unsupported
@@ -82,41 +98,15 @@ final class Document {
     /// A generated, read-only buffer (a git diff) rather than a file on disk.
     /// Never saved, and coloured by the diff painter instead of tree-sitter.
     private(set) var isVirtual = false
-    /// A working-tree diff is editable, and saving it replays the new side
-    /// into the file the diff is about. Set only for the uncommitted diff: a
-    /// diff of a past commit describes a file that no longer exists in that
-    /// form, so there is nothing to write it back to.
-    /// The source file, and how it looked when this diff was taken. Replaying
-    /// an edited diff writes the whole file, so a version that arrived
-    /// underneath it has to be noticed rather than flattened.
-    private(set) var editableDiff: (directory: URL, path: String, sourceModified: Date?)?
+    /// The two sides of an SVG diff, when this buffer is one: the picture as
+    /// Git has it and the picture as the working tree has it. The diff text
+    /// itself is what the buffer holds.
+    var svgDiffSides: SVGDiffSides?
 
     /// Images, generated diffs and unreadable/unsupported files must never be
     /// written back from their display-only placeholder.
-    var isReadOnly: Bool {
-        isUnsupported || (isVirtual && editableDiff == nil) || isPreviewOnly
-    }
+    var isReadOnly: Bool { isUnsupported || isVirtual || isPreviewOnly }
 
-    func makeDiffEditable(directory: URL, path: String) {
-        editableDiff = (directory, path,
-                        Self.modificationDate(for: directory.appendingPathComponent(path)))
-    }
-
-    /// The diff was just replayed into its file, so that write is the version
-    /// it now describes.
-    func diffSourceWasWritten() {
-        guard let source = editableDiff else { return }
-        editableDiff = (source.directory, source.path,
-                        Self.modificationDate(for:
-                            source.directory.appendingPathComponent(source.path)))
-    }
-
-    /// An edited diff has no file of its own to write: it is saved by replaying
-    /// it into its source, and this is how that reports back.
-    func markSaved() {
-        isModified = false
-        lastLocalEditAt = nil
-    }
     /// Preserve the encoding that was decoded instead of silently converting a
     /// Latin-1 source file to UTF-8 on its first save.
     private var textEncoding: String.Encoding = .utf8
@@ -286,16 +276,18 @@ final class Document {
         if hasImageExtension {
             if let source = PreviewImageSource(url: url, data: data) {
                 previewImage = source
-                let px = "\(Int(source.pixelSize.width)) × \(Int(source.pixelSize.height))"
+                let size = "\(Int(source.pixelSize.width)) × \(Int(source.pixelSize.height))"
                 let bytes = ByteCountFormatter.string(
                     fromByteCount: Int64(data.count), countStyle: .file)
-                storage = NSTextStorage(string: "\(url.lastPathComponent)  ·  \(px)  ·  \(bytes)")
+                storage = NSTextStorage(
+                    string: "\(url.lastPathComponent)  ·  \(size)  ·  \(bytes)")
                 storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                                       range: NSRange(location: 0, length: storage.length))
                 return
             }
             isUnsupported = true
-            storage = NSTextStorage(string: Self.unsupportedMessage(for: url, byteCount: data.count))
+            storage = NSTextStorage(
+                string: Self.unsupportedMessage(for: url, byteCount: data.count))
             storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                                   range: NSRange(location: 0, length: storage.length))
             return

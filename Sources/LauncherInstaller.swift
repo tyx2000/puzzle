@@ -93,9 +93,18 @@ enum LauncherInstaller {
         process.arguments = ["-lic", "printf %s \"$PATH\""]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        // This runs during launch, on the main thread. `waitUntilExit()` would
+        // service the main run loop while it waited, letting timers and
+        // notifications fire re-entrantly before the app has finished starting.
+        let latch = ProcessExitLatch(process)
         do {
             try process.run()
-            process.waitUntilExit()
+            // A login shell that hangs — waiting on input from a broken profile
+            // — must not hold the launch open for ever.
+            guard latch.wait(seconds: 5) else {
+                process.terminate()
+                return []
+            }
             guard process.terminationStatus == 0 else { return [] }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let path = String(data: data, encoding: .utf8) else { return [] }

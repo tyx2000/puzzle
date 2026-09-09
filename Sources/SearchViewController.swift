@@ -386,6 +386,8 @@ final class SearchViewController: NSViewController {
         // Search errors are represented by no results; leaving an unread stderr
         // pipe here can deadlock on a tree with many permission errors.
         process.standardError = FileHandle.nullDevice
+        // Waited on without a run loop, like every other subprocess here.
+        let latch = ProcessExitLatch(process)
         do { try process.run() } catch {
             return nativeSearch(query: query, in: directory, options: options,
                                 cancellation: cancellation)
@@ -453,7 +455,7 @@ final class SearchViewController: NSViewController {
             }
         }
         if done { process.terminate() }        // stop ripgrep early
-        process.waitUntilExit()
+        latch.wait()
         return out
     }
 

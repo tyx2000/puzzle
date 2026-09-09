@@ -107,14 +107,9 @@ final class DocumentStore {
                 DispatchQueue.main.async {
                     guard let self, let placeholder, self.docs[url] === placeholder,
                           placeholder.contentReplacements == generation else { return }
-                    // Without the pairing the tab comes back read-only: what
-                    // makes a diff editable is that, not the text.
                     placeholder.replaceVirtualContent(content?.text ?? "No diff available.\n",
                                                       displayName: content?.displayName)
-                    if let source = content?.editableSource {
-                        placeholder.makeDiffEditable(directory: source.directory,
-                                                     path: source.path)
-                    }
+                    placeholder.svgDiffSides = content?.svgSides
                     HighlightService.shared.highlight(placeholder)
                 }
             }
@@ -165,9 +160,9 @@ final class DocumentStore {
     struct VirtualContent {
         let text: String
         let displayName: String?
-        /// Set for a working-tree diff, which is editable and replays into the
-        /// file it describes. Nil for a commit diff, which is history.
-        let editableSource: (directory: URL, path: String)?
+        /// Set when the diff is about an SVG: the pane draws both versions
+        /// above the diff text.
+        let svgSides: SVGDiffSides?
     }
 
     /// Registered once at launch. Its presence is what allows a virtual buffer
@@ -175,9 +170,7 @@ final class DocumentStore {
     /// dropped, because there is nowhere to read it back from.
     var virtualContentProvider: ((URL) -> VirtualContent?)?
 
-    /// A synthetic buffer may be dropped only if it can be built again. An
-    /// edited one never qualifies — the eviction rules keep every modified
-    /// document, and an edited diff is the only copy of what the user typed.
+    /// A synthetic buffer may be dropped only if it can be built again.
     private func isRegenerable(_ url: URL) -> Bool {
         url.scheme == Self.diffScheme && virtualContentProvider != nil
     }

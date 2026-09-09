@@ -217,6 +217,10 @@ enum GitService {
         process.standardError = errPipe
         let inputPipe = stdin.map { _ in Pipe() }
         if let inputPipe { process.standardInput = inputPipe }
+        // Built before `run()`, and waited on instead of `waitUntilExit()`,
+        // which would run a run loop on whichever pooled thread this queue
+        // landed on. See ProcessExitLatch.
+        let latch = ProcessExitLatch(process)
         do {
             try process.run()
         } catch {
@@ -264,21 +268,17 @@ enum GitService {
         if let timeout {
             // A stalled transfer (a dropped VPN mid-push) would otherwise hang
             // this call, and with it every later Git action, until Puzzle quits.
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning, Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            if process.isRunning {
+            if !latch.wait(seconds: timeout) {
                 timedOut = true
                 process.terminate()
-                let killDeadline = Date().addingTimeInterval(2)
-                while process.isRunning, Date() < killDeadline {
-                    Thread.sleep(forTimeInterval: 0.05)
+                if !latch.wait(seconds: 2) {
+                    kill(process.processIdentifier, SIGKILL)
+                    latch.wait()
                 }
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             }
+        } else {
+            latch.wait()
         }
-        process.waitUntilExit()
         readers.wait()
         if timedOut {
             let note = Data("\ngit gave up after \(Int(timeout ?? 0))s with no result.\n".utf8)
@@ -1179,39 +1179,52 @@ enum GitService {
         return text
     }
 
-    /// The pre-image a diff was taken against, for replaying an edited diff
-    /// back into its file.
+    /// The two versions an SVG diff is about: HEAD's picture and the working
+    /// tree's. Nil for anything that is not an SVG, so the ordinary diff tab is
+    /// unaffected.
     ///
-    /// The diff names its own old blob in the `index a..b` header, which is
-    /// exact: it says HEAD's copy or the index's copy without this code having
-    /// to work out which one the diff was asked for. A new file names the
-    /// all-zero hash and has no pre-image; a hand-mangled header falls back to
-    /// HEAD's copy of the path.
-    /// Nil when the pre-image cannot be established. That is not the same as an
-    /// empty one: a diff that creates a file has an empty pre-image and applies
-    /// perfectly well over it, while a blob that is missing or too large to read
-    /// leaves us with nothing to replay the diff over — and replaying it over
-    /// "" instead would rewrite the file as the additions alone.
-    static func diffPreimage(_ diff: String, path: String, in directory: URL) -> String? {
-        // Both reads go through the bounded blob API: this text is replayed
-        // into a source file, so it is worth a ceiling and worth resolving the
-        // path the way Git does rather than the way the project is opened.
-        if let hash = UnifiedDiff.oldBlob(in: diff) {
-            guard case .data(let data) = blob(object: hash, in: directory) else { return nil }
-            return String(decoding: data, as: UTF8.self)
+    /// Either side may be missing on its own — a file being added has no before
+    /// and one being deleted has no after — and a diff with neither is not
+    /// worth two empty panes.
+    static func svgDiffSides(for path: String, in directory: URL) -> SVGDiffSides? {
+        guard isVectorPath(path) else { return nil }
+        var before: Data?
+        if case .data(let data) = blob(inCommit: "HEAD", path: path, in: directory) {
+            before = data
         }
-        switch blob(inCommit: "HEAD", path: path, in: directory) {
-        case .data(let data): return String(decoding: data, as: UTF8.self)
-        case .tooLarge: return nil
-        case .unavailable:
-            // An empty pre-image is right for a file the diff creates, and
-            // catastrophic for one whose blob merely would not read: the whole
-            // file would be rewritten as the additions alone.
-            return headState(ofProjectPath: path, in: directory) == .absent ? "" : nil
-        }
+        // The working tree, which is what the "+" side of the diff describes.
+        let file = directory.appendingPathComponent(path)
+        let after = try? Data(contentsOf: file)
+        guard before != nil || after != nil else { return nil }
+        return SVGDiffSides(before: before, after: after)
     }
 
-    /// One file touched by a commit.
+    /// The same two versions for a file as one commit left it: the parent's
+    /// picture and the commit's own.
+    ///
+    /// A commit that adds the file has no parent version, and the root commit
+    /// has no parent at all — both come back with no `before`, which is what
+    /// tells the pane to show one picture rather than two.
+    static func svgDiffSides(inCommit commit: String, path: String,
+                             in directory: URL) -> SVGDiffSides? {
+        guard isVectorPath(path) else { return nil }
+        var before: Data?
+        if case .data(let data) = blob(inCommit: commit + "^", path: path, in: directory) {
+            before = data
+        }
+        var after: Data?
+        if case .data(let data) = blob(inCommit: commit, path: path, in: directory) {
+            after = data
+        }
+        guard before != nil || after != nil else { return nil }
+        return SVGDiffSides(before: before, after: after)
+    }
+
+    private static func isVectorPath(_ path: String) -> Bool {
+        Document.vectorImageExtensions.contains((path as NSString).pathExtension.lowercased())
+    }
+
+    /// One file touched by a commit.    /// One file touched by a commit.
     struct CommitFile {
         let status: String      // A, M, D, R…
         let path: String

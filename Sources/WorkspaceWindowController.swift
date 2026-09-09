@@ -319,6 +319,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let text = GitService.diff(for: entry, in: directory)
+            // A picture that is also source: the diff tab shows both versions
+            // above the diff itself.
+            let sides = GitService.svgDiffSides(for: entry.path, in: directory)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.projectURL == directory else { return }
                 let url = self.diffPreviewURL(in: directory, path: entry.path)
@@ -326,9 +329,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 let document = DocumentStore.shared.setVirtualDocument(
                     url: url, text: text,
                     displayName: "\((entry.path as NSString).lastPathComponent) (diff)")
-                // The uncommitted diff is editable: what the user types on its
-                // new side is replayed into the file when the tab is saved.
-                document.makeDiffEditable(directory: directory, path: entry.path)
+                document.svgDiffSides = sides
                 self.editor.open(url: url, replacingContent: true)
             }
         }
@@ -378,14 +379,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             return
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let text = GitService.diff(inCommit: commit.shortHash, path: file.path, in: directory)
+            // Built the same way the rebuild-from-URL path builds it, so a
+            // History tab that is evicted and reopened comes back identical.
+            let content = Self.commitDiffContent(commit: commit.shortHash,
+                                                 path: file.path, in: directory)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.projectURL == directory else { return }
                 let url = self.diffPreviewURL(in: directory,
                                               path: file.path, commit: commit.shortHash)
-                let name = (file.path as NSString).lastPathComponent
-                DocumentStore.shared.setVirtualDocument(
-                    url: url, text: text, displayName: "\(name) @ \(commit.shortHash)")
+                let document = DocumentStore.shared.setVirtualDocument(
+                    url: url, text: content.text, displayName: content.displayName)
+                document.svgDiffSides = content.svgSides
                 self.editor.open(url: url, replacingContent: true)
             }
         }
@@ -450,15 +454,33 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             let commit = components.queryItems?
                 .first(where: { $0.name == "commit" })?.value
             if let commit, !commit.isEmpty {
-                return DocumentStore.VirtualContent(
-                    text: GitService.diff(inCommit: commit, path: path, in: directory),
-                    displayName: "\(name) @ \(commit)", editableSource: nil)
+                return commitDiffContent(commit: commit, path: path, in: directory)
             }
             guard let text = GitService.diff(forPath: path, in: directory) else { return nil }
             return DocumentStore.VirtualContent(
                 text: text, displayName: "\(name) (diff)",
-                editableSource: (directory: directory, path: path))
+                svgSides: GitService.svgDiffSides(for: path, in: directory))
         }
+    }
+
+    /// What a History row opens: the commit's diff for the file, or — for an
+    /// SVG the commit *added* — the file itself with its picture above it.
+    ///
+    /// A diff that adds a file is every line with a `+` in front of it. For a
+    /// picture that is worth nothing: the file as it stands reads better, and
+    /// the preview has one version to show rather than two.
+    static func commitDiffContent(commit: String, path: String,
+                                  in directory: URL) -> DocumentStore.VirtualContent {
+        let name = (path as NSString).lastPathComponent
+        let sides = GitService.svgDiffSides(inCommit: commit, path: path, in: directory)
+        if let sides, sides.before == nil, let after = sides.after,
+           let text = String(data: after, encoding: .utf8) {
+            return DocumentStore.VirtualContent(
+                text: text, displayName: "\(name) @ \(commit)", svgSides: sides)
+        }
+        return DocumentStore.VirtualContent(
+            text: GitService.diff(inCommit: commit, path: path, in: directory),
+            displayName: "\(name) @ \(commit)", svgSides: sides)
     }
 
     /// Preserve the repository path below the per-commit temp directory. Using

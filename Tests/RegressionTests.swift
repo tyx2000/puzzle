@@ -49,21 +49,21 @@ enum RegressionTests {
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
         try testMarkdownLinkHover()
-        try testRevertAndDiffWriteBack()
+        try testSVGPreviewAboveItsSource()
+        try testRevertGitChange()
         try testDeepSyntaxTreesDoNotOverflow()
-        try testDiffWriteBackEdgeCases()
         try testReplaceAllPastTheMatchCache()
         try testExternalRefreshKeepsBoundedPreview()
         try testSettingsRejectUnusableNumbers()
         try testSearchStopsWhenCancelled()
         try testDiffBuffersAreRebuiltAfterEviction()
         try testSavePolicyIsOnePlace()
-        try testDiffWriteBackNoticesANewerSourceFile()
         try testUnreadableGitObjectIsNotANewFile()
         try testMarkdownLinkDestinations()
         try testVirtualDocumentsObeyTheCacheBudget()
         try testSearchQuotaSurvivesUnsearchableLines()
         try testSearchBackendsAgree()
+        try testSubprocessWaitsDoNotRunARunLoop()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -5618,8 +5618,7 @@ enum RegressionTests {
     /// it refreshes, so it can collide with itself over `.git/index.lock` —
     /// "Another git process seems to be running in this repository", from an
     /// app the user only asked to commit.
-    /// The gutter mark's popover can put its own lines back, and an edited diff
-    /// tab is written through to the file it describes.
+    /// The gutter mark's popover can put its own lines back.
     /// Syntax-tree depth follows the source, not the file size: `a + b + c + …`
     /// nests one binary expression per term, so a few thousand of them build a
     /// tree thousands of levels deep out of 48 KB of text with no line longer
@@ -5663,61 +5662,6 @@ enum RegressionTests {
         try expect(tornDown, "a late handler was never run on an already-cancelled token")
     }
 
-    /// A diff buffer is synthetic, so nothing could read it back and it was
-    /// excluded from eviction altogether. It carries everything it is made of
-    /// in its own URL, so it can be dropped and built again like any other.
-    /// Every door into a save — ⌘S, leaving the buffer, the typing stopping,
-    /// closing, quitting — goes through one policy, and the reason it names is
-    /// the only thing that changes. Only the explicit one writes over a change
-    /// that arrived on disk underneath the edit; the silent ones defer to it
-    /// and leave the buffer dirty rather than interrupting anyone.
-    /// Replaying a diff rewrites the whole file from the version it describes,
-    /// so anything written to that file since would go with it. The silent
-    /// doors have to refuse, exactly as they do for an ordinary buffer.
-    private static func testDiffWriteBackNoticesANewerSourceFile() throws {
-        let root = try temporaryDirectory("diff-source-conflict")
-        defer { try? FileManager.default.removeItem(at: root) }
-        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
-        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
-        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
-        GitService.forgetRepositoryInfo()
-        let file = root.appendingPathComponent("a.txt")
-        try Data("a\nb\nc\n".utf8).write(to: file)
-        _ = GitService.run(["add", "-A"], in: root)
-        _ = GitService.run(["commit", "-qm", "base"], in: root)
-        try Data("a\nedited\nc\n".utf8).write(to: file)
-        guard let diff = GitService.diff(forPath: "a.txt", in: root) else {
-            throw Failure(description: "the fixture produced no diff")
-        }
-
-        let url = URL(string: "puzzle-diff:///\(root.path)/.puzzle-diff-preview?path=a.txt")!
-        let document = DocumentStore.shared.setVirtualDocument(url: url, text: diff)
-        document.makeDiffEditable(directory: root, path: "a.txt")
-        document.markLocalEdit()
-
-        // Something else writes the file while the diff tab sits open.
-        Thread.sleep(forTimeInterval: 1.1)
-        try Data("external changes\n".utf8).write(to: file)
-
-        let coordinator = DocumentSaveCoordinator()
-        try expect(!coordinator.save(document, because: .leaving),
-                   "a silent save replayed a diff over a newer file")
-        let survived = try String(contentsOf: file, encoding: .utf8)
-        try expect(survived == "external changes\n",
-                   "the newer file was overwritten: \(survived)")
-        try expect(document.isModified, "the refused write-back cleared the buffer")
-
-        // With no newer version underneath it, the same door writes.
-        document.makeDiffEditable(directory: root, path: "a.txt")
-        try expect(coordinator.save(document, because: .leaving),
-                   "the write-back was refused with nothing to conflict with")
-        let written = try String(contentsOf: file, encoding: .utf8)
-        try expect(written == "a\nedited\nc\n", "the diff was not replayed: \(written)")
-    }
-
-    /// `cat-file` fails the same way for a path HEAD does not have and for a
-    /// blob that will not read. Only the first is a new file; reading the
-    /// second as one marks every line added, and Revert writes that.
     private static func testUnreadableGitObjectIsNotANewFile() throws {
         let root = try temporaryDirectory("unreadable-blob")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -5742,10 +5686,6 @@ enum RegressionTests {
 
         try expect(GitLineChanges.baseline(for: file, in: root) == .unavailable,
                    "an unreadable blob was reported as a brand-new file")
-        try expect(GitService.diffPreimage("@@ -1,2 +1,2 @@\n one\n-two\n+2\n",
-                                           path: "tracked.txt", in: root) == nil,
-                   "an unreadable blob produced an empty pre-image to replay over")
-
         // A file HEAD really does not have is still new in its entirety.
         let added = root.appendingPathComponent("added.txt")
         try Data("fresh\n".utf8).write(to: added)
@@ -5817,6 +5757,47 @@ enum RegressionTests {
     /// whichever one it has is the only one anybody ever sees. They have to
     /// answer alike; they used not to, and the difference was invisible until
     /// someone installed ripgrep.
+    /// Waiting for a subprocess must not run a run loop.
+    ///
+    /// `Process.waitUntilExit()` does, on whichever pooled thread the queue
+    /// happened to land on, which lets a timer another framework left dormant
+    /// there fire in the middle of a Git call on a background thread. PDFKit
+    /// had left a coalesced notification on such a thread; it drove an
+    /// NSCollectionView reload — `addSubview:`, the Auto Layout engine — off
+    /// the main thread, and AppKit's exception crossing Swift frames aborted
+    /// the app rather than raising an error anyone could catch.
+    private static func testSubprocessWaitsDoNotRunARunLoop() throws {
+        let root = try temporaryDirectory("runloop")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var fired = false
+        let finished = DispatchSemaphore(value: 0)
+        var result: GitService.ProcessResult?
+        DispatchQueue(label: "test.runloop", qos: .utility).async {
+            // Dormant on a dispatch worker thread — nothing runs the run loop
+            // there — unless something spins one while it waits.
+            _ = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { _ in
+                fired = true
+            }
+            result = GitService.runProcess(executable: URL(fileURLWithPath: "/bin/sleep"),
+                                           arguments: ["0.4"], in: root)
+            finished.signal()
+        }
+        finished.wait()
+        try expect(result?.code == 0, "the fixture process did not run")
+        try expect(!fired,
+                   "waiting for a subprocess ran the run loop on its worker thread")
+
+        // The timeout path is the other half of that wait, and it still ends
+        // a process that overstays.
+        let started = Date()
+        let timedOut = GitService.runProcess(executable: URL(fileURLWithPath: "/bin/sleep"),
+                                             arguments: ["30"], in: root, timeout: 0.3)
+        try expect(timedOut.code != 0, "a process past its deadline reported success")
+        try expect(Date().timeIntervalSince(started) < 10,
+                   "the deadline did not end the process promptly")
+    }
+
     private static func testSearchBackendsAgree() throws {
         let directory = try temporaryDirectory("search-backends")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -5944,8 +5925,7 @@ enum RegressionTests {
 
         WorkspaceWindowController.registerDiffContentProvider()
         let store = DocumentStore.shared
-        let opened = store.setVirtualDocument(url: url, text: "placeholder\n")
-        opened.makeDiffEditable(directory: root, path: "source.txt")
+        _ = store.setVirtualDocument(url: url, text: "placeholder\n")
         try expect(store.cachedDocument(for: url) != nil, "the diff buffer was not stored")
 
         // Nothing is displaying it, so releasing transient memory should drop it.
@@ -5964,80 +5944,12 @@ enum RegressionTests {
         }
         try expect(rebuilt.text.contains("-two") && rebuilt.text.contains("+TWO"),
                    "the diff was not rebuilt from its URL: \(rebuilt.text)")
-        try expect(!rebuilt.isReadOnly,
-                   "the rebuilt diff came back read-only, so saving it would do nothing")
-
-        // An edited diff is the only copy of what the user typed, so it stays.
-        rebuilt.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: " ")
-        rebuilt.markLocalEdit()
-        store.releaseTransientMemory()
-        try expect(store.cachedDocument(for: url) != nil,
-                   "an edited diff buffer was evicted")
-        store.setVirtualDocument(url: url, text: "reset\n").markSaved()
+        // A diff is a rendering of what Git says, and is not typed into.
+        try expect(rebuilt.isReadOnly, "a diff tab is editable")
         store.releaseTransientMemory()
         GitService.forgetRepositoryInfo()
     }
 
-    private static func testDiffWriteBackEdgeCases() throws {
-        // 1. A deleted line that itself begins with "-- " arrives as "--- " and
-        //    was read as a file header: the hunk was cut off there and the half
-        //    of it already parsed was applied on its own.
-        let lua = "local a = 1\n-- comment\nlocal b = 2\n"
-        let deletion = """
-        diff --git a/x.lua b/x.lua
-        index 1111111..2222222 100644
-        --- a/x.lua
-        +++ b/x.lua
-        @@ -1,3 +1,2 @@
-         local a = 1
-        --- comment
-         local b = 2
-
-        """
-        try expect(UnifiedDiff.apply(deletion, to: lua) == "local a = 1\nlocal b = 2\n",
-                   "deleting a comment line produced "
-                     + "\(UnifiedDiff.apply(deletion, to: lua) ?? "nil")")
-
-        // 2. A hunk with no old lines inserts *between* two of them, so it does
-        //    not step back the way a replacement does.
-        let three = "one\ntwo\nthree\n"
-        let insertion = "@@ -2,0 +3 @@\n+inserted\n"
-        try expect(UnifiedDiff.apply(insertion, to: three) == "one\ntwo\ninserted\nthree\n",
-                   "a zero-context insertion landed at "
-                     + "\(UnifiedDiff.apply(insertion, to: three) ?? "nil")")
-        // A normal hunk still counts from the line the header names.
-        try expect(UnifiedDiff.apply("@@ -2,1 +2,1 @@\n-two\n+2\n", to: three)
-                    == "one\n2\nthree\n",
-                   "an ordinary hunk moved")
-
-        // 3. The marker says which side has no final newline. Reading that off
-        //    the baseline took a newly added one straight back off.
-        let unterminated = "alpha\nomega"
-        let gainsNewline = """
-        @@ -1,2 +1,2 @@
-         alpha
-        -omega
-        \\ No newline at end of file
-        +omega!
-
-        """
-        try expect(UnifiedDiff.apply(gainsNewline, to: unterminated) == "alpha\nomega!\n",
-                   "the diff added a final newline and it was dropped: "
-                     + "\(UnifiedDiff.apply(gainsNewline, to: unterminated) ?? "nil")")
-        let losesNewline = """
-        @@ -1,2 +1,2 @@
-         alpha
-        -omega
-        +omega!
-        \\ No newline at end of file
-
-        """
-        try expect(UnifiedDiff.apply(losesNewline, to: "alpha\nomega\n") == "alpha\nomega!",
-                   "the diff removed the final newline and it came back")
-    }
-
-    /// Replace All used to walk the same capped list the bar paints from, so a
-    /// file with more matches than the cap kept the ones past it.
     private static func testReplaceAllPastTheMatchCache() throws {
         let count = FindBarView.maxRetainedMatches + 500
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
@@ -6206,42 +6118,8 @@ enum RegressionTests {
         GitService.forgetRepositoryInfo()
     }
 
-    private static func testRevertAndDiffWriteBack() throws {
-        // Replaying a diff over its pre-image, which is what saving a diff tab
-        // does. Context lines come from the diff, not from the pre-image: an
-        // edited context line is an edit like any other.
-        let preimage = "one\ntwo\nthree\nfour\n"
-        let diff = """
-            diff --git a/f.txt b/f.txt
-            index 1111111..2222222 100644
-            --- a/f.txt
-            +++ b/f.txt
-            @@ -1,3 +1,4 @@
-             one
-            -two
-            +TWO
-            +two and a half
-             three
-            """
-        try expect(UnifiedDiff.apply(diff, to: preimage)
-                    == "one\nTWO\ntwo and a half\nthree\nfour\n",
-                   "replaying the diff produced "
-                     + "\(UnifiedDiff.apply(diff, to: preimage) ?? "nil")")
-        try expect(UnifiedDiff.oldBlob(in: diff) == "1111111",
-                   "the pre-image blob was not read off the index header")
-        // A hunk that starts before the lines already emitted cannot be laid
-        // over the file: nothing partial is written.
-        let overlapping = "@@ -3,1 +3,1 @@\n-three\n+THREE\n@@ -1,1 +1,1 @@\n-one\n+ONE\n"
-        try expect(UnifiedDiff.apply(overlapping, to: preimage) == nil,
-                   "out-of-order hunks were applied anyway")
-        try expect(UnifiedDiff.apply("not a diff at all\n", to: preimage) == nil,
-                   "text with no hunks was treated as a diff")
-        // A new file: no pre-image, every line added.
-        try expect(UnifiedDiff.apply("@@ -0,0 +1,2 @@\n+alpha\n+beta\n", to: "")
-                    == "alpha\nbeta\n",
-                   "a new file's diff did not rebuild the file")
-
-        let root = try temporaryDirectory("diff-writeback")
+    private static func testRevertGitChange() throws {
+        let root = try temporaryDirectory("revert-change")
         defer { try? FileManager.default.removeItem(at: root) }
         let repository = root.appendingPathComponent("repository", isDirectory: true)
         try expect(GitService.run(["init", "-q", "-b", "main", repository.path], in: root).code == 0,
@@ -6310,38 +6188,160 @@ enum RegressionTests {
                    "reverting the deletion gave \(pane.textForTesting.debugDescription)")
         try expect(pane.persistForTesting(DocumentStore.shared.document(for: file)),
                    "saving after a revert failed")
+    }
 
-        // Editing the diff tab and saving it writes through to the file.
-        try Data("alpha\nBRAVO\ncharlie\ndelta\n".utf8).write(to: file)
-        _ = GitService.stageAll(in: repository)
-        guard let entry = GitService.status(in: repository).entries
-            .first(where: { $0.path == "source.txt" }) else {
-            throw Failure(description: "the modified file was not reported by status")
+    /// An SVG is source and picture at once: the drawing sits above the text
+    /// that describes it, and follows the typing. A diff of one shows both
+    /// versions instead, and is not typed into at all.
+    private static func testSVGPreviewAboveItsSource() throws {
+        let root = try temporaryDirectory("svg-source")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("mark.svg")
+        let circle = """
+            <svg xmlns="http://www.w3.org/2000/svg" width="120" height="90">
+              <circle cx="60" cy="45" r="30" fill="#39bae6"/>
+            </svg>
+            """
+        try Data(circle.utf8).write(to: file)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+        pane.open(url: file)
+        pane.view.layoutSubtreeIfNeeded()
+
+        // The file itself is what the buffer holds, and it is editable: an SVG
+        // that opened as a picture could not be worked on at all.
+        try expect(pane.textForTesting == circle,
+                   "the SVG's own source is not in the buffer: \(pane.textForTesting)")
+        try expect(!DocumentStore.shared.document(for: file).isReadOnly,
+                   "the SVG opened read-only, so it could not be edited")
+        guard let preview = pane.svgPreviewForTesting, !preview.isHidden else {
+            throw Failure(description: "an SVG opened without its picture")
         }
-        let diffText = GitService.diff(for: entry, in: repository)
-        try expect(diffText.contains("+BRAVO"), "the fixture diff is \(diffText)")
-        let diffURL = URL(string: "puzzle-diff:///\(repository.path)/source.txt")!
-        let diffDocument = DocumentStore.shared.setVirtualDocument(
-            url: diffURL, text: diffText, displayName: "source.txt (diff)")
-        diffDocument.makeDiffEditable(directory: repository, path: "source.txt")
-        try expect(!diffDocument.isReadOnly,
-                   "the working-tree diff tab is still read-only")
-        pane.open(url: diffURL)
-        pane.selectAllForTesting()
-        pane.insertTextForTesting(diffText.replacingOccurrences(of: "+BRAVO", with: "+EDITED"))
-        try expect(pane.persistForTesting(diffDocument),
-                   "saving the edited diff failed")
-        let written = String(data: try Data(contentsOf: file), encoding: .utf8)
-        try expect(written == "alpha\nEDITED\ncharlie\ndelta\n",
-                   "the file holds \(written.debugDescription) after saving the diff")
-        try expect(!diffDocument.isModified,
-                   "the diff tab still reports unsaved changes after writing through")
+        try expect(preview.paneCountForTesting == 1 && preview.paneHasImageForTesting == [true],
+                   "the picture was not drawn: \(preview.paneHasImageForTesting)")
+        // The line under the picture, as the image preview has always had it.
+        guard let caption = preview.paneCaptionsForTesting.first ?? nil else {
+            throw Failure(description: "the picture has no caption")
+        }
+        try expect(caption.contains("mark.svg") && caption.contains("120 × 90")
+                    && caption.contains("bytes"),
+                   "the caption does not say what the picture is: \(caption)")
 
-        // A diff of a past commit has no file of that shape to write back to.
-        let historic = DocumentStore.shared.setVirtualDocument(
-            url: URL(string: "puzzle-diff:///\(repository.path)/source.txt?commit=abc")!,
-            text: diffText, displayName: "source.txt @ abc")
-        try expect(historic.isReadOnly, "a commit's diff was made editable")
+        // Half-typed source cannot be drawn. The last picture that rendered
+        // stays, marked, rather than the pane going blank on every keystroke.
+        pane.selectAllForTesting()
+        pane.insertTextForTesting("<svg xmlns=\"http://www.w3.org/2000/svg\"><circ")
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            EditorPaneViewController.svgRenderDelay + 0.3))
+        try expect(preview.paneHasImageForTesting == [true],
+                   "an unfinished edit emptied the preview")
+        try expect(preview.paneNotesForTesting.first??.contains("last version") == true,
+                   "the stale picture is not marked: \(preview.paneNotesForTesting)")
+
+        // Finishing the edit draws the new picture and drops the note.
+        pane.selectAllForTesting()
+        pane.insertTextForTesting("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="60" height="60">
+              <rect width="60" height="60" fill="#ffb454"/>
+            </svg>
+            """)
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            EditorPaneViewController.svgRenderDelay + 0.3))
+        try expect(preview.paneNotesForTesting == [nil],
+                   "the note outlived the edit that caused it: \(preview.paneNotesForTesting)")
+
+        // A diff of an SVG: both versions above, the diff below, read-only.
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "SVG Test"], in: root)
+        _ = GitService.run(["config", "user.email", "svg@example.invalid"], in: root)
+        try Data(circle.utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+        _ = GitService.commit("base", in: root)
+        try Data(circle.replacingOccurrences(of: "#39bae6", with: "#ffb454").utf8)
+            .write(to: file)
+        _ = GitService.stageAll(in: root)
+
+        guard let sides = GitService.svgDiffSides(for: "mark.svg", in: root) else {
+            throw Failure(description: "no before/after for a changed SVG")
+        }
+        try expect(sides.before != nil && sides.after != nil,
+                   "one side of the SVG diff is missing")
+        try expect(GitService.svgDiffSides(for: "notes.txt", in: root) == nil,
+                   "a text file was given picture panes")
+
+        let diffURL = URL(string: "puzzle-diff:///\(root.path)/mark.svg")!
+        let diff = DocumentStore.shared.setVirtualDocument(
+            url: diffURL, text: GitService.diff(forPath: "mark.svg", in: root) ?? "",
+            displayName: "mark.svg (diff)")
+        diff.svgDiffSides = sides
+        pane.open(url: diffURL, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        guard let diffPreview = pane.svgPreviewForTesting, !diffPreview.isHidden else {
+            throw Failure(description: "the SVG diff opened without its pictures")
+        }
+        try expect(diffPreview.paneTitlesForTesting == ["Before", "After"],
+                   "the two versions are not labelled: \(diffPreview.paneTitlesForTesting)")
+        try expect(diffPreview.paneHasImageForTesting == [true, true],
+                   "a version did not draw: \(diffPreview.paneHasImageForTesting)")
+        // Both sides are the same file, so the captions carry the size and the
+        // weight — which is what differs — and not the name twice over.
+        try expect(diffPreview.paneCaptionsForTesting.allSatisfy {
+            $0?.contains("120 × 90") == true && $0?.contains("mark.svg") == false
+        }, "the versions are not measured: \(diffPreview.paneCaptionsForTesting)")
+        try expect(diff.isReadOnly && !pane.textViewForTesting.isEditable,
+                   "a diff tab can be typed into")
+        // Landing on a line in a diff moves the caret, but nothing is being
+        // edited there, so no line is painted as the active one. `jumpToLine`
+        // is the path a click and a search result both take.
+        pane.jumpToLine(6)
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(pane.caretLocationForTesting > 0, "the caret did not move into the diff")
+        try expect(pane.currentLineBandRectForTesting == nil,
+                   "a diff painted an active-line band under the caret")
+        try expect(pane.textForTesting.contains("-") && pane.textForTesting.contains("+"),
+                   "the diff itself is not shown under the pictures")
+
+        // Drawn at its own size, never blown up: a 24pt icon stretched across
+        // half the pane says nothing about how it will look.
+        let room = NSSize(width: 300, height: 200)
+        try expect(SVGPreviewView.fitted(NSSize(width: 24, height: 24), in: room)
+                    == NSSize(width: 24, height: 24),
+                   "a small picture was enlarged to fill the pane")
+        try expect(SVGPreviewView.fitted(NSSize(width: 900, height: 300), in: room)
+                    == NSSize(width: 300, height: 100),
+                   "a large picture was not shrunk to fit: "
+                     + "\(SVGPreviewView.fitted(NSSize(width: 900, height: 300), in: room))")
+
+        // History shows the same two versions, taken from the commit and its
+        // parent — and a commit that *adds* an SVG has only one, so the tab
+        // shows the file itself with its picture above, not a diff of nothing.
+        let head = GitService.run(["rev-parse", "--short", "HEAD"], in: root)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(!head.isEmpty, "no commit to read back")
+        guard let added = GitService.svgDiffSides(inCommit: head, path: "mark.svg", in: root)
+        else { throw Failure(description: "the adding commit produced no picture") }
+        try expect(added.before == nil && added.after != nil,
+                   "the commit that added the file reported a previous version")
+        let content = WorkspaceWindowController.commitDiffContent(
+            commit: head, path: "mark.svg", in: root)
+        try expect(content.text.hasPrefix("<svg") && !content.text.contains("@@"),
+                   "an added SVG opened as a diff of nothing: \(content.text.prefix(40))")
+        try expect(content.svgSides?.before == nil && content.svgSides?.after != nil,
+                   "the added file's picture was not carried to the tab")
+
+        // Leaving the file behind takes its picture with it.
+        let plain = root.appendingPathComponent("notes.txt")
+        try Data("no picture here\n".utf8).write(to: plain)
+        pane.open(url: plain)
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(pane.svgPreviewForTesting == nil,
+                   "the picture stayed behind on a file that has none")
+        GitService.forgetRepositoryInfo()
     }
 
     /// Hovering a link in a rendered Markdown document says where it goes and

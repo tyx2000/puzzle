@@ -94,6 +94,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private static var diffMode: DiffHeaderView.Mode = .unified
     /// Shown instead of the text view when the active document is a picture.
     private var imagePreview: ImagePreviewView?
+    private var svgPreview: SVGPreviewView?
+    private var svgRenderWork: DispatchWorkItem?
+    /// The last picture that rendered, kept so a half-typed edit shows the
+    /// drawing it is being made from rather than an empty pane.
+    private var lastRenderedSVG: NSImage?
+    /// The text view starts under the header, or under the SVG preview when
+    /// there is one. Exactly one of these is active.
+    private lazy var scrollTopBelowHeader =
+        scrollView.topAnchor.constraint(equalTo: diffHeader.bottomAnchor)
+    /// Rebuilt with the preview: the view it pins to is released when the pane
+    /// shows something else, and a constraint to a released view pins nothing.
+    private var scrollTopBelowSVGPreview: NSLayoutConstraint?
     /// Shown instead of the text view when the active document is audio/video.
     private var mediaPreview: MediaPreviewView?
     /// Shown instead of the text view when the active document is an EPUB.
@@ -238,7 +250,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             diffHeaderHeight,
 
             // Height follows the pills (grows when tabs wrap to a second row).
-            scrollView.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            scrollTopBelowHeader,
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -584,6 +596,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
     var caretLocationForTesting: Int { textView.selectedRange().location }
     var textViewForTesting: PuzzleTextView { textView }
+    var svgPreviewForTesting: SVGPreviewView? { svgPreview }
     @discardableResult
     func focusEditorForTesting() -> Bool { view.window?.makeFirstResponder(textView) ?? false }
     func insertTextForTesting(_ text: String) {
@@ -621,6 +634,105 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var sideBySideCurrentRowForTesting: Int? { sideBySideDiff?.currentRowForTesting }
     func toggleDiffModeForTesting() { toggleDiffMode() }
     var changeBlockCountForTesting: Int { changeBlocks().count }
+
+    /// The picture an SVG file describes, above the source. Just under half the
+    /// pane: enough to see the drawing, with the file still the thing being
+    /// worked on.
+    private func ensureSVGPreview() -> SVGPreviewView {
+        if let svgPreview { return svgPreview }
+        let preview = SVGPreviewView()
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        preview.isHidden = true
+        view.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            preview.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.45),
+        ])
+        scrollTopBelowSVGPreview = scrollView.topAnchor.constraint(
+            equalTo: preview.bottomAnchor)
+        svgPreview = preview
+        return preview
+    }
+
+    /// Draw what the buffer currently describes, and say so when it does not.
+    ///
+    /// An edit mid-tag leaves the source undrawable for a keystroke or two.
+    /// The last picture that rendered stays on screen, marked, rather than the
+    /// pane going blank every time a `<` is typed.
+    private func refreshSVGPreview(for document: Document) {
+        let preview = ensureSVGPreview()
+        if let sides = document.svgDiffSides {
+            let before = SVGPreviewView.render(sides.before)
+            let after = SVGPreviewView.render(sides.after)
+            // Two versions only when there are two. A file this change adds has
+            // nothing to compare against, so it is shown the way an ordinary
+            // SVG file is: one picture, over the source below it.
+            func pane(_ title: String?, _ image: NSImage?, _ data: Data?) -> SVGPreviewView.Pane {
+                SVGPreviewView.Pane(
+                    title: title, image: image,
+                    caption: SVGPreviewView.caption(name: nil, image: image,
+                                                    bytes: data?.count ?? 0),
+                    note: image == nil ? "Nothing to draw" : nil)
+            }
+            switch (before, after) {
+            case (nil, _): preview.show([pane(nil, after, sides.after)])
+            case (_, nil): preview.show([pane("Deleted", before, sides.before)])
+            default:
+                preview.show([pane("Before", before, sides.before),
+                              pane("After", after, sides.after)])
+            }
+            return
+        }
+        // The buffer, not the file: the caption describes what is on screen.
+        let bytes = document.text.utf8.count
+        let name = document.url.lastPathComponent
+        if let image = SVGPreviewView.render(document.text) {
+            lastRenderedSVG = image
+            preview.show([SVGPreviewView.Pane(
+                title: nil, image: image,
+                caption: SVGPreviewView.caption(name: name, image: image, bytes: bytes),
+                note: nil)])
+        } else {
+            preview.show([SVGPreviewView.Pane(
+                title: nil, image: lastRenderedSVG,
+                caption: SVGPreviewView.caption(name: name, image: lastRenderedSVG,
+                                                bytes: bytes),
+                note: lastRenderedSVG == nil
+                    ? "Nothing to draw yet"
+                    : "Showing the last version that rendered")])
+        }
+    }
+
+    /// Redraw once the typing settles, not on every keystroke: rendering an SVG
+    /// is cheap but not free, and a picture that flickers between half-typed
+    /// states is harder to read than one that lands a moment later.
+    private func scheduleSVGRender(for document: Document) {
+        svgRenderWork?.cancel()
+        let work = DispatchWorkItem { [weak self, weak document] in
+            guard let self, let document, document === self.currentDocument else { return }
+            self.refreshSVGPreview(for: document)
+        }
+        svgRenderWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.svgRenderDelay, execute: work)
+    }
+
+    static let svgRenderDelay: TimeInterval = 0.25
+
+    private func releaseSVGPreview() {
+        svgRenderWork?.cancel()
+        svgRenderWork = nil
+        lastRenderedSVG = nil
+        guard let svgPreview else { return }
+        scrollTopBelowSVGPreview?.isActive = false
+        scrollTopBelowSVGPreview = nil
+        scrollTopBelowHeader.isActive = true
+        svgPreview.clear()
+        svgPreview.isHidden = true
+        svgPreview.removeFromSuperview()
+        self.svgPreview = nil
+    }
 
     private func ensureImagePreview() -> ImagePreviewView {
         if let imagePreview { return imagePreview }
@@ -958,6 +1070,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             fileHistoryView?.isHidden = true
             hidePreviews()
             scrollView.isHidden = false
+            // An SVG is source with a picture attached: the drawing goes above
+            // the text that describes it, and a diff of one shows both
+            // versions side by side over the diff itself.
+            if doc.isSVG || doc.svgDiffSides != nil {
+                let preview = ensureSVGPreview()
+                preview.isHidden = false
+                scrollTopBelowHeader.isActive = false
+                scrollTopBelowSVGPreview?.isActive = true
+                refreshSVGPreview(for: doc)
+            }
             // Rendered Markdown reads like a document, not a source listing:
             // no gutter, and a column of readable width instead of the full
             // pane.
@@ -1298,11 +1420,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         releaseImagePreview()
         releaseMediaPreview()
         releaseEPUBReader()
+        releaseSVGPreview()
     }
 
     /// Release view-owned payloads that are not currently visible. Documents
     /// themselves are handled separately by `DocumentStore`.
     func releaseTransientMemory() {
+        if svgPreview?.isHidden != false { releaseSVGPreview() }
         if imagePreview?.isHidden != false { releaseImagePreview() }
         if mediaPreview?.isHidden != false { releaseMediaPreview() }
         if epubReader?.isHidden != false { releaseEPUBReader() }
@@ -1390,6 +1514,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.refreshBracketMatches()
         scheduleGitLineChanges()
         scheduleIdleSave(for: doc)
+        if doc.isSVG { scheduleSVGRender(for: doc) }
     }
 
     /// Write the buffer once the typing stops.

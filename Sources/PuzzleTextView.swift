@@ -1086,6 +1086,11 @@ final class PuzzleTextView: NSTextView {
     }
 
     func currentLineBandRect() -> NSRect? {
+        // Nothing is being worked on in a buffer that cannot be typed into, so
+        // no line is the active one: a diff is read, not edited. The gutter
+        // still underlines the caret's line — that is where the pointer left
+        // off, which is worth knowing while reading.
+        guard isEditable else { return nil }
         if searchResultLineLocation == nil {
             guard showsCurrentLineBand,
                   selectedRanges.count == 1, selectedRange().length == 0 else { return nil }
