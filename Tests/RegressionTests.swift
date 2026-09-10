@@ -712,7 +712,7 @@ enum RegressionTests {
 
         // The commit box explains itself and takes ⌘↩.
         let commit = CommitMessageTextView()
-        commit.placeholder = "Commit message  (⌘↩ to commit)"
+        commit.placeholder = "Commit message  (⌘↩ commit · ⇧⌘↩ push)"
         var committed = 0
         commit.onCommitShortcut = { committed += 1 }
         guard let enter = NSEvent.keyEvent(
@@ -731,6 +731,20 @@ enum RegressionTests {
         }
         commit.keyDown(with: plain)
         try expect(committed == 1, "a plain Return committed instead of inserting a newline")
+        // Shift is the other half of the pair: ⌘↩ commits, ⇧⌘↩ pushes.
+        var pushed = 0
+        commit.onPushShortcut = { pushed += 1 }
+        guard let shiftEnter = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "\r",
+            charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            throw Failure(description: "could not synthesise ⇧⌘↩")
+        }
+        commit.keyDown(with: shiftEnter)
+        try expect(pushed == 1 && committed == 1,
+                   "⇧⌘↩ pushed \(pushed) times and committed \(committed)")
+        try expect(commit.placeholder.contains("⌘↩") && commit.placeholder.contains("⇧⌘↩"),
+                   "the box does not say what either shortcut does: \(commit.placeholder)")
     }
 
     private static func testReviewFixes() throws {
@@ -4193,6 +4207,15 @@ enum RegressionTests {
                                        isRepo: true, userName: "T",
                                        ahead: 0, hasUpstream: true)
         panel.applyStatusForTesting(status, in: directory)
+        // The panel refuses to rebuild its rows while a mouse button is down,
+        // so a click is never swallowed mid-press — and that is the *machine's*
+        // mouse, which whoever is at the keyboard may be holding while the
+        // suite runs. The deferred rebuild lands 0.15s later; wait for it
+        // rather than reading the flag in whatever moment this happens to be.
+        let rebuilt = Date().addingTimeInterval(2)
+        while panel.reloadWouldRebuildForTesting, Date() < rebuilt {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
         try expect(!panel.reloadWouldRebuildForTesting,
                    "the rows were left needing a rebuild right after one")
 

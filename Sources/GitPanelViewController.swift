@@ -190,7 +190,7 @@ final class GitPanelViewController: NSViewController {
 
         // Commit message box.
         commitField.font = Theme.uiFont(11)
-        commitField.placeholder = "Commit message  (⌘↩ to commit)"
+        commitField.placeholder = "Commit message  (⌘↩ commit · ⇧⌘↩ push)"
         commitField.onCommitShortcut = { [weak self] in
             // ⌘↩ obeys the same rule the button does; there is nothing to
             // explain in an alert that the disabled button has not said.
@@ -199,6 +199,15 @@ final class GitPanelViewController: NSViewController {
                 return
             }
             self.commit()
+        }
+        commitField.onPushShortcut = { [weak self] in
+            // The same rule the Push button follows: one Git operation at a
+            // time, and nothing to explain that the panel has not already said.
+            guard let self, self.activeOperationID == nil else {
+                NSSound.beep()
+                return
+            }
+            self.pushAction()
         }
         commitField.onTextChange = { [weak self] in self?.refreshCommitButton() }
         commitField.isRichText = false

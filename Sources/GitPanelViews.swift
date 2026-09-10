@@ -484,6 +484,8 @@ final class GitRowView: NSTableRowView {
 final class CommitMessageTextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
     var onCommitShortcut: (() -> Void)?
+    /// ⇧⌘↩, the other half of the pair: commit with ⌘↩, push with shift.
+    var onPushShortcut: (() -> Void)?
     /// Typing changes whether there is anything to commit.
     var onTextChange: (() -> Void)?
 
@@ -504,9 +506,15 @@ final class CommitMessageTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if modifiers == [.command], event.keyCode == 36 || event.keyCode == 76 {
-            onCommitShortcut?()
-            return
+        if event.keyCode == 36 || event.keyCode == 76 {
+            if modifiers == [.command] {
+                onCommitShortcut?()
+                return
+            }
+            if modifiers == [.command, .shift] {
+                onPushShortcut?()
+                return
+            }
         }
         super.keyDown(with: event)
     }
