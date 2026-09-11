@@ -9,12 +9,15 @@ final class SidebarViewController: NSViewController {
     /// Project name + branch beside the traffic lights (the panel owns that
     /// strip of the titlebar because it is the view underneath it).
     let projectTitle = ProjectTitleView()
-    /// The two buttons at the end of the title band: one lists the projects
-    /// already open, the other opens another.
-    private let projectsButton = NSButton()
+    /// The Projects panel: the window's projects, with the selected one's tree
+    /// expanded under its row.
+    private(set) lazy var projectsPanel = ProjectsPanelViewController(fileTree: fileTree)
+    /// A project row was chosen, or its ✕ was clicked.
+    var onSelectProjectRow: ((Int) -> Void)?
+    var onCloseProjectRow: ((Int) -> Void)?
+    /// The button at the end of the title band. Listing the open projects is
+    /// the Projects panel's job now; this opens another one.
     private let addProjectButton = NSButton()
-    /// Show the list of open projects, anchored under the button.
-    var onShowProjects: ((NSView) -> Void)?
     var onAddProject: (() -> Void)?
 
     // Search and Git each own an outline/table view, scroll view, controls and
@@ -53,15 +56,10 @@ final class SidebarViewController: NSViewController {
         root.addSubview(containerView)
         root.addSubview(activityBar)
         root.addSubview(projectTitle)
-        configure(projectsButton, symbol: "rectangle.stack",
-                  label: "Open projects",
-                  tip: "Switch to another open project",
-                  action: #selector(showProjectsAction))
         configure(addProjectButton, symbol: "plus",
                   label: "Open project",
                   tip: "Open another project",
                   action: #selector(addProjectAction))
-        root.addSubview(projectsButton)
         root.addSubview(addProjectButton)
         root.addSubview(titleSeparator)
 
@@ -80,17 +78,12 @@ final class SidebarViewController: NSViewController {
             // traffic lights' centre line.
             projectTitle.topAnchor.constraint(equalTo: root.topAnchor),
             projectTitle.bottomAnchor.constraint(equalTo: containerView.topAnchor),
-            // The name truncates rather than pushing the buttons off the end.
+            // The name truncates rather than pushing the button off the end.
             projectTitle.trailingAnchor.constraint(
-                lessThanOrEqualTo: projectsButton.leadingAnchor, constant: -6),
-            projectsButton.trailingAnchor.constraint(
-                equalTo: addProjectButton.leadingAnchor, constant: -2),
+                lessThanOrEqualTo: addProjectButton.leadingAnchor, constant: -6),
             addProjectButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -8),
-            projectsButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             addProjectButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            projectsButton.widthAnchor.constraint(equalToConstant: 22),
-            projectsButton.heightAnchor.constraint(equalToConstant: 20),
             addProjectButton.widthAnchor.constraint(equalToConstant: 22),
             addProjectButton.heightAnchor.constraint(equalToConstant: 20),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -108,7 +101,9 @@ final class SidebarViewController: NSViewController {
         ])
         self.view = root
 
-        mount(fileTree)
+        projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
+        projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
+        mount(projectsPanel)
         showFiles()
     }
 
@@ -128,12 +123,9 @@ final class SidebarViewController: NSViewController {
         button.translatesAutoresizingMaskIntoConstraints = false
     }
 
-    @objc private func showProjectsAction() { onShowProjects?(projectsButton) }
     @objc private func addProjectAction() { onAddProject?() }
 
-    var projectButtonsForTesting: (list: NSButton, add: NSButton) {
-        (projectsButton, addProjectButton)
-    }
+    var addProjectButtonForTesting: NSButton { addProjectButton }
 
     func setFileTabHeight(_ height: CGFloat) {
         containerTopConstraint.constant = height
@@ -161,8 +153,14 @@ final class SidebarViewController: NSViewController {
 
     func showFiles() {
         visiblePanel = .project
-        reveal(fileTree)
+        reveal(projectsPanel)
         activityBar.setSelected(.project)
+    }
+
+    /// The window's projects, newest last, and which one is showing.
+    func setProjects(_ projects: [(name: String, branch: String, path: String)],
+                     active: Int?) {
+        projectsPanel.configure(projects: projects, active: active)
     }
     func showSearch() {
         let search = ensureSearch()

@@ -97,20 +97,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     private func wire() {
         sidebar.onAddProject = { [weak self] in self?.openFolder(nil) }
-        editor.projectTabs.onSelect = { [weak self] index in
+        sidebar.onSelectProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
-            self.activateProject(self.projects[index])
+            let wanted = self.projects[index]
+            // Clicking the project already showing collapses it: the tree
+            // folds away and the start page comes back, which is where the
+            // other projects are chosen from.
+            if self.projectURL == wanted {
+                self.deactivateProject()
+            } else {
+                self.activateProject(wanted)
+            }
         }
-        editor.projectTabs.onAdd = { [weak self] in self?.openFolder(nil) }
-        editor.projectTabs.onClose = { [weak self] index in
+        sidebar.onCloseProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             self.closeProject(self.projects[index])
         }
-        editor.projectTabs.onReorder = { [weak self] from, to in
-            self?.moveProject(from: from, to: to)
-        }
         onProjectsChanged = { [weak self] in self?.refreshProjectTabs() }
-        sidebar.onShowProjects = { [weak self] anchor in self?.showProjectList(from: anchor) }
         sidebar.fileTree.onOpenFile = { [weak self] url in self?.editor.open(url: url) }
         sidebar.fileTree.onGitHistory = { [weak self] url in self?.showFileHistory(for: url) }
         sidebar.fileTree.onOpenInTerminal = { url in Self.openTerminal(at: url) }
@@ -154,6 +157,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onOpenSettings = { [weak self] in self?.openSettings() }
         editor.onOpenRecent = { [weak self] url in self?.openSelection([url]) }
+        // Every ticked project joins this window, and the last one read becomes
+        // the one on screen.
+        editor.onOpenChecked = { [weak self] urls in self?.openSelection(urls) }
         editor.onDocumentSaved = { [weak self] url in
             guard let self else { return }
             // The file changed on disk, so its cached blame is stale.
@@ -608,6 +614,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,
                         branch: status.isRepo ? status.branch : "")
+                    // The row beside the tree says the same thing the title
+                    // strip does, and hears it at the same moment.
+                    self.noteBranch(status.isRepo ? status.branch : "", for: projectURL)
                     if status.isRepo {
                         self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
                     }
@@ -1016,7 +1025,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         activateProject(next)
     }
 
+    /// Show no project, while keeping the window's list of them.
+    ///
+    /// The window is then what it is before any project is opened — the start
+    /// page, and the recent projects on it — except that the rows are still
+    /// there to come back to.
+    func deactivateProject() {
+        guard projectURL != nil else { return }
+        clearProject()
+        refreshProjectTabs()
+    }
+
     private func closeLastProject() {
+        clearProject()
+        refreshProjectTabs()
+    }
+
+    /// Put the window back to having nothing open: no tabs, no monitors, no
+    /// tree, no Git. Whether any projects remain in the list is the caller's
+    /// business.
+    private func clearProject() {
         editor.closeAllTabs()
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
@@ -1031,64 +1059,54 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.fileTree.clearRoot()
         sidebar.setDirectory(nil)
         sidebar.setProjectTitle(project: "", branch: "")
+        // Nothing is open, so nothing has changed: the Git button's count is
+        // about a project that is no longer on screen. Bumping the generation
+        // also discards a refresh that is already in flight, which would
+        // otherwise arrive and put the count back.
+        gitRefreshGeneration += 1
+        sidebar.activityBar.setChangeCount(0)
+        currentBranchName = nil
         refreshWindowTitle(activeFile: nil)
-        refreshProjectTabs()
     }
+
+    /// The branch each project is on, so a row can say more than its name.
+    /// Resolved off the main thread and remembered: a `rev-parse` per project
+    /// is cheap, but not on every redraw.
+    private var projectBranches: [URL: String] = [:]
 
     private func refreshProjectTabs() {
-        editor.projectTabs.configure(
-            projects: projects,
-            activeIndex: projectURL.flatMap { projects.firstIndex(of: $0) })
+        sidebar.setProjects(
+            projects.map { (name: $0.lastPathComponent,
+                            branch: projectBranches[$0] ?? "",
+                            path: $0.path) },
+            active: projectURL.flatMap { projects.firstIndex(of: $0) })
+        refreshProjectBranches()
     }
 
-    /// What the other windows have open, newest last, so the button can list
-    /// them. Supplied by the application, which is what knows about windows.
-    var onListProjects: (() -> [(name: String, url: URL, isCurrent: Bool)])?
-    /// Bring the window showing this project to the front.
-    var onSelectProject: ((URL) -> Void)?
-
-    /// The list behind the projects button: every project open in the app, with
-    /// this window's own marked. Switching raises that window rather than
-    /// loading the project here — a window is a project, and two windows on one
-    /// project would each keep their own half of its state.
-    private func showProjectList(from anchor: NSView) {
-        let projects = onListProjects?() ?? []
-        let menu = NSMenu()
-        menu.font = Theme.uiFont(12)
-        if projects.isEmpty {
-            let empty = NSMenuItem(title: "No projects open", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
+    private func refreshProjectBranches() {
+        let wanted = projects.filter { projectBranches[$0] == nil }
+        guard !wanted.isEmpty else { return }
+        GitService.workQueue.async { [weak self] in
+            let found = wanted.map { ($0, GitService.currentBranch(in: $0)) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                var changed = false
+                for (url, branch) in found where self.projectBranches[url] != branch {
+                    self.projectBranches[url] = branch
+                    changed = true
+                }
+                if changed { self.refreshProjectTabs() }
+            }
         }
-        for project in projects {
-            let item = NSMenuItem(title: project.name,
-                                  action: #selector(selectProjectAction(_:)),
-                                  keyEquivalent: "")
-            item.target = self
-            item.representedObject = project.url
-            item.state = project.isCurrent ? .on : .off
-            item.toolTip = project.url.path
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-        let add = NSMenuItem(title: "Open Project…", action: #selector(openFolder(_:)),
-                             keyEquivalent: "")
-        add.target = self
-        menu.addItem(add)
-        menu.popUp(positioning: nil,
-                   at: NSPoint(x: 0, y: anchor.bounds.maxY + 4), in: anchor)
     }
 
-    @objc private func selectProjectAction(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        onSelectProject?(url)
+    /// The branch the panel reports for the project on screen, which is fresher
+    /// than a cached `rev-parse` — it arrives with every Git refresh.
+    private func noteBranch(_ branch: String, for url: URL) {
+        guard !branch.isEmpty, projectBranches[url] != branch else { return }
+        projectBranches[url] = branch
+        refreshProjectTabs()
     }
-
-    /// Drives the list without a menu, for tests.
-    func projectListForTesting() -> [(name: String, url: URL, isCurrent: Bool)] {
-        onListProjects?() ?? []
-    }
-    func selectProjectForTesting(_ url: URL) { onSelectProject?(url) }
 
     @objc func openFolder(_ sender: Any?) {
         let panel = NSOpenPanel()

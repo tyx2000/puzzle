@@ -431,7 +431,12 @@ final class GitTableView: NSTableView {
         guard next != hoveredRow else { return }
         let previous = hoveredRow
         hoveredRow = next
-        for index in [previous, next] where index >= 0 {
+        // `previous` was recorded when the list was longer. Asking for a row
+        // that is gone raises, and this runs from `layout()`, where AppKit
+        // turns an exception into a hard crash rather than letting it
+        // propagate — so the row that is being let go needs the same bounds
+        // check as the one being taken.
+        for index in [previous, next] where index >= 0 && index < numberOfRows {
             (rowView(atRow: index, makeIfNecessary: false) as? GitRowView)?
                 .isHovered = index == next
         }

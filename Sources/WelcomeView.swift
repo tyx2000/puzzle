@@ -5,10 +5,13 @@ import AppKit
 final class WelcomeView: FlatView {
     var onOpenFolder: (() -> Void)?
     var onOpenRecent: ((URL) -> Void)?
+    /// Open several at once — every recent project whose box is ticked.
+    var onOpenChecked: (([URL]) -> Void)?
 
     private let stack = NSStackView()
     private let recentStack = NSStackView()
-    private let recentHeading = NSTextField(labelWithString: "Recent")
+    private let openCheckedButton = NSButton()
+    private var checked: Set<URL> = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -19,20 +22,24 @@ final class WelcomeView: FlatView {
         title.textColor = Theme.foreground
         title.alignment = .center
 
-        let subtitle = NSTextField(labelWithString: "Open a folder to get started")
-        subtitle.font = Theme.uiFont(11.5)
-        subtitle.textColor = Theme.dimText
-        subtitle.alignment = .center
-
-        let openButton = NSButton(title: "Open Folder…", target: self,
+        let openButton = NSButton(title: "Open", target: self,
                                   action: #selector(openFolderTapped))
         openButton.bezelStyle = .rounded
         openButton.font = Theme.uiFont(12)
         openButton.keyEquivalent = "\r"
 
-        recentHeading.font = Theme.uiFont(10.5)
-        recentHeading.textColor = Theme.dimText
-        recentHeading.alignment = .left
+        // Beside it: open everything that has been ticked below. Disabled
+        // until something is, so the button says whether it has anything to do.
+        openCheckedButton.title = "Open Checked"
+        openCheckedButton.bezelStyle = .rounded
+        openCheckedButton.font = Theme.uiFont(12)
+        openCheckedButton.target = self
+        openCheckedButton.action = #selector(openCheckedTapped)
+        openCheckedButton.isEnabled = false
+
+        let buttons = NSStackView(views: [openButton, openCheckedButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
 
         recentStack.orientation = .vertical
         recentStack.alignment = .leading
@@ -42,8 +49,8 @@ final class WelcomeView: FlatView {
         stack.alignment = .centerX
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setViews([title, subtitle, openButton], in: .top)
-        stack.setCustomSpacing(18, after: subtitle)
+        stack.setViews([title, buttons], in: .top)
+        stack.setCustomSpacing(18, after: title)
 
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -61,28 +68,58 @@ final class WelcomeView: FlatView {
 
     @objc private func openFolderTapped() { onOpenFolder?() }
 
+    @objc private func openCheckedTapped() {
+        // In the order they are listed, so the projects arrive in the order
+        // they are read.
+        let wanted = RecentProjects.shared.urls.filter { checked.contains($0) }
+        guard !wanted.isEmpty else { return }
+        onOpenChecked?(wanted)
+    }
+
+    private func setChecked(_ url: URL, _ isChecked: Bool) {
+        if isChecked { checked.insert(url) } else { checked.remove(url) }
+        openCheckedButton.isEnabled = !checked.isEmpty
+    }
+
     @objc func reloadRecents() {
         recentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let recents = RecentProjects.shared.urls
         // Drop the recents block entirely when there's nothing to show.
-        for view in [recentHeading, recentStack] where stack.arrangedSubviews.contains(view) {
-            stack.removeArrangedSubview(view)
-            view.removeFromSuperview()
+        if stack.arrangedSubviews.contains(recentStack) {
+            stack.removeArrangedSubview(recentStack)
+            recentStack.removeFromSuperview()
         }
         guard !recents.isEmpty else { return }
 
         // Everything the store keeps, which is the same list the Dock menu
         // shows: a start page that hides half of them sends the reader to the
         // menu to find the rest.
+        // A project that has left the list cannot stay ticked.
+        checked.formIntersection(recents)
+        openCheckedButton.isEnabled = !checked.isEmpty
         for url in recents.prefix(RecentProjects.displayLimit) {
             recentStack.addArrangedSubview(RecentRowView(
                 url: url,
+                isChecked: checked.contains(url),
                 action: { [weak self] in self?.onOpenRecent?(url) },
+                checkAction: { [weak self] on in self?.setChecked(url, on) },
                 removeAction: { RecentProjects.shared.remove(url) }))
         }
-        stack.addArrangedSubview(recentHeading)
         stack.addArrangedSubview(recentStack)
-        stack.setCustomSpacing(20, after: recentStack.arrangedSubviews.isEmpty ? recentHeading : recentHeading)
+    }
+
+    var checkedForTesting: [URL] {
+        RecentProjects.shared.urls.filter { checked.contains($0) }
+    }
+    var openCheckedEnabledForTesting: Bool { openCheckedButton.isEnabled }
+    var openCheckedTitleForTesting: String { openCheckedButton.title }
+    func openCheckedForTesting() { openCheckedTapped() }
+    func rowsForTesting() -> [NSView] { recentStack.arrangedSubviews }
+    func toggleCheckForTesting(at index: Int) {
+        (recentStack.arrangedSubviews[index] as? RecentRowView)?.toggleCheckForTesting()
+    }
+    func clickRowForTesting(_ index: Int) {
+        (recentStack.arrangedSubviews[index] as? RecentRowView)?.clickForTesting()
     }
 
     func refreshFonts() {
@@ -94,18 +131,32 @@ final class WelcomeView: FlatView {
 /// One clickable recent-project row: name + dimmed parent folder.
 private final class RecentRowView: FlatView {
     private let action: () -> Void
+    private let checkAction: (Bool) -> Void
     private let removeAction: () -> Void
     private let url: URL
     private var hovering = false { didSet { removeButton.isHidden = !hovering; needsDisplay = true } }
     private var tracking: NSTrackingArea?
     private let removeButton = NSButton()
+    private let check = NSButton()
 
-    init(url: URL, action: @escaping () -> Void, removeAction: @escaping () -> Void) {
+    init(url: URL, isChecked: Bool, action: @escaping () -> Void,
+         checkAction: @escaping (Bool) -> Void, removeAction: @escaping () -> Void) {
         self.action = action
+        self.checkAction = checkAction
         self.removeAction = removeAction
         self.url = url
         super.init(frame: .zero)
         fillColor = .clear
+
+        // Ticking is for gathering several; clicking the row still opens this
+        // one on its own, so the box takes its own clicks.
+        check.setButtonType(.switch)
+        check.title = ""
+        check.state = isChecked ? .on : .off
+        check.target = self
+        check.action = #selector(checkToggled)
+        check.setAccessibilityLabel("Open \(url.lastPathComponent) with the others")
+        check.translatesAutoresizingMaskIntoConstraints = false
 
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = Theme.uiFont(12)
@@ -137,10 +188,13 @@ private final class RecentRowView: FlatView {
         row.orientation = .horizontal
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(check)
         addSubview(row)
         addSubview(removeButton)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            check.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            check.centerYAnchor.constraint(equalTo: centerYAnchor),
+            row.leadingAnchor.constraint(equalTo: check.trailingAnchor, constant: 4),
             row.trailingAnchor.constraint(equalTo: removeButton.leadingAnchor, constant: -6),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
             removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
@@ -165,7 +219,16 @@ private final class RecentRowView: FlatView {
         self.menu = contextMenu
     }
 
+    @objc private func checkToggled() { checkAction(check.state == .on) }
+
     @objc private func removeTapped() { removeAction() }
+
+    var isCheckedForTesting: Bool { check.state == .on }
+    func clickForTesting() { action() }
+    func toggleCheckForTesting() {
+        check.state = check.state == .on ? .off : .on
+        checkToggled()
+    }
 
     @objc private func revealTapped() {
         NSWorkspace.shared.activateFileViewerSelecting([url])

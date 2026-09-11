@@ -48,6 +48,7 @@ enum RegressionTests {
         try testBracketMatchingAndDeleteLine()
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
+        try testStartPageOpensProjects()
         try testMarkdownLinkHover()
         try testSVGPreviewAboveItsSource()
         try testRevertGitChange()
@@ -66,6 +67,7 @@ enum RegressionTests {
         try testSubprocessWaitsDoNotRunARunLoop()
         try testDeeplyNestedMarkdownIsLeftAsPlainText()
         try testFindBarDropsRangesFromReplacedText()
+        try testHoverSurvivesTheRowsGoingAway()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -1616,6 +1618,24 @@ enum RegressionTests {
                    "file tree top inset did not follow traffic-light geometry")
         try expect(workspace.editor.activePaneForTesting?.tabBarHeight == titlebarHeight,
                    "file-tab height did not follow traffic-light geometry")
+
+        // The project's own folder is not a row: the project list above the
+        // tree names it, and repeating it cost a row and a level of indent on
+        // everything inside.
+        let noRootRow = try temporaryDirectory("tree-no-root-row")
+        defer { try? FileManager.default.removeItem(at: noRootRow) }
+        try Data("a".utf8).write(to: noRootRow.appendingPathComponent("alpha.txt"))
+        try Data("b".utf8).write(to: noRootRow.appendingPathComponent("beta.txt"))
+        let rootless = FileTreeViewController()
+        _ = rootless.view
+        rootless.setRoot(noRootRow)
+        try expect(rootless.rowCountForTesting == 2,
+                   "the tree shows \(rootless.rowCountForTesting) rows, not the project's "
+                     + "two files")
+        try expect(rootless.nodeForTesting(at: 0)?.url.lastPathComponent == "alpha.txt",
+                   "the first row is "
+                     + "\(rootless.nodeForTesting(at: 0)?.url.lastPathComponent ?? "nil"), "
+                     + "not the project's first file")
 
         let treeRoot = try temporaryDirectory("tree-top-inset")
         defer { try? FileManager.default.removeItem(at: treeRoot) }
@@ -3256,18 +3276,18 @@ enum RegressionTests {
         bar.layoutSubtreeIfNeeded()
         // One button per panel. Settings is not a panel — it opens a file — so
         // it sits with the editor's actions at the top right instead.
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git"],
+        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git"],
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
 
         // The Git label carries the live changed-file count in the same form as
         // the panel's own "Changes (7)" tab. A clean tree has nothing to say, so
         // the count disappears rather than reading "(0)".
         bar.setChangeCount(7)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git 7"],
+        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git 7"],
                    "the change count did not reach the Git label: "
                     + "\(bar.buttonTitlesForTesting)")
         bar.setChangeCount(0)
-        try expect(bar.buttonTitlesForTesting == ["Files", "Search", "Git"],
+        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git"],
                    "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
@@ -3590,29 +3610,14 @@ enum RegressionTests {
                     && app.window(showingProject: inner)?.editor.currentURL == file.resolvingSymlinksInPath(),
                    "the picker ignored the deepest open project")
 
-        // The title band lists what is open elsewhere and offers to open more,
-        // so several projects can be reached without hunting for their windows.
-        let listed = outerWindow.projectListForTesting()
-        try expect(Set(listed.map(\.name)) == ["outer", "other", "nested"],
-                   "the list shows \(listed.map(\.name)), not every open project")
-        try expect(listed.filter(\.isCurrent).map(\.name) == ["outer"],
-                   "the list does not mark which project this window holds")
-        // Choosing one raises its window rather than loading it here: a window
-        // is a project, and two windows on one project would each keep half of
-        // its state.
-        outerWindow.selectProjectForTesting(other)
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        try expect(outerWindow.projectURL == outer.resolvingSymlinksInPath()
-                    && otherWindow.projectURL == other.resolvingSymlinksInPath(),
-                   "switching projects moved a project into the wrong window")
-        let buttons = outerWindow.sidebar.projectButtonsForTesting
-        try expect(buttons.list.toolTip?.isEmpty == false
-                    && buttons.add.toolTip?.isEmpty == false,
-                   "the title band's buttons do not say what they do")
+        // The title band still offers to open another project; listing the ones
+        // already open is the Projects panel's job.
+        try expect(outerWindow.sidebar.addProjectButtonForTesting.toolTip?.isEmpty == false,
+                   "the title band's button does not say what it does")
 
-        // One window, several projects: the strip lists them and switching
-        // loads the chosen one from scratch. Nothing of the project being left
-        // is kept — its tabs close, which is the whole point of the design.
+        // One window, several projects: the Projects panel lists them down the
+        // side and switching loads the chosen one from scratch. Nothing of the
+        // project being left is kept — its tabs close, which is the design.
         let host = app.window(showingProject: outer) ?? outerWindow
         host.editor.open(url: sibling)
         try expect(host.editor.openURLs.count >= 1, "the fixture opened no file")
@@ -3621,50 +3626,77 @@ enum RegressionTests {
                    "the second project did not become this window's active one")
         try expect(host.editor.openURLs.isEmpty,
                    "the previous project's tabs survived the switch")
-        let strip = host.editor.projectTabs
-        try expect(strip.tabTitlesForTesting == ["outer", "other"],
-                   "the strip shows \(strip.tabTitlesForTesting)")
-        try expect(strip.activeIndexForTesting == 1,
-                   "the strip does not mark the project being shown")
-        // The `+` keeps its place however many projects are open.
-        try expect(strip.addRectForTesting.maxX > strip.tabRectForTesting(1).maxX - 1,
-                   "the add button is not at the end of the strip")
-        strip.clickTabForTesting(0)
-        try expect(host.projectURL == outer.resolvingSymlinksInPath()
-                    && strip.activeIndexForTesting == 0,
-                   "clicking a project tab did not switch to it")
 
-        // While a tab is dragged the others move aside, so the gap shows where
-        // it will land rather than everything snapping at the drop.
-        let slots = strip.displaySlotsForTesting(dragging: 0,
-                                                 toX: strip.tabRectForTesting(1).midX)
-        try expect(slots[0] == 1 && slots[1] == 0,
-                   "the other tabs did not make room: \(slots)")
-        // Dragging reorders without changing which project is showing: the
-        // order is a convenience, not a switch.
-        strip.dragTabForTesting(from: 0, to: 1)
-        try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
-                   "dragging did not reorder: \(host.projects.map(\.lastPathComponent))")
+        let panel = host.sidebar.projectsPanel
+        _ = panel.view
+        let rows = panel.rowsForTesting
+        try expect(rows.count == 2,
+                   "the panel lists \(rows.count) projects, not 2")
+        try expect(rows.map(\.titleForTesting).contains { $0.hasPrefix("outer") }
+                    && rows.map(\.titleForTesting).contains { $0.hasPrefix("other") },
+                   "the rows do not name the projects: \(rows.map(\.titleForTesting))")
+        try expect(rows[1].isActiveForTesting && !rows[0].isActiveForTesting,
+                   "the panel does not mark the project being shown")
+        // The tree is expanded directly under the row that is selected.
+        try expect(panel.treePositionForTesting == 2,
+                   "the tree sits at \(String(describing: panel.treePositionForTesting)), "
+                     + "not under the selected project")
+        try expect(ProjectRowView.height == 32,
+                   "a project row is \(ProjectRowView.height)pt, not 32")
+        // Lines between the rows, but none between a project and the tree that
+        // belongs to it.
+        try expect(!rows[0].showsDivider && rows[1].showsDivider,
+                   "the rows are not separated: \(rows.map(\.showsDivider))")
+        // A band down the leading edge of the project being shown, and only it.
+        rows.forEach { $0.frame = NSRect(x: 0, y: 0, width: 300,
+                                         height: ProjectRowView.height) }
+        try expect(rows[1].markerRectForTesting?.width == 5
+                    && rows[0].markerRectForTesting == nil,
+                   "the selected project is not banded: "
+                     + "\(rows.map { $0.markerRectForTesting?.width })")
+
+        rows[0].clickForTesting()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
-                   "reordering changed which project was showing")
+                   "clicking a project row did not switch to it")
 
-        // The ✕ takes the project out of the window. It only appears on the
-        // hovered tab, and it sits at that tab's trailing end.
-        host.editor.projectTabs.hoverForTesting(1)
-        let closeBox = strip.closeRectForTesting(1)
-        let hostTab = strip.tabRectForTesting(1)
-        try expect(closeBox.width > 0 && closeBox.maxX <= hostTab.maxX - 4,
-                   "the close button is against the tab's edge: \(closeBox) in \(hostTab)")
-        try expect(closeBox.minX > hostTab.midX,
-                   "the close button is not at the trailing end of its tab")
-        strip.clickCloseForTesting(1)
-        try expect(host.projects.map(\.lastPathComponent) == ["other"],
+        // Clicking the project already showing folds it away: the tree goes,
+        // the start page comes back, and the row stays for coming back to.
+        host.sidebar.activityBar.setChangeCount(7)
+        try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git 7",
+                   "the fixture could not put a count on the Git button")
+        rows[0].clickForTesting()
+        try expect(host.projectURL == nil && host.projects.count == 2,
+                   "re-clicking the open project did not collapse it")
+        try expect(!host.editor.hasProject && host.editor.openURLs.isEmpty,
+                   "the collapsed window still claims a project")
+        // The Git button counted a project that is no longer on screen. The
+        // count is set by the Git refresh; what matters here is that collapsing
+        // takes it away again.
+        try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git",
+                   "the Git button still carries a count after collapsing: "
+                     + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
+        try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
+                   "a project is still marked as showing after collapsing")
+        rows[0].clickForTesting()
+        try expect(host.projectURL == outer.resolvingSymlinksInPath(),
+                   "the collapsed project could not be opened again")
+        try expect(panel.treePositionForTesting == 1,
+                   "the tree did not move under the newly selected project")
+
+        // The ✕ is always there, at the row's trailing end, so the name's room
+        // never changes as the pointer crosses the panel.
+        let row = panel.rowsForTesting[1]
+        row.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
+        let closeBox = row.closeRectForTesting
+        try expect(closeBox.width > 0 && closeBox.maxX <= row.bounds.maxX - 4
+                    && closeBox.minX > row.bounds.midX,
+                   "the close button is not at the row's trailing end: \(closeBox)")
+        row.clickCloseForTesting()
+        try expect(host.projects.map(\.lastPathComponent) == ["outer"],
                    "closing did not remove the project: \(host.projects)")
-        try expect(host.projectURL == other.resolvingSymlinksInPath(),
-                   "closing the project being shown did not move to its neighbour")
         // Closing the last one empties the window rather than leaving a tree
         // and a Git panel pointing at a project that is no longer here.
-        strip.clickCloseForTesting(0)
+        panel.rowsForTesting[0].clickCloseForTesting()
         try expect(host.projects.isEmpty && host.projectURL == nil,
                    "the window kept a project after the last one closed")
         try expect(host.editor.openURLs.isEmpty && !host.editor.hasProject,
@@ -5957,6 +5989,76 @@ enum RegressionTests {
     /// An external write replaces the whole buffer. Every range the find bar
     /// cached describes text that no longer exists, and handing one to
     /// `replaceCharacters` raises NSRangeException — an abort, not an error.
+    /// The hovered row is remembered from before the list changed. Asking a
+    /// table for a row it no longer has raises, and this runs from `layout()`,
+    /// where AppKit turns an exception into a hard crash instead of letting it
+    /// propagate — EXC_BREAKPOINT in +[NSApplication _crashOnException:].
+    private static func testHoverSurvivesTheRowsGoingAway() throws {
+        final class Rows: NSObject, NSTableViewDataSource {
+            var count = 0
+            func numberOfRows(in tableView: NSTableView) -> Int { count }
+        }
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let table = GitTableView()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
+        let rows = Rows()
+        rows.count = 30
+        table.dataSource = rows
+        table.frame = NSRect(x: 0, y: 0, width: 400, height: 600)
+        window.contentView?.addSubview(table)
+        table.reloadData()
+        table.layoutSubtreeIfNeeded()
+        defer { window.close() }
+
+        try expect(table.numberOfRows == 30, "the fixture table has \(table.numberOfRows) rows")
+        table.setHoveredRowForTesting(25)
+        try expect(table.hoveredRow == 25, "the row did not take the hover")
+
+        // The panel refreshes with a shorter list — a commit, a stage, or a
+        // switch to another project.
+        rows.count = 1
+        table.reloadData()
+        table.layoutSubtreeIfNeeded()
+
+        // Moving the hover now has to let go of a row that no longer exists.
+        table.setHoveredRowForTesting(0)
+        try expect(table.hoveredRow == 0,
+                   "the hover did not move: \(table.hoveredRow)")
+        // And clearing it from a list that shrank to nothing.
+        rows.count = 0
+        table.reloadData()
+        table.setHoveredRowForTesting(-1)
+        try expect(table.hoveredRow == -1, "the hover did not clear")
+
+        // The file tree keeps the same kind of state and had the same gap.
+        let directory = try temporaryDirectory("hover-tree")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<30 {
+            try Data("x".utf8).write(to: directory.appendingPathComponent("f\(index).txt"))
+        }
+        let small = try temporaryDirectory("hover-tree-small")
+        defer { try? FileManager.default.removeItem(at: small) }
+        try Data("x".utf8).write(to: small.appendingPathComponent("only.txt"))
+
+        let tree = FileTreeViewController()
+        let treeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 600),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+        treeWindow.contentViewController = tree
+        defer { treeWindow.close() }
+        tree.setRoot(directory)
+        tree.view.layoutSubtreeIfNeeded()
+        tree.setHoveredRowForTesting(20)
+        try expect(tree.hoveredRowForTesting == 20,
+                   "the tree row did not take the hover: \(tree.hoveredRowForTesting)")
+        tree.setRoot(small)
+        tree.view.layoutSubtreeIfNeeded()
+        tree.setHoveredRowForTesting(0)
+        try expect(tree.hoveredRowForTesting == 0,
+                   "the tree hover did not move: \(tree.hoveredRowForTesting)")
+    }
+
     private static func testFindBarDropsRangesFromReplacedText() throws {
         let directory = try temporaryDirectory("stale-find")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -6659,6 +6761,54 @@ enum RegressionTests {
         pane.open(url: plain)
         try expect(pane.textViewForTesting.markdownLinks.isEmpty,
                    "the links of the previous document are still loaded")
+    }
+
+    /// The start page is where projects are chosen when none is showing: one
+    /// click opens one, and the tick boxes gather several.
+    private static func testStartPageOpensProjects() throws {
+        let root = try temporaryDirectory("start-page")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var projects: [URL] = []
+        for name in ["alpha", "beta", "gamma"] {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            projects.append(url)
+            RecentProjects.shared.add(url)
+        }
+        defer { projects.forEach { RecentProjects.shared.remove($0) } }
+
+        let welcome = WelcomeView(frame: NSRect(x: 0, y: 0, width: 620, height: 420))
+        welcome.reloadRecents()
+        var openedOne: URL?
+        var openedMany: [URL] = []
+        welcome.onOpenRecent = { openedOne = $0 }
+        welcome.onOpenChecked = { openedMany = $0 }
+
+        // Nothing ticked, nothing to do.
+        try expect(welcome.openCheckedTitleForTesting == "Open Checked",
+                   "the button reads \(welcome.openCheckedTitleForTesting)")
+        try expect(!welcome.openCheckedEnabledForTesting,
+                   "Open Checked is offered with nothing ticked")
+        welcome.openCheckedForTesting()
+        try expect(openedMany.isEmpty, "Open Checked opened something with nothing ticked")
+
+        // Ticking two and asking for them opens exactly those, in the order
+        // they are listed.
+        let rows = welcome.rowsForTesting()
+        try expect(rows.count == 3, "the start page lists \(rows.count) recents, not 3")
+        welcome.toggleCheckForTesting(at: 0)
+        welcome.toggleCheckForTesting(at: 2)
+        try expect(welcome.openCheckedEnabledForTesting,
+                   "Open Checked stayed unavailable with two projects ticked")
+        welcome.openCheckedForTesting()
+        try expect(openedMany.count == 2,
+                   "Open Checked opened \(openedMany.count) projects, not the two ticked")
+        try expect(openedMany == welcome.checkedForTesting,
+                   "Open Checked did not open the ticked projects in listed order")
+
+        // A row still opens on its own when it is clicked.
+        welcome.clickRowForTesting(1)
+        try expect(openedOne != nil, "clicking a recent project did not open it")
     }
 
     private static func testIndexLockContention() throws {

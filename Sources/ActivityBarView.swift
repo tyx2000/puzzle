@@ -46,7 +46,7 @@ final class ActivityBarView: NSView {
         super.init(frame: frameRect)
 
         let specs: [(Action, title: String)] = [
-            (.project, "Files"),
+            (.project, "Projects"),
             (.search, "Search"),
             (.git, "Git"),
         ]

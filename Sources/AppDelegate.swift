@@ -292,23 +292,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onOpenRequested = { [weak self, weak controller] urls in
             self?.openURLs(urls, from: controller)
         }
-        // Only the application knows what every window has open.
-        controller.onListProjects = { [weak self, weak controller] in
-            // Every project in every window, not one per window: a window holds
-            // several and shows one, and the menu should say so.
-            (self?.windows ?? []).flatMap { window in
-                window.projects.map { url in
-                    (name: url.lastPathComponent, url: url,
-                     isCurrent: window === controller && window.projectURL == url)
-                }
-            }
-        }
-        controller.onSelectProject = { [weak self] url in
-            guard let target = self?.window(showingProject: url) else { return }
-            target.activateProject(url)
-            target.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        }
         windows.append(controller)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)

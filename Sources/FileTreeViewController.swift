@@ -92,7 +92,10 @@ private final class FileTreeOutlineView: NSOutlineView {
         guard next != hoveredRow else { return }
         let previous = hoveredRow
         hoveredRow = next
-        if previous >= 0 {
+        // Bounded against the row count as it is now, not as it was when the
+        // hover was recorded: switching to a smaller tree leaves this pointing
+        // at a row that no longer exists, and asking for one raises.
+        if previous >= 0, previous < numberOfRows {
             (rowView(atRow: previous, makeIfNecessary: false) as? TreeRowView)?.isHovered = false
         }
         if next >= 0 {
@@ -253,7 +256,7 @@ final class FileTreeViewController: NSViewController {
         }
         guard !affected.isEmpty else { return }
         affected.forEach { $0.refreshChildren() }
-        affected.forEach { outlineView.reloadItem($0, reloadChildren: true) }
+        affected.forEach { reloadChildren(of: $0) }
         refreshActiveRowBackgrounds()
     }
 
@@ -271,6 +274,24 @@ final class FileTreeViewController: NSViewController {
     }
 
     /// Row index for a URL, or nil if not currently displayed.
+    /// How AppKit names this node's parent slot. The project's own folder is
+    /// not a row, so anything inside it is a *top-level* item, which AppKit
+    /// spells `nil`.
+    private func outlineParent(_ node: FileNode) -> FileNode? {
+        node === root ? nil : node
+    }
+
+    /// Reload a node's children. The project's own folder is not a row, so
+    /// AppKit cannot be asked to reload it — reloading the outline is what
+    /// refreshes the top level.
+    private func reloadChildren(of node: FileNode) {
+        if node === root {
+            outlineView.reloadData()
+        } else {
+            outlineView.reloadItem(node, reloadChildren: true)
+        }
+    }
+
     func row(for url: URL) -> Int? {
         let target = url.standardizedFileURL
         for index in 0..<outlineView.numberOfRows {
@@ -448,7 +469,7 @@ final class FileTreeViewController: NSViewController {
                 // file. Refresh only the missing item's parent, preserving all
                 // other node identities and expansion state.
                 current.refreshChildren()
-                outlineView.reloadItem(current, reloadChildren: true)
+                reloadChildren(of: current)
                 child = current.children.first(where: { $0.name == name })
             }
             guard let child else { return false }
@@ -717,7 +738,7 @@ final class FileTreeViewController: NSViewController {
                                       original: nil, initialName: "",
                                       insertionIndex: insertionIndex)
         outlineView.insertItems(at: IndexSet(integer: insertionIndex),
-                                inParent: parent, withAnimation: [])
+                                inParent: outlineParent(parent), withAnimation: [])
         focusPendingEditor()
     }
 
@@ -756,7 +777,7 @@ final class FileTreeViewController: NSViewController {
             outlineView.reloadItem(original)
         } else if let parent = edit.parent {
             outlineView.removeItems(at: IndexSet(integer: edit.insertionIndex),
-                                    inParent: parent, withAnimation: [])
+                                    inParent: outlineParent(parent), withAnimation: [])
         }
         applyDeferredTreeReloadIfNeeded()
     }
@@ -866,7 +887,7 @@ final class FileTreeViewController: NSViewController {
     private func reloadAfterMutation(parent: FileNode?, selecting url: URL?) {
         parent?.invalidate()
         if let parent {
-            outlineView.reloadItem(parent, reloadChildren: true)
+            reloadChildren(of: parent)
             outlineView.expandItem(parent)
         } else {
             refresh()
@@ -902,16 +923,18 @@ final class FileTreeViewController: NSViewController {
 }
 
 extension FileTreeViewController: NSOutlineViewDataSource {
+    /// The project's own folder is not a row: the project list above the tree
+    /// already names it, and repeating it cost a row and a level of indent on
+    /// everything inside. The top level of the tree is what the project
+    /// contains.
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return root == nil ? 0 : 1 }
-        guard let node = item as? FileNode, node.isDirectory else { return 0 }
+        guard let node = (item as? FileNode) ?? root, node.isDirectory else { return 0 }
         let extra = pendingEdit?.original == nil && pendingEdit?.parent === node ? 1 : 0
         return node.children.count + extra
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return root ?? staleChild }
-        guard let node = item as? FileNode else { return staleChild }
+        guard let node = (item as? FileNode) ?? root else { return staleChild }
         var wanted = index
         if let pending = pendingEdit, pending.original == nil, pending.parent === node {
             let insertion = min(pending.insertionIndex, node.children.count)
