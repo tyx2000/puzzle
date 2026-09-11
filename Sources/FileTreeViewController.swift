@@ -188,6 +188,15 @@ final class FileTreeViewController: NSViewController {
         self.view = scrollView
     }
 
+    /// Forget the project, for a window that has just closed its last one.
+    func clearRoot() {
+        cancelPendingEdit()
+        deferredTreeReload = false
+        deferredDiskRefresh = false
+        root = nil
+        outlineView.reloadData()
+    }
+
     func setRoot(_ url: URL) {
         cancelPendingEdit()
         deferredTreeReload = false

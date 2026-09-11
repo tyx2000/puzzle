@@ -96,7 +96,7 @@ final class GitPanelViewController: NSViewController {
     private var activeOperationID: UUID?
     private var operationLocksMessage = false
 
-    func setDirectory(_ url: URL) {
+    func setDirectory(_ url: URL?) {
         directory = url
         entries.removeAll()
         history.removeAll()
@@ -190,7 +190,7 @@ final class GitPanelViewController: NSViewController {
 
         // Commit message box.
         commitField.font = Theme.uiFont(11)
-        commitField.placeholder = "Commit message  (⌘↩ commit · ⇧⌘↩ push)"
+        commitField.placeholder = "Commit message"
         commitField.onCommitShortcut = { [weak self] in
             // ⌘↩ obeys the same rule the button does; there is nothing to
             // explain in an alert that the disabled button has not said.
@@ -244,7 +244,7 @@ final class GitPanelViewController: NSViewController {
         // Push is the common case, so it is one click on its own button; the
         // arrow beside it holds Commit & Push, Fetch, Pull and Force Push.
         pushControl.title = "Push"
-        pushControl.toolTip = "Push the current branch"
+        pushControl.toolTip = "Push the current branch  (⇧⌘↩)"
         pushControl.setAccessibilityLabel("Push")
         pushControl.onClick = { [weak self] in self?.pushAction() }
         pushControl.translatesAutoresizingMaskIntoConstraints = false
@@ -556,7 +556,10 @@ final class GitPanelViewController: NSViewController {
     private func refreshCommitButton() {
         // Never enable anything while an operation owns the panel.
         commitButton.isEnabled = activeOperationID == nil && commitIsPossible
-        commitButton.toolTip = commitIsPossible ? nil
+        // The shortcut lives here rather than in the message box: a hint
+        // printed inside the box sits where the message goes and is read every
+        // time, long after it is news.
+        commitButton.toolTip = commitIsPossible ? "Commit  (⌘↩)"
             : (hasChanges ? "Describe the change to commit it"
                           : "Nothing to commit")
     }
@@ -567,8 +570,8 @@ final class GitPanelViewController: NSViewController {
         // exception: pushing is what sets one up.
         pushControl.isEnabled = pushIsPossible
         pushControl.toolTip = aheadCount > 0
-            ? "\(aheadCount) commit\(aheadCount == 1 ? "" : "s") to push"
-            : "Push the current branch"
+            ? "Push \(aheadCount) commit\(aheadCount == 1 ? "" : "s")  (⇧⌘↩)"
+            : "Push the current branch  (⇧⌘↩)"
         pushControl.invalidateIntrinsicContentSize()
     }
 
@@ -1284,6 +1287,11 @@ final class GitPanelViewController: NSViewController {
             .isHovered ?? false
     }
 
+    /// What hovering each button says, which is where the shortcuts are now
+    /// written rather than inside the message box.
+    var buttonHintsForTesting: (commit: String?, push: String?) {
+        (commitButton.toolTip, pushControl.toolTip)
+    }
     var pushBadgeForTesting: String {
         _ = view
         return pushControl.badge

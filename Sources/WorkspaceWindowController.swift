@@ -96,6 +96,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     private func wire() {
+        sidebar.onAddProject = { [weak self] in self?.openFolder(nil) }
+        editor.projectTabs.onSelect = { [weak self] index in
+            guard let self, self.projects.indices.contains(index) else { return }
+            self.activateProject(self.projects[index])
+        }
+        editor.projectTabs.onAdd = { [weak self] in self?.openFolder(nil) }
+        editor.projectTabs.onClose = { [weak self] index in
+            guard let self, self.projects.indices.contains(index) else { return }
+            self.closeProject(self.projects[index])
+        }
+        editor.projectTabs.onReorder = { [weak self] from, to in
+            self?.moveProject(from: from, to: to)
+        }
+        onProjectsChanged = { [weak self] in self?.refreshProjectTabs() }
+        sidebar.onShowProjects = { [weak self] anchor in self?.showProjectList(from: anchor) }
         sidebar.fileTree.onOpenFile = { [weak self] url in self?.editor.open(url: url) }
         sidebar.fileTree.onGitHistory = { [weak self] url in self?.showFileHistory(for: url) }
         sidebar.fileTree.onOpenInTerminal = { url in Self.openTerminal(at: url) }
@@ -153,9 +168,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onActiveDocumentChanged = { [weak self] url in
             guard let self, let url else { return }
             self.sidebar.fileTree.selectFile(url)
-            self.window?.title = url.lastPathComponent
+            self.refreshWindowTitle(activeFile: url)
         }
     }
+
+    /// The name Mission Control, the Dock's window list and the Window menu
+    /// show for this window.
+    ///
+    /// A window *is* a project, so it keeps the project's name as tabs come and
+    /// go: hovering a window in the switcher should say which project it holds,
+    /// not which file happened to be open in it. A window opened on a single
+    /// file has only that file to be named after.
+    private func refreshWindowTitle(activeFile: URL?) {
+        let name = projectURL?.lastPathComponent
+            ?? activeFile?.lastPathComponent
+        window?.title = name.map { $0.isEmpty ? "Puzzle" : $0 } ?? "Puzzle"
+    }
+
+    var windowTitleForTesting: String { window?.title ?? "" }
 
     func windowWillClose(_ notification: Notification) {
         gitRepositoryMonitor?.stop()
@@ -234,7 +264,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Project
 
+    /// The projects this window holds, in the order their tabs appear. A window
+    /// shows one at a time; `projectURL` is whichever that is.
+    private(set) var projects: [URL] = []
+    /// Told when the list or the active project changes, so the strip redraws.
+    var onProjectsChanged: (() -> Void)?
+
+    /// Add a project to this window and switch to it. One already here just
+    /// becomes the active one.
     func openProject(_ url: URL) {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        if !projects.contains(resolved) { projects.append(resolved) }
+        activateProject(resolved)
+    }
+
+    /// Switch to a project this window already holds.
+    ///
+    /// The editor is emptied first: nothing of the previous project is carried
+    /// across, and nothing about it is remembered — coming back loads it as if
+    /// it had just been opened. That is deliberate; keeping per-project tab
+    /// state would mean a bundle of caret positions, folds and find state that
+    /// every future per-tab feature would have to remember to join.
+    func activateProject(_ url: URL) {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard projects.contains(resolved) else { return }
+        if projectURL != resolved { editor.closeAllTabs() }
+        loadProject(resolved)
+    }
+
+    private func loadProject(_ url: URL) {
         // Where the repository root is and who commits from it are resolved
         // once per project and then reused; a new project resolves its own.
         GitService.forgetRepositoryInfo()
@@ -252,7 +310,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setDirectory(url)
         // Show the name straight away; the branch follows the Git refresh.
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
-        window?.title = url.lastPathComponent
+        refreshWindowTitle(activeFile: nil)
         refreshGit()
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
@@ -271,6 +329,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self.refreshGit(requireFollowUp: true)
             reloaded.forEach { self.editor.invalidateBlame(for: $0) }
         }
+        onProjectsChanged?()
     }
 
     /// Synchronize every Git-derived surface after another process changes the
@@ -923,6 +982,113 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             }
         }
     }
+
+    /// Reorder the strip. Which project is showing does not change: the order
+    /// is a convenience, not a switch.
+    func moveProject(from: Int, to: Int) {
+        guard projects.indices.contains(from), from != to else { return }
+        let destination = max(0, min(to, projects.count - 1))
+        let moved = projects.remove(at: from)
+        projects.insert(moved, at: destination)
+        refreshProjectTabs()
+    }
+
+    /// Take a project out of this window.
+    ///
+    /// Closing the one being shown moves to a neighbour — the tabs of the
+    /// project being left close either way. Closing the last one empties the
+    /// window back to the welcome screen rather than leaving a tree and a Git
+    /// panel pointing at a project that is no longer here.
+    func closeProject(_ url: URL) {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard let index = projects.firstIndex(of: resolved) else { return }
+        let wasShowing = projectURL == resolved
+        projects.remove(at: index)
+        guard wasShowing else {
+            refreshProjectTabs()
+            return
+        }
+        guard let next = projects.indices.contains(index)
+                ? projects[index] : projects.last else {
+            closeLastProject()
+            return
+        }
+        activateProject(next)
+    }
+
+    private func closeLastProject() {
+        editor.closeAllTabs()
+        gitRepositoryMonitor?.stop()
+        gitRepositoryMonitor = nil
+        workspaceFileMonitor?.stop()
+        workspaceFileMonitor = nil
+        GitService.forgetRepositoryInfo()
+        projectURL = nil
+        quickOpenIndex = []
+        palette?.dismiss()
+        editor.hasProject = false
+        editor.repositoryRoot = nil
+        sidebar.fileTree.clearRoot()
+        sidebar.setDirectory(nil)
+        sidebar.setProjectTitle(project: "", branch: "")
+        refreshWindowTitle(activeFile: nil)
+        refreshProjectTabs()
+    }
+
+    private func refreshProjectTabs() {
+        editor.projectTabs.configure(
+            projects: projects,
+            activeIndex: projectURL.flatMap { projects.firstIndex(of: $0) })
+    }
+
+    /// What the other windows have open, newest last, so the button can list
+    /// them. Supplied by the application, which is what knows about windows.
+    var onListProjects: (() -> [(name: String, url: URL, isCurrent: Bool)])?
+    /// Bring the window showing this project to the front.
+    var onSelectProject: ((URL) -> Void)?
+
+    /// The list behind the projects button: every project open in the app, with
+    /// this window's own marked. Switching raises that window rather than
+    /// loading the project here — a window is a project, and two windows on one
+    /// project would each keep their own half of its state.
+    private func showProjectList(from anchor: NSView) {
+        let projects = onListProjects?() ?? []
+        let menu = NSMenu()
+        menu.font = Theme.uiFont(12)
+        if projects.isEmpty {
+            let empty = NSMenuItem(title: "No projects open", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+        for project in projects {
+            let item = NSMenuItem(title: project.name,
+                                  action: #selector(selectProjectAction(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = project.url
+            item.state = project.isCurrent ? .on : .off
+            item.toolTip = project.url.path
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let add = NSMenuItem(title: "Open Project…", action: #selector(openFolder(_:)),
+                             keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: 0, y: anchor.bounds.maxY + 4), in: anchor)
+    }
+
+    @objc private func selectProjectAction(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        onSelectProject?(url)
+    }
+
+    /// Drives the list without a menu, for tests.
+    func projectListForTesting() -> [(name: String, url: URL, isCurrent: Bool)] {
+        onListProjects?() ?? []
+    }
+    func selectProjectForTesting(_ url: URL) { onSelectProject?(url) }
 
     @objc func openFolder(_ sender: Any?) {
         let panel = NSOpenPanel()

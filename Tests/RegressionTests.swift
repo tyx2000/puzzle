@@ -712,7 +712,7 @@ enum RegressionTests {
 
         // The commit box explains itself and takes ⌘↩.
         let commit = CommitMessageTextView()
-        commit.placeholder = "Commit message  (⌘↩ commit · ⇧⌘↩ push)"
+        commit.placeholder = "Commit message"
         var committed = 0
         commit.onCommitShortcut = { committed += 1 }
         guard let enter = NSEvent.keyEvent(
@@ -743,8 +743,10 @@ enum RegressionTests {
         commit.keyDown(with: shiftEnter)
         try expect(pushed == 1 && committed == 1,
                    "⇧⌘↩ pushed \(pushed) times and committed \(committed)")
-        try expect(commit.placeholder.contains("⌘↩") && commit.placeholder.contains("⇧⌘↩"),
-                   "the box does not say what either shortcut does: \(commit.placeholder)")
+        // The hints belong on the buttons, not inside the box: a line printed
+        // where the message goes is read every time the panel is opened.
+        try expect(!commit.placeholder.contains("⌘"),
+                   "the shortcut is printed inside the message box: \(commit.placeholder)")
     }
 
     private static func testReviewFixes() throws {
@@ -3551,6 +3553,14 @@ enum RegressionTests {
         outerWindow.openSelection([file, sibling])
         try expect(app.windowsForTesting.count == 1 && outerWindow.editor.openURLs.count == 2,
                    "the file picker created another window for files inside an open project")
+        // A window is a project, and says so wherever macOS shows window names
+        // — Mission Control, the Dock's window list, the Window menu. It used
+        // to be renamed after whichever file was open, so hovering a window in
+        // the switcher told you nothing about which project it held.
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        try expect(outerWindow.windowTitleForTesting == "outer",
+                   "the window is called \(outerWindow.windowTitleForTesting), not its project")
+
         outerWindow.openSelection([outer, sibling])
         try expect(app.windowsForTesting.count == 1 && outerWindow.editor.openURLs.count == 2,
                    "reselecting an open folder or file created a duplicate window/tab")
@@ -3580,17 +3590,115 @@ enum RegressionTests {
                     && app.window(showingProject: inner)?.editor.currentURL == file.resolvingSymlinksInPath(),
                    "the picker ignored the deepest open project")
 
+        // The title band lists what is open elsewhere and offers to open more,
+        // so several projects can be reached without hunting for their windows.
+        let listed = outerWindow.projectListForTesting()
+        try expect(Set(listed.map(\.name)) == ["outer", "other", "nested"],
+                   "the list shows \(listed.map(\.name)), not every open project")
+        try expect(listed.filter(\.isCurrent).map(\.name) == ["outer"],
+                   "the list does not mark which project this window holds")
+        // Choosing one raises its window rather than loading it here: a window
+        // is a project, and two windows on one project would each keep half of
+        // its state.
+        outerWindow.selectProjectForTesting(other)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        try expect(outerWindow.projectURL == outer.resolvingSymlinksInPath()
+                    && otherWindow.projectURL == other.resolvingSymlinksInPath(),
+                   "switching projects moved a project into the wrong window")
+        let buttons = outerWindow.sidebar.projectButtonsForTesting
+        try expect(buttons.list.toolTip?.isEmpty == false
+                    && buttons.add.toolTip?.isEmpty == false,
+                   "the title band's buttons do not say what they do")
+
+        // One window, several projects: the strip lists them and switching
+        // loads the chosen one from scratch. Nothing of the project being left
+        // is kept — its tabs close, which is the whole point of the design.
+        let host = app.window(showingProject: outer) ?? outerWindow
+        host.editor.open(url: sibling)
+        try expect(host.editor.openURLs.count >= 1, "the fixture opened no file")
+        host.openProject(other)
+        try expect(host.projects.count == 2 && host.projectURL == other.resolvingSymlinksInPath(),
+                   "the second project did not become this window's active one")
+        try expect(host.editor.openURLs.isEmpty,
+                   "the previous project's tabs survived the switch")
+        let strip = host.editor.projectTabs
+        try expect(strip.tabTitlesForTesting == ["outer", "other"],
+                   "the strip shows \(strip.tabTitlesForTesting)")
+        try expect(strip.activeIndexForTesting == 1,
+                   "the strip does not mark the project being shown")
+        // The `+` keeps its place however many projects are open.
+        try expect(strip.addRectForTesting.maxX > strip.tabRectForTesting(1).maxX - 1,
+                   "the add button is not at the end of the strip")
+        strip.clickTabForTesting(0)
+        try expect(host.projectURL == outer.resolvingSymlinksInPath()
+                    && strip.activeIndexForTesting == 0,
+                   "clicking a project tab did not switch to it")
+
+        // While a tab is dragged the others move aside, so the gap shows where
+        // it will land rather than everything snapping at the drop.
+        let slots = strip.displaySlotsForTesting(dragging: 0,
+                                                 toX: strip.tabRectForTesting(1).midX)
+        try expect(slots[0] == 1 && slots[1] == 0,
+                   "the other tabs did not make room: \(slots)")
+        // Dragging reorders without changing which project is showing: the
+        // order is a convenience, not a switch.
+        strip.dragTabForTesting(from: 0, to: 1)
+        try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
+                   "dragging did not reorder: \(host.projects.map(\.lastPathComponent))")
+        try expect(host.projectURL == outer.resolvingSymlinksInPath(),
+                   "reordering changed which project was showing")
+
+        // The ✕ takes the project out of the window. It only appears on the
+        // hovered tab, and it sits at that tab's trailing end.
+        host.editor.projectTabs.hoverForTesting(1)
+        let closeBox = strip.closeRectForTesting(1)
+        let hostTab = strip.tabRectForTesting(1)
+        try expect(closeBox.width > 0 && closeBox.maxX <= hostTab.maxX - 4,
+                   "the close button is against the tab's edge: \(closeBox) in \(hostTab)")
+        try expect(closeBox.minX > hostTab.midX,
+                   "the close button is not at the trailing end of its tab")
+        strip.clickCloseForTesting(1)
+        try expect(host.projects.map(\.lastPathComponent) == ["other"],
+                   "closing did not remove the project: \(host.projects)")
+        try expect(host.projectURL == other.resolvingSymlinksInPath(),
+                   "closing the project being shown did not move to its neighbour")
+        // Closing the last one empties the window rather than leaving a tree
+        // and a Git panel pointing at a project that is no longer here.
+        strip.clickCloseForTesting(0)
+        try expect(host.projects.isEmpty && host.projectURL == nil,
+                   "the window kept a project after the last one closed")
+        try expect(host.editor.openURLs.isEmpty && !host.editor.hasProject,
+                   "the emptied window still holds files or claims a project")
+
         // A mixed selection must establish the chosen root before opening its
-        // nested file, even if the panel reports that file first.
+        // nested file, even if the panel reports that file first. A project
+        // asked for from a window joins that window rather than opening one of
+        // its own, which is what the strip's `+` is for.
         let fresh = root.appendingPathComponent("fresh", isDirectory: true)
         let child = fresh.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
         let freshFile = child.appendingPathComponent("sample.txt")
         try Data("sample".utf8).write(to: freshFile)
+        let windowsBefore = app.windowsForTesting.count
         otherWindow.openSelection([freshFile, fresh])
-        try expect(app.windowsForTesting.count == 4
-                    && app.window(showingProject: fresh)?.editor.openURLs.count == 1,
-                   "a mixed file/folder selection created two windows for one project")
+        try expect(app.windowsForTesting.count == windowsBefore,
+                   "opening a project from a window created another window")
+        try expect(app.window(showingProject: fresh) === otherWindow
+                    && otherWindow.projectURL == fresh.resolvingSymlinksInPath(),
+                   "the new project did not become the window's active one")
+        try expect(otherWindow.editor.openURLs.count == 1,
+                   "the file inside the new project did not open with it")
+        try expect(otherWindow.projects.contains(other.resolvingSymlinksInPath()),
+                   "switching projects dropped the one the window already held")
+
+        // Opening a file belonging to another of this window's projects
+        // switches to that project first, so the tree and Git panel are its
+        // own rather than whichever project happened to be up.
+        otherWindow.openSelection([sibling])
+        try expect(otherWindow.projectURL == outer.resolvingSymlinksInPath()
+                    || app.window(showingProject: outer)?.projectURL
+                        == outer.resolvingSymlinksInPath(),
+                   "opening a file did not switch to the project that owns it")
     }
 
     private static func testActiveLineSpansTheGutter() throws {
@@ -4487,6 +4595,13 @@ enum RegressionTests {
         panel.setCommitMessageForTesting("real message")
         try expect(panel.commitEnabledForTesting,
                    "Commit stayed unavailable with changes and a message")
+        // Hovering a button is where its shortcut is explained; the message box
+        // is for the message.
+        let hints = panel.buttonHintsForTesting
+        try expect(hints.commit?.contains("⌘↩") == true,
+                   "Commit does not name its shortcut: \(hints.commit ?? "nil")")
+        try expect(hints.push?.contains("⇧⌘↩") == true,
+                   "Push does not name its shortcut: \(hints.push ?? "nil")")
 
         // And it goes back as soon as either half is taken away.
         panel.applyStatusForTesting(

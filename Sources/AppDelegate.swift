@@ -143,25 +143,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let welcome = source.flatMap { $0.hasProject ? nil : $0 }
                 ?? windows.first { !$0.hasProject }
             if item.isDirectory {
-                // The project may already be open: raise that window instead of
+                // Already open somewhere: switch that window to it rather than
                 // stacking a second copy of the same workspace.
-                let target = window(showingProject: url)
-                    ?? welcome
-                    ?? makeWindow()
-                if target.projectURL == nil { target.openProject(url) }
-                target.window?.makeKeyAndOrderFront(nil)
-            } else {
-                // A file inside an open project becomes a tab there. Each window
-                // carries its own editor, tree and Git state, so spawning one per
-                // file cost ~60 MB a time and split the project across windows.
-                let target = window(containing: url)
-                    ?? welcome
-                    ?? makeWindow()
-                if target.projectURL == nil {
-                    target.openProject(url.deletingLastPathComponent())
+                if let found = Self.projectIndex(matching: url,
+                                                 in: windows.map(\.projects)) {
+                    let target = windows[found.window]
+                    target.activateProject(found.project)
+                    target.window?.makeKeyAndOrderFront(nil)
+                } else if let source, source.hasProject {
+                    // Asked for from a window — its own `+`, or its file picker
+                    // — so it joins that window's projects.
+                    source.openProject(url)
+                    source.window?.makeKeyAndOrderFront(nil)
+                } else {
+                    let target = welcome ?? makeWindow()
+                    target.openProject(url)
+                    target.window?.makeKeyAndOrderFront(nil)
                 }
-                target.editor.open(url: url)
-                target.window?.makeKeyAndOrderFront(nil)
+            } else {
+                // A file inside an open project becomes a tab there, in that
+                // project: the window switches to the project first, so the
+                // tree, Git panel and search are showing the file's own
+                // workspace rather than whichever one happened to be up.
+                if let found = Self.projectIndex(owning: url,
+                                                 in: windows.map(\.projects)) {
+                    let target = windows[found.window]
+                    target.activateProject(found.project)
+                    target.editor.open(url: url)
+                    target.window?.makeKeyAndOrderFront(nil)
+                } else {
+                    let target = welcome ?? makeWindow()
+                    if target.projectURL == nil {
+                        target.openProject(url.deletingLastPathComponent())
+                    }
+                    target.editor.open(url: url)
+                    target.window?.makeKeyAndOrderFront(nil)
+                }
             }
             handled = true
         }
@@ -170,9 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var windowsForTesting: [WorkspaceWindowController] { windows }
 
-    /// The window whose project is exactly this folder.
+    /// The window holding this project, whether or not it is the one showing.
     func window(showingProject url: URL) -> WorkspaceWindowController? {
-        Self.projectIndex(matching: url, in: windows.map(\.projectURL)).map { windows[$0] }
+        Self.projectIndex(matching: url, in: windows.map(\.projects))
+            .map { windows[$0.window] }
     }
 
     /// The window whose project contains this file.
@@ -194,6 +212,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Which open project contains this file — the deepest one wins, so a file
     /// inside a nested workspace lands in that workspace rather than its parent.
+    /// The window whose projects own this file, and which of them it is. A
+    /// window holds several projects now, so the answer is a pair; the deepest
+    /// project still wins, as a nested workspace must keep its own files.
+    static func projectIndex(owning file: URL,
+                             in projects: [[URL]]) -> (window: Int, project: URL)? {
+        let path = normalized(file)
+        return projects.enumerated()
+            .flatMap { index, roots in roots.map { (index, $0) } }
+            .compactMap { index, root -> (Int, URL, Int)? in
+                let rootPath = normalized(root)
+                let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+                guard path.hasPrefix(prefix) else { return nil }
+                return (index, root, rootPath.count)
+            }
+            .max { $0.2 < $1.2 }
+            .map { (window: $0.0, project: $0.1) }
+    }
+
+    /// The window holding exactly this project.
+    static func projectIndex(matching url: URL,
+                             in projects: [[URL]]) -> (window: Int, project: URL)? {
+        let path = normalized(url)
+        for (index, roots) in projects.enumerated() {
+            if let match = roots.first(where: { normalized($0) == path }) {
+                return (window: index, project: match)
+            }
+        }
+        return nil
+    }
+
     static func projectIndex(owning file: URL, in roots: [URL?]) -> Int? {
         let path = normalized(file)
         return roots.enumerated()
@@ -243,6 +291,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.onOpenRequested = { [weak self, weak controller] urls in
             self?.openURLs(urls, from: controller)
+        }
+        // Only the application knows what every window has open.
+        controller.onListProjects = { [weak self, weak controller] in
+            // Every project in every window, not one per window: a window holds
+            // several and shows one, and the menu should say so.
+            (self?.windows ?? []).flatMap { window in
+                window.projects.map { url in
+                    (name: url.lastPathComponent, url: url,
+                     isCurrent: window === controller && window.projectURL == url)
+                }
+            }
+        }
+        controller.onSelectProject = { [weak self] url in
+            guard let target = self?.window(showingProject: url) else { return }
+            target.activateProject(url)
+            target.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
         windows.append(controller)
         controller.showWindow(nil)

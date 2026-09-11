@@ -45,7 +45,7 @@ final class SearchViewController: NSViewController {
     /// walk into it.
     private let staleRow = NSObject()
 
-    func setDirectory(_ url: URL) {
+    func setDirectory(_ url: URL?) {
         guard directory != url else { return }
         directory = url
         searchGeneration += 1

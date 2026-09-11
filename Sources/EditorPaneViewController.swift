@@ -1138,6 +1138,21 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         activate(index: min(index, openURLs.count - 1))
     }
 
+    /// Close every tab, which is what switching projects does: the files of
+    /// the project being left have no place in the one being entered.
+    ///
+    /// Closing one at a time rather than in a batch, because a batch keeps an
+    /// anchor tab open by design — and because this is the path that writes
+    /// each buffer on the way out. A refused close (a disk conflict the user
+    /// cancelled) stops the walk rather than looping on it.
+    func closeAllTabs() {
+        while !openURLs.isEmpty {
+            let before = openURLs.count
+            close(index: openURLs.count - 1)
+            guard openURLs.count < before else { return }
+        }
+    }
+
     /// Close every tab except `index`.
     func closeOtherTabs(around index: Int) {
         guard openURLs.indices.contains(index) else { return }

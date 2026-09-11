@@ -21,6 +21,8 @@ final class EditorViewController: NSViewController {
     /// right edge — in the container, not in the strip, so an empty window
     /// with no tabs still offers it.
     private let settingsButton = NSButton()
+    /// The window's projects, along the bottom beside the sidebar's action bar.
+    let projectTabs = ProjectTabBar()
     private var settingsButtonTop: NSLayoutConstraint!
     private var tabRowHeight = EditorTabBar.defaultRowHeight
     private var fileHistories: [URL: FileHistoryModel] = [:]
@@ -60,6 +62,8 @@ final class EditorViewController: NSViewController {
         settingsButton.action = #selector(settingsAction)
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(settingsButton)
+        projectTabs.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(projectTabs)
         settingsButtonTop = settingsButton.topAnchor.constraint(
             equalTo: container.topAnchor, constant: (tabRowHeight - 20) / 2)
 
@@ -67,11 +71,15 @@ final class EditorViewController: NSViewController {
             pane.view.topAnchor.constraint(equalTo: container.topAnchor),
             pane.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             pane.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            pane.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            pane.view.bottomAnchor.constraint(equalTo: projectTabs.topAnchor),
             welcome.topAnchor.constraint(equalTo: container.topAnchor),
             welcome.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             welcome.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            welcome.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            welcome.bottomAnchor.constraint(equalTo: projectTabs.topAnchor),
+            // Level with the sidebar's action bar, so the two are one strip.
+            projectTabs.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            projectTabs.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            projectTabs.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             settingsButton.trailingAnchor.constraint(equalTo: container.trailingAnchor,
                                                      constant: -10),
             settingsButtonTop,
@@ -164,6 +172,8 @@ final class EditorViewController: NSViewController {
     }
 
     func stepTab(by offset: Int) { pane?.stepTab(by: offset) }
+    /// Every tab, as a project switch requires.
+    func closeAllTabs() { pane?.closeAllTabs() }
 
     @discardableResult
     func reopenLastClosedTab() -> Bool {
