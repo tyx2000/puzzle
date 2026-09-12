@@ -212,7 +212,8 @@ final class SidebarViewController: NSViewController {
     }
 
     /// The window's projects, newest last, and which one is showing.
-    func setProjects(_ projects: [(name: String, branch: String, path: String)],
+    func setProjects(_ projects: [(name: String, branch: String, changes: Int,
+                                   path: String)],
                      active: Int?) {
         projectsPanel.configure(projects: projects, active: active)
     }

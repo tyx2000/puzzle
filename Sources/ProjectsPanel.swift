@@ -26,6 +26,9 @@ final class ProjectRowView: NSView {
 
     private var name = ""
     private var branch = ""
+    /// How many files the project has changed but not committed. Nothing is
+    /// drawn for none: a row of zeroes down the panel says nothing.
+    private var changes = 0
     private var path = ""
     private var isActive = false
     private var isHovered = false
@@ -47,16 +50,20 @@ final class ProjectRowView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func configure(name: String, branch: String, path: String, isActive: Bool) {
+    func configure(name: String, branch: String, changes: Int, path: String,
+                   isActive: Bool) {
         self.name = name
         self.branch = branch
+        self.changes = changes
         self.path = path
         self.isActive = isActive
         toolTip = path
         // The branch's hit box moved with the name; the pointing hand over it
         // has to be measured again.
         window?.invalidateCursorRects(for: self)
-        setAccessibilityLabel(branch.isEmpty ? name : "\(name), branch \(branch)")
+        var label = branch.isEmpty ? name : "\(name), branch \(branch)"
+        if changes > 0 { label += ", \(changes) changed" }
+        setAccessibilityLabel(label)
         needsDisplay = true
     }
 
@@ -154,11 +161,37 @@ final class ProjectRowView: NSView {
             }
             label.append(NSAttributedString(string: branch, attributes: attributes))
         }
+        // The number of uncommitted changes, a gap further along and in the
+        // badge the sidebar uses for a count everywhere else. This is the
+        // count the Git button used to carry, moved to the project it belongs
+        // to, where several projects can each show their own.
+        if let badge = badgeRun() {
+            label.append(NSAttributedString(string: "  ", attributes: [
+                .font: Self.branchFont(),
+                .foregroundColor: Theme.dimText,
+            ]))
+            label.append(badge)
+        }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         label.addAttribute(.paragraphStyle, value: paragraph,
                            range: NSRange(location: 0, length: label.length))
         return label
+    }
+
+    /// The count as the sidebar's round badge, sitting on the label's line.
+    private func badgeRun() -> NSAttributedString? {
+        guard changes > 0,
+              let image = SidebarCellDrawing.Badge.image(
+                "\(changes)", labelFont: Self.branchFont(),
+                background: Theme.activeRow, foreground: Theme.foreground)
+        else { return nil }
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = NSRect(
+            x: 0, y: (Self.branchFont().capHeight - image.size.height) / 2,
+            width: image.size.width, height: image.size.height)
+        return NSAttributedString(attachment: attachment)
     }
 
     private static let centred: NSParagraphStyle = {
@@ -263,7 +296,21 @@ final class ProjectRowView: NSView {
         }
     }
 
-    var titleForTesting: String { branch.isEmpty ? name : "\(name)  \(branch)" }
+    /// What the row reads as, with the badge written out as its number.
+    var titleForTesting: String {
+        label().string.replacingOccurrences(
+            of: "\u{FFFC}", with: changes > 0 ? "\(changes)" : "")
+    }
+    /// The badge image the count is drawn in, if the row carries one.
+    var badgeImageForTesting: NSImage? {
+        let label = label()
+        var found: NSImage?
+        label.enumerateAttribute(.attachment,
+                                 in: NSRange(location: 0, length: label.length)) { value, _, _ in
+            if let attachment = value as? NSTextAttachment { found = attachment.image }
+        }
+        return found
+    }
     /// The band's rect when the row is the one being shown, else nil.
     var markerRectForTesting: NSRect? {
         isActive ? NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height) : nil
@@ -363,7 +410,8 @@ final class ProjectsPanelViewController: NSViewController {
 
     /// Rebuild the list. The tree is moved rather than remade, so switching
     /// projects does not cost a fresh scroll view.
-    func configure(projects: [(name: String, branch: String, path: String)],
+    func configure(projects: [(name: String, branch: String, changes: Int,
+                               path: String)],
                    active: Int?) {
         _ = view
         let identity = projects.map { "\($0.path)|\($0.branch)" }
@@ -392,7 +440,8 @@ final class ProjectsPanelViewController: NSViewController {
         }
         for (index, project) in projects.enumerated() where rows.indices.contains(index) {
             rows[index].configure(name: project.name, branch: project.branch,
-                                  path: project.path, isActive: index == active)
+                                  changes: project.changes, path: project.path,
+                                  isActive: index == active)
             // Between rows only: not under the project whose tree follows it,
             // where a line would cut the project off from its own contents.
             rows[index].showsDivider = index > 0

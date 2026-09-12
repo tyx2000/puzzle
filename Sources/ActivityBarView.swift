@@ -73,16 +73,7 @@ final class ActivityBarView: NSView {
         }
     }
 
-    /// Number of changed files, shown after the Git label in the same form the
-    /// panel's own tab uses — "Changes (3)" there, "Git (3)" here. Nothing to
-    /// commit means nothing to say, so a clean tree drops the count entirely.
-    func setChangeCount(_ count: Int) {
-        guard let button = buttons.indices.contains(Action.git.rawValue)
-            ? buttons[Action.git.rawValue] : nil else { return }
-        button.badge = count > 0 ? "\(count)" : nil
-    }
-
-    var buttonTitlesForTesting: [String] { buttons.map(\.displayTitleForTesting) }
+    var buttonTitlesForTesting: [String] { buttons.map(\.titleForTesting) }
     var buttonTooltipsForTesting: [String?] { buttons.map(\.toolTip) }
 
     func setSelected(_ action: Action?) {
@@ -101,16 +92,11 @@ final class ActivityButton: NSView {
     var onClick: (() -> Void)?
     var isSelected = false { didSet { needsDisplay = true } }
 
+    /// The whole button. The changed-file count that used to follow it now
+    /// sits on the project's own row, where a window holding several projects
+    /// can show one count each instead of one number for whichever is on
+    /// screen.
     private let title: String
-    /// Appended after the label, e.g. the number of changed files.
-    var badge: String? {
-        didSet {
-            guard badge != oldValue else { return }
-            setAccessibilityLabel(displayTitle)
-            needsDisplay = true
-        }
-    }
-    private var displayTitle: String { badge.map { "\(title) \($0)" } ?? title }
 
     init(title: String) {
         self.title = title
@@ -121,7 +107,7 @@ final class ActivityButton: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    var displayTitleForTesting: String { displayTitle }
+    var titleForTesting: String { title }
 
     override func draw(_ dirtyRect: NSRect) {
         if isSelected {
@@ -134,11 +120,13 @@ final class ActivityButton: NSView {
         let font = Theme.uiFont(10.5)
         let ink = isSelected ? Theme.selectedControlText : Theme.dimText
         let content = bounds.insetBy(dx: 4, dy: 0)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
         SidebarCellDrawing.attributedText(
-            SidebarCellDrawing.labelWithBadge(
-                title, badge: badge ?? "", font: font, colour: ink,
-                badgeBackground: Theme.activeRow, badgeForeground: Theme.foreground,
-                alignment: .center),
+            NSAttributedString(string: title, attributes: [
+                .font: font, .foregroundColor: ink, .paragraphStyle: paragraph,
+            ]),
             in: content)
     }
 

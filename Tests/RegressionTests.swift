@@ -3323,16 +3323,9 @@ enum RegressionTests {
         try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git"],
                    "the activity bar reads \(bar.buttonTitlesForTesting)")
 
-        // The Git label carries the live changed-file count in the same form as
-        // the panel's own "Changes (7)" tab. A clean tree has nothing to say, so
-        // the count disappears rather than reading "(0)".
-        bar.setChangeCount(7)
-        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git 7"],
-                   "the change count did not reach the Git label: "
-                    + "\(bar.buttonTitlesForTesting)")
-        bar.setChangeCount(0)
-        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git"],
-                   "a clean tree still showed a count: \(bar.buttonTitlesForTesting)")
+        // The changed-file count is not here: it belongs to a project, and a
+        // window holds several. Each project's own row carries its own count,
+        // so the button answers for none of them.
         // The label is the affordance, so nothing waits for a hover to explain it.
         try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
                    "a text button still carries a tooltip")
@@ -3705,19 +3698,15 @@ enum RegressionTests {
 
         // Clicking the project already showing folds it away: the tree goes,
         // the start page comes back, and the row stays for coming back to.
-        host.sidebar.activityBar.setChangeCount(7)
-        try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git 7",
-                   "the fixture could not put a count on the Git button")
         rows[0].clickForTesting()
         try expect(host.projectURL == nil && host.projects.count == 2,
                    "re-clicking the open project did not collapse it")
         try expect(!host.editor.hasProject && host.editor.openURLs.isEmpty,
                    "the collapsed window still claims a project")
-        // The Git button counted a project that is no longer on screen. The
-        // count is set by the Git refresh; what matters here is that collapsing
-        // takes it away again.
+        // The Git button never carries a count: it would have to answer for
+        // one of several projects, and each row answers for its own.
         try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git",
-                   "the Git button still carries a count after collapsing: "
+                   "the Git button carries a count: "
                      + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
         try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
                    "a project is still marked as showing after collapsing")
@@ -3786,7 +3775,7 @@ enum RegressionTests {
         // forward and opens its Git panel, rather than sending the reader to
         // the Git button at the foot of the sidebar.
         host.sidebar.setProjects(host.projects.map {
-            (name: $0.lastPathComponent, branch: "main", path: $0.path)
+            (name: $0.lastPathComponent, branch: "main", changes: 0, path: $0.path)
         }, active: nil)
         let branchRow = panel.rowsForTesting[0]
         branchRow.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
@@ -4008,13 +3997,12 @@ enum RegressionTests {
         // Work to do: both places count it, and Push says how much is waiting.
         panel.applyStatusForTesting(status(entries: [entry("a.swift"), entry("b.swift")],
                                            ahead: 3), in: directory)
-        bar.setChangeCount(2)
         // The number is a badge beside the label, not part of its text.
         try expect(panel.changesTabLabelForTesting == "Changes"
                     && panel.changesTabBadgeForTesting == "2",
                    "the tab reads \(panel.changesTabLabelForTesting) "
                     + "/ \(panel.changesTabBadgeForTesting)")
-        try expect(bar.buttonTitlesForTesting[2] == "Git 2",
+        try expect(bar.buttonTitlesForTesting[2] == "Git",
                    "the activity bar reads \(bar.buttonTitlesForTesting[2])")
         try expect(panel.pushLabelForTesting == "Push" && panel.pushBadgeForTesting == "3",
                    "Push reads \(panel.pushLabelForTesting) / \(panel.pushBadgeForTesting)")
@@ -4028,11 +4016,8 @@ enum RegressionTests {
 
         // Nothing to do: no "(0)" anywhere.
         panel.applyStatusForTesting(status(entries: [], ahead: 0), in: directory)
-        bar.setChangeCount(0)
         try expect(panel.changesTabBadgeForTesting.isEmpty,
                    "the tab shows a zero badge: \(panel.changesTabBadgeForTesting)")
-        try expect(bar.buttonTitlesForTesting[2] == "Git",
-                   "the activity bar shows a zero: \(bar.buttonTitlesForTesting[2])")
         try expect(panel.pushBadgeForTesting.isEmpty,
                    "Push shows a zero badge: \(panel.pushBadgeForTesting)")
 
@@ -5745,6 +5730,38 @@ enum RegressionTests {
         try expect(title.titleForTesting.branch == "trunk",
                    "the titlebar strip did not pick up the branch: "
                     + "\(title.titleForTesting.branch)")
+
+        // The row in the Projects panel carries the same branch, and after it,
+        // a gap further along, how many files the project has changed but not
+        // committed — the count the Git button shows, on the project it
+        // belongs to. Nothing at all while the project is clean.
+        let projectsPanel = workspace.sidebar.projectsPanel
+        _ = projectsPanel.view
+        try expect(projectsPanel.rowsForTesting.first?.titleForTesting
+                    == "\(root.lastPathComponent)  trunk",
+                   "a clean project's row is not just its name and branch: "
+                     + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
+        try Data("new\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
+        workspace.refreshGit()
+        let wanted = "\(root.lastPathComponent)  trunk  1"
+        let countDeadline = Date().addingTimeInterval(5)
+        while projectsPanel.rowsForTesting.first?.titleForTesting != wanted,
+              Date() < countDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(projectsPanel.rowsForTesting.first?.titleForTesting == wanted,
+                   "the row does not carry the change count: "
+                     + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
+        // Drawn in the round badge a count takes everywhere else in the
+        // sidebar, not as loose digits after the branch.
+        let badge = projectsPanel.rowsForTesting.first?.badgeImageForTesting
+        try expect(badge != nil,
+                   "the count is plain text rather than the sidebar's badge")
+        try expect(badge.map { $0.size.width == $0.size.height
+                                && $0.size.width >= SidebarCellDrawing.Badge.minimumDiameter }
+                    == true,
+                   "the badge is not the round mark the sidebar draws a count in: "
+                     + "\(String(describing: badge?.size))")
 
         // The two halves are separate targets: the name goes back to the
         // Projects panel, the branch opens the branch menu. Measured with a

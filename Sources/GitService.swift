@@ -594,16 +594,6 @@ enum GitService {
         let message: String
     }
 
-    /// The branch a repository is on, or "" when it is not a repository or is
-    /// on a detached HEAD. One process, no status walk: this is what a project
-    /// row needs beside its name.
-    static func currentBranch(in directory: URL) -> String {
-        let branch = run(["rev-parse", "--abbrev-ref", "HEAD"], in: directory)
-        guard branch.code == 0 else { return "" }
-        let name = branch.out.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name == "HEAD" ? "" : name
-    }
-
     static func branches(in directory: URL) -> [Branch] {
         let current = run(["branch", "--show-current"], in: directory)
             .out.trimmingCharacters(in: .whitespacesAndNewlines)
