@@ -2,10 +2,11 @@ import AppKit
 
 /// The project name and current branch shown beside the traffic lights, the way
 /// Zed labels its window. It fills the whole title band, so its text sits on the
-/// traffic lights' centre line, and clicking it opens the project folder in
-/// Terminal.
+/// traffic lights' centre line.
 final class ProjectTitleView: NSView {
-    /// Clicking the project name opens the folder in a terminal.
+    /// Clicking the project name shows the Projects panel — the list this name
+    /// was chosen from. A terminal is opened from the button at the end of the
+    /// band instead, where it does not sit on top of the more common errand.
     var onProjectClick: (() -> Void)?
     /// Clicking the branch name asks for the branch menu, anchored under the
     /// branch text (the rect is in this view's coordinates).
@@ -40,10 +41,10 @@ final class ProjectTitleView: NSView {
         self.branch = branch
         if hadProject != !project.isEmpty { window?.invalidateCursorRects(for: self) }
         toolTip = project.isEmpty ? nil
-            : "Click the name to open a terminal here, the branch to switch"
+            : "Click the name for the projects, the branch to switch"
         setAccessibilityLabel(
             branch.isEmpty ? project : "\(project), branch \(branch)")
-        setAccessibilityHelp("Opens the project folder in Terminal.")
+        setAccessibilityHelp("Shows the Projects panel.")
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -119,7 +120,11 @@ final class ProjectTitleView: NSView {
         pressedZone = nil
         let point = convert(event.locationInWindow, from: nil)
         guard let pressed, pressed == zone(at: point) else { return }
-        switch pressed {
+        act(on: pressed)
+    }
+
+    private func act(on zone: Zone) {
+        switch zone {
         case .project: onProjectClick?()
         case .branch: onBranchClick?(branchRect())
         }
@@ -150,6 +155,11 @@ final class ProjectTitleView: NSView {
     var titleForTesting: (project: String, branch: String) { (project, branch) }
     var hasClickHandlerForTesting: Bool { onProjectClick != nil && onBranchClick != nil }
     var zonesForTesting: (project: NSRect, branch: NSRect) { layoutZones() }
+    /// A click that landed in whichever half `point` falls in.
+    func clickForTesting(at point: NSPoint) {
+        guard let zone = zone(at: point) else { return }
+        act(on: zone)
+    }
     func zoneNameForTesting(at point: NSPoint) -> String? {
         switch zone(at: point) {
         case .project: return "project"

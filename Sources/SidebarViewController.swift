@@ -15,11 +15,17 @@ final class SidebarViewController: NSViewController {
     /// A project row was chosen, or its ✕ was clicked.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
+    /// The branch on a project row was clicked, which goes to its Git panel.
+    var onSelectProjectBranchRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
-    /// The button at the end of the title band. Listing the open projects is
-    /// the Projects panel's job now; this opens another one.
+    /// The buttons at the end of the title band: one opens another project,
+    /// the one past it opens a terminal on the project showing. The terminal
+    /// used to be what clicking the project's name did, where it sat on top of
+    /// the more common errand of going back to the list.
     private let addProjectButton = NSButton()
+    private let terminalButton = NSButton()
     var onAddProject: (() -> Void)?
+    var onOpenTerminal: (() -> Void)?
 
     // Search and Git each own an outline/table view, scroll view, controls and
     // (for Git) another NSTextView. Most windows never show both panels, so do
@@ -62,6 +68,11 @@ final class SidebarViewController: NSViewController {
                   tip: "Open another project",
                   action: #selector(addProjectAction))
         root.addSubview(addProjectButton)
+        configure(terminalButton, image: Self.promptImage(),
+                  label: "Open terminal",
+                  tip: "Open this project in a terminal",
+                  action: #selector(openTerminalAction))
+        root.addSubview(terminalButton)
         root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
@@ -83,10 +94,15 @@ final class SidebarViewController: NSViewController {
             projectTitle.trailingAnchor.constraint(
                 lessThanOrEqualTo: addProjectButton.leadingAnchor, constant: -6),
             addProjectButton.trailingAnchor.constraint(
-                equalTo: root.trailingAnchor, constant: -8),
+                equalTo: terminalButton.leadingAnchor, constant: -2),
             addProjectButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             addProjectButton.widthAnchor.constraint(equalToConstant: 22),
             addProjectButton.heightAnchor.constraint(equalToConstant: 20),
+            terminalButton.trailingAnchor.constraint(
+                equalTo: root.trailingAnchor, constant: -8),
+            terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            terminalButton.widthAnchor.constraint(equalToConstant: 22),
+            terminalButton.heightAnchor.constraint(equalToConstant: 20),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -104,6 +120,7 @@ final class SidebarViewController: NSViewController {
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
+        projectsPanel.onSelectBranch = { [weak self] in self?.onSelectProjectBranchRow?($0) }
         projectsPanel.onReorder = { [weak self] from, to in
             self?.onReorderProjectRows?(from, to)
         }
@@ -114,8 +131,15 @@ final class SidebarViewController: NSViewController {
     /// The title band's buttons, drawn like the editor's settings gear.
     private func configure(_ button: NSButton, symbol: String, label: String,
                            tip: String, action: Selector) {
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        configure(button,
+                  image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+                    .withSymbolConfiguration(.init(pointSize: 12, weight: .regular)),
+                  label: label, tip: tip, action: action)
+    }
+
+    private func configure(_ button: NSButton, image: NSImage?, label: String,
+                           tip: String, action: Selector) {
+        button.image = image
         button.isBordered = false
         button.bezelStyle = .regularSquare
         button.imageScaling = .scaleProportionallyDown
@@ -127,9 +151,35 @@ final class SidebarViewController: NSViewController {
         button.translatesAutoresizingMaskIntoConstraints = false
     }
 
+    /// A shell prompt: one chevron and the cursor's underscore, drawn at the
+    /// weight of the SF Symbols beside it. The `terminal` symbol puts a window
+    /// frame around the same two marks, which at this size reads as a filled
+    /// box next to the bare `+`.
+    private static func promptImage() -> NSImage {
+        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { _ in
+            let path = NSBezierPath()
+            path.lineWidth = 1.3
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.move(to: NSPoint(x: 3, y: 10.25))
+            path.line(to: NSPoint(x: 6.5, y: 7))
+            path.line(to: NSPoint(x: 3, y: 3.75))
+            path.move(to: NSPoint(x: 8, y: 3.75))
+            path.line(to: NSPoint(x: 11.5, y: 3.75))
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        // Tinted by the button, like every other mark in the band.
+        image.isTemplate = true
+        return image
+    }
+
     @objc private func addProjectAction() { onAddProject?() }
+    @objc private func openTerminalAction() { onOpenTerminal?() }
 
     var addProjectButtonForTesting: NSButton { addProjectButton }
+    var terminalButtonForTesting: NSButton { terminalButton }
 
     func setFileTabHeight(_ height: CGFloat) {
         containerTopConstraint.constant = height

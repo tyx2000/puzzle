@@ -3729,22 +3729,110 @@ enum RegressionTests {
 
         // Reordering is offered only with every project collapsed: with one
         // expanded the tree sits between the rows, and "where will it land"
-        // has no honest answer.
-        try expect(!panel.dragRowForTesting(0, toY: ProjectRowView.height * 1.5),
+        // has no honest answer. A drag then means nothing, and the press lands
+        // as the click it started out as.
+        host.window?.contentView?.layoutSubtreeIfNeeded()
+        let grip = NSPoint(x: 200, y: ProjectRowView.height / 2)
+        let travel = [NSPoint(x: 200, y: grip.y + ProjectRowView.height),
+                      NSPoint(x: 200, y: grip.y + ProjectRowView.height * 1.5)]
+        let expandedOrder = host.projects.map(\.lastPathComponent)
+        rows[0].pressForTesting(at: grip, draggingThrough: travel)
+        try expect(host.projects.map(\.lastPathComponent) == expandedOrder,
                    "a row was dragged while a project was expanded")
-        rows[0].clickForTesting()
-        try expect(host.projectURL == nil, "the fixture did not collapse")
+        try expect(host.projectURL == nil,
+                   "a press that could not reorder did not land as a click")
+
+        // Everything collapsed, the row travels. What is on screen during the
+        // drag is what gets committed: the rows change places as it goes
+        // rather than snapping at the drop.
+        host.window?.contentView?.layoutSubtreeIfNeeded()
         let before = panel.visualOrderForTesting
-        try expect(panel.dragRowForTesting(0, toY: ProjectRowView.height * 1.5),
-                   "a row could not be dragged with everything collapsed")
+        var whileMoving: [[String]] = []
+        panel.rowsForTesting[0].pressForTesting(at: grip, draggingThrough: travel) {
+            whileMoving.append(panel.visualOrderForTesting)
+        }
         try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
                    "dragging did not reorder: \(host.projects.map(\.lastPathComponent))")
-        // What is on screen during the drag is what gets committed: the row
-        // changes places as it travels rather than snapping at the drop.
-        try expect(panel.visualOrderForTesting != before,
-                   "the list did not preview the new order while dragging")
+        try expect(whileMoving.contains { $0 != before },
+                   "the list did not preview the new order while the row was moving: "
+                     + "\(whileMoving)")
+        // A press that turns into a drag is carrying the row, not clicking it.
+        // Selecting on the press expanded the project the drag started from,
+        // which then took reordering away in the middle of the gesture.
         try expect(host.projectURL == nil,
-                   "reordering opened a project")
+                   "dragging a row into place also selected its project")
+
+        // And it travels the other way just as well: a stack lays its rows out
+        // top-down but counts its own coordinates bottom-up, and measuring the
+        // drop against the stack's origin let a row move only downwards.
+        host.window?.contentView?.layoutSubtreeIfNeeded()
+        panel.rowsForTesting[1].pressForTesting(at: grip, draggingThrough: [
+            NSPoint(x: 200, y: grip.y - ProjectRowView.height),
+            NSPoint(x: 200, y: grip.y - ProjectRowView.height * 1.5),
+        ])
+        try expect(host.projects.map(\.lastPathComponent) == ["outer", "other"],
+                   "a row could not be dragged upwards: "
+                     + "\(host.projects.map(\.lastPathComponent))")
+
+        // The same press without the travel is an ordinary click.
+        host.window?.contentView?.layoutSubtreeIfNeeded()
+        panel.rowsForTesting[0].pressForTesting(at: grip)
+        try expect(host.projectURL == host.projects[0],
+                   "releasing a press that never moved did not select the project")
+        panel.rowsForTesting[0].clickForTesting()
+        try expect(host.projectURL == nil, "the fixture did not collapse")
+
+        // The branch name is a target of its own: it brings the project
+        // forward and opens its Git panel, rather than sending the reader to
+        // the Git button at the foot of the sidebar.
+        host.sidebar.setProjects(host.projects.map {
+            (name: $0.lastPathComponent, branch: "main", path: $0.path)
+        }, active: nil)
+        let branchRow = panel.rowsForTesting[0]
+        branchRow.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
+        let branchBox = branchRow.branchRectForTesting
+        try expect(branchBox.width > 0 && branchBox.minX > ProjectRowView.markerWidth
+                    && branchBox.maxX < branchRow.closeRectForTesting.minX,
+                   "the branch name has no hit box between the name and the ✕: \(branchBox)")
+        // Under the pointer the branch underlines itself, the way a link does —
+        // and only itself: the underline once ran back across the gap between
+        // the project's name and its branch.
+        branchRow.hoverForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        let hovered = branchRow.labelForTesting
+        var underlined: [String] = []
+        hovered.enumerateAttribute(.underlineStyle,
+                                   in: NSRange(location: 0, length: hovered.length)) {
+            value, range, _ in
+            guard value != nil else { return }
+            underlined.append((hovered.string as NSString).substring(with: range))
+        }
+        try expect(underlined == ["main"],
+                   "the hover underline covers \(underlined), not the branch name alone")
+        // The underline says where it goes; a bubble saying it again does not.
+        try expect(branchRow.toolTip == branchRow.pathForTesting,
+                   "hovering the branch put a tip over it: "
+                     + "\(String(describing: branchRow.toolTip))")
+        branchRow.hoverForTesting(at: NSPoint(x: 20, y: branchBox.midY))
+        let plain = branchRow.labelForTesting
+        try expect(plain.attribute(.underlineStyle, at: plain.length - 1,
+                                   effectiveRange: nil) == nil,
+                   "the branch stays underlined with the pointer elsewhere")
+
+        branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        try expect(host.projectURL == host.projects[0],
+                   "clicking the branch did not bring its project forward")
+        try expect(host.sidebar.visiblePanel == .git,
+                   "clicking the branch did not open the Git panel: "
+                     + "\(host.sidebar.visiblePanel)")
+        // Clicking the branch of the project already showing must not fold it
+        // away — that would take back the panel it just asked for.
+        branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        try expect(host.projectURL == host.projects[0],
+                   "clicking the branch again collapsed the project")
+        host.sidebar.showFiles()
+        panel.rowsForTesting[0].clickForTesting()
+        try expect(host.projectURL == nil,
+                   "the fixture did not collapse after the branch check")
 
         // The ✕ is always there, at the row's trailing end, so the name's room
         // never changes as the pointer crosses the panel.
@@ -3755,9 +3843,9 @@ enum RegressionTests {
                     && closeBox.minX > row.bounds.midX,
                    "the close button is not at the row's trailing end: \(closeBox)")
         // The list has been reordered above, so this closes the second of
-        // ["other", "outer"].
+        // ["outer", "other"].
         row.clickCloseForTesting()
-        try expect(host.projects.map(\.lastPathComponent) == ["other"],
+        try expect(host.projects.map(\.lastPathComponent) == ["outer"],
                    "closing did not remove the project: \(host.projects)")
         // Closing the last one empties the window rather than leaving a tree
         // and a Git panel pointing at a project that is no longer here.
@@ -5658,9 +5746,10 @@ enum RegressionTests {
                    "the titlebar strip did not pick up the branch: "
                     + "\(title.titleForTesting.branch)")
 
-        // The two halves are separate targets: the name opens a terminal, the
-        // branch opens the branch menu. Measured with a short name, since a
-        // temporary directory's is long enough to consume the whole strip.
+        // The two halves are separate targets: the name goes back to the
+        // Projects panel, the branch opens the branch menu. Measured with a
+        // short name, since a temporary directory's is long enough to consume
+        // the whole strip.
         title.configure(project: "Puzzle", branch: "main")
         title.layoutSubtreeIfNeeded()
         let zones = title.zonesForTesting
@@ -5678,8 +5767,46 @@ enum RegressionTests {
                     at: NSPoint(x: zones.branch.maxX + 40, y: zones.branch.midY)) == nil,
                    "empty space past the branch still counted as a click")
 
-        // Clicking the name opens the folder in iTerm, with Terminal as the
-        // fallback where iTerm is not installed.
+        // The name goes back to the list it was chosen from. It used to open a
+        // terminal, which sat on top of the more common errand and left the
+        // panel reachable only from the activity bar.
+        workspace.sidebar.showGit()
+        title.clickForTesting(at: inProject)
+        try expect(workspace.sidebar.visiblePanel == .project,
+                   "clicking the project name did not show the Projects panel: "
+                     + "\(workspace.sidebar.visiblePanel)")
+
+        // The terminal is its own button, past the one that opens another
+        // project, at the end of the band.
+        let terminalButton = workspace.sidebar.terminalButtonForTesting
+        let addButton = workspace.sidebar.addProjectButtonForTesting
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(terminalButton.toolTip?.isEmpty == false
+                    && terminalButton.image != nil,
+                   "the terminal button says nothing about what it does")
+        // Drawn here rather than taken from SF Symbols, whose `terminal` puts a
+        // window frame around the prompt. A template image so the band tints it
+        // like everything else in it.
+        try expect(terminalButton.image?.isTemplate == true
+                    && terminalButton.image?.size == NSSize(width: 14, height: 14),
+                   "the terminal mark is not the band's own 14pt template: "
+                     + "\(String(describing: terminalButton.image?.size))")
+        try expect(terminalButton.frame.minX >= addButton.frame.maxX,
+                   "the terminal button is not past the add-project button: "
+                     + "\(terminalButton.frame) vs \(addButton.frame)")
+        try expect(terminalButton.frame.maxX
+                    <= workspace.sidebar.view.bounds.maxX,
+                   "the terminal button hangs off the end of the band: "
+                     + "\(terminalButton.frame)")
+        try expect(workspace.sidebar.onOpenTerminal != nil,
+                   "nothing answers the terminal button")
+        var openedTerminal = false
+        workspace.sidebar.onOpenTerminal = { openedTerminal = true }
+        terminalButton.performClick(nil)
+        try expect(openedTerminal, "the terminal button did nothing")
+
+        // It opens the folder in iTerm, with Terminal as the fallback where
+        // iTerm is not installed.
         let iTerm = URL(fileURLWithPath: "/Applications/iTerm.app")
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
         let installed: [String: URL] = ["com.googlecode.iterm2": iTerm,

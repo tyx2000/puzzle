@@ -109,6 +109,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 self.activateProject(wanted)
             }
         }
+        // The branch is a shortcut into that project's Git panel: it brings the
+        // project forward if it is not the one showing, and never collapses the
+        // one that is — collapsing would take the panel it just asked for away.
+        sidebar.onSelectProjectBranchRow = { [weak self] index in
+            guard let self, self.projects.indices.contains(index) else { return }
+            let wanted = self.projects[index]
+            if self.projectURL != wanted { self.activateProject(wanted) }
+            self.sidebar.showGit()
+        }
         sidebar.onReorderProjectRows = { [weak self] from, to in
             self?.moveProject(from: from, to: to)
         }
@@ -153,7 +162,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.editor.refreshGitLineChanges()
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
-        sidebar.projectTitle.onProjectClick = { [weak self] in self?.openProjectInTerminal() }
+        // The name goes back to the list it was chosen from; the terminal has
+        // its own button at the end of the band.
+        sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
+        sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal() }
         sidebar.projectTitle.onBranchClick = { [weak self] rect in
             self?.showBranchMenu(from: rect)
         }
