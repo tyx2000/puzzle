@@ -323,6 +323,12 @@ final class FileTreeViewController: NSViewController {
     /// Counts `reloadItem` calls, so a test can tell a deferred reload from one
     /// that happened inside AppKit's own.
     private(set) var reloadCountForTesting = 0
+    /// The colour a row draws its name in, which is how a change shows.
+    func statusColorForTesting(at row: Int) -> NSColor? {
+        guard let node = outlineView.item(atRow: row) as? FileNode else { return nil }
+        return statusColor(for: node)
+    }
+
     var pendingEditRowForTesting: Int? {
         guard let edit = pendingEdit else { return nil }
         let item: Any = edit.original ?? edit.placeholder

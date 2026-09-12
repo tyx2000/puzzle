@@ -118,8 +118,12 @@ final class WelcomeView: FlatView {
     func toggleCheckForTesting(at index: Int) {
         (recentStack.arrangedSubviews[index] as? RecentRowView)?.toggleCheckForTesting()
     }
-    func clickRowForTesting(_ index: Int) {
-        (recentStack.arrangedSubviews[index] as? RecentRowView)?.clickForTesting()
+    /// A double click on the row, which is what opens it.
+    func openRowForTesting(_ index: Int) {
+        (recentStack.arrangedSubviews[index] as? RecentRowView)?.openForTesting()
+    }
+    func isRowCheckedForTesting(_ index: Int) -> Bool {
+        (recentStack.arrangedSubviews[index] as? RecentRowView)?.isCheckedForTesting ?? false
     }
 
     func refreshFonts() {
@@ -224,7 +228,9 @@ private final class RecentRowView: FlatView {
     @objc private func removeTapped() { removeAction() }
 
     var isCheckedForTesting: Bool { check.state == .on }
-    func clickForTesting() { action() }
+    /// What a double click does.
+    func openForTesting() { action() }
+    /// What a single click — or the box itself — does.
     func toggleCheckForTesting() {
         check.state = check.state == .on ? .off : .on
         checkToggled()
@@ -245,7 +251,16 @@ private final class RecentRowView: FlatView {
     }
     override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
-    override func mouseDown(with event: NSEvent) { action() }
+    /// A click ticks the row; a double click opens it. Gathering several is
+    /// the common errand on this page, and the box is a small target — the
+    /// whole row is the easier one.
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount < 2 else {
+            action()
+            return
+        }
+        toggleCheckForTesting()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard hovering else { return }

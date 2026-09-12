@@ -14,6 +14,11 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Dragging this row: the panel decides whether the list may be reordered
+    /// at all, and tracks where the row is going.
+    var onDragBegan: (() -> Bool)?
+    var onDragMoved: ((NSPoint) -> Void)?
+    var onDragEnded: (() -> Void)?
 
     private var name = ""
     private var branch = ""
@@ -138,14 +143,39 @@ final class ProjectRowView: NSView {
         needsDisplay = true
     }
 
+    /// Far enough that a shaky click is not a drag.
+    private static let dragThreshold: CGFloat = 4
+
+    /// Selection happens on the press. A drag that follows reorders the list,
+    /// tracked in its own event loop: the panel moves this row between its
+    /// neighbours as it travels, and touching the view hierarchy mid-gesture
+    /// ends AppKit's own tracking.
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+        let start = convert(event.locationInWindow, from: nil)
         // The ✕ takes the click, so closing never also selects.
-        if closeRect.insetBy(dx: -4, dy: -4).contains(point) {
+        if closeRect.insetBy(dx: -4, dy: -4).contains(start) {
             onClose?()
             return
         }
         onSelect?()
+        guard let window else { return }
+        var dragging = false
+        var tracking = true
+        while tracking, let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            switch next.type {
+            case .leftMouseDragged:
+                let point = convert(next.locationInWindow, from: nil)
+                if !dragging {
+                    guard abs(point.y - start.y) > Self.dragThreshold,
+                          onDragBegan?() == true else { continue }
+                    dragging = true
+                }
+                onDragMoved?(convert(next.locationInWindow, from: nil))
+            default:
+                tracking = false
+            }
+        }
+        if dragging { onDragEnded?() }
     }
 
     var titleForTesting: String { branch.isEmpty ? name : "\(name)  \(branch)" }
@@ -168,8 +198,13 @@ final class ProjectsPanelViewController: NSViewController {
     let fileTree: FileTreeViewController
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
+    /// A row was dragged to another place in the list.
+    var onReorder: ((Int, Int) -> Void)?
 
     private let stack = NSStackView()
+    /// The row being dragged and where it started, while a drag is running.
+    private var draggingRow: ProjectRowView?
+    private var dragStartIndex = 0
     private var rows: [ProjectRowView] = []
     private var shown: [String] = []
     private var activeIndex: Int?
@@ -221,6 +256,15 @@ final class ProjectsPanelViewController: NSViewController {
                 let row = ProjectRowView()
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
+                row.onDragBegan = { [weak self, weak row] in
+                    guard let self, let row else { return false }
+                    return self.beginRowDrag(row)
+                }
+                row.onDragMoved = { [weak self, weak row] point in
+                    guard let self, let row else { return }
+                    self.rowDragMoved(row, to: point)
+                }
+                row.onDragEnded = { [weak self] in self?.endRowDrag() }
                 return row
             }
         }
@@ -264,7 +308,55 @@ final class ProjectsPanelViewController: NSViewController {
         }
     }
 
+    // MARK: - Reordering
+
+    /// Reordering is offered only when every project is collapsed. With one
+    /// expanded, the tree sits between the rows and "where will it land" has
+    /// no honest answer.
+    private var canReorder: Bool { activeIndex == nil && rows.count > 1 }
+
+    private func beginRowDrag(_ row: ProjectRowView) -> Bool {
+        guard canReorder, let index = stack.arrangedSubviews.firstIndex(of: row) else {
+            return false
+        }
+        draggingRow = row
+        dragStartIndex = index
+        return true
+    }
+
+    /// The row follows the pointer by *changing places*: the list it is being
+    /// dropped into is the preview, so what is on screen while dragging is
+    /// exactly what will be committed.
+    private func rowDragMoved(_ row: ProjectRowView, to point: NSPoint) {
+        guard draggingRow === row else { return }
+        let inStack = stack.convert(point, from: row)
+        let slot = max(0, min(rows.count - 1,
+                              Int((inStack.y / max(1, ProjectRowView.height)).rounded(.down))))
+        guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
+        stack.insertArrangedSubview(row, at: slot)
+        stack.layoutSubtreeIfNeeded()
+    }
+
+    private func endRowDrag() {
+        guard let row = draggingRow,
+              let landed = stack.arrangedSubviews.firstIndex(of: row) else { return }
+        draggingRow = nil
+        guard landed != dragStartIndex else { return }
+        onReorder?(dragStartIndex, landed)
+    }
+
     var rowsForTesting: [ProjectRowView] { rows }
+    /// Drive a reorder without a pointer: the same path a drag takes.
+    func dragRowForTesting(_ index: Int, toY y: CGFloat) -> Bool {
+        guard rows.indices.contains(index), beginRowDrag(rows[index]) else { return false }
+        let row = rows[index]
+        rowDragMoved(row, to: row.convert(NSPoint(x: 0, y: y), from: stack))
+        endRowDrag()
+        return true
+    }
+    var visualOrderForTesting: [String] {
+        stack.arrangedSubviews.compactMap { ($0 as? ProjectRowView)?.titleForTesting }
+    }
     /// Where the tree sits among the rows, which is what "expanded underneath"
     /// means in layout terms.
     var treePositionForTesting: Int? {

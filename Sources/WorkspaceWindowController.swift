@@ -109,6 +109,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 self.activateProject(wanted)
             }
         }
+        sidebar.onReorderProjectRows = { [weak self] from, to in
+            self?.moveProject(from: from, to: to)
+        }
         sidebar.onCloseProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             self.closeProject(self.projects[index])

@@ -15,6 +15,7 @@ final class SidebarViewController: NSViewController {
     /// A project row was chosen, or its ✕ was clicked.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
+    var onReorderProjectRows: ((Int, Int) -> Void)?
     /// The button at the end of the title band. Listing the open projects is
     /// the Projects panel's job now; this opens another one.
     private let addProjectButton = NSButton()
@@ -103,6 +104,9 @@ final class SidebarViewController: NSViewController {
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
+        projectsPanel.onReorder = { [weak self] from, to in
+            self?.onReorderProjectRows?(from, to)
+        }
         mount(projectsPanel)
         showFiles()
     }

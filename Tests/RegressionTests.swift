@@ -1632,6 +1632,50 @@ enum RegressionTests {
         try expect(rootless.rowCountForTesting == 2,
                    "the tree shows \(rootless.rowCountForTesting) rows, not the project's "
                      + "two files")
+        // A changed file is coloured apart from the rest, and a new file apart
+        // from a changed one.
+        rootless.setStatus(modified: ["beta.txt"], untracked: ["alpha.txt"])
+        let first = rootless.statusColorForTesting(at: 0)
+        let second = rootless.statusColorForTesting(at: 1)
+        try expect(first != nil && second != nil && !sameColor(first, second),
+                   "a new file and a changed file are drawn the same")
+        try expect(!sameColor(first, Theme.foreground)
+                    && !sameColor(second, Theme.foreground),
+                   "a changed file is drawn like an unchanged one")
+
+        // A collapsed folder carries the colour of what is inside it: a tree
+        // that opens on folders would otherwise show no sign of a change until
+        // every folder had been expanded.
+        let nested = try temporaryDirectory("tree-folder-colour")
+        defer { try? FileManager.default.removeItem(at: nested) }
+        let nestedSources = nested.appendingPathComponent("Sources")
+        let nestedDocs = nested.appendingPathComponent("Docs")
+        try FileManager.default.createDirectory(at: nestedSources,
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: nestedDocs,
+                                                withIntermediateDirectories: true)
+        try Data("a".utf8).write(to: nestedSources.appendingPathComponent("App.swift"))
+        try Data("c".utf8).write(to: nestedDocs.appendingPathComponent("readme.md"))
+        let folders = FileTreeViewController()
+        _ = folders.view
+        folders.setRoot(nested)
+        folders.setStatus(modified: ["Sources/App.swift"], untracked: [])
+        var folderColours: [String: NSColor?] = [:]
+        for row in 0..<folders.rowCountForTesting {
+            guard let name = folders.nodeForTesting(at: row)?.url.lastPathComponent
+            else { continue }
+            folderColours[name] = folders.statusColorForTesting(at: row)
+        }
+        try expect(sameColor(folderColours["Sources"] ?? nil, Theme.yellow),
+                   "a folder holding a changed file is not coloured for it")
+        try expect((folderColours["Docs"] ?? nil) == nil,
+                   "a folder with nothing changed inside it is coloured")
+
+        rootless.setStatus(modified: [], untracked: [])
+        try expect(rootless.statusColorForTesting(at: 0) == nil,
+                   "the mark outlived the change")
+        rootless.setStatus(modified: ["beta.txt"], untracked: ["alpha.txt"])
+
         try expect(rootless.nodeForTesting(at: 0)?.url.lastPathComponent == "alpha.txt",
                    "the first row is "
                      + "\(rootless.nodeForTesting(at: 0)?.url.lastPathComponent ?? "nil"), "
@@ -3683,6 +3727,25 @@ enum RegressionTests {
         try expect(panel.treePositionForTesting == 1,
                    "the tree did not move under the newly selected project")
 
+        // Reordering is offered only with every project collapsed: with one
+        // expanded the tree sits between the rows, and "where will it land"
+        // has no honest answer.
+        try expect(!panel.dragRowForTesting(0, toY: ProjectRowView.height * 1.5),
+                   "a row was dragged while a project was expanded")
+        rows[0].clickForTesting()
+        try expect(host.projectURL == nil, "the fixture did not collapse")
+        let before = panel.visualOrderForTesting
+        try expect(panel.dragRowForTesting(0, toY: ProjectRowView.height * 1.5),
+                   "a row could not be dragged with everything collapsed")
+        try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
+                   "dragging did not reorder: \(host.projects.map(\.lastPathComponent))")
+        // What is on screen during the drag is what gets committed: the row
+        // changes places as it travels rather than snapping at the drop.
+        try expect(panel.visualOrderForTesting != before,
+                   "the list did not preview the new order while dragging")
+        try expect(host.projectURL == nil,
+                   "reordering opened a project")
+
         // The ✕ is always there, at the row's trailing end, so the name's room
         // never changes as the pointer crosses the panel.
         let row = panel.rowsForTesting[1]
@@ -3691,8 +3754,10 @@ enum RegressionTests {
         try expect(closeBox.width > 0 && closeBox.maxX <= row.bounds.maxX - 4
                     && closeBox.minX > row.bounds.midX,
                    "the close button is not at the row's trailing end: \(closeBox)")
+        // The list has been reordered above, so this closes the second of
+        // ["other", "outer"].
         row.clickCloseForTesting()
-        try expect(host.projects.map(\.lastPathComponent) == ["outer"],
+        try expect(host.projects.map(\.lastPathComponent) == ["other"],
                    "closing did not remove the project: \(host.projects)")
         // Closing the last one empties the window rather than leaving a tree
         // and a Git panel pointing at a project that is no longer here.
@@ -6806,9 +6871,15 @@ enum RegressionTests {
         try expect(openedMany == welcome.checkedForTesting,
                    "Open Checked did not open the ticked projects in listed order")
 
-        // A row still opens on its own when it is clicked.
-        welcome.clickRowForTesting(1)
-        try expect(openedOne != nil, "clicking a recent project did not open it")
+        // A single click ticks the row — gathering several is the common
+        // errand here, and the box alone is a small target. Opening one on its
+        // own is a double click.
+        try expect(!welcome.isRowCheckedForTesting(1), "the fixture row was already ticked")
+        welcome.toggleCheckForTesting(at: 1)
+        try expect(welcome.isRowCheckedForTesting(1) && openedOne == nil,
+                   "clicking a recent project opened it instead of ticking it")
+        welcome.openRowForTesting(1)
+        try expect(openedOne != nil, "double-clicking a recent project did not open it")
     }
 
     private static func testIndexLockContention() throws {
