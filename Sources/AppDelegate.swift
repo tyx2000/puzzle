@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// `applicationDidFinishLaunching`. Loading settings there meant a window
     /// opened that way was built against the defaults rather than the user's.
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Before anything else can throw: a crash report names the frames but
+        // not the exception, and the reason is what says which invariant went.
+        ExceptionLog.install()
         prepareSettings()
     }
 

@@ -68,6 +68,7 @@ enum RegressionTests {
         try testDeeplyNestedMarkdownIsLeftAsPlainText()
         try testFindBarDropsRangesFromReplacedText()
         try testHoverSurvivesTheRowsGoingAway()
+        try testExceptionLogKeepsTheReason()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
         try testMinifiedFilesOpenBounded()
@@ -77,7 +78,7 @@ enum RegressionTests {
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
-        try testBranchMenu()
+        try testTerminalLaunchScripts()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
         try testTabKeyboardNavigation()
@@ -5608,72 +5609,7 @@ enum RegressionTests {
                    "a normal file showed the diff header")
     }
 
-    private static func testBranchMenu() throws {
-        func branch(_ name: String, _ author: String, _ date: String,
-                    _ stamp: Int64, current: Bool = false,
-                    remote: Bool = false) -> GitService.Branch {
-            GitService.Branch(name: name, author: author, createdAt: date,
-                              createdTimestamp: stamp, isCurrent: current,
-                              isRemote: remote,
-                              upstreamRemote: remote ? "origin" : nil,
-                              upstreamBranch: remote ? name : nil)
-        }
-        // Most recent first is how GitService hands them over; the menu puts the
-        // checked-out branch at the top regardless, then caps the list.
-        var branches = (0..<15).map {
-            branch("topic-\($0)", "Author \($0)", "2026-08-\(10 + $0) 09:00", Int64(1000 - $0))
-        }
-        branches.insert(branch("main", "tyxu", "2026-07-01 12:00", 1, current: true), at: 7)
-        let entries = WorkspaceWindowController.branchMenuEntries(branches)
-        try expect(entries.count == WorkspaceWindowController.branchMenuLimit,
-                   "the menu listed \(entries.count) branches, not "
-                    + "\(WorkspaceWindowController.branchMenuLimit)")
-        try expect(entries.first?.name == "main",
-                   "the current branch is not first: \(entries.map(\.name))")
-        try expect(entries.dropFirst().map(\.name) == (0..<9).map { "topic-\($0)" },
-                   "the rest lost their recency order: \(entries.map(\.name))")
-        // A short list is not padded or truncated.
-        try expect(WorkspaceWindowController.branchMenuEntries(Array(branches.prefix(3))).count == 3,
-                   "a three-branch repo did not list all three")
-
-        // Each row carries the branch, its author and its date.
-        let title = WorkspaceWindowController.branchMenuTitle(
-            branch("release", "Ada", "2026-08-20 18:30", 900)).string
-        try expect(title.contains("release") && title.contains("Ada")
-                    && title.contains("2026-08-20 18:30"),
-                   "a menu row is missing branch, author or date: \(title.debugDescription)")
-        try expect(title.contains("\n"),
-                   "the row is not two lines: \(title.debugDescription)")
-
-        // What a click decides, before any alert is on screen: refuse with a
-        // reason, or confirm naming both ends.
-        let main = branch("main", "tyxu", "2026-07-01 12:00", 1, current: true)
-        let topic = branch("topic", "Ada", "2026-08-20 18:30", 900)
-        let danglingRemote = GitService.Branch(
-            name: "origin/HEAD", author: "Ada", createdAt: "2026-08-20 18:30",
-            createdTimestamp: 900, isCurrent: false, isRemote: true,
-            upstreamRemote: "origin", upstreamBranch: nil)
-
-        try expect(WorkspaceWindowController.branchSwitch(to: main, from: "main")
-                    == .alreadyCurrent,
-                   "switching to the checked-out branch was not refused")
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "topic")
-                    == .alreadyCurrent,
-                   "a branch matching HEAD by name was not treated as current")
-        if case .unavailable(let reason) = WorkspaceWindowController.branchSwitch(
-            to: danglingRemote, from: "main") {
-            try expect(!reason.isEmpty, "the refusal did not say why")
-        } else {
-            throw Failure(description: "a remote ref with no local name was offered as switchable")
-        }
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "main")
-                    == .confirm(from: "main", to: "topic"),
-                   "the confirmation did not name both ends")
-        // With no branch known yet the prompt still reads sensibly.
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: nil)
-                    == .confirm(from: "the current branch", to: "topic"),
-                   "an unknown current branch produced an empty prompt")
-
+    private static func testTerminalLaunchScripts() throws {
         // Launching iTerm opens a window by itself, so the script must not add
         // a second one — that was two windows per click.
         let cold = WorkspaceWindowController.iTermScript(command: "cd /tmp",
@@ -5792,6 +5728,15 @@ enum RegressionTests {
         try expect(workspace.sidebar.visiblePanel == .project,
                    "clicking the project name did not show the Projects panel: "
                      + "\(workspace.sidebar.visiblePanel)")
+
+        // The branch beside it goes to this project's Git panel, the same place
+        // the branch on a project row goes. It used to drop a menu of branches
+        // to switch between, which the panel's own Branch tab does at length.
+        title.clickForTesting(at: inBranch)
+        try expect(workspace.sidebar.visiblePanel == .git,
+                   "clicking the branch did not show the Git panel: "
+                     + "\(workspace.sidebar.visiblePanel)")
+        workspace.sidebar.showFiles()
 
         // The terminal is its own button, past the one that opens another
         // project, at the end of the band.
@@ -6202,6 +6147,40 @@ enum RegressionTests {
     /// table for a row it no longer has raises, and this runs from `layout()`,
     /// where AppKit turns an exception into a hard crash instead of letting it
     /// propagate — EXC_BREAKPOINT in +[NSApplication _crashOnException:].
+    /// A crash report carries the frames but not the exception. When the throw
+    /// is entirely inside AppKit — a window frame rejected during a display
+    /// pass — neither the reason nor a frame of ours reaches the report, and
+    /// there is nothing to diagnose from. This keeps the reason.
+    private static func testExceptionLogKeepsTheReason() throws {
+        let url = ExceptionLog.fileURL
+        let before = (try? Data(contentsOf: url).count) ?? 0
+        defer {
+            // Leave the file as it was found: truncate back to its old length.
+            if let handle = try? FileHandle(forWritingTo: url) {
+                try? handle.truncate(atOffset: UInt64(before))
+                try? handle.close()
+            }
+        }
+
+        let exception = NSException(
+            name: .invalidArgumentException,
+            reason: "Invalid parameter not satisfying: a test reason",
+            userInfo: nil)
+        ExceptionLog.record(exception)
+
+        guard let written = try? String(contentsOf: url, encoding: .utf8) else {
+            throw Failure(description: "nothing was written to \(url.path)")
+        }
+        try expect(written.count > before, "the record did not append")
+        let entry = String(written.dropFirst(before))
+        try expect(entry.contains("NSInvalidArgumentException"),
+                   "the exception name was not recorded: \(entry)")
+        try expect(entry.contains("a test reason"),
+                   "the reason — the only part a crash report drops — was not recorded")
+        try expect(entry.contains("screens:") && entry.contains("windows:"),
+                   "the display context was not recorded, which is what these arrive during")
+    }
+
     private static func testHoverSurvivesTheRowsGoingAway() throws {
         final class Rows: NSObject, NSTableViewDataSource {
             var count = 0
