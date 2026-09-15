@@ -65,9 +65,17 @@ final class ProjectHistoryViewController: NSViewController {
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
+        let header = SidebarSectionHeader(title: "History")
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(header)
         root.addSubview(scroll)
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: root.topAnchor),
+            header.topAnchor.constraint(equalTo: root.topAnchor),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: SidebarSectionHeader.height),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -183,6 +191,11 @@ final class ProjectHistoryViewController: NSViewController {
 
     // MARK: - Regression-test surface
 
+    /// The strip that names this list.
+    var headerForTesting: SidebarSectionHeader? {
+        _ = view
+        return view.subviews.compactMap { $0 as? SidebarSectionHeader }.first
+    }
     var rowCountForTesting: Int {
         _ = view
         return table.numberOfRows

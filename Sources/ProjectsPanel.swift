@@ -441,6 +441,46 @@ final class ProjectRowView: NSView {
     }
 }
 
+/// The strip that names a list in the Projects panel.
+///
+/// Why a strip rather than a tint over the whole region: from the panel's
+/// ground to the first state a row can be in — hovered — is about fifteen
+/// steps per channel, and selected is fifteen more. Divide that range between
+/// three regions and a hovered row in one reads as the plain ground of
+/// another; the marks stop meaning what they mean. A header lifts one surface
+/// that no row is ever drawn on, and leaves the rows their whole range.
+final class SidebarSectionHeader: FlatView {
+    static let height: CGFloat = 20
+    private let title: String
+
+    init(title: String) {
+        self.title = title
+        super.init(frame: .zero)
+        fillColor = Theme.activeTab
+        bottomBorder = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(title)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let font = Theme.uiFont(9.5)
+        SidebarCellDrawing.text(
+            title, font: font, color: Theme.dimText,
+            baseline: SidebarCellDrawing.centeredBaseline(for: font, in: bounds),
+            in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height))
+    }
+
+    var titleForTesting: String { title }
+}
+
 /// What an expanded project shows: its file tree and its changes, side by
 /// side under the two headings its row draws. Laid out by hand so the line
 /// between the columns lands on exactly the point the row's does.
@@ -470,7 +510,8 @@ final class ProjectColumnsView: FlatView {
     /// Neither pane may be squeezed away. A column needs this much to say a
     /// name; a list stacked on another needs only a couple of rows.
     static let minimumColumn: CGFloat = 90
-    static let minimumRow: CGFloat = 44
+    /// A stacked pane keeps its heading and a row under it.
+    static let minimumRow: CGFloat = SidebarSectionHeader.height + 44
     var minimumPane: CGFloat = minimumColumn
     /// How far either side of the line answers to a drag.
     private static let grabRadius: CGFloat = 3

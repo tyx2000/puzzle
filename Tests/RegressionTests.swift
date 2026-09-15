@@ -5898,6 +5898,26 @@ enum RegressionTests {
         try expect(projectsPanel.history.fileRowsForTesting.isEmpty,
                    "clicking an open commit did not close it again")
 
+        // The lower list is the one nothing names — the changes have the
+        // branch in the row above them — so it carries its own strip, on a
+        // surface no row is ever drawn on. Tinting the three regions instead
+        // would have spent the range the rows' own states live in: from the
+        // ground to hovered is fifteen steps a channel, and a region tinted
+        // into that range makes a hovered row read as another region's ground.
+        let historyHeader = projectsPanel.history.headerForTesting
+        try expect(historyHeader?.titleForTesting == "History",
+                   "the history list is not named: "
+                     + "\(String(describing: historyHeader?.titleForTesting))")
+        try expect(sameColor(historyHeader?.fillColor, Theme.activeTab)
+                    && !sameColor(Theme.activeTab, Theme.panelBackground)
+                    && !sameColor(Theme.activeTab, Theme.hover)
+                    && !sameColor(Theme.activeTab, Theme.activeRow),
+                   "the heading shares its surface with a state a row can be in")
+        try expect(projectsPanel.changes.view.subviews
+                    .compactMap { $0 as? SidebarSectionHeader }.isEmpty,
+                   "the changes list took a heading, which puts back the gap under "
+                     + "the project row")
+
         // A commit moves HEAD and the list follows without being asked: the
         // window's own status refresh carries the commit it is on, and the log
         // is re-read exactly when that moves — not on every save.

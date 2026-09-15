@@ -43,6 +43,9 @@ final class ProjectChangesViewController: NSViewController {
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
+        // No strip of its own: the branch in the row above heads this list, and
+        // the two start level — a heading here would put back the gap that was
+        // taken out from under the project row.
         root.addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
