@@ -17,9 +17,17 @@ final class ProjectHistoryViewController: NSViewController {
 
     private let table = GitTableView()
     private var directory: URL?
-    /// What the list was built for. History only changes when HEAD moves, so
-    /// the log is left alone through the saves and refreshes that do not.
-    private var head = ""
+    /// What the list was built for: the commit it ends at and where the
+    /// upstream sits behind it. Those are what the rows show — the commits
+    /// themselves, and the ↑ on the ones not pushed yet — so the log is read
+    /// again exactly when one of them moves, and left alone through the saves
+    /// and refreshes that move neither.
+    private var state = State()
+    struct State: Equatable {
+        var head = ""
+        var ahead = 0
+        var hasUpstream = false
+    }
     private var commits: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — drawn with an ↑, as in
     /// the Git panel.
@@ -67,13 +75,14 @@ final class ProjectHistoryViewController: NSViewController {
         view = root
     }
 
-    /// Point the list at a project and the commit it is on. Called with every
-    /// Git refresh; the log is only re-read when one of the two has moved.
-    func setSource(directory: URL?, head: String) {
-        guard directory != self.directory || head != self.head else { return }
+    /// Point the list at a project and at where that project stands. Called
+    /// with every Git refresh; the log is only re-read when something the
+    /// rows show has actually moved — a commit, or a push.
+    func setSource(directory: URL?, state: State) {
+        guard directory != self.directory || state != self.state else { return }
         let switched = directory != self.directory
         self.directory = directory
-        self.head = head
+        self.state = state
         if switched {
             // Another project's commits must not sit here while its own load
             // is still running.
@@ -180,6 +189,14 @@ final class ProjectHistoryViewController: NSViewController {
     }
     var commitSubjectsForTesting: [String] {
         rows.compactMap { if case .commit(let c) = $0 { return c.subject } else { return nil } }
+    }
+    /// The commits drawn with the ↑ that says they are not pushed yet.
+    var unpushedSubjectsForTesting: [String] {
+        rows.compactMap {
+            guard case .commit(let commit) = $0,
+                  isUnpushed(commit.shortHash) else { return nil }
+            return commit.subject
+        }
     }
     var fileRowsForTesting: [String] {
         rows.compactMap { if case .file(let f, _) = $0 { return f.path } else { return nil } }

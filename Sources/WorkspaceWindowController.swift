@@ -242,6 +242,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         GitService.forgetRepositoryInfo()
         sidebar.refreshGitPanelIfLoaded()
         refreshGit(requireFollowUp: true)
+        // The rows behind the one on screen are read once, when their project
+        // joins the window. Coming back is the moment they are most likely to
+        // be wrong — a commit, a checkout or a push in another project's own
+        // terminal shows nowhere else.
+        refreshProjectSummaries(all: true)
     }
 
     /// Clicking another window, or switching apps, is a focus change: the
@@ -628,9 +633,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked)
                     self.currentBranchName = status.isRepo ? status.branch : nil
-                    self.sidebar.setChanges(status.isRepo ? status.entries : [],
-                                            in: projectURL,
-                                            head: status.isRepo ? status.head : "")
+                    self.sidebar.setChanges(
+                        status.isRepo ? status.entries : [], in: projectURL,
+                        state: status.isRepo
+                            ? .init(head: status.head, ahead: status.ahead,
+                                    hasUpstream: status.hasUpstream)
+                            : .init())
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,
                         branch: status.isRepo ? status.branch : "")
@@ -953,8 +961,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         refreshProjectSummaries()
     }
 
-    private func refreshProjectSummaries() {
-        let wanted = projects.filter { projectSummaries[$0] == nil }
+    /// `all` re-reads every project rather than only the ones never read. The
+    /// project on screen is never in that sweep: its own refresh has just run
+    /// and knows more than a summary does.
+    private func refreshProjectSummaries(all: Bool = false) {
+        let wanted = all
+            ? projects.filter { $0 != projectURL }
+            : projects.filter { projectSummaries[$0] == nil }
         guard !wanted.isEmpty else { return }
         GitService.workQueue.async { [weak self] in
             // One status walk each, giving both the branch and the count. The

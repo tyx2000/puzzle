@@ -229,12 +229,12 @@ final class SidebarViewController: NSViewController {
     }
 
     /// What the project on screen has changed, for the column beside its tree,
-    /// and the commit it is on — the history under the changes is re-read only
-    /// when that moves.
+    /// and where that project stands — the history under the changes is re-read
+    /// only when something it shows has moved.
     func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?,
-                    head: String = "") {
+                    state: ProjectHistoryViewController.State = .init()) {
         projectsPanel.changes.setEntries(entries, in: directory)
-        projectsPanel.history.setSource(directory: directory, head: head)
+        projectsPanel.history.setSource(directory: directory, state: state)
     }
     func showSearch() {
         let search = ensureSearch()

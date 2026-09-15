@@ -5914,6 +5914,44 @@ enum RegressionTests {
                    "the history did not follow the new commit: "
                      + "\(projectsPanel.history.commitSubjectsForTesting)")
 
+        // A push moves the upstream, not HEAD. A list that watched HEAD alone
+        // went on drawing the ↑ over commits that were already pushed, until
+        // the project was left and come back to.
+        func settleHistory(_ what: String, until done: @escaping () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(5)
+            while !done(), Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            try expect(done(), what)
+        }
+        let remote = try temporaryDirectory("project-title-remote")
+        defer { try? FileManager.default.removeItem(at: remote) }
+        try expect(GitService.run(["init", "-q", "--bare"], in: remote).code == 0,
+                   "the fixture remote was not created")
+        _ = GitService.run(["remote", "add", "origin", remote.path], in: root)
+        try expect(GitService.run(["push", "-q", "-u", "origin", "trunk"], in: root).code == 0,
+                   "the fixture could not push")
+        workspace.refreshGit()
+        try settleHistory("everything is pushed, but the history still marks commits "
+                            + "unpushed: \(projectsPanel.history.unpushedSubjectsForTesting)") {
+            projectsPanel.history.unpushedSubjectsForTesting.isEmpty
+        }
+        try Data("later\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("Third", in: root).code == 0,
+                   "the fixture could not commit a third time")
+        workspace.refreshGit()
+        try settleHistory("a commit that is not pushed is not marked: "
+                            + "\(projectsPanel.history.unpushedSubjectsForTesting)") {
+            projectsPanel.history.unpushedSubjectsForTesting == ["Third"]
+        }
+        try expect(GitService.run(["push", "-q", "origin", "trunk"], in: root).code == 0,
+                   "the fixture could not push again")
+        workspace.refreshGit()
+        try settleHistory("the ↑ outlived the push: "
+                            + "\(projectsPanel.history.unpushedSubjectsForTesting)") {
+            projectsPanel.history.unpushedSubjectsForTesting.isEmpty
+        }
+
         // Both dragged lines are remembered; a test writes that somewhere of
         // its own rather than into the user's defaults.
         let scratchDefaults = UserDefaults(suiteName: "puzzle-divider-\(UUID())")!
@@ -6125,6 +6163,39 @@ enum RegressionTests {
         // A repo with no remote also appends "(no upstream)" after the author.
         try expect(label.hasPrefix("\(root.lastPathComponent) / trunk / Puzzle Test"),
                    "the commit header read \(label)")
+        // Coming back to the window re-reads every project, not only the one
+        // on screen: a commit made in another project's own terminal shows in
+        // its row and nowhere else.
+        let sibling = try temporaryDirectory("project-title-sibling")
+        defer { try? FileManager.default.removeItem(at: sibling) }
+        _ = GitService.run(["init", "-q", "-b", "side"], in: sibling)
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: sibling)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: sibling)
+        try Data("one\n".utf8).write(to: sibling.appendingPathComponent("a.txt"))
+        try expect(GitService.commit("start", in: sibling).code == 0,
+                   "the sibling project could not commit")
+        workspace.openProject(sibling)
+        workspace.activateProject(root)
+        func siblingRow() -> String? {
+            projectsPanel.rowsForTesting
+                .first { $0.titleForTesting.hasPrefix(sibling.lastPathComponent) }?
+                .titleForTesting
+        }
+        try settleHistory("the sibling project's row never read its branch: "
+                            + "\(String(describing: siblingRow()))") {
+            siblingRow()?.contains("side") == true
+        }
+        try expect(siblingRow()?.hasSuffix("1") == false,
+                   "the sibling started with a change: \(String(describing: siblingRow()))")
+        // Changed from outside the app, in a project that is not on screen.
+        try Data("two\n".utf8).write(to: sibling.appendingPathComponent("b.txt"))
+        workspace.windowDidBecomeKey(
+            Notification(name: NSWindow.didBecomeKeyNotification))
+        try settleHistory("the row did not follow a change made while the window was "
+                            + "away: \(String(describing: siblingRow()))") {
+            siblingRow()?.hasSuffix("1") == true
+        }
+
     }
 
     private static func testDiffGutterUsesFileLineNumbers() throws {
