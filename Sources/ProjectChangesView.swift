@@ -12,15 +12,16 @@ final class ProjectChangesViewController: NSViewController {
     private let table = GitTableView()
     private var entries: [GitService.Status.Entry] = []
     private var directory: URL?
-    /// Drawn in place of the list when the project has nothing uncommitted,
-    /// which is otherwise an empty half with no explanation.
-    private let emptyLabel = NSTextField(labelWithString: "No changes")
 
     override func loadView() {
         let root = FlatView()
         root.fillColor = Theme.panelBackground
 
         table.headerView = nil
+        // `.automatic` insets the first row by 10pt, which would set this list
+        // below the tree beside it; both start at the row under the heading.
+        table.style = .plain
+        table.rowSizeStyle = .custom
         table.backgroundColor = Theme.panelBackground
         table.gridStyleMask = []
         table.intercellSpacing = .zero
@@ -42,22 +43,14 @@ final class ProjectChangesViewController: NSViewController {
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        emptyLabel.font = Theme.uiFont(10.5)
-        emptyLabel.textColor = Theme.dimText
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-
         root.addSubview(scroll)
-        root.addSubview(emptyLabel)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            emptyLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
-            emptyLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
         ])
         view = root
-        refreshEmptyState()
     }
 
     /// The project's changes, as the window's own Git refresh found them.
@@ -67,11 +60,6 @@ final class ProjectChangesViewController: NSViewController {
         self.directory = directory
         guard isViewLoaded else { return }
         table.reloadData()
-        refreshEmptyState()
-    }
-
-    private func refreshEmptyState() {
-        emptyLabel.isHidden = !entries.isEmpty
     }
 
     @objc private func rowClicked() {
@@ -80,7 +68,6 @@ final class ProjectChangesViewController: NSViewController {
     }
 
     func refreshFonts() {
-        emptyLabel.font = Theme.uiFont(10.5)
         guard isViewLoaded else { return }
         table.reloadData()
     }
@@ -92,9 +79,14 @@ final class ProjectChangesViewController: NSViewController {
         _ = view
         return table.numberOfRows
     }
-    var emptyLabelIsVisibleForTesting: Bool {
+    /// Where the first row starts, measured from the window's top, so it can
+    /// be held level with the tree in the column beside it.
+    var firstRowTopInsetInWindowForTesting: CGFloat? {
         _ = view
-        return !emptyLabel.isHidden
+        guard table.numberOfRows > 0, let window = view.window else { return nil }
+        table.layoutSubtreeIfNeeded()
+        let rect = table.convert(table.rect(ofRow: 0), to: nil)
+        return window.frame.height - rect.maxY
     }
     /// The name a row draws, which is what the reader picks it out by.
     func rowNameForTesting(_ row: Int) -> String? {

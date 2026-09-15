@@ -629,7 +629,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                                                     untracked: split.untracked)
                     self.currentBranchName = status.isRepo ? status.branch : nil
                     self.sidebar.setChanges(status.isRepo ? status.entries : [],
-                                            in: projectURL)
+                                            in: projectURL,
+                                            head: status.isRepo ? status.head : "")
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,
                         branch: status.isRepo ? status.branch : "")

@@ -3370,6 +3370,14 @@ enum RegressionTests {
                    "an unknown extension did not fall back to the generic icon")
         try expect(FileIcons.folderIconName(for: "Sources", expanded: false) == "folder-src",
                    "the source folder did not get its own icon")
+        // The two marks the Projects panel heads its columns with have to be
+        // among the icons that ship, or a column loses the one thing that says
+        // which of the two it is.
+        for mark in ProjectRowView.columnIconNamesForTesting {
+            try expect(FileIcons.image(named: mark, dark: true) != nil,
+                       "the panel's \(mark) mark is not among the shipped icons")
+        }
+
         // The decoded-image cache is bounded: each icon keeps its parsed SVG
         // alive, so browsing a tree with many file types must not accumulate
         // them forever.
@@ -3713,8 +3721,8 @@ enum RegressionTests {
         // A plain folder is not a repository: there is no branch to head a
         // second column with, so the tree takes the whole width rather than
         // facing an empty half.
-        try expect(!panel.columnsForTesting.showsRight,
-                   "a project with no branch was given a changes column")
+        try expect(!panel.columnsForTesting.showsSecond,
+                   "a project with no branch was given a Git column")
 
         // Clicking the project already showing folds it away: the tree goes,
         // the start page comes back, and the row stays for coming back to.
@@ -5699,8 +5707,8 @@ enum RegressionTests {
                     == "\(root.lastPathComponent)  trunk  Puzzle Test",
                    "a clean project's row does not read as name, branch and user: "
                      + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
-        try expect(projectsPanel.changes.emptyLabelIsVisibleForTesting,
-                   "a clean project's changes column is blank rather than saying so")
+        try expect(projectsPanel.changes.rowCountForTesting == 0,
+                   "a clean project's changes column is not empty")
         try Data("new\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
         workspace.refreshGit()
         let wanted = "\(root.lastPathComponent)  trunk  Puzzle Test  1"
@@ -5734,6 +5742,68 @@ enum RegressionTests {
                    "the branch does not head the right column: "
                      + "\(row.branchRectForTesting)")
 
+        // The project being shown carries a band; the row under the pointer
+        // does not — a wash that follows the mouse across the headings read as
+        // a third list laid over the two they head.
+        //
+        // A row of its own: the panel's real ones belong to its stack, and
+        // taking one out to look at it would leave the panel a row short.
+        let sample = ProjectRowView()
+        sample.configure(name: "project", branch: "trunk", user: "Ada",
+                         changes: 2, path: "/tmp/project", isActive: true)
+        let backdrop = FlatView(frame: NSRect(x: 0, y: 0, width: 300,
+                                              height: ProjectRowView.height))
+        backdrop.fillColor = Theme.panelBackground
+        backdrop.addSubview(sample)
+        sample.frame = backdrop.bounds
+        func rowPixel() throws -> NSColor {
+            backdrop.displayIfNeeded()
+            guard let rep = backdrop.bitmapImageRepForCachingDisplay(in: backdrop.bounds)
+            else { throw Failure(description: "the row would not render") }
+            backdrop.cacheDisplay(in: backdrop.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / max(1, backdrop.bounds.width)
+            // Clear of the glyphs and of both marks: the very top of the row,
+            // in the left column.
+            guard let colour = rep.colorAt(x: Int(100 * scale),
+                                           y: Int(1 * scale)) else {
+                throw Failure(description: "no pixel to read")
+            }
+            return colour.usingColorSpace(.sRGB) ?? colour
+        }
+        /// A rendered pixel comes back through a colour-space conversion, so it
+        /// lands a shade off the value that was asked for. The washes this is
+        /// looking for are half a channel apart, not a thousandth.
+        func matches(_ colour: NSColor, _ wanted: NSColor) -> Bool {
+            guard let wanted = wanted.usingColorSpace(.sRGB) else { return false }
+            return abs(colour.redComponent - wanted.redComponent) < 0.02
+                && abs(colour.greenComponent - wanted.greenComponent) < 0.02
+                && abs(colour.blueComponent - wanted.blueComponent) < 0.02
+        }
+        let selectedPixel = try rowPixel()
+        try expect(matches(selectedPixel, Theme.selectedControl),
+                   "the project being shown carries no band: \(selectedPixel)")
+        sample.configure(name: "project", branch: "trunk", user: "Ada",
+                         changes: 2, path: "/tmp/project", isActive: false)
+        sample.hoverForTesting(at: NSPoint(x: 100, y: ProjectRowView.height / 2))
+        let hoveredPixel = try rowPixel()
+        try expect(matches(hoveredPixel, Theme.panelBackground),
+                   "the row under the pointer is washed with a background: "
+                     + "\(hoveredPixel)")
+
+        // Each column is headed by a mark saying what it holds: the folder
+        // whose tree is below it, Git's own for the changes. The two headings
+        // are set alike, so this is what tells them apart at a glance.
+        let marks = row.columnIconsForTesting
+        try expect(marks.name.0 == "folder-base" && marks.branch.0 == "git",
+                   "the columns are not marked as the tree and Git: "
+                     + "\(marks.name.0) / \(marks.branch.0)")
+        try expect(marks.name.1.maxX <= row.columnDividerForTesting
+                    && marks.branch.1.minX >= row.columnDividerForTesting,
+                   "a column's mark is not inside its own column: "
+                     + "\(marks.name.1) / \(marks.branch.1)")
+        try expect(row.branchRectForTesting.minX >= marks.branch.1.maxX,
+                   "the branch is drawn over its own mark")
+
         // The branch names its column the way the project names its own: same
         // size, same ink, so the row reads as the two headings it is rather
         // than a name with a note after it.
@@ -5751,18 +5821,18 @@ enum RegressionTests {
         let columns = projectsPanel.columnsForTesting
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         columns.layoutSubtreeIfNeeded()
-        try expect(columns.showsRight, "a repository was given no changes column")
-        try expect(columns.left === workspace.sidebar.fileTree.view
-                    && columns.right === projectsPanel.changes.view,
-                   "the columns are not the file tree and the changes")
+        try expect(columns.showsSecond, "a repository was given no Git column")
+        try expect(columns.first === workspace.sidebar.fileTree.view
+                    && columns.second === projectsPanel.gitColumnForTesting,
+                   "the columns are not the file tree and the Git column")
         try expect(abs(columns.divider - columns.bounds.width / 2) <= 0.5,
                    "the columns are not halves: \(columns.divider) of "
                      + "\(columns.bounds.width)")
         try expect(workspace.sidebar.fileTree.view.frame.maxX <= columns.divider
-                    && projectsPanel.changes.view.frame.minX >= columns.divider,
-                   "the tree and the changes overlap: "
+                    && projectsPanel.gitColumnForTesting.frame.minX >= columns.divider,
+                   "the tree and the Git column overlap: "
                      + "\(workspace.sidebar.fileTree.view.frame) / "
-                     + "\(projectsPanel.changes.view.frame)")
+                     + "\(projectsPanel.gitColumnForTesting.frame)")
 
         // The right column lists what the project has changed, and a click on
         // one asks for that file's diff — the same errand the Git panel's own
@@ -5771,8 +5841,15 @@ enum RegressionTests {
                     && projectsPanel.changes.rowNameForTesting(0) == "changed.txt",
                    "the changes column does not list the change: "
                      + "\(projectsPanel.changes.entriesForTesting.map(\.path))")
-        try expect(!projectsPanel.changes.emptyLabelIsVisibleForTesting,
-                   "the changes column still says it is empty")
+        // It starts level with the tree beside it, directly under the row that
+        // heads them both. A table left on the system's own style insets its
+        // first row, which set this list ten points lower than the tree.
+        let changesTop = projectsPanel.changes.firstRowTopInsetInWindowForTesting
+        let treeTop = workspace.sidebar.fileTree.firstRowTopInsetInWindowForTesting
+        try expect(changesTop != nil && treeTop != nil
+                    && abs(changesTop! - treeTop!) <= 0.5,
+                   "the changes list does not start level with the tree: "
+                     + "\(String(describing: changesTop)) vs \(String(describing: treeTop))")
         var openedDiff: String?
         let realDiffHandler = workspace.sidebar.onGitDiff
         workspace.sidebar.onGitDiff = { entry, _ in openedDiff = entry.path }
@@ -5784,11 +5861,90 @@ enum RegressionTests {
         try expect(realDiffHandler != nil,
                    "the window does not answer for a diff asked for by the panel")
 
+        // Under the changes, the same branch's commits, in the form the Git
+        // panel's own History tab uses — one line per commit, its files under
+        // it when it is opened.
+        let gitColumn = projectsPanel.gitColumnForTesting
+        try expect(gitColumn.first === projectsPanel.changes.view
+                    && gitColumn.second === projectsPanel.history.view,
+                   "the Git column is not the changes over the history")
+        projectsPanel.history.settleForTesting()
+        try expect(projectsPanel.history.commitSubjectsForTesting == ["fixture"],
+                   "the history does not list the project's commits: "
+                     + "\(projectsPanel.history.commitSubjectsForTesting)")
+        try expect(projectsPanel.history.rowSubjectForTesting(0) == "fixture",
+                   "a history row does not draw its commit's subject")
+        // Opening a commit lists its files; clicking one asks for that commit's
+        // diff of it.
+        projectsPanel.history.clickRowForTesting(0)
+        let filesDeadline = Date().addingTimeInterval(5)
+        while projectsPanel.history.fileRowsForTesting.isEmpty, Date() < filesDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(projectsPanel.history.fileRowsForTesting == ["file.txt"],
+                   "opening a commit did not list its files: "
+                     + "\(projectsPanel.history.fileRowsForTesting)")
+        var openedCommitFile: String?
+        let realCommitDiff = workspace.sidebar.onGitCommitDiff
+        workspace.sidebar.onGitCommitDiff = { _, file, _ in openedCommitFile = file.path }
+        projectsPanel.history.clickRowForTesting(1)
+        workspace.sidebar.onGitCommitDiff = realCommitDiff
+        try expect(openedCommitFile == "file.txt",
+                   "clicking a commit's file did not ask for its diff: "
+                     + "\(String(describing: openedCommitFile))")
+        try expect(realCommitDiff != nil,
+                   "the window does not answer for a commit diff from the panel")
+        projectsPanel.history.clickRowForTesting(0)
+        try expect(projectsPanel.history.fileRowsForTesting.isEmpty,
+                   "clicking an open commit did not close it again")
+
+        // A commit moves HEAD and the list follows without being asked: the
+        // window's own status refresh carries the commit it is on, and the log
+        // is re-read exactly when that moves — not on every save.
+        try Data("more\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("Second", in: root).code == 0,
+                   "the fixture could not commit again")
+        workspace.refreshGit()
+        let historyDeadline = Date().addingTimeInterval(5)
+        while !projectsPanel.history.commitSubjectsForTesting.contains("Second"),
+              Date() < historyDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(projectsPanel.history.commitSubjectsForTesting == ["Second", "fixture"],
+                   "the history did not follow the new commit: "
+                     + "\(projectsPanel.history.commitSubjectsForTesting)")
+
+        // Both dragged lines are remembered; a test writes that somewhere of
+        // its own rather than into the user's defaults.
+        let scratchDefaults = UserDefaults(suiteName: "puzzle-divider-\(UUID())")!
+        projectsPanel.dividerDefaults = scratchDefaults
+
+        // That line is dragged too, and keeps a couple of rows on each side.
+        gitColumn.layoutSubtreeIfNeeded()
+        let gitHeight = gitColumn.bounds.height
+        projectsPanel.dragGitDividerForTesting(to: gitHeight * 0.3)
+        gitColumn.layoutSubtreeIfNeeded()
+        try expect(abs(gitColumn.divider - gitHeight * 0.3) <= 1,
+                   "the Git column's line did not follow the drag: "
+                     + "\(gitColumn.divider) of \(gitHeight)")
+        // A point between them, which is where the line is drawn — under the
+        // pane's own edge it would be invisible.
+        try expect(projectsPanel.changes.view.frame.minY
+                    == projectsPanel.history.view.frame.maxY + 1,
+                   "the changes and the history leave no gap for the line: "
+                     + "\(projectsPanel.changes.view.frame) / "
+                     + "\(projectsPanel.history.view.frame)")
+        projectsPanel.dragGitDividerForTesting(to: -400)
+        try expect(gitColumn.divider >= ProjectColumnsView.minimumRow,
+                   "the changes were squeezed to \(gitColumn.divider)")
+        projectsPanel.dragGitDividerForTesting(to: gitHeight + 400)
+        try expect(gitHeight - gitColumn.divider >= ProjectColumnsView.minimumRow,
+                   "the history was squeezed to \(gitHeight - gitColumn.divider)")
+        projectsPanel.dragGitDividerForTesting(to: gitHeight / 2)
+
         // The line between the columns is dragged, and the headings above
         // follow it: a name and a branch have very different lengths, and a
         // fixed half each suits neither.
-        let scratchDefaults = UserDefaults(suiteName: "puzzle-divider-\(UUID())")!
-        projectsPanel.dividerDefaults = scratchDefaults
         let wide = columns.bounds.width
         projectsPanel.dragDividerForTesting(to: wide * 0.75)
         columns.layoutSubtreeIfNeeded()
@@ -5811,8 +5967,9 @@ enum RegressionTests {
         try expect(wide - columns.divider >= ProjectColumnsView.minimumColumn,
                    "the right column was squeezed to \(wide - columns.divider)")
         // And it is where the next window will find it.
-        try expect(scratchDefaults.object(forKey: "projects_panel_divider") != nil,
-                   "the line's place was not remembered")
+        try expect(scratchDefaults.object(forKey: "projects_panel_divider") != nil
+                    && scratchDefaults.object(forKey: "projects_panel_git_divider") != nil,
+                   "a line's place was not remembered")
         projectsPanel.dragDividerForTesting(to: wide / 2)
 
         // The two halves are separate targets: the name goes back to the

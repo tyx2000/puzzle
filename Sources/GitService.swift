@@ -34,6 +34,10 @@ enum GitService {
         var branch: String
         var entries: [Entry]
         var isRepo: Bool
+        /// The commit HEAD points at, straight out of the same status call.
+        /// Reading it costs nothing and says exactly when the history a panel
+        /// is showing has gone stale.
+        var head: String = ""
         /// `git config user.name` — who the next commit will be authored by.
         /// Empty when the repository (and the global config) name nobody.
         var userName: String = ""
@@ -433,6 +437,7 @@ enum GitService {
     ///     ? <path>
     static func parseStatus(_ output: String, prefix: String) -> Status {
         var branch = ""
+        var head = ""
         var ahead = 0
         var hasUpstream = false
         var entries: [Status.Entry] = []
@@ -459,6 +464,8 @@ enum GitService {
                     // Git spells a detached HEAD "(detached)"; the panels have
                     // always shown it as "detached".
                     branch = fields[2] == "(detached)" ? "detached" : String(fields[2])
+                case "branch.oid":
+                    head = String(fields[2])
                 case "branch.upstream":
                     hasUpstream = true
                 case "branch.ab":
@@ -495,7 +502,7 @@ enum GitService {
             }
         }
         return Status(branch: branch.isEmpty ? "detached" : branch, entries: entries,
-                      isRepo: true, ahead: ahead, hasUpstream: hasUpstream)
+                      isRepo: true, head: head, ahead: ahead, hasUpstream: hasUpstream)
     }
 
     /// What a project's repository is, and who commits from it. None of this

@@ -126,6 +126,11 @@ final class SidebarViewController: NSViewController {
         projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
             self?.onGitDiff?(entry, directory)
         }
+        // A file inside a commit opens that commit's diff, as it does in the
+        // Git panel's own History tab.
+        projectsPanel.history.onOpenCommitDiff = { [weak self] commit, file, directory in
+            self?.onGitCommitDiff?(commit, file, directory)
+        }
         projectsPanel.onReorder = { [weak self] from, to in
             self?.onReorderProjectRows?(from, to)
         }
@@ -223,9 +228,13 @@ final class SidebarViewController: NSViewController {
         projectsPanel.configure(projects: projects, active: active)
     }
 
-    /// What the project on screen has changed, for the column beside its tree.
-    func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?) {
+    /// What the project on screen has changed, for the column beside its tree,
+    /// and the commit it is on — the history under the changes is re-read only
+    /// when that moves.
+    func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?,
+                    head: String = "") {
         projectsPanel.changes.setEntries(entries, in: directory)
+        projectsPanel.history.setSource(directory: directory, head: head)
     }
     func showSearch() {
         let search = ensureSearch()
@@ -257,6 +266,7 @@ final class SidebarViewController: NSViewController {
         searchController?.refreshFonts()
         gitController?.refreshFonts()
         projectsPanel.changes.refreshFonts()
+        projectsPanel.history.refreshFonts()
     }
 
     /// External Git tools can update an already-visible panel without routing
