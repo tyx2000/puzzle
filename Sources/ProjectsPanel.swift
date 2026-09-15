@@ -21,11 +21,17 @@ final class ProjectRowView: NSView {
     /// Dragging this row: the panel decides whether the list may be reordered
     /// at all, and tracks where the row is going.
     var onDragBegan: (() -> Bool)?
-    var onDragMoved: ((NSPoint) -> Void)?
+    /// How far the row has travelled *down* the list from where it was picked
+    /// up, in points.
+    var onDragMoved: ((CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
 
     private var name = ""
     private var branch = ""
+    /// Who commits here — the repository's `user.name`. Dimmed after the
+    /// branch: the branch is the heading, this says whose name the next
+    /// commit will carry.
+    private var user = ""
     /// How many files the project has changed but not committed. Nothing is
     /// drawn for none: a row of zeroes down the panel says nothing.
     private var changes = 0
@@ -50,10 +56,11 @@ final class ProjectRowView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func configure(name: String, branch: String, changes: Int, path: String,
-                   isActive: Bool) {
+    func configure(name: String, branch: String, user: String, changes: Int,
+                   path: String, isActive: Bool) {
         self.name = name
         self.branch = branch
+        self.user = user
         self.changes = changes
         self.path = path
         self.isActive = isActive
@@ -62,6 +69,7 @@ final class ProjectRowView: NSView {
         // has to be measured again.
         window?.invalidateCursorRects(for: self)
         var label = branch.isEmpty ? name : "\(name), branch \(branch)"
+        if !user.isEmpty { label += ", \(user)" }
         if changes > 0 { label += ", \(changes) changed" }
         setAccessibilityLabel(label)
         needsDisplay = true
@@ -73,30 +81,43 @@ final class ProjectRowView: NSView {
                width: Self.closeWidth, height: Self.closeWidth)
     }
 
+    /// Both headings are drawn alike: the branch names the right column the
+    /// way the project names the left one, so the row reads as two headings
+    /// rather than a name with a note after it.
     private static func nameFont() -> NSFont { Theme.uiFont(12) }
-    private static func branchFont() -> NSFont { Theme.uiFont(11) }
-    /// The room the label has: from the marker to the ✕.
-    private var textRect: NSRect {
-        var text = bounds.insetBy(dx: Self.markerWidth + 6, dy: 0)
-        text.size.width -= Self.closeWidth + Self.closeInset
-        return text
+    /// The row is divided: the project's name heads the file tree below it,
+    /// the branch heads that project's changes. Both columns carry on down
+    /// through the panel, so a row reads as the two headings it is — and the
+    /// line moves where the reader drags it, in the lists below.
+    var dividerFraction: CGFloat = 0.5 { didSet { needsDisplay = true } }
+    var columnDivider: CGFloat {
+        ProjectColumnsView.divider(at: dividerFraction, in: bounds.width)
+    }
+    /// The room the name has: from the marker to the divider.
+    private var nameRect: NSRect {
+        let x = Self.markerWidth + 6
+        return NSRect(x: x, y: 0, width: max(0, columnDivider - x - 6),
+                      height: bounds.height)
+    }
+    /// The room the branch has: from the divider to the ✕.
+    private var branchColumnRect: NSRect {
+        let x = columnDivider + 8
+        return NSRect(x: x, y: 0,
+                      width: max(0, bounds.width - Self.closeWidth - Self.closeInset - 4 - x),
+                      height: bounds.height)
     }
 
     /// Where the branch name lands, so a click on it can be told from a click
-    /// on the rest of the row. Empty when there is no branch, or when the name
-    /// has already taken every point of the row.
+    /// on the rest of the row. Empty when there is no branch, or when its
+    /// column has no room left.
     private var branchRect: NSRect {
         guard !branch.isEmpty else { return .zero }
-        let text = textRect
-        let nameWidth = (name as NSString)
-            .size(withAttributes: [.font: Self.nameFont()]).width
-        let gap = ("  " as NSString)
-            .size(withAttributes: [.font: Self.branchFont()]).width
+        let column = branchColumnRect
         let width = (branch as NSString)
-            .size(withAttributes: [.font: Self.branchFont()]).width
-        let x = text.minX + nameWidth + gap
-        guard x < text.maxX else { return .zero }
-        return NSRect(x: x, y: 0, width: min(width, text.maxX - x), height: bounds.height)
+            .size(withAttributes: [.font: Self.nameFont()]).width
+        guard column.width > 0 else { return .zero }
+        return NSRect(x: column.minX, y: 0, width: min(width, column.width),
+                      height: bounds.height)
     }
 
     override func resetCursorRects() {
@@ -122,7 +143,14 @@ final class ProjectRowView: NSView {
             Theme.cursor.setFill()
             NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height).fill()
         }
-        SidebarCellDrawing.attributedText(label(), in: textRect)
+        SidebarCellDrawing.attributedText(nameLabel(), in: nameRect)
+        // The line between the two columns, carried on down the panel by the
+        // pair of lists below.
+        if !branch.isEmpty {
+            Theme.border.setFill()
+            NSRect(x: columnDivider, y: 0, width: 1, height: bounds.height).fill()
+            SidebarCellDrawing.attributedText(branchLabel(), in: branchColumnRect)
+        }
 
         // Always there, so the name's room never changes as the pointer moves.
         SidebarCellDrawing.attributedText(
@@ -135,61 +163,76 @@ final class ProjectRowView: NSView {
             in: closeRect)
     }
 
-    /// Name then branch on one line, the branch dimmed: the same pairing the
-    /// window's own title strip uses.
-    private func label() -> NSAttributedString {
+    /// The left column's heading: the project's name.
+    private func nameLabel() -> NSAttributedString {
         let ink = isActive ? Theme.selectedControlText : Theme.foreground
-        let label = NSMutableAttributedString(string: name, attributes: [
+        return NSAttributedString(string: name, attributes: [
             .font: Self.nameFont(),
             .foregroundColor: ink,
+            .paragraphStyle: Self.truncating,
         ])
-        if !branch.isEmpty {
-            // The gap is a run of its own: an underline drawn across it would
-            // reach out past the branch name it belongs to.
-            label.append(NSAttributedString(string: "  ", attributes: [
-                .font: Self.branchFont(),
-                .foregroundColor: Theme.dimText,
-            ]))
-            // Underlined under the pointer, the way a link is: it is the one
-            // part of the row that goes somewhere else.
-            var attributes: [NSAttributedString.Key: Any] = [
-                .font: Self.branchFont(),
-                .foregroundColor: branchIsHovered ? ink : Theme.dimText,
-            ]
-            if branchIsHovered {
-                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-            }
-            label.append(NSAttributedString(string: branch, attributes: attributes))
+    }
+
+    /// The right column's heading: the branch, and after it the number of
+    /// files changed but not committed, in the badge the sidebar uses for a
+    /// count everywhere else.
+    private func branchLabel() -> NSAttributedString {
+        let ink = isActive ? Theme.selectedControlText : Theme.foreground
+        // Underlined under the pointer, the way a link is: it is the one part
+        // of the row that goes somewhere else.
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: Self.nameFont(),
+            .foregroundColor: ink,
+            .paragraphStyle: Self.truncating,
+        ]
+        if branchIsHovered {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
-        // The number of uncommitted changes, a gap further along and in the
-        // badge the sidebar uses for a count everywhere else. This is the
-        // count the Git button used to carry, moved to the project it belongs
-        // to, where several projects can each show their own.
-        if let badge = badgeRun() {
-            label.append(NSAttributedString(string: "  ", attributes: [
-                .font: Self.branchFont(),
+        let label = NSMutableAttributedString(string: branch, attributes: attributes)
+        if !user.isEmpty {
+            label.append(gap())
+            label.append(NSAttributedString(string: user, attributes: [
+                .font: Self.nameFont(),
                 .foregroundColor: Theme.dimText,
+                .paragraphStyle: Self.truncating,
             ]))
+        }
+        if let badge = badgeRun() {
+            label.append(gap())
             label.append(badge)
         }
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        label.addAttribute(.paragraphStyle, value: paragraph,
-                           range: NSRange(location: 0, length: label.length))
         return label
     }
 
+    /// The one gap the row uses between anything and anything else.
+    private func gap() -> NSAttributedString {
+        NSAttributedString(string: "  ", attributes: [
+            .font: Self.nameFont(),
+            .foregroundColor: Theme.dimText,
+            .paragraphStyle: Self.truncating,
+        ])
+    }
+
+    private static let truncating: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        return style
+    }()
+
     /// The count as the sidebar's round badge, sitting on the label's line.
     private func badgeRun() -> NSAttributedString? {
+        // On the row being shown the panel's own selection is already this
+        // colour, which left the count as loose digits on it.
+        let background = isActive ? Theme.panelBackground : Theme.activeRow
         guard changes > 0,
               let image = SidebarCellDrawing.Badge.image(
-                "\(changes)", labelFont: Self.branchFont(),
-                background: Theme.activeRow, foreground: Theme.foreground)
+                "\(changes)", labelFont: Self.nameFont(),
+                background: background, foreground: Theme.foreground)
         else { return nil }
         let attachment = NSTextAttachment()
         attachment.image = image
         attachment.bounds = NSRect(
-            x: 0, y: (Self.branchFont().capHeight - image.size.height) / 2,
+            x: 0, y: (Self.nameFont().capHeight - image.size.height) / 2,
             width: image.size.width, height: image.size.height)
         return NSAttributedString(attachment: attachment)
     }
@@ -258,7 +301,7 @@ final class ProjectRowView: NSView {
             onClose?()
             return
         }
-        trackPress(from: start) { [weak self] in
+        trackPress(from: start, inWindow: event.locationInWindow) { [weak self] in
             self?.window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp])
         }
     }
@@ -266,19 +309,25 @@ final class ProjectRowView: NSView {
     /// The press, from the button going down to what it turns out to have
     /// meant. `nextEvent` hands over the rest of the gesture — the window's
     /// own queue in the app, a scripted sequence in a test.
-    func trackPress(from start: NSPoint, nextEvent: () -> NSEvent?) {
+    ///
+    /// The travel is measured in the window's own space, not this row's: the
+    /// row changes places under the pointer as it goes, which would otherwise
+    /// move the mark the travel is measured from.
+    func trackPress(from start: NSPoint, inWindow startInWindow: NSPoint,
+                    nextEvent: () -> NSEvent?) {
         var dragging = false
         var tracking = true
         while tracking, let next = nextEvent() {
             switch next.type {
             case .leftMouseDragged:
-                let point = convert(next.locationInWindow, from: nil)
+                // A window's y grows upwards; the list runs down the screen.
+                let travelled = startInWindow.y - next.locationInWindow.y
                 if !dragging {
-                    guard abs(point.y - start.y) > Self.dragThreshold,
+                    guard abs(travelled) > Self.dragThreshold,
                           onDragBegan?() == true else { continue }
                     dragging = true
                 }
-                onDragMoved?(point)
+                onDragMoved?(travelled)
             default:
                 tracking = false
             }
@@ -296,14 +345,19 @@ final class ProjectRowView: NSView {
         }
     }
 
-    /// What the row reads as, with the badge written out as its number.
+    /// What the row reads as, both columns, with the badge written out as its
+    /// number.
     var titleForTesting: String {
-        label().string.replacingOccurrences(
+        let left = nameLabel().string
+        guard !branch.isEmpty else { return left }
+        return left + "  " + branchLabel().string.replacingOccurrences(
             of: "\u{FFFC}", with: changes > 0 ? "\(changes)" : "")
     }
+    /// Where the row divides its two columns.
+    var columnDividerForTesting: CGFloat { columnDivider }
     /// The badge image the count is drawn in, if the row carries one.
     var badgeImageForTesting: NSImage? {
-        let label = label()
+        let label = branchLabel()
         var found: NSImage?
         label.enumerateAttribute(.attachment,
                                  in: NSRange(location: 0, length: label.length)) { value, _, _ in
@@ -319,8 +373,10 @@ final class ProjectRowView: NSView {
     var closeRectForTesting: NSRect { closeRect }
     var branchRectForTesting: NSRect { branchRect }
     var pathForTesting: String { path }
-    /// The row's label exactly as it is drawn, hover and all.
-    var labelForTesting: NSAttributedString { label() }
+    /// The left column's label exactly as it is drawn.
+    var nameLabelForTesting: NSAttributedString { nameLabel() }
+    /// The right column's label exactly as it is drawn, hover and all.
+    var labelForTesting: NSAttributedString { branchLabel() }
     /// Move the pointer across the row, the way its tracking area reports it.
     func hoverForTesting(at point: NSPoint) {
         mouseMoved(with: Self.mouseEventForTesting(.mouseMoved, at: convert(point, to: nil)))
@@ -338,7 +394,7 @@ final class ProjectRowView: NSView {
         queue.append(Self.mouseEventForTesting(
             .leftMouseUp, at: convert(path.last ?? point, to: nil)))
         var index = 0
-        trackPress(from: point) {
+        trackPress(from: point, inWindow: convert(point, to: nil)) {
             // Before each event, so a test can watch the list rearrange while
             // the row is still travelling.
             between?()
@@ -355,13 +411,119 @@ final class ProjectRowView: NSView {
     }
 }
 
+/// What an expanded project shows: its file tree and its changes, side by
+/// side under the two headings its row draws. Laid out by hand so the line
+/// between the columns lands on exactly the point the row's does.
+final class ProjectColumnsView: FlatView {
+    var left: NSView?
+    var right: NSView?
+    /// A project that is not a repository has nothing to put on the right, so
+    /// the tree takes the whole width rather than facing an empty half.
+    var showsRight = true { didSet { needsLayout = true; needsDisplay = true } }
+    /// Where the line sits, as a share of the width. The rows above draw their
+    /// own line from the same number, so the headings stay over the columns
+    /// they name.
+    var fraction: CGFloat = 0.5 {
+        didSet {
+            guard fraction != oldValue else { return }
+            needsLayout = true
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    var onFractionChanged: ((CGFloat) -> Void)?
+
+    /// Neither column may be squeezed away; a name needs this much to say
+    /// anything at all.
+    static let minimumColumn: CGFloat = 90
+    /// How far either side of the line answers to a drag.
+    private static let grabRadius: CGFloat = 3
+
+    /// The line's place for a given share of a given width, kept inside the
+    /// minimums and on a whole point so it draws as one crisp line.
+    static func divider(at fraction: CGFloat, in width: CGFloat) -> CGFloat {
+        guard width > minimumColumn * 2 + 1 else { return (width / 2).rounded() }
+        return min(max((fraction * width).rounded(), minimumColumn),
+                   width - minimumColumn - 1)
+    }
+
+    var divider: CGFloat {
+        showsRight ? Self.divider(at: fraction, in: bounds.width) : bounds.width
+    }
+
+    /// The grab band lies over the two lists, so the press that moves the line
+    /// has to be claimed before a scroll view swallows it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if showsRight, bounds.contains(local),
+           abs(local.x - divider) <= Self.grabRadius {
+            return self
+        }
+        return super.hitTest(point)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard showsRight else { return }
+        addCursorRect(NSRect(x: divider - Self.grabRadius, y: 0,
+                             width: Self.grabRadius * 2 + 1, height: bounds.height),
+                      cursor: .resizeLeftRight)
+    }
+
+    /// Tracked in its own event loop, like the rows' own drag: the columns are
+    /// laid out as it travels, so what is on screen is the size being chosen.
+    override func mouseDown(with event: NSEvent) {
+        guard showsRight, let window else { return }
+        var tracking = true
+        while tracking, let next = window.nextEvent(matching: [.leftMouseDragged,
+                                                              .leftMouseUp]) {
+            switch next.type {
+            case .leftMouseDragged:
+                moveDivider(to: convert(next.locationInWindow, from: nil).x)
+            default:
+                tracking = false
+            }
+        }
+    }
+
+    /// Put the line under `x`, within the minimums, and tell the panel so the
+    /// rows above can follow.
+    func moveDivider(to x: CGFloat) {
+        guard bounds.width > 0 else { return }
+        let next = Self.divider(at: x / bounds.width, in: bounds.width) / bounds.width
+        guard next != fraction else { return }
+        fraction = next
+        layoutSubtreeIfNeeded()
+        onFractionChanged?(next)
+    }
+
+    override func layout() {
+        super.layout()
+        left?.frame = NSRect(x: 0, y: 0, width: divider, height: bounds.height)
+        right?.isHidden = !showsRight
+        guard showsRight else { return }
+        right?.frame = NSRect(x: divider + 1, y: 0,
+                              width: max(0, bounds.width - divider - 1),
+                              height: bounds.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard showsRight else { return }
+        Theme.border.setFill()
+        NSRect(x: divider, y: 0, width: 1, height: bounds.height).fill()
+    }
+}
+
 /// The Projects panel: the window's projects listed down the side, with the
-/// selected one's file tree expanded directly underneath its row.
+/// selected one's file tree and changes expanded directly underneath its row.
 ///
 /// The tree is the same controller the panel always used; only where it sits
 /// changes, so nothing about browsing a project moves.
 final class ProjectsPanelViewController: NSViewController {
     let fileTree: FileTreeViewController
+    /// The right-hand column: what the expanded project has changed.
+    let changes = ProjectChangesViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     /// The branch name on a row was clicked: show that project's Git panel.
@@ -370,6 +532,21 @@ final class ProjectsPanelViewController: NSViewController {
     var onReorder: ((Int, Int) -> Void)?
 
     private let stack = NSStackView()
+    private let columns = ProjectColumnsView()
+    /// Where the reader last put the line between the two columns. Remembered
+    /// across launches: it is a deliberate choice about a window's shape, not
+    /// a passing state.
+    private static let dividerKey = "projects_panel_divider"
+    /// Where that choice is kept. Injectable, so a test moving the line does
+    /// not reach into the user's own defaults.
+    var dividerDefaults: UserDefaults = .standard
+    private var dividerFraction: CGFloat = 0.5
+
+    private static func storedDividerFraction(_ defaults: UserDefaults) -> CGFloat {
+        let stored = defaults.object(forKey: dividerKey) as? Double
+        guard let stored, stored > 0.05, stored < 0.95 else { return 0.5 }
+        return CGFloat(stored)
+    }
     /// The row being dragged and where it started, while a drag is running.
     private var draggingRow: ProjectRowView?
     private var dragStartIndex = 0
@@ -386,7 +563,25 @@ final class ProjectsPanelViewController: NSViewController {
     override func loadView() {
         let root = FlatView()
         root.fillColor = Theme.panelBackground
+        // Layer-backed for one reason: the rows slide to their new places when
+        // a project is picked, which needs implicit animation.
+        root.wantsLayer = true
         addChild(fileTree)
+        addChild(changes)
+        // Both columns live in the container for good: taking a view out of
+        // the hierarchy and putting it back leaves an outline view that draws
+        // nothing until it is reloaded.
+        fileTree.view.translatesAutoresizingMaskIntoConstraints = true
+        changes.view.translatesAutoresizingMaskIntoConstraints = true
+        columns.left = fileTree.view
+        columns.right = changes.view
+        dividerFraction = Self.storedDividerFraction(dividerDefaults)
+        columns.fraction = dividerFraction
+        columns.onFractionChanged = { [weak self] fraction in
+            self?.applyDividerFraction(fraction)
+        }
+        columns.addSubview(fileTree.view)
+        columns.addSubview(changes.view)
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 0
@@ -399,9 +594,9 @@ final class ProjectsPanelViewController: NSViewController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        // The tree takes whatever the rows leave.
-        fileTree.view.setContentHuggingPriority(.init(1), for: .vertical)
-        fileTree.view.setContentCompressionResistancePriority(.init(1), for: .vertical)
+        // The columns take whatever the rows leave.
+        columns.setContentHuggingPriority(.init(1), for: .vertical)
+        columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
         view = root
         // A window with no project still shows the tree — empty, filling the
         // panel — so the panel is never a blank rectangle.
@@ -410,8 +605,8 @@ final class ProjectsPanelViewController: NSViewController {
 
     /// Rebuild the list. The tree is moved rather than remade, so switching
     /// projects does not cost a fresh scroll view.
-    func configure(projects: [(name: String, branch: String, changes: Int,
-                               path: String)],
+    func configure(projects: [(name: String, branch: String, user: String,
+                               changes: Int, path: String)],
                    active: Int?) {
         _ = view
         let identity = projects.map { "\($0.path)|\($0.branch)" }
@@ -430,41 +625,50 @@ final class ProjectsPanelViewController: NSViewController {
                     guard let self, let row else { return false }
                     return self.beginRowDrag(row)
                 }
-                row.onDragMoved = { [weak self, weak row] point in
+                row.onDragMoved = { [weak self, weak row] travel in
                     guard let self, let row else { return }
-                    self.rowDragMoved(row, to: point)
+                    self.rowDragMoved(row, by: travel)
                 }
                 row.onDragEnded = { [weak self] in self?.endRowDrag() }
                 return row
             }
         }
         for (index, project) in projects.enumerated() where rows.indices.contains(index) {
+            rows[index].dividerFraction = dividerFraction
             rows[index].configure(name: project.name, branch: project.branch,
-                                  changes: project.changes, path: project.path,
-                                  isActive: index == active)
+                                  user: project.user, changes: project.changes,
+                                  path: project.path, isActive: index == active)
             // Between rows only: not under the project whose tree follows it,
             // where a line would cut the project off from its own contents.
             rows[index].showsDivider = index > 0
         }
         activeIndex = active
+        // A project with no branch is not a repository: nothing to head the
+        // right column with, and nothing to put in it.
+        columns.showsRight = active.map { projects.indices.contains($0)
+            && !projects[$0].branch.isEmpty } ?? false
         layOut(active: active)
     }
 
-    /// Rows in order, with the tree inserted straight after the active one.
+    /// Rows in order, with the expanded project's two columns inserted
+    /// straight after its row.
     ///
     /// Views are *moved* into place rather than torn down and rebuilt: taking
-    /// the tree out of the hierarchy and putting it back leaves an outline view
+    /// a list out of the hierarchy and putting it back leaves an outline view
     /// that has to be reloaded before it draws anything, which showed up as an
     /// empty panel after every project switch.
     private func layOut(active: Int?) {
         var desired: [NSView] = []
         for (index, row) in rows.enumerated() {
             desired.append(row)
-            if index == active { desired.append(fileTree.view) }
+            if index == active { desired.append(columns) }
         }
         // No project: the tree still fills the panel, empty.
-        if active == nil || rows.isEmpty { desired.append(fileTree.view) }
+        if active == nil || rows.isEmpty { desired.append(columns) }
         guard desired != stack.arrangedSubviews else { return }
+        // Nothing to slide from when the panel is being filled for the first
+        // time: a window opening should find its project already there.
+        let hadRows = stack.arrangedSubviews.contains { $0 is ProjectRowView }
         for (position, item) in desired.enumerated() {
             guard stack.arrangedSubviews.indices.contains(position),
                   stack.arrangedSubviews[position] === item else {
@@ -477,6 +681,31 @@ final class ProjectsPanelViewController: NSViewController {
             stack.removeArrangedSubview(extra)
             extra.removeFromSuperview()
         }
+        // The rows below the chosen project have to travel the height of a
+        // whole file tree. Jumping there reads as the list being rebuilt;
+        // sliding reads as the one project opening.
+        guard hadRows else {
+            lastLayoutDurationForTesting = 0
+            return
+        }
+        lastLayoutDurationForTesting = Self.switchDuration
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.switchDuration
+            context.allowsImplicitAnimation = true
+            stack.layoutSubtreeIfNeeded()
+        }
+    }
+
+    /// Long enough to be followed, short enough not to be waited for.
+    static let switchDuration: TimeInterval = 0.3
+    private(set) var lastLayoutDurationForTesting: TimeInterval?
+
+    /// The line moved: the headings follow it, and it is where the next
+    /// window will find it.
+    private func applyDividerFraction(_ fraction: CGFloat) {
+        dividerFraction = fraction
+        rows.forEach { $0.dividerFraction = fraction }
+        dividerDefaults.set(Double(fraction), forKey: Self.dividerKey)
     }
 
     // MARK: - Reordering
@@ -498,27 +727,19 @@ final class ProjectsPanelViewController: NSViewController {
     /// The row follows the pointer by *changing places*: the list it is being
     /// dropped into is the preview, so what is on screen while dragging is
     /// exactly what will be committed.
-    private func rowDragMoved(_ row: ProjectRowView, to point: NSPoint) {
+    ///
+    /// Counted in whole rows travelled rather than measured against the other
+    /// rows' frames. Reordering is only offered with every project collapsed,
+    /// so the rows are a contiguous run of one height; and frames are the one
+    /// thing that cannot be trusted here, since a project switch that is still
+    /// sliding into place has not settled into its own yet.
+    private func rowDragMoved(_ row: ProjectRowView, by travel: CGFloat) {
         guard draggingRow === row else { return }
-        let pointer = topDown(stack.convert(point, from: row).y)
-        // Measured against the other rows' middles rather than by dividing the
-        // stack's height into slots: a vertical stack is not flipped, so
-        // counting from its origin numbers the list from the bottom up and a
-        // row would only ever travel one way.
-        var slot = 0
-        for candidate in stack.arrangedSubviews.compactMap({ $0 as? ProjectRowView })
-        where candidate !== row {
-            if topDown(candidate.frame.midY) < pointer { slot += 1 }
-        }
+        let moved = Int((travel / ProjectRowView.height).rounded())
+        let slot = max(0, min(rows.count - 1, dragStartIndex + moved))
         guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
         stack.insertArrangedSubview(row, at: slot)
         stack.layoutSubtreeIfNeeded()
-    }
-
-    /// How far down the stack a point is, whichever way the stack's own axis
-    /// runs.
-    private func topDown(_ y: CGFloat) -> CGFloat {
-        stack.isFlipped ? y : stack.bounds.height - y
     }
 
     private func endRowDrag() {
@@ -530,12 +751,16 @@ final class ProjectsPanelViewController: NSViewController {
     }
 
     var rowsForTesting: [ProjectRowView] { rows }
+    var columnsForTesting: ProjectColumnsView { columns }
+    var dividerFractionForTesting: CGFloat { dividerFraction }
+    /// Drag the line to `x`, the way a pointer moves it.
+    func dragDividerForTesting(to x: CGFloat) { columns.moveDivider(to: x) }
     var visualOrderForTesting: [String] {
         stack.arrangedSubviews.compactMap { ($0 as? ProjectRowView)?.titleForTesting }
     }
-    /// Where the tree sits among the rows, which is what "expanded underneath"
-    /// means in layout terms.
+    /// Where the expanded columns sit among the rows, which is what "expanded
+    /// underneath" means in layout terms.
     var treePositionForTesting: Int? {
-        stack.arrangedSubviews.firstIndex(of: fileTree.view)
+        stack.arrangedSubviews.firstIndex(of: columns)
     }
 }

@@ -329,6 +329,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.repositoryRoot = url
         RecentProjects.shared.add(url)
         sidebar.fileTree.setRoot(url)
+        // Empty until this project's own refresh lands: the column must not
+        // keep showing what the project being left had changed.
+        sidebar.setChanges([], in: url)
         sidebar.setDirectory(url)
         // Show the name straight away; the branch follows the Git refresh.
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
@@ -625,12 +628,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked)
                     self.currentBranchName = status.isRepo ? status.branch : nil
+                    self.sidebar.setChanges(status.isRepo ? status.entries : [],
+                                            in: projectURL)
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,
                         branch: status.isRepo ? status.branch : "")
                     // The row beside the tree says the same thing the title
                     // strip does, and hears it at the same moment.
                     self.noteSummary(branch: status.isRepo ? status.branch : "",
+                                     user: status.isRepo ? status.userName : "",
                                      changes: status.isRepo ? status.entries.count : 0,
                                      for: projectURL)
                     if status.isRepo {
@@ -913,6 +919,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.hasProject = false
         editor.repositoryRoot = nil
         sidebar.fileTree.clearRoot()
+        sidebar.setChanges([], in: nil)
         sidebar.setDirectory(nil)
         sidebar.setProjectTitle(project: "", branch: "")
         // Bumping the generation discards a refresh that is already in flight,
@@ -923,13 +930,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         refreshWindowTitle(activeFile: nil)
     }
 
-    /// What each row says after the project's name: the branch it is on and
-    /// how many files it has changed. The project on screen keeps its entry
-    /// current from every Git refresh; the others are read once, when they
-    /// join the window.
+    /// What each row says after the project's name: the branch it is on, who
+    /// commits there, and how many files it has changed. The project on screen
+    /// keeps its entry current from every Git refresh; the others are read
+    /// once, when they join the window.
     private var projectSummaries: [URL: ProjectSummary] = [:]
     struct ProjectSummary: Equatable {
         var branch: String
+        var user: String
         var changes: Int
     }
 
@@ -937,6 +945,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setProjects(
             projects.map { (name: $0.lastPathComponent,
                             branch: projectSummaries[$0]?.branch ?? "",
+                            user: projectSummaries[$0]?.user ?? "",
                             changes: projectSummaries[$0]?.changes ?? 0,
                             path: $0.path) },
             active: projectURL.flatMap { projects.firstIndex(of: $0) })
@@ -953,6 +962,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             let found = wanted.map { url -> (URL, ProjectSummary) in
                 let status = GitService.status(in: url)
                 return (url, ProjectSummary(branch: status.isRepo ? status.branch : "",
+                                            user: status.isRepo ? status.userName : "",
                                             changes: status.isRepo ? status.entries.count : 0))
             }
             DispatchQueue.main.async {
@@ -969,8 +979,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     /// What the panel reports for the project on screen, which is fresher than
     /// anything cached — it arrives with every Git refresh.
-    private func noteSummary(branch: String, changes: Int, for url: URL) {
-        let summary = ProjectSummary(branch: branch, changes: changes)
+    private func noteSummary(branch: String, user: String, changes: Int, for url: URL) {
+        let summary = ProjectSummary(branch: branch, user: user, changes: changes)
         guard projectSummaries[url] != summary else { return }
         projectSummaries[url] = summary
         refreshProjectTabs()

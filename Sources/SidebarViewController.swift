@@ -121,6 +121,11 @@ final class SidebarViewController: NSViewController {
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
         projectsPanel.onSelectBranch = { [weak self] in self?.onSelectProjectBranchRow?($0) }
+        // The changes column opens a diff the same way the Git panel's list
+        // does — it is the same list, beside the tree instead of instead of it.
+        projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
+            self?.onGitDiff?(entry, directory)
+        }
         projectsPanel.onReorder = { [weak self] from, to in
             self?.onReorderProjectRows?(from, to)
         }
@@ -212,10 +217,15 @@ final class SidebarViewController: NSViewController {
     }
 
     /// The window's projects, newest last, and which one is showing.
-    func setProjects(_ projects: [(name: String, branch: String, changes: Int,
-                                   path: String)],
+    func setProjects(_ projects: [(name: String, branch: String, user: String,
+                                   changes: Int, path: String)],
                      active: Int?) {
         projectsPanel.configure(projects: projects, active: active)
+    }
+
+    /// What the project on screen has changed, for the column beside its tree.
+    func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?) {
+        projectsPanel.changes.setEntries(entries, in: directory)
     }
     func showSearch() {
         let search = ensureSearch()
@@ -246,6 +256,7 @@ final class SidebarViewController: NSViewController {
         fileTree.refreshAppearance()
         searchController?.refreshFonts()
         gitController?.refreshFonts()
+        projectsPanel.changes.refreshFonts()
     }
 
     /// External Git tools can update an already-visible panel without routing

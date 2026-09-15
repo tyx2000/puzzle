@@ -3696,6 +3696,25 @@ enum RegressionTests {
         rows[0].clickForTesting()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
                    "clicking a project row did not switch to it")
+        // The rows below the chosen project travel the height of a whole file
+        // tree. They slide there rather than jumping, or the list reads as
+        // having been rebuilt rather than as one project opening.
+        try expect(panel.lastLayoutDurationForTesting.map { $0 > 0 } == true,
+                   "switching projects moved the rows without a transition: "
+                     + "\(String(describing: panel.lastLayoutDurationForTesting))")
+        // But a window opening finds its project already there.
+        let freshPanel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        _ = freshPanel.view
+        freshPanel.configure(projects: [(name: "a", branch: "", user: "",
+                                         changes: 0, path: "/a")], active: 0)
+        try expect(freshPanel.lastLayoutDurationForTesting == 0,
+                   "the first fill slid into place instead of being there: "
+                     + "\(String(describing: freshPanel.lastLayoutDurationForTesting))")
+        // A plain folder is not a repository: there is no branch to head a
+        // second column with, so the tree takes the whole width rather than
+        // facing an empty half.
+        try expect(!panel.columnsForTesting.showsRight,
+                   "a project with no branch was given a changes column")
 
         // Clicking the project already showing folds it away: the tree goes,
         // the start page comes back, and the row stays for coming back to.
@@ -3776,7 +3795,8 @@ enum RegressionTests {
         // forward and opens its Git panel, rather than sending the reader to
         // the Git button at the foot of the sidebar.
         host.sidebar.setProjects(host.projects.map {
-            (name: $0.lastPathComponent, branch: "main", changes: 0, path: $0.path)
+            (name: $0.lastPathComponent, branch: "main", user: "", changes: 0,
+             path: $0.path)
         }, active: nil)
         let branchRow = panel.rowsForTesting[0]
         branchRow.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
@@ -5673,13 +5693,17 @@ enum RegressionTests {
         // belongs to. Nothing at all while the project is clean.
         let projectsPanel = workspace.sidebar.projectsPanel
         _ = projectsPanel.view
+        // Name, branch, and who commits here — the repository's own user.name,
+        // which is whose name the next commit from this row will carry.
         try expect(projectsPanel.rowsForTesting.first?.titleForTesting
-                    == "\(root.lastPathComponent)  trunk",
-                   "a clean project's row is not just its name and branch: "
+                    == "\(root.lastPathComponent)  trunk  Puzzle Test",
+                   "a clean project's row does not read as name, branch and user: "
                      + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
+        try expect(projectsPanel.changes.emptyLabelIsVisibleForTesting,
+                   "a clean project's changes column is blank rather than saying so")
         try Data("new\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
         workspace.refreshGit()
-        let wanted = "\(root.lastPathComponent)  trunk  1"
+        let wanted = "\(root.lastPathComponent)  trunk  Puzzle Test  1"
         let countDeadline = Date().addingTimeInterval(5)
         while projectsPanel.rowsForTesting.first?.titleForTesting != wanted,
               Date() < countDeadline {
@@ -5699,8 +5723,100 @@ enum RegressionTests {
                    "the badge is not the round mark the sidebar draws a count in: "
                      + "\(String(describing: badge?.size))")
 
+        // The row is halved: the name heads the project's file tree, the
+        // branch heads that project's changes, and the two columns carry on
+        // down the panel under the headings that name them.
+        let row = projectsPanel.rowsForTesting[0]
+        row.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
+        try expect(row.columnDividerForTesting == 150,
+                   "the row does not halve: \(row.columnDividerForTesting)")
+        try expect(row.branchRectForTesting.minX >= row.columnDividerForTesting,
+                   "the branch does not head the right column: "
+                     + "\(row.branchRectForTesting)")
+
+        // The branch names its column the way the project names its own: same
+        // size, same ink, so the row reads as the two headings it is rather
+        // than a name with a note after it.
+        let nameRun = row.nameLabelForTesting
+        let branchRun = row.labelForTesting
+        try expect(nameRun.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    == branchRun.attribute(.font, at: 0, effectiveRange: nil) as? NSFont,
+                   "the branch is not set in the project name's font: "
+                     + "\(String(describing: branchRun.attribute(.font, at: 0, effectiveRange: nil)))")
+        try expect(sameColor(
+                    nameRun.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+                    branchRun.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor),
+                   "the branch is not drawn in the project name's colour")
+
+        let columns = projectsPanel.columnsForTesting
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        columns.layoutSubtreeIfNeeded()
+        try expect(columns.showsRight, "a repository was given no changes column")
+        try expect(columns.left === workspace.sidebar.fileTree.view
+                    && columns.right === projectsPanel.changes.view,
+                   "the columns are not the file tree and the changes")
+        try expect(abs(columns.divider - columns.bounds.width / 2) <= 0.5,
+                   "the columns are not halves: \(columns.divider) of "
+                     + "\(columns.bounds.width)")
+        try expect(workspace.sidebar.fileTree.view.frame.maxX <= columns.divider
+                    && projectsPanel.changes.view.frame.minX >= columns.divider,
+                   "the tree and the changes overlap: "
+                     + "\(workspace.sidebar.fileTree.view.frame) / "
+                     + "\(projectsPanel.changes.view.frame)")
+
+        // The right column lists what the project has changed, and a click on
+        // one asks for that file's diff — the same errand the Git panel's own
+        // list runs.
+        try expect(projectsPanel.changes.rowCountForTesting == 1
+                    && projectsPanel.changes.rowNameForTesting(0) == "changed.txt",
+                   "the changes column does not list the change: "
+                     + "\(projectsPanel.changes.entriesForTesting.map(\.path))")
+        try expect(!projectsPanel.changes.emptyLabelIsVisibleForTesting,
+                   "the changes column still says it is empty")
+        var openedDiff: String?
+        let realDiffHandler = workspace.sidebar.onGitDiff
+        workspace.sidebar.onGitDiff = { entry, _ in openedDiff = entry.path }
+        projectsPanel.changes.clickRowForTesting(0)
+        workspace.sidebar.onGitDiff = realDiffHandler
+        try expect(openedDiff == "changed.txt",
+                   "clicking a change did not ask for its diff: "
+                     + "\(String(describing: openedDiff))")
+        try expect(realDiffHandler != nil,
+                   "the window does not answer for a diff asked for by the panel")
+
+        // The line between the columns is dragged, and the headings above
+        // follow it: a name and a branch have very different lengths, and a
+        // fixed half each suits neither.
+        let scratchDefaults = UserDefaults(suiteName: "puzzle-divider-\(UUID())")!
+        projectsPanel.dividerDefaults = scratchDefaults
+        let wide = columns.bounds.width
+        projectsPanel.dragDividerForTesting(to: wide * 0.75)
+        columns.layoutSubtreeIfNeeded()
+        try expect(abs(columns.divider - wide * 0.75) <= 1,
+                   "the line did not follow the drag: \(columns.divider) of \(wide)")
+        try expect(workspace.sidebar.fileTree.view.frame.width > wide / 2,
+                   "the tree did not take the room the drag gave it: "
+                     + "\(workspace.sidebar.fileTree.view.frame)")
+        row.needsDisplay = true
+        try expect(abs(row.columnDividerForTesting - row.bounds.width * 0.75) <= 1,
+                   "the heading's line did not follow the columns': "
+                     + "\(row.columnDividerForTesting) of \(row.bounds.width)")
+        // Neither column can be squeezed away, however far the drag goes.
+        projectsPanel.dragDividerForTesting(to: -400)
+        columns.layoutSubtreeIfNeeded()
+        try expect(columns.divider >= ProjectColumnsView.minimumColumn,
+                   "the left column was squeezed to \(columns.divider)")
+        projectsPanel.dragDividerForTesting(to: wide + 400)
+        columns.layoutSubtreeIfNeeded()
+        try expect(wide - columns.divider >= ProjectColumnsView.minimumColumn,
+                   "the right column was squeezed to \(wide - columns.divider)")
+        // And it is where the next window will find it.
+        try expect(scratchDefaults.object(forKey: "projects_panel_divider") != nil,
+                   "the line's place was not remembered")
+        projectsPanel.dragDividerForTesting(to: wide / 2)
+
         // The two halves are separate targets: the name goes back to the
-        // Projects panel, the branch opens the branch menu. Measured with a
+        // Projects panel, the branch opens the Git panel. Measured with a
         // short name, since a temporary directory's is long enough to consume
         // the whole strip.
         title.configure(project: "Puzzle", branch: "main")
