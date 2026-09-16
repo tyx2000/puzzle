@@ -88,6 +88,9 @@ final class SearchNavigatorView: FlatView {
     var onPrevious: (() -> Void)?
     var onNext: (() -> Void)?
     var onClear: (() -> Void)?
+    /// The code the buttons float over. They are its sibling, not its child,
+    /// so a scroll over them would otherwise climb to the pane and go nowhere.
+    weak var scrollTarget: NSView?
 
     private let previous = RoundIconButton(symbol: "chevron.up", label: "Previous match")
     private let next = RoundIconButton(symbol: "chevron.down", label: "Next match")
@@ -120,10 +123,22 @@ final class SearchNavigatorView: FlatView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Only the buttons take clicks; the gaps between them belong to the code
-    /// underneath.
+    /// underneath. The stack that arranges them spans the whole of this view,
+    /// so anything that is not inside a button is let through — not just this
+    /// view itself.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        return hit === self ? nil : hit
+        guard let hit = super.hitTest(point) else { return nil }
+        let buttons = [previous, next, clear]
+        return buttons.contains { hit === $0 || hit.isDescendant(of: $0) } ? hit : nil
+    }
+
+    /// A scroll over a button moves the code the button is floating over.
+    override func scrollWheel(with event: NSEvent) {
+        guard let scrollTarget else {
+            super.scrollWheel(with: event)
+            return
+        }
+        scrollTarget.scrollWheel(with: event)
     }
 
     var buttonsForTesting: [RoundIconButton] { [previous, next, clear] }

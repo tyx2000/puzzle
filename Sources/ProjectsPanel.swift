@@ -342,6 +342,7 @@ final class ProjectRowView: NSView {
                     nextEvent: () -> NSEvent?) {
         var dragging = false
         var tracking = true
+        var released: NSPoint?
         while tracking, let next = nextEvent() {
             switch next.type {
             case .leftMouseDragged:
@@ -354,6 +355,7 @@ final class ProjectRowView: NSView {
                 }
                 onDragMoved?(travelled)
             default:
+                released = convert(next.locationInWindow, from: nil)
                 tracking = false
             }
         }
@@ -363,6 +365,11 @@ final class ProjectRowView: NSView {
             onDragEnded?()
             return
         }
+        // A press that could not become a drag — the list cannot be reordered
+        // while a project is open — and was let go somewhere else was not a
+        // click either. Selecting then closed every tab of the project being
+        // left, for a press the reader had already abandoned.
+        guard let released, bounds.contains(released) else { return }
         if branchRect.contains(start), onSelectBranch != nil {
             onSelectBranch?()
         } else {
@@ -507,11 +514,16 @@ final class ProjectColumnsView: FlatView {
     /// has to be claimed before a scroll view swallows it.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        if showsSecond, bounds.contains(local),
-           abs(position(of: local) - divider) <= Self.grabRadius {
-            return self
-        }
+        if isOnGrabBand(local) { return self }
         return super.hitTest(point)
+    }
+
+    /// Whether a point (in this view's own coordinates) is on the band that
+    /// moves the line. Everything else that lands on this view — the 1pt
+    /// borders the panes are inset from — is not the line's to act on.
+    private func isOnGrabBand(_ point: NSPoint) -> Bool {
+        showsSecond && bounds.contains(point)
+            && abs(position(of: point) - divider) <= Self.grabRadius
     }
 
     /// Where a point falls along the axis, measured the way `divider` is: from
@@ -545,29 +557,72 @@ final class ProjectColumnsView: FlatView {
     /// A scroll that lands on the grab band belongs to the list under it. The
     /// band lies over both panes so the line can be caught anywhere along it,
     /// which quietly swallowed the wheel wherever the pointer crossed it.
+    ///
+    /// Only a scroll that was delivered *here* is handed down. One that
+    /// arrives by climbing the responder chain came up out of a pane — a list
+    /// passing on a scroll it could not use — and sending it back down into
+    /// that same pane would bring it straight back, until the stack ran out.
     override func scrollWheel(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+        handleScroll(event, at: convert(event.locationInWindow, from: nil))
+    }
+
+    func handleScroll(_ event: NSEvent, at point: NSPoint) {
+        guard !forwardingScroll, isOnGrabBand(point) else {
+            super.scrollWheel(with: event)
+            return
+        }
         let pane = position(of: point) <= divider ? first : second
         guard let target = pane?.hitTest(point), target !== self else {
             super.scrollWheel(with: event)
             return
         }
+        forwardingScroll = true
+        defer { forwardingScroll = false }
         target.scrollWheel(with: event)
     }
+    private var forwardingScroll = false
 
     /// Tracked in its own event loop, like the rows' own drag: the panes are
     /// laid out as it travels, so what is on screen is the size being chosen.
     override func mouseDown(with event: NSEvent) {
-        guard showsSecond, let window else { return }
+        let tracked = trackDivider(from: convert(event.locationInWindow, from: nil)) {
+            [weak self] in
+            self?.window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp])
+        }
+        if !tracked { super.mouseDown(with: event) }
+    }
+
+    /// The press, from the button going down to its release. A press on a
+    /// pane's border lands on this view too, having no subview of its own to
+    /// land on; only a press on the band moves the line. Returns whether it
+    /// did.
+    @discardableResult
+    func trackDivider(from start: NSPoint, nextEvent: () -> NSEvent?) -> Bool {
+        guard isOnGrabBand(start) else { return false }
         var tracking = true
-        while tracking, let next = window.nextEvent(matching: [.leftMouseDragged,
-                                                              .leftMouseUp]) {
+        while tracking, let next = nextEvent() {
             switch next.type {
             case .leftMouseDragged:
                 moveDivider(to: position(of: convert(next.locationInWindow, from: nil)))
             default:
                 tracking = false
             }
+        }
+        return true
+    }
+
+    /// A whole press, scripted in this view's own points.
+    @discardableResult
+    func pressForTesting(at point: NSPoint, draggingTo end: NSPoint) -> Bool {
+        let events = [NSEvent.EventType.leftMouseDragged, .leftMouseUp].map {
+            NSEvent.mouseEvent(with: $0, location: convert(end, to: nil),
+                               modifierFlags: [], timestamp: 0, windowNumber: 0,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        var index = 0
+        return trackDivider(from: point) {
+            defer { index += 1 }
+            return index < events.count ? events[index] : nil
         }
     }
 
@@ -702,6 +757,11 @@ final class ProjectsPanelViewController: NSViewController {
     /// The row being dragged and where it started, while a drag is running.
     private var draggingRow: ProjectRowView?
     private var dragStartIndex = 0
+    /// What a refresh asked the list to show while a row was being dragged.
+    private var pendingConfiguration: (projects: [(name: String, branch: String,
+                                                   user: String, changes: Int,
+                                                   path: String)],
+                                       active: Int?)?
     private var rows: [ProjectRowView] = []
     private var shown: [String] = []
     private var activeIndex: Int?
@@ -781,6 +841,14 @@ final class ProjectsPanelViewController: NSViewController {
                                changes: Int, path: String)],
                    active: Int?) {
         _ = view
+        // A refresh can land in the middle of a row drag — the drag's own
+        // event loop still runs the main queue. Rearranging then put the row
+        // back where it started, or rebuilt the rows out from under it; the
+        // newest state waits until the row is put down.
+        guard draggingRow == nil else {
+            pendingConfiguration = (projects, active)
+            return
+        }
         let identity = projects.map { "\($0.path)|\($0.branch)" }
         if identity != shown {
             shown = identity
@@ -915,14 +983,31 @@ final class ProjectsPanelViewController: NSViewController {
     }
 
     private func endRowDrag() {
-        guard let row = draggingRow,
-              let landed = stack.arrangedSubviews.firstIndex(of: row) else { return }
+        let row = draggingRow
         draggingRow = nil
-        guard landed != dragStartIndex else { return }
-        onReorder?(dragStartIndex, landed)
+        let pending = pendingConfiguration
+        pendingConfiguration = nil
+        if let row, let landed = stack.arrangedSubviews.firstIndex(of: row),
+           landed != dragStartIndex {
+            // The reorder redraws the list from the model, which already holds
+            // anything the deferred refresh would have said.
+            onReorder?(dragStartIndex, landed)
+            return
+        }
+        if let pending {
+            configure(projects: pending.projects, active: pending.active)
+        }
     }
 
     var rowsForTesting: [ProjectRowView] { rows }
+    /// Start carrying a row, as a press that has travelled far enough does.
+    func beginDragForTesting(_ index: Int) -> Bool {
+        rows.indices.contains(index) && beginRowDrag(rows[index])
+    }
+    func moveDragForTesting(_ index: Int, by travel: CGFloat) {
+        rowDragMoved(rows[index], by: travel)
+    }
+    func endDragForTesting() { endRowDrag() }
     var columnsForTesting: ProjectColumnsView { columns }
     var gitColumnForTesting: ProjectColumnsView { gitColumn }
     /// Drag the line inside the Git column, the way a pointer moves it.

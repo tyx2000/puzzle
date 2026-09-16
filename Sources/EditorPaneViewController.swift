@@ -234,6 +234,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         searchNavigator.onPrevious = { [weak self] in self?.findBar.goToPreviousMatch() }
         searchNavigator.onNext = { [weak self] in self?.findBar.goToNextMatch() }
         searchNavigator.onClear = { [weak self] in self?.hideFindBar() }
+        searchNavigator.scrollTarget = scrollView
         findBar.onMatchesChanged = { [weak self] in self?.refreshSearchNavigator() }
 
         diffHeader.translatesAutoresizingMaskIntoConstraints = false

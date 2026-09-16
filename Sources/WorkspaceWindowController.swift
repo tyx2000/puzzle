@@ -20,6 +20,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var gitSummaryRefreshInFlight = false
     private var gitSummaryRefreshAgain = false
     private var gitSummaryDirectory: URL?
+    /// The generation the refresh in flight was started under. Clearing the
+    /// project moves `gitRefreshGeneration` on, which means that refresh's
+    /// result will be thrown away when it lands.
+    private var gitSummaryGeneration = 0
     /// Branch currently checked out, as last reported by the Git refresh.
     private var currentBranchName: String?
     /// ⌘P's panel and the file list behind it.
@@ -96,6 +100,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     private func wire() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applicationDidBecomeActive(_:)),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
         sidebar.onAddProject = { [weak self] in self?.openFolder(nil) }
         sidebar.onSelectProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
@@ -244,10 +251,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         GitService.forgetRepositoryInfo()
         sidebar.refreshGitPanelIfLoaded()
         refreshGit(requireFollowUp: true)
-        // The rows behind the one on screen are read once, when their project
-        // joins the window. Coming back is the moment they are most likely to
-        // be wrong — a commit, a checkout or a push in another project's own
-        // terminal shows nowhere else.
+    }
+
+    /// The app came back from somewhere else. The rows behind the one on screen
+    /// are read once, when their project joins the window; this is the moment
+    /// they are most likely to be wrong — a commit, a checkout or a push in
+    /// another project's own terminal shows nowhere else.
+    ///
+    /// Tied to the app becoming active rather than to this window becoming key:
+    /// a window becomes key again after every alert and sheet, and each sweep
+    /// is a full status walk of every other project.
+    @objc func applicationDidBecomeActive(_ notification: Notification? = nil) {
+        summarySweepCountForTesting += 1
         refreshProjectSummaries(all: true)
     }
 
@@ -338,7 +353,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.fileTree.setRoot(url)
         // Empty until this project's own refresh lands: the column must not
         // keep showing what the project being left had changed.
-        sidebar.setChanges([], in: url)
+        sidebar.clearChanges(for: url)
         sidebar.setDirectory(url)
         // Show the name straight away; the branch follows the Git refresh.
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
@@ -614,7 +629,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func refreshGit(requireFollowUp: Bool = false) {
         guard let projectURL else { return }
         if gitSummaryRefreshInFlight {
-            if gitSummaryDirectory != projectURL || requireFollowUp {
+            // Coalesced into the one in flight — unless that one no longer
+            // counts. A project collapsed and opened again while its refresh
+            // was out gets that refresh discarded on arrival; dropping this
+            // request as a duplicate of it left the reopened project with no
+            // changes, no history and no branch until something else moved.
+            if gitSummaryDirectory != projectURL || requireFollowUp
+                || gitSummaryGeneration != gitRefreshGeneration {
                 gitSummaryRefreshAgain = true
             }
             return
@@ -623,6 +644,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         gitSummaryDirectory = projectURL
         gitRefreshGeneration += 1
         let generation = gitRefreshGeneration
+        gitSummaryGeneration = generation
         gitSummaryQueue.async { [weak self] in
             let status = GitService.status(in: projectURL)
             let split = GitService.trackedAndUntracked(in: status)
@@ -650,9 +672,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                                      user: status.isRepo ? status.userName : "",
                                      changes: status.isRepo ? status.entries.count : 0,
                                      for: projectURL)
-                    if status.isRepo {
-                        self.window?.subtitle = "\(projectURL.lastPathComponent) — \(status.branch)"
-                    }
+                    // A folder that is not a repository has no branch to name,
+                    // and must not keep the last repository's.
+                    self.window?.subtitle = status.isRepo
+                        ? "\(projectURL.lastPathComponent) — \(status.branch)" : ""
                 }
                 if self.gitSummaryRefreshAgain {
                     self.gitSummaryRefreshAgain = false
@@ -1096,7 +1119,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.hasProject = false
         editor.repositoryRoot = nil
         sidebar.fileTree.clearRoot()
-        sidebar.setChanges([], in: nil)
+        sidebar.clearChanges(for: nil)
         sidebar.setDirectory(nil)
         sidebar.setProjectTitle(project: "", branch: "")
         // Bumping the generation discards a refresh that is already in flight,
@@ -1104,6 +1127,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // longer on screen.
         gitRefreshGeneration += 1
         currentBranchName = nil
+        window?.subtitle = ""
         refreshWindowTitle(activeFile: nil)
     }
 
@@ -1112,6 +1136,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// keeps its entry current from every Git refresh; the others are read
     /// once, when they join the window.
     private var projectSummaries: [URL: ProjectSummary] = [:]
+    /// Summaries of the projects behind the one on screen are read here, off
+    /// the queue that project's own history and commit files are read on, so
+    /// a sweep over several large repositories does not hold those up.
+    private static let summaryQueue = DispatchQueue(label: "app.puzzle.git-summaries",
+                                                    qos: .utility)
     struct ProjectSummary: Equatable {
         var branch: String
         var user: String
@@ -1137,7 +1166,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             ? projects.filter { $0 != projectURL }
             : projects.filter { projectSummaries[$0] == nil }
         guard !wanted.isEmpty else { return }
-        GitService.workQueue.async { [weak self] in
+        Self.summaryQueue.async { [weak self] in
             // One status walk each, giving both the branch and the count. The
             // count is the same number the project on screen reports from its
             // own refresh, so a row does not change meaning when it is opened.
@@ -1147,17 +1176,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                                             user: status.isRepo ? status.userName : "",
                                             changes: status.isRepo ? status.entries.count : 0))
             }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                var changed = false
-                for (url, summary) in found where self.projectSummaries[url] != summary {
-                    self.projectSummaries[url] = summary
-                    changed = true
-                }
-                if changed { self.refreshProjectTabs() }
-            }
+            DispatchQueue.main.async { self?.applySummaries(found) }
         }
     }
+
+    private func applySummaries(_ found: [(URL, ProjectSummary)]) {
+        var changed = false
+        // The project on screen may have been opened while the sweep was
+        // reading it; its own refresh is newer than this snapshot and must not
+        // be replaced by it.
+        for (url, summary) in found
+        where url != projectURL && projectSummaries[url] != summary {
+            projectSummaries[url] = summary
+            changed = true
+        }
+        if changed { refreshProjectTabs() }
+    }
+
+    /// Hand the window a summary as a sweep would, for a project by URL.
+    func applySummaryForTesting(branch: String, changes: Int, for url: URL) {
+        applySummaries([(url.standardizedFileURL.resolvingSymlinksInPath(),
+                         ProjectSummary(branch: branch, user: "", changes: changes))])
+    }
+    /// How many sweeps over the other projects have started.
+    private(set) var summarySweepCountForTesting = 0
 
     /// What the panel reports for the project on screen, which is fresher than
     /// anything cached — it arrives with every Git refresh.

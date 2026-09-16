@@ -79,6 +79,7 @@ enum RegressionTests {
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
         try testBranchMenu()
+        try testSplitterAndRowGestures()
         try testTerminalLaunchScripts()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -520,6 +521,41 @@ enum RegressionTests {
         try expect(abs(text.maxX - inPane.maxX - SearchNavigatorView.trailingInset) <= 0.5,
                    "the buttons are not at the code area's right edge: "
                      + "\(inPane) in \(text)")
+
+        // Only the buttons take the pointer: a click or a scroll between them
+        // belongs to the code underneath.
+        let navigatorBoxes = navigator.buttonsForTesting.map {
+            $0.convert($0.bounds, to: navigator)
+        }
+        let gapY = (navigatorBoxes[0].minY + navigatorBoxes[1].maxY) / 2
+        let inGap = navigator.convert(NSPoint(x: navigator.bounds.midX, y: gapY),
+                                      to: navigator.superview)
+        try expect(navigator.hitTest(inGap) == nil,
+                   "the gap between the buttons still takes the click: "
+                     + "\(String(describing: navigator.hitTest(inGap)))")
+        let onButton = navigator.convert(NSPoint(x: navigatorBoxes[1].midX,
+                                                 y: navigatorBoxes[1].midY),
+                                         to: navigator.superview)
+        try expect(navigator.hitTest(onButton).map {
+                    $0 === navigator.buttonsForTesting[1]
+                        || $0.isDescendant(of: navigator.buttonsForTesting[1]) } == true,
+                   "a button no longer takes its own click")
+        // A scroll over the buttons moves the code they float over.
+        final class ScrollSpy: NSView {
+            var scrolled = 0
+            override func scrollWheel(with event: NSEvent) { scrolled += 1 }
+        }
+        let spy = ScrollSpy()
+        let realTarget = navigator.scrollTarget
+        navigator.scrollTarget = spy
+        if let source = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                wheel1: -10, wheel2: 0, wheel3: 0),
+           let wheel = NSEvent(cgEvent: source) {
+            navigator.buttonsForTesting[1].scrollWheel(with: wheel)
+        }
+        navigator.scrollTarget = realTarget
+        try expect(spy.scrolled == 1 && realTarget === pane.scrollViewForTesting,
+                   "a scroll over the buttons did not reach the code beneath")
 
         // Under the pointer they say they can be clicked.
         for button in navigator.buttonsForTesting {
@@ -3837,18 +3873,26 @@ enum RegressionTests {
 
         // Reordering is offered only with every project collapsed: with one
         // expanded the tree sits between the rows, and "where will it land"
-        // has no honest answer. A drag then means nothing, and the press lands
-        // as the click it started out as.
+        // has no honest answer. A drag then means nothing — and a press let go
+        // away from the row is not a click either: selecting then closed every
+        // tab of the project being left, for a press already abandoned.
         host.window?.contentView?.layoutSubtreeIfNeeded()
         let grip = NSPoint(x: 200, y: ProjectRowView.height / 2)
         let travel = [NSPoint(x: 200, y: grip.y + ProjectRowView.height),
                       NSPoint(x: 200, y: grip.y + ProjectRowView.height * 1.5)]
         let expandedOrder = host.projects.map(\.lastPathComponent)
+        let expandedProject = host.projectURL
         rows[0].pressForTesting(at: grip, draggingThrough: travel)
         try expect(host.projects.map(\.lastPathComponent) == expandedOrder,
                    "a row was dragged while a project was expanded")
+        try expect(host.projectURL == expandedProject && expandedProject != nil,
+                   "a press released away from the row still counted as a click")
+        // Let go on the row itself, it is the click it started out as.
+        rows[0].pressForTesting(at: grip, draggingThrough: [
+            NSPoint(x: grip.x + 30, y: grip.y + 2),
+        ])
         try expect(host.projectURL == nil,
-                   "a press that could not reorder did not land as a click")
+                   "a press released on the row did not land as a click")
 
         // Everything collapsed, the row travels. What is on screen during the
         // drag is what gets committed: the rows change places as it goes
@@ -4968,6 +5012,29 @@ enum RegressionTests {
                    "rows with different branch names do not line up: "
                      + "\(narrow.drawnHashRectForTesting.minX) vs "
                      + "\(wide.drawnHashRectForTesting.minX)")
+        // A commit no branch contains keeps the column too, empty — or its id
+        // and message start out of line with every labelled row.
+        let unlabelled = GitCommitCell()
+        unlabelled.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
+                             branch: "", branchColumnWidth: shared)
+        unlabelled.frame = NSRect(x: 0, y: 0, width: 520, height: Theme.treeRowHeight())
+        if let rep = unlabelled.bitmapImageRepForCachingDisplay(in: unlabelled.bounds) {
+            unlabelled.cacheDisplay(in: unlabelled.bounds, to: rep)
+        }
+        try expect(unlabelled.drawnHashRectForTesting.minX == narrow.drawnHashRectForTesting.minX,
+                   "a commit with no branch is out of line with the rest: "
+                     + "\(unlabelled.drawnHashRectForTesting.minX) vs "
+                     + "\(narrow.drawnHashRectForTesting.minX)")
+
+        // Only the columns asked for: a tagged commit that is also another
+        // branch's tip names neither in its row.
+        _ = GitService.run(["tag", "v1"], in: root)
+        let tagged = GitCommitCell()
+        tagged.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
+                         branch: "main", branchColumnWidth: shared)
+        try expect(!tagged.accessibilityLabel()!.contains("v1"),
+                   "the row names the commit's tag: "
+                     + "\(String(describing: tagged.accessibilityLabel()))")
         try expect(abs(idBox.minX - branchBox.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(historyCell.drawnSubjectXForTesting - idBox.maxX
                             - GitCommitCell.columnGap) <= 0.5,
@@ -5763,6 +5830,120 @@ enum RegressionTests {
                    "a normal file showed the diff header")
     }
 
+    private static func testSplitterAndRowGestures() throws {
+        // A pane that passes a scroll it cannot use up the responder chain, the
+        // way a list shorter than its pane does.
+        final class BubblingPane: NSView {
+            var received = 0
+            override func scrollWheel(with event: NSEvent) {
+                received += 1
+                // A recursion stops here rather than taking the suite down.
+                guard received < 20 else { return }
+                nextResponder?.scrollWheel(with: event)
+            }
+        }
+        let splitter = ProjectColumnsView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let left = BubblingPane()
+        let right = BubblingPane()
+        splitter.first = left
+        splitter.second = right
+        splitter.addSubview(left)
+        splitter.addSubview(right)
+        splitter.layout()
+        guard let wheelSource = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                                        wheelCount: 1, wheel1: -10, wheel2: 0, wheel3: 0),
+              let wheel = NSEvent(cgEvent: wheelSource) else {
+            throw Failure(description: "could not make a scroll event")
+        }
+        // A scroll that climbed out of a pane is not sent back down into it:
+        // that went round and round until the stack ran out.
+        splitter.handleScroll(wheel, at: NSPoint(x: 50, y: 150))
+        try expect(left.received == 0,
+                   "a scroll that came up out of a pane was sent back down into it: "
+                     + "\(left.received)")
+        // One that landed on the band reaches the list under it, once.
+        splitter.handleScroll(wheel, at: NSPoint(x: splitter.divider - 1, y: 150))
+        try expect(left.received == 1,
+                   "a scroll on the band did not reach the list under it just once: "
+                     + "\(left.received)")
+
+        // A press on a pane's border lands on the splitter — there is no
+        // subview there — but only a press on the band moves the line.
+        splitter.firstBorder = Theme.red
+        splitter.layout()
+        let fraction = splitter.fraction
+        try expect(!splitter.pressForTesting(at: NSPoint(x: 0.5, y: 150),
+                                            draggingTo: NSPoint(x: 120, y: 150)),
+                   "a press on a pane's border took hold of the divider")
+        try expect(splitter.fraction == fraction, "a press on a border moved the divider")
+        try expect(splitter.pressForTesting(at: NSPoint(x: splitter.divider, y: 150),
+                                           draggingTo: NSPoint(x: 260, y: 150)),
+                   "a press on the divider did not take hold of it")
+        try expect(abs(splitter.divider - 260) <= 1,
+                   "dragging the divider did not move it: \(splitter.divider)")
+
+        // A refresh that lands while a row is being carried waits for it to be
+        // put down: rearranging then put the row back where it started, and
+        // rebuilding the rows left the drag holding one that was no longer in
+        // the list.
+        let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        _ = panel.view
+        panel.view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        typealias Listed = (name: String, branch: String, user: String, changes: Int,
+                            path: String)
+        let listed: [Listed] = ["a", "b", "c"].map {
+            (name: $0, branch: "", user: "", changes: 0, path: "/\($0)")
+        }
+        panel.configure(projects: listed, active: nil)
+        var reordered: (Int, Int)?
+        panel.onReorder = { reordered = ($0, $1) }
+        let rowsBefore = panel.rowsForTesting
+        try expect(panel.beginDragForTesting(0), "the fixture row could not be picked up")
+        panel.moveDragForTesting(0, by: ProjectRowView.height)
+        let preview = panel.visualOrderForTesting
+        // New branches change the rows' identity, which rebuilds them.
+        let refreshed: [Listed] = listed.map {
+            (name: $0.name, branch: "main", user: $0.user, changes: $0.changes, path: $0.path)
+        }
+        panel.configure(projects: refreshed, active: nil)
+        try expect(panel.visualOrderForTesting == preview,
+                   "a refresh in the middle of a drag put the row back")
+        try expect(panel.rowsForTesting.count == rowsBefore.count
+                    && zip(panel.rowsForTesting, rowsBefore).allSatisfy { $0 === $1 },
+                   "a refresh in the middle of a drag rebuilt the rows under it")
+        panel.endDragForTesting()
+        try expect(reordered?.0 == 0 && reordered?.1 == 1,
+                   "the drop was lost to the refresh: \(String(describing: reordered))")
+        // A drag that ends where it began still delivers the refresh it held.
+        reordered = nil
+        panel.configure(projects: listed, active: nil)
+        try expect(panel.beginDragForTesting(1), "the fixture row could not be picked up again")
+        panel.configure(projects: refreshed, active: nil)
+        panel.endDragForTesting()
+        try expect(reordered == nil
+                    && panel.rowsForTesting.allSatisfy { $0.titleForTesting.hasSuffix("main") },
+                   "the refresh held during a drag was never applied: "
+                     + "\(panel.rowsForTesting.map(\.titleForTesting))")
+
+        // `name-rev` skips an argument it cannot resolve. Pairing its lines
+        // with the hashes by position then gave every later commit its
+        // neighbour's branch; they are read by the hash each line names.
+        let named = GitService.parseBranchNames(
+            "aaa1111 main~2\nccc3333 topic^2~1\nddd4444 undefined\n",
+            for: ["aaa1111", "bbb2222", "ccc3333", "ddd4444"])
+        try expect(named == ["aaa1111": "main", "ccc3333": "topic"],
+                   "branch names were not read by the hash each line names: \(named)")
+
+        // A tinted symbol is made once and kept: every visible tree row draws
+        // its chevron on every redraw.
+        guard let chevron = Theme.symbol("chevron.down", pointSize: 12) else {
+            throw Failure(description: "no chevron symbol")
+        }
+        try expect(SidebarCellDrawing.tintedImageIsReusedForTesting(
+                    chevron, Theme.dimText, size: NSSize(width: 12, height: 12)),
+                   "a tinted symbol was rebuilt on a second draw")
+    }
+
     private static func testBranchMenu() throws {
         func branch(_ name: String, _ author: String, _ date: String,
                     _ stamp: Int64, current: Bool = false,
@@ -6295,22 +6476,27 @@ enum RegressionTests {
         // With more commits than a page holds, reaching the end reads deeper.
         // Measured on a page of two, so the fixture needs no two hundred
         // commits to prove it.
-        ProjectHistoryViewController.pageSize = 2
-        defer { ProjectHistoryViewController.pageSize = 200 }
-        let deep = ProjectHistoryViewController()
-        _ = deep.view
-        deep.view.frame = NSRect(x: 0, y: 0, width: 300, height: 80)
-        deep.view.layoutSubtreeIfNeeded()
-        deep.setSource(directory: root, state: .init(head: "deep"))
-        deep.settleForTesting()
-        try expect(deep.limitForTesting == 2 && deep.rowCountForTesting == 2,
-                   "the first page is not one page deep: \(deep.limitForTesting) / "
-                     + "\(deep.rowCountForTesting)")
-        deep.scrollToEndForTesting()
-        deep.settleForTesting()
-        try expect(deep.limitForTesting > 2 && deep.rowCountForTesting > 2,
-                   "reaching the end did not read deeper: \(deep.limitForTesting) / "
-                     + "\(deep.rowCountForTesting)")
+        // Scoped: `defer` runs when its scope ends, and the whole test is a
+        // long scope — every later project switch here would read two
+        // commits a page.
+        do {
+            ProjectHistoryViewController.pageSize = 2
+            defer { ProjectHistoryViewController.pageSize = 200 }
+            let deep = ProjectHistoryViewController()
+            _ = deep.view
+            deep.view.frame = NSRect(x: 0, y: 0, width: 300, height: 80)
+            deep.view.layoutSubtreeIfNeeded()
+            deep.setSource(directory: root, state: .init(head: "deep"))
+            deep.settleForTesting()
+            try expect(deep.limitForTesting == 2 && deep.rowCountForTesting == 2,
+                       "the first page is not one page deep: \(deep.limitForTesting) / "
+                         + "\(deep.rowCountForTesting)")
+            deep.scrollToEndForTesting()
+            deep.settleForTesting()
+            try expect(deep.limitForTesting > 2 && deep.rowCountForTesting > 2,
+                       "reaching the end did not read deeper: \(deep.limitForTesting) / "
+                         + "\(deep.rowCountForTesting)")
+        }
 
         // Both dragged lines are remembered; a test writes that somewhere of
         // its own rather than into the user's defaults.
@@ -6552,7 +6738,22 @@ enum RegressionTests {
         try expect(GitService.commit("start", in: sibling).code == 0,
                    "the sibling project could not commit")
         workspace.openProject(sibling)
+        projectsPanel.history.settleForTesting()
+        // A switch reads the history once — when the new project's refresh
+        // says where it stands. It read once more for the placeholder state it
+        // was handed first.
+        let readsBefore = projectsPanel.history.loadCountForTesting
         workspace.activateProject(root)
+        let switchDeadline = Date().addingTimeInterval(5)
+        while projectsPanel.history.loadCountForTesting == readsBefore,
+              Date() < switchDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        projectsPanel.history.settleForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        try expect(projectsPanel.history.loadCountForTesting == readsBefore + 1,
+                   "switching projects read the history "
+                     + "\(projectsPanel.history.loadCountForTesting - readsBefore) times")
         func siblingRow() -> String? {
             projectsPanel.rowsForTesting
                 .first { $0.titleForTesting.hasPrefix(sibling.lastPathComponent) }?
@@ -6566,13 +6767,66 @@ enum RegressionTests {
                    "the sibling started with a change: \(String(describing: siblingRow()))")
         // Changed from outside the app, in a project that is not on screen.
         try Data("two\n".utf8).write(to: sibling.appendingPathComponent("b.txt"))
+        // The window becoming key is not the app coming back: that happens
+        // after every alert and sheet, and each sweep walks every repository.
+        let sweepsBefore = workspace.summarySweepCountForTesting
         workspace.windowDidBecomeKey(
             Notification(name: NSWindow.didBecomeKeyNotification))
-        try settleHistory("the row did not follow a change made while the window was "
+        try expect(workspace.summarySweepCountForTesting == sweepsBefore,
+                   "the window becoming key swept every project")
+        workspace.applicationDidBecomeActive()
+        try settleHistory("the row did not follow a change made while the app was "
                             + "away: \(String(describing: siblingRow()))") {
             siblingRow()?.hasSuffix("1") == true
         }
+        try expect(workspace.summarySweepCountForTesting == sweepsBefore + 1,
+                   "coming back did not sweep the other projects")
+        // And every time: a second commit in the terminal, and straight back,
+        // is exactly when the row has to follow again.
+        try Data("three\n".utf8).write(to: sibling.appendingPathComponent("c.txt"))
+        workspace.applicationDidBecomeActive()
+        try settleHistory("coming straight back again did not re-read the other "
+                            + "projects: \(String(describing: siblingRow()))") {
+            siblingRow()?.hasSuffix("2") == true
+        }
 
+        // A sweep that read the project now on screen does not replace what
+        // that project's own refresh said — the snapshot is older.
+        let rootRow = { projectsPanel.rowsForTesting
+            .first { $0.titleForTesting.hasPrefix(root.lastPathComponent) }?.titleForTesting }
+        let rootBefore = rootRow()
+        workspace.applySummaryForTesting(branch: "stale-branch", changes: 99, for: root)
+        try expect(rootRow() == rootBefore,
+                   "a sweep's snapshot replaced the project on screen: "
+                     + "\(String(describing: rootRow()))")
+
+        // Leaving every project leaves no subtitle naming one of them.
+        try expect(workspace.window?.subtitle.isEmpty == false,
+                   "a repository project gave the window no subtitle")
+        workspace.deactivateProject()
+        try expect(workspace.window?.subtitle == "",
+                   "the subtitle outlived the project: "
+                     + "\(String(describing: workspace.window?.subtitle))")
+
+        // Collapsed and opened again while a refresh is still out — a save, a
+        // return to the window. That refresh is thrown away on arrival, and the
+        // one the reopening asked for used to be dropped as its duplicate: the
+        // project came back with no history, no changes and no branch.
+        workspace.activateProject(root)
+        projectsPanel.history.settleForTesting()
+        workspace.refreshGit()
+        workspace.deactivateProject()
+        workspace.activateProject(root)
+        let reopenDeadline = Date().addingTimeInterval(5)
+        while (projectsPanel.history.commitSubjectsForTesting.isEmpty
+                || title.titleForTesting.branch.isEmpty), Date() < reopenDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(!projectsPanel.history.commitSubjectsForTesting.isEmpty,
+                   "a project reopened during a refresh came back with no history")
+        try expect(title.titleForTesting.branch == "trunk",
+                   "a project reopened during a refresh came back with no branch: "
+                     + "\(title.titleForTesting.branch)")
     }
 
     private static func testDiffGutterUsesFileLineNumbers() throws {
@@ -6900,6 +7154,27 @@ enum RegressionTests {
                    "the reason — the only part a crash report drops — was not recorded")
         try expect(entry.contains("screens:") && entry.contains("windows:"),
                    "the display context was not recorded, which is what these arrive during")
+
+        // Raised off the main thread, the handler runs there too. The reason
+        // and the stack are still written; AppKit is not asked, since asking
+        // it from there can deadlock or throw again inside the handler.
+        let offMainStart = (try? Data(contentsOf: url).count) ?? 0
+        let written2 = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            ExceptionLog.record(NSException(name: .invalidArgumentException,
+                                            reason: "raised off the main thread in a test",
+                                            userInfo: nil))
+            written2.signal()
+        }
+        guard written2.wait(timeout: .now() + 5) == .success else {
+            throw Failure(description: "recording off the main thread never finished")
+        }
+        let offMain = String(((try? String(contentsOf: url, encoding: .utf8)) ?? "")
+                                .dropFirst(offMainStart))
+        try expect(offMain.contains("raised off the main thread in a test"),
+                   "an exception raised off the main thread lost its reason")
+        try expect(offMain.contains("not read") && !offMain.contains("screens: "),
+                   "the handler asked AppKit from a background thread: \(offMain)")
     }
 
     private static func testHoverSurvivesTheRowsGoingAway() throws {

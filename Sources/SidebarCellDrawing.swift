@@ -283,21 +283,58 @@ enum SidebarCellDrawing {
         // a block where the glyph should be. Tinting inside an image of its
         // own starts from transparency, where the glyph is the only opaque
         // thing there is.
-        let painted: NSImage
-        if let tint {
-            painted = NSImage(size: fitted.size, flipped: false) { rect in
-                image.draw(in: rect, from: .zero, operation: .sourceOver,
-                           fraction: 1, respectFlipped: true, hints: nil)
-                tint.setFill()
-                rect.fill(using: .sourceAtop)
-                return true
-            }
-        } else {
-            painted = image
-        }
+        let painted = tint.map { tinted(image, $0, size: fitted.size) } ?? image
         painted.draw(in: fitted, from: .zero, operation: .sourceOver,
                      fraction: 1, respectFlipped: true, hints: nil)
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// A symbol in a colour, made once and kept: every visible tree row draws
+    /// its chevron on every redraw, and building the tinted copy afresh each
+    /// time rasterised the symbol twice per row per frame.
+    private static func tinted(_ image: NSImage, _ tint: NSColor, size: NSSize) -> NSImage {
+        let colour = tint.usingColorSpace(.sRGB) ?? tint
+        let key = "\(ObjectIdentifier(image).hashValue)|\(colour.redComponent)|"
+            + "\(colour.greenComponent)|\(colour.blueComponent)|\(colour.alphaComponent)|"
+            + "\(size.width)x\(size.height)" as NSString
+        // The key names the source by identity, which a later image can reuse
+        // once the first is gone; the entry keeps a weak hold on its source and
+        // is only trusted while that is still the image being drawn.
+        if let cached = tintedImages.object(forKey: key), cached.source === image {
+            return cached.image
+        }
+        let made = NSImage(size: size, flipped: false) { rect in
+            image.draw(in: rect, from: .zero, operation: .sourceOver,
+                       fraction: 1, respectFlipped: true, hints: nil)
+            tint.setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tintedImages.setObject(TintedImage(source: image, image: made), forKey: key)
+        return made
+    }
+
+    private final class TintedImage {
+        weak var source: NSImage?
+        let image: NSImage
+        init(source: NSImage, image: NSImage) {
+            self.source = source
+            self.image = image
+        }
+    }
+
+    private static let tintedImages: NSCache<NSString, TintedImage> = {
+        let cache = NSCache<NSString, TintedImage>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    /// Whether drawing the same symbol in the same colour twice reuses the
+    /// first tinted copy.
+    static func tintedImageIsReusedForTesting(_ image: NSImage, _ tint: NSColor,
+                                              size: NSSize) -> Bool {
+        let first = tinted(image, tint, size: size)
+        return tinted(image, tint, size: size) === first
     }
 
     /// Draw a primary name at its natural width and let the dim secondary path

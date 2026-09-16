@@ -65,16 +65,9 @@ final class GitCommitCell: DrawnSidebarCell {
         // to be tellable apart at a glance — the arrow rides with the metadata
         // rather than taking room from the subject.
         metaColor = pending ? Theme.cursor : Theme.dimText
-        // One line can only carry so much. Everything the row had to drop —
-        // the commit id, where a branch or tag points — is one hover away.
-        var details = [commit.shortHash, commit.subject, commit.blameSummary]
-        if !branch.isEmpty { details.insert(branch, at: 1) }
-        if !commit.refLabels.isEmpty { details.insert(commit.refLabels.joined(separator: ", "), at: 1) }
-        if pending { details.append("not pushed") }
         // No bubble: the row carries the branch, the id, the message, the name
         // and the time itself, and a tip over every row is then only something
         // that follows the pointer down the list.
-        _ = details
         toolTip = nil
         exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
                                 + (branch.isEmpty ? "" : "on \(branch), ")
@@ -93,28 +86,31 @@ final class GitCommitCell: DrawnSidebarCell {
         }
         var content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
                              height: bounds.height)
-        // The branch the commit sits on, first: a list of everything behind
-        // HEAD holds commits made on branches that were merged in, and the
-        // subject alone does not say which.
         // Branch, then the commit's id, each a column of its own ahead of the
         // message: the list holds commits merged in from other branches, and
         // the id is what names one to Git.
         let metaFont = Theme.uiFont(9.5)
         let baseline = SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11), in: content)
+        /// A column of its own. With a width shared down the list it is kept
+        /// even for a row that has nothing to put in it — a commit no branch
+        /// contains — or that row's later columns start out of line.
         func leadingColumn(_ text: String, color: NSColor, share: CGFloat,
                            lineBreak: NSLineBreakMode, width fixed: CGFloat? = nil) -> NSRect? {
-            guard !text.isEmpty else { return nil }
+            let reserved = (fixed ?? 0) > 0
+            guard !text.isEmpty || reserved else { return nil }
             let natural = fixed ?? ceil((text as NSString)
                                             .size(withAttributes: [.font: metaFont]).width) + 2
             let width = min(natural, floor(content.width * share))
             let box = NSRect(x: content.minX, y: content.minY,
                              width: width, height: content.height)
-            SidebarCellDrawing.text(text, font: metaFont, color: color,
-                                    baseline: baseline, in: box, lineBreak: lineBreak)
+            if !text.isEmpty {
+                SidebarCellDrawing.text(text, font: metaFont, color: color,
+                                        baseline: baseline, in: box, lineBreak: lineBreak)
+            }
             let taken = width + Self.columnGap
             content = NSRect(x: content.minX + taken, y: content.minY,
                              width: max(0, content.width - taken), height: content.height)
-            return box
+            return text.isEmpty ? nil : box
         }
         // A quarter at most for the branch: the message is what the row is
         // read for, and a long branch name must not take the whole line.
@@ -165,8 +161,8 @@ final class GitCommitCell: DrawnSidebarCell {
             message = NSRect(x: top.minX + taken, y: top.minY,
                              width: max(0, top.width - taken), height: top.height)
         }
-        drawnSubjectRectForTesting = message
         drawnSubjectXForTesting = message.minX
+        drawnSubjectRectForTesting = message
         SidebarCellDrawing.text(
             subject, font: subjectFont, color: Theme.foreground,
             baseline: SidebarCellDrawing.centeredBaseline(for: subjectFont, in: message),

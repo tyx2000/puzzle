@@ -232,9 +232,16 @@ final class SidebarViewController: NSViewController {
     /// and where that project stands — the history under the changes is re-read
     /// only when something it shows has moved.
     func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?,
-                    state: ProjectHistoryViewController.State = .init()) {
+                    state: ProjectHistoryViewController.State) {
         projectsPanel.changes.setEntries(entries, in: directory)
         projectsPanel.history.setSource(directory: directory, state: state)
+    }
+
+    /// Empty both lists for a project whose Git state is not known yet. Nothing
+    /// is read: the refresh that follows fills them.
+    func clearChanges(for directory: URL?) {
+        projectsPanel.changes.setEntries([], in: directory)
+        projectsPanel.history.prepare(for: directory)
     }
     func showSearch() {
         let search = ensureSearch()

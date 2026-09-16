@@ -606,19 +606,31 @@ enum GitService {
     /// merged in. Git records no branch on a commit; `name-rev` answers the
     /// question that does have an answer, the nearest branch that contains it,
     /// and answers it for the whole list in one process.
+    ///
+    /// Read by what each line names, not by where it sits: `name-rev` skips an
+    /// argument it cannot resolve — an abbreviation that stopped being unique
+    /// between the log and this call — and pairing lines with hashes by
+    /// position then labelled every later commit with its neighbour's branch.
     static func branchNames(for hashes: [String],
                             in directory: URL) -> [String: String] {
         guard !hashes.isEmpty else { return [:] }
-        let result = run(["name-rev", "--name-only", "--refs=refs/heads/*"] + hashes,
-                         in: directory)
+        let result = run(["name-rev", "--refs=refs/heads/*"] + hashes, in: directory)
         guard result.code == 0 else { return [:] }
-        let names = result.out.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+        return parseBranchNames(result.out, for: Set(hashes))
+    }
+
+    /// `<hash> <name>` per line, for the hashes that were asked about.
+    static func parseBranchNames(_ output: String,
+                                 for hashes: Set<String>) -> [String: String] {
         var found: [String: String] = [:]
-        for (hash, name) in zip(hashes, names) {
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let hash = String(parts[0])
+            guard hashes.contains(hash) else { continue }
             // `main~3`, `feature^2~1`: the branch is the part before the walk
             // back from its tip. Commits no branch contains read "undefined".
-            let branch = name.prefix { $0 != "~" && $0 != "^" }
+            let branch = parts[1].prefix { $0 != "~" && $0 != "^" }
             guard !branch.isEmpty, branch != "undefined" else { continue }
             found[hash] = String(branch)
         }

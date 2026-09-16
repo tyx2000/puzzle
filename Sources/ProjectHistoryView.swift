@@ -22,7 +22,9 @@ final class ProjectHistoryViewController: NSViewController {
     /// themselves, and the ↑ on the ones not pushed yet — so the log is read
     /// again exactly when one of them moves, and left alone through the saves
     /// and refreshes that move neither.
-    private var state = State()
+    /// Nil until a Git refresh has said where the project stands — which is
+    /// what the first read waits for.
+    private var state: State?
     struct State: Equatable {
         var head = ""
         var ahead = 0
@@ -92,24 +94,35 @@ final class ProjectHistoryViewController: NSViewController {
     /// rows show has actually moved — a commit, or a push.
     func setSource(directory: URL?, state: State) {
         guard directory != self.directory || state != self.state else { return }
-        let switched = directory != self.directory
-        self.directory = directory
+        prepare(for: directory)
         self.state = state
-        if switched {
-            // Another project's commits must not sit here while its own load
-            // is still running, and its depth is not this one's.
-            limit = Self.pageSize
-            hasMore = true
-            commits = []
-            unpushed = []
-            branches = [:]
-            expanded = []
-            files = [:]
-            rebuildRows()
-        }
-        guard let directory else { return }
+        // No commit to read from: not a repository.
+        guard let directory, !state.head.isEmpty else { return }
         load(directory)
     }
+
+    /// Empty the list for a project whose state is not known yet, without
+    /// reading anything: the refresh that follows says where it stands, and
+    /// reading now only to read again then cost every project switch a
+    /// second `git log`.
+    func prepare(for directory: URL?) {
+        guard directory != self.directory else { return }
+        self.directory = directory
+        state = nil
+        // Another project's commits must not sit here while its own load is
+        // still running, and its depth is not this one's.
+        limit = Self.pageSize
+        hasMore = true
+        commits = []
+        unpushed = []
+        branches = [:]
+        expanded = []
+        files = [:]
+        rebuildRows()
+    }
+
+    /// How many times the log has been read, for a test to count them.
+    private(set) var loadCountForTesting = 0
 
     private func load(_ directory: URL) {
         guard !loading else {
@@ -117,6 +130,7 @@ final class ProjectHistoryViewController: NSViewController {
             return
         }
         loading = true
+        loadCountForTesting += 1
         // Read on the main thread, where it is set; the queue below only uses
         // the number.
         let wanted = limit

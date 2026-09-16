@@ -37,17 +37,24 @@ enum ExceptionLog {
         \(exception.reason ?? "(no reason given)")
 
         """
-        // The screen layout and the window sizes, because the exceptions worth
-        // reading here arrive during a display pass — a wake, a resolution
-        // change, a display coming or going.
-        entry += "screens: "
-            + NSScreen.screens.map { NSStringFromRect($0.frame) }.joined(separator: " ")
-            + "\n"
-        entry += "windows: "
-            + NSApp.windows.map { NSStringFromRect($0.frame) }.joined(separator: " ")
-            + "\n"
+        // The stack first, and written before anything else is asked: the
+        // handler runs on whichever thread threw, and the reason and the frames
+        // are what must survive if what follows goes wrong too.
         entry += exception.callStackSymbols.joined(separator: "\n") + "\n"
         append(entry)
+        // The screen layout and the window sizes, because the exceptions worth
+        // reading here arrive during a display pass — a wake, a resolution
+        // change, a display coming or going. AppKit is only safe to ask on the
+        // main thread; from a background queue, asking could deadlock against
+        // the main thread or throw again inside the handler.
+        guard Thread.isMainThread else {
+            append("screens/windows: not read — raised off the main thread\n")
+            return
+        }
+        let screens = NSScreen.screens.map { NSStringFromRect($0.frame) }
+        let windows = (NSApp?.windows ?? []).map { NSStringFromRect($0.frame) }
+        append("screens: " + screens.joined(separator: " ") + "\n"
+               + "windows: " + windows.joined(separator: " ") + "\n")
     }
 
     private static func append(_ text: String) {
