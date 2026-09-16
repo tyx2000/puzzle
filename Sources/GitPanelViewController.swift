@@ -32,6 +32,11 @@ final class GitPanelViewController: NSViewController {
     private var history: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — rendered with an ↑ badge.
     private var unpushed: Set<String> = []
+    /// The branch each listed commit sits on — the list is everything behind
+    /// HEAD, including work merged in from other branches.
+    private var historyBranches: [String: String] = [:]
+    /// One width for the branch column across the whole list.
+    private var historyBranchColumnWidth: CGFloat = 0
 
     /// `git log --abbrev` and `git rev-list --abbrev-commit` both honour
     /// core.abbrev, but a repo can still hand back different lengths, so match
@@ -403,10 +408,14 @@ final class GitPanelViewController: NSViewController {
             let loadHistory = {
                 let log = GitService.log(in: directory, limit: 40)
                 let pending = GitService.unpushedHashes(in: directory)
+                let named = GitService.branchNames(for: log.map(\.shortHash), in: directory)
                 DispatchQueue.main.async {
                     guard self.directory == directory else { return }
                     self.history = log
                     self.unpushed = pending
+                    self.historyBranches = named
+                    self.historyBranchColumnWidth =
+                        GitCommitCell.branchColumnWidth(for: named.values)
                     self.rebuildHistoryRows()
                     if self.showingHistory { self.table.reloadData() }
                 }
@@ -1193,6 +1202,10 @@ final class GitPanelViewController: NSViewController {
         }
         return ("", "", "")
     }
+    /// The commit cell a History row builds, to be drawn and measured.
+    func commitCellForTesting(_ row: Int) -> GitCommitCell? {
+        tableView(table, viewFor: nil, row: row) as? GitCommitCell
+    }
     func applyStatusForTesting(_ status: GitService.Status, in directory: URL) {
         _ = view
         applyStatus(status, in: directory)
@@ -1381,7 +1394,9 @@ extension GitPanelViewController: NSTableViewDelegate {
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitCommitCell) ?? GitCommitCell()
                 cell.identifier = id
-                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash))
+                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
+                               branch: historyBranches[commit.shortHash] ?? "",
+                               branchColumnWidth: historyBranchColumnWidth)
                 return cell
 
             case .file(let file, _):

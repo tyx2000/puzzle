@@ -441,46 +441,6 @@ final class ProjectRowView: NSView {
     }
 }
 
-/// The strip that names a list in the Projects panel.
-///
-/// Why a strip rather than a tint over the whole region: from the panel's
-/// ground to the first state a row can be in — hovered — is about fifteen
-/// steps per channel, and selected is fifteen more. Divide that range between
-/// three regions and a hovered row in one reads as the plain ground of
-/// another; the marks stop meaning what they mean. A header lifts one surface
-/// that no row is ever drawn on, and leaves the rows their whole range.
-final class SidebarSectionHeader: FlatView {
-    static let height: CGFloat = 20
-    private let title: String
-
-    init(title: String) {
-        self.title = title
-        super.init(frame: .zero)
-        fillColor = Theme.activeTab
-        bottomBorder = true
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-        setAccessibilityLabel(title)
-    }
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override var isFlipped: Bool { true }
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: Self.height)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let font = Theme.uiFont(9.5)
-        SidebarCellDrawing.text(
-            title, font: font, color: Theme.dimText,
-            baseline: SidebarCellDrawing.centeredBaseline(for: font, in: bounds),
-            in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height))
-    }
-
-    var titleForTesting: String { title }
-}
-
 /// What an expanded project shows: its file tree and its changes, side by
 /// side under the two headings its row draws. Laid out by hand so the line
 /// between the columns lands on exactly the point the row's does.
@@ -507,11 +467,22 @@ final class ProjectColumnsView: FlatView {
     }
     var onFractionChanged: ((CGFloat) -> Void)?
 
+    /// A border drawn inside a pane, in the colour that says which region it
+    /// is. The pane's content is inset by the width, so the border sits inside
+    /// the region rather than over its first row.
+    var firstBorder: NSColor? { didSet { needsLayout = true; needsDisplay = true } }
+    var secondBorder: NSColor? { didSet { needsLayout = true; needsDisplay = true } }
+    static let borderWidth: CGFloat = 1
+    /// The hues are the panel's own, taken right down: at full strength three
+    /// saturated frames are the loudest thing in a sidebar whose whole palette
+    /// is two steps off black.
+    static func regionBorder(_ hue: NSColor) -> NSColor { hue.withAlphaComponent(0.4) }
+
     /// Neither pane may be squeezed away. A column needs this much to say a
     /// name; a list stacked on another needs only a couple of rows.
     static let minimumColumn: CGFloat = 90
-    /// A stacked pane keeps its heading and a row under it.
-    static let minimumRow: CGFloat = SidebarSectionHeader.height + 44
+    /// A stacked pane keeps a couple of rows.
+    static let minimumRow: CGFloat = 44
     var minimumPane: CGFloat = minimumColumn
     /// How far either side of the line answers to a drag.
     private static let grabRadius: CGFloat = 3
@@ -571,6 +542,19 @@ final class ProjectColumnsView: FlatView {
         }
     }
 
+    /// A scroll that lands on the grab band belongs to the list under it. The
+    /// band lies over both panes so the line can be caught anywhere along it,
+    /// which quietly swallowed the wheel wherever the pointer crossed it.
+    override func scrollWheel(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let pane = position(of: point) <= divider ? first : second
+        guard let target = pane?.hitTest(point), target !== self else {
+            super.scrollWheel(with: event)
+            return
+        }
+        target.scrollWheel(with: event)
+    }
+
     /// Tracked in its own event loop, like the rows' own drag: the panes are
     /// laid out as it travels, so what is on screen is the size being chosen.
     override func mouseDown(with event: NSEvent) {
@@ -598,32 +582,78 @@ final class ProjectColumnsView: FlatView {
         onFractionChanged?(next)
     }
 
-    override func layout() {
-        super.layout()
-        second?.isHidden = !showsSecond
+    /// The room each pane is given, before its own border is taken out of it.
+    var firstPaneRect: NSRect {
         switch axis {
         case .horizontal:
-            first?.frame = NSRect(x: 0, y: 0, width: divider, height: bounds.height)
-            guard showsSecond else { return }
-            second?.frame = NSRect(x: divider + 1, y: 0,
-                                   width: max(0, bounds.width - divider - 1),
-                                   height: bounds.height)
+            return NSRect(x: 0, y: 0, width: divider, height: bounds.height)
         case .vertical:
             // Unflipped: the first pane is the top one, so it starts a
             // divider's worth below the view's own top edge.
-            first?.frame = NSRect(x: 0, y: bounds.height - divider,
-                                  width: bounds.width, height: divider)
-            guard showsSecond else { return }
-            second?.frame = NSRect(x: 0, y: 0, width: bounds.width,
-                                   height: max(0, bounds.height - divider - 1))
+            return NSRect(x: 0, y: bounds.height - divider,
+                          width: bounds.width, height: divider)
         }
+    }
+    var secondPaneRect: NSRect {
+        switch axis {
+        case .horizontal:
+            return NSRect(x: divider + 1, y: 0,
+                          width: max(0, bounds.width - divider - 1), height: bounds.height)
+        case .vertical:
+            return NSRect(x: 0, y: 0, width: bounds.width,
+                          height: max(0, bounds.height - divider - 1))
+        }
+    }
+
+    private func content(of pane: NSRect, bordered: Bool) -> NSRect {
+        guard bordered else { return pane }
+        return pane.insetBy(dx: Self.borderWidth, dy: Self.borderWidth)
+    }
+
+    /// A pane is positioned by hand, and everything inside it by constraints.
+    /// Handing it a new frame only marks its own subtree as needing layout, so
+    /// a scroll view inside it keeps the size it had until some later pass —
+    /// and a list whose clip view is still the old size scrolls by the wrong
+    /// amount, or not at all. Settle each pane before leaving.
+    override func layout() {
+        super.layout()
+        second?.isHidden = !showsSecond
+        first?.frame = content(of: firstPaneRect, bordered: firstBorder != nil)
+        first?.layoutSubtreeIfNeeded()
+        guard showsSecond else { return }
+        second?.frame = content(of: secondPaneRect, bordered: secondBorder != nil)
+        second?.layoutSubtreeIfNeeded()
+    }
+
+    /// A resize that does not come through the layout engine — an animated
+    /// frame change, a window growing — still moves the line, so the panes
+    /// have to be placed again.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        draw(border: firstBorder, around: firstPaneRect)
         guard showsSecond else { return }
+        draw(border: secondBorder, around: secondPaneRect)
+        // Two coloured borders meeting already separate the panes; a grey line
+        // between them is a third edge saying the same thing.
+        guard firstBorder == nil, secondBorder == nil else { return }
         Theme.border.setFill()
         dividerRect(radius: 0).fill()
+    }
+
+    private func draw(border: NSColor?, around pane: NSRect) {
+        guard let border, pane.width > 0, pane.height > 0 else { return }
+        border.setStroke()
+        let path = NSBezierPath(rect: pane.insetBy(dx: Self.borderWidth / 2,
+                                                   dy: Self.borderWidth / 2))
+        path.lineWidth = Self.borderWidth
+        path.stroke()
     }
 }
 
@@ -707,6 +737,11 @@ final class ProjectsPanelViewController: NSViewController {
         gitColumn.addSubview(history.view)
         columns.first = fileTree.view
         columns.second = gitColumn
+        // One hue per region, drawn inside it: the tree, what has changed, and
+        // what has been committed.
+        columns.firstBorder = ProjectColumnsView.regionBorder(Theme.red)
+        gitColumn.firstBorder = ProjectColumnsView.regionBorder(Theme.orange)
+        gitColumn.secondBorder = ProjectColumnsView.regionBorder(Theme.purple)
         dividerFraction = Self.storedDividerFraction(dividerDefaults)
         columns.fraction = dividerFraction
         columns.onFractionChanged = { [weak self] fraction in

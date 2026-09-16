@@ -14,6 +14,10 @@ final class FindBarView: FlatView {
     var onClose: (() -> Void)?
     /// The bar grew or shrank a row; the pane re-lays its content.
     var onHeightChanged: (() -> Void)?
+    /// The set of matches changed — found, lost, or stepped through. The pane
+    /// shows or hides the buttons that ride beside the text on the strength of
+    /// this.
+    var onMatchesChanged: (() -> Void)?
 
     private let input = SearchInputView()
     private let countLabel = NSTextField(labelWithString: "")
@@ -424,6 +428,11 @@ final class FindBarView: FlatView {
 
     @objc private func goNext() { step(1) }
     @objc private func goPrev() { step(-1) }
+    /// Stepping from outside the bar — the buttons beside the text.
+    func goToNextMatch() { step(1) }
+    func goToPreviousMatch() { step(-1) }
+    /// Whether there is anything to step through.
+    var hasMatches: Bool { !matches.isEmpty }
     @objc private func closeBar() { onClose?() }
 
     private func step(_ delta: Int) {
@@ -466,6 +475,7 @@ final class FindBarView: FlatView {
     }
 
     func clearHighlights() {
+        defer { onMatchesChanged?() }
         matches.removeAll(keepingCapacity: false)
         totalMatches = 0
         current = -1
@@ -477,6 +487,7 @@ final class FindBarView: FlatView {
     }
 
     private func updateCount() {
+        defer { onMatchesChanged?() }
         if matches.isEmpty {
             countLabel.stringValue = input.stringValue.isEmpty ? "" : "No results"
         } else if totalMatches > matches.count {
@@ -487,6 +498,10 @@ final class FindBarView: FlatView {
         }
     }
 
+    /// Which match the bar is on, by its place in the text.
+    var currentMatchForTesting: NSRange? {
+        matches.indices.contains(current) ? matches[current] : nil
+    }
     var retainedMatchCountForTesting: Int { matches.count }
     var totalMatchCountForTesting: Int { totalMatches }
 }

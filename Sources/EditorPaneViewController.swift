@@ -79,6 +79,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var isActivePane = false { didSet { tabBar.paneActive = isActivePane } }
 
     private let findBar = FindBarView()
+    /// The three round buttons that ride beside the text while a search has
+    /// results. The bar itself is at the top of the pane, a long way from what
+    /// is being read.
+    private let searchNavigator = SearchNavigatorView()
     private var findBarHeight: NSLayoutConstraint!
     private var findStates: [URL: FindBarView.State] = [:]
     /// The document actually bound to the shared bar, even while tab indices change.
@@ -225,6 +229,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         container.addSubview(findBar)
 
+        searchNavigator.translatesAutoresizingMaskIntoConstraints = false
+        searchNavigator.isHidden = true
+        searchNavigator.onPrevious = { [weak self] in self?.findBar.goToPreviousMatch() }
+        searchNavigator.onNext = { [weak self] in self?.findBar.goToNextMatch() }
+        searchNavigator.onClear = { [weak self] in self?.hideFindBar() }
+        findBar.onMatchesChanged = { [weak self] in self?.refreshSearchNavigator() }
+
         diffHeader.translatesAutoresizingMaskIntoConstraints = false
         diffHeader.isHidden = true
         diffHeader.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
@@ -254,6 +265,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        // Added last so it floats over the text, and pinned to the text's own
+        // area rather than the pane's: the bar and the tab strip above it are
+        // not what these belong beside.
+        container.addSubview(searchNavigator)
+        NSLayoutConstraint.activate([
+            searchNavigator.trailingAnchor.constraint(
+                equalTo: scrollView.trailingAnchor,
+                constant: -SearchNavigatorView.trailingInset),
+            searchNavigator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
         self.view = container
         reloadTabs()
@@ -614,6 +635,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return persistForTesting(document)
     }
     var findBarForTesting: FindBarView { findBar }
+    var searchNavigatorForTesting: SearchNavigatorView { searchNavigator }
+    /// The code area itself, which the navigator is measured against.
+    var scrollViewForTesting: NSScrollView { scrollView }
     var textForTesting: String { textView.string }
     var isModifiedForTesting: Bool { currentDocument?.isModified == true }
     func undoForTesting() { textView.undoManager?.undo() }
@@ -841,6 +865,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBar.setReplaceVisible(replacing)
         findBarHeight.constant = findBar.preferredHeight
         if !replacing { findBar.focus() }
+        refreshSearchNavigator()
+    }
+
+    /// The buttons are there only while a search has something to step through:
+    /// an empty query, or one that finds nothing, has nothing for them to do.
+    private func refreshSearchNavigator() {
+        searchNavigator.isHidden = findBar.isHidden || !findBar.hasMatches
     }
 
     private func saveFindState() {
@@ -855,6 +886,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBarURL = url
         findBar.restore(url.flatMap { findStates[$0] } ?? .init(), to: textView)
         findBarHeight.constant = findBar.isHidden ? 0 : findBar.preferredHeight
+        refreshSearchNavigator()
     }
 
     func hideFindBar() {
@@ -862,6 +894,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findBar.clearHighlights()
         findBar.isHidden = true
         findBarHeight.constant = 0
+        refreshSearchNavigator()
         view.window?.makeFirstResponder(textView)
     }
 

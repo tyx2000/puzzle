@@ -87,6 +87,9 @@ enum Theme {
     static let red = hex(0xf07178)
     static let green = hex(0xaad94c)
     static let yellow = hex(0xffb454)
+    /// Ayu's own orange — the hue it paints keywords in, named here as a hue
+    /// so a panel can ask for it without asking for "keyword".
+    static let orange = hex(0xff8f40)
     static let blue = hex(0x39bae6)
     static let purple = hex(0xd2a6ff)
     static let cyan = hex(0x95e6cb)

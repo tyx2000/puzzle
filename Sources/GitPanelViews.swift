@@ -12,9 +12,50 @@ final class GitCommitCell: DrawnSidebarCell {
     private var subject = ""
     private var author = ""
     private var date = ""
+    private var branch = ""
+    private var commitID = ""
     private var metaColor = NSColor.clear
+    /// Between every column in the row.
+    static let columnGap: CGFloat = 15
+    /// How much room the row gets. A narrow column cannot hold a subject, a
+    /// branch, a name and a time on one line without losing the subject, which
+    /// is what the row is read for; given a second line the subject has the
+    /// first to itself.
+    enum Layout { case oneLine, twoLine }
+    private var layout: Layout = .oneLine
+    static func height(for layout: Layout) -> CGFloat {
+        layout == .oneLine ? Theme.treeRowHeight() : Theme.treeRowHeight() + 14
+    }
 
-    func configure(commit: GitService.Commit, pending: Bool) {
+    /// Where the last draw put each column, so the gaps between them can be
+    /// measured rather than eyeballed.
+    private(set) var drawnBranchRectForTesting: NSRect = .zero
+    private(set) var drawnSubjectXForTesting: CGFloat = 0
+    private(set) var drawnSubjectRectForTesting: NSRect = .zero
+    private(set) var drawnAuthorRectForTesting: NSRect = .zero
+    private(set) var drawnDateRectForTesting: NSRect = .zero
+    private(set) var drawnHashRectForTesting: NSRect = .zero
+
+    /// The width every row in the list gives its branch, so the id and the
+    /// message start at the same place on each — they are columns, and a
+    /// longer branch name on one row must not push that row's out of line.
+    private var branchColumnWidth: CGFloat?
+
+    /// The width a list of these rows should give the branch column: its
+    /// widest name.
+    static func branchColumnWidth(for names: some Sequence<String>) -> CGFloat {
+        let font = Theme.uiFont(9.5)
+        return names.reduce(0) { widest, name in
+            max(widest, ceil((name as NSString).size(withAttributes: [.font: font]).width) + 2)
+        }
+    }
+
+    func configure(commit: GitService.Commit, pending: Bool, branch: String = "",
+                   layout: Layout = .oneLine, branchColumnWidth: CGFloat? = nil) {
+        self.branch = branch
+        self.branchColumnWidth = branchColumnWidth
+        self.layout = layout
+        commitID = commit.shortHash
         subject = commit.subject
         // The name gives way before the timestamp does: a truncated name still
         // reads, a truncated date does not.
@@ -27,23 +68,148 @@ final class GitCommitCell: DrawnSidebarCell {
         // One line can only carry so much. Everything the row had to drop —
         // the commit id, where a branch or tag points — is one hover away.
         var details = [commit.shortHash, commit.subject, commit.blameSummary]
+        if !branch.isEmpty { details.insert(branch, at: 1) }
         if !commit.refLabels.isEmpty { details.insert(commit.refLabels.joined(separator: ", "), at: 1) }
         if pending { details.append("not pushed") }
-        toolTip = details.joined(separator: "\n")
+        // No bubble: the row carries the branch, the id, the message, the name
+        // and the time itself, and a tip over every row is then only something
+        // that follows the pointer down the list.
+        _ = details
+        toolTip = nil
         exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
+                                + (branch.isEmpty ? "" : "on \(branch), ")
                                 + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        drawnBranchRectForTesting = .zero
+        drawnAuthorRectForTesting = .zero
+        drawnDateRectForTesting = .zero
+        drawnHashRectForTesting = .zero
+        guard layout == .oneLine else {
+            drawTwoLines()
+            return
+        }
+        var content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
+                             height: bounds.height)
+        // The branch the commit sits on, first: a list of everything behind
+        // HEAD holds commits made on branches that were merged in, and the
+        // subject alone does not say which.
+        // Branch, then the commit's id, each a column of its own ahead of the
+        // message: the list holds commits merged in from other branches, and
+        // the id is what names one to Git.
+        let metaFont = Theme.uiFont(9.5)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11), in: content)
+        func leadingColumn(_ text: String, color: NSColor, share: CGFloat,
+                           lineBreak: NSLineBreakMode, width fixed: CGFloat? = nil) -> NSRect? {
+            guard !text.isEmpty else { return nil }
+            let natural = fixed ?? ceil((text as NSString)
+                                            .size(withAttributes: [.font: metaFont]).width) + 2
+            let width = min(natural, floor(content.width * share))
+            let box = NSRect(x: content.minX, y: content.minY,
+                             width: width, height: content.height)
+            SidebarCellDrawing.text(text, font: metaFont, color: color,
+                                    baseline: baseline, in: box, lineBreak: lineBreak)
+            let taken = width + Self.columnGap
+            content = NSRect(x: content.minX + taken, y: content.minY,
+                             width: max(0, content.width - taken), height: content.height)
+            return box
+        }
+        // A quarter at most for the branch: the message is what the row is
+        // read for, and a long branch name must not take the whole line.
+        drawnBranchRectForTesting = leadingColumn(
+            branch, color: Theme.cursor, share: 0.25, lineBreak: .byTruncatingTail,
+            width: branchColumnWidth) ?? .zero
+        drawnHashRectForTesting = leadingColumn(
+            commitID, color: Theme.dimText, share: 0.25, lineBreak: .byClipping) ?? .zero
+        drawnSubjectXForTesting = content.minX
+        drawnSubjectRectForTesting = content
         SidebarCellDrawing.leadingAndTrailing(
             leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
             trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
-            trailingPinned: date,
-            in: NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: bounds.height))
+            trailingPinned: date, in: content, gap: Self.columnGap,
+            // With a branch ahead of it the subject is down to whatever the
+            // other three leave; the name and the date give way first.
+            trailingShare: branch.isEmpty ? 0.6 : 0.5)
+    }
+
+    /// The subject on its own line, and under it the branch, the name and the
+    /// time — each column a gap from the next, the time against the trailing
+    /// edge where a list of them lines up.
+    private func drawTwoLines() {
+        let content = NSRect(x: 8, y: 2, width: max(0, bounds.width - 16),
+                             height: max(0, bounds.height - 4))
+        guard content.width > 0, content.height > 0 else { return }
+        let subjectFont = Theme.uiFont(11)
+        let metaFont = Theme.uiFont(9.5)
+        let top = NSRect(x: content.minX, y: content.minY,
+                         width: content.width, height: content.height / 2)
+        let bottom = NSRect(x: content.minX, y: content.midY,
+                            width: content.width, height: content.height / 2)
+        var message = top
+        // The commit's id first, so a row can be named to Git without hunting
+        // for it: `git show <id>` starts here.
+        if !commitID.isEmpty {
+            let idFont = Theme.uiFont(9.5)
+            let idWidth = min(ceil((commitID as NSString)
+                                    .size(withAttributes: [.font: idFont]).width) + 2,
+                              floor(top.width / 3))
+            let box = NSRect(x: top.minX, y: top.minY, width: idWidth, height: top.height)
+            drawnHashRectForTesting = box
+            SidebarCellDrawing.text(
+                commitID, font: idFont, color: Theme.dimText,
+                baseline: SidebarCellDrawing.centeredBaseline(for: subjectFont, in: top),
+                in: box, lineBreak: .byClipping)
+            let taken = idWidth + Self.columnGap
+            message = NSRect(x: top.minX + taken, y: top.minY,
+                             width: max(0, top.width - taken), height: top.height)
+        }
+        drawnSubjectRectForTesting = message
+        drawnSubjectXForTesting = message.minX
+        SidebarCellDrawing.text(
+            subject, font: subjectFont, color: Theme.foreground,
+            baseline: SidebarCellDrawing.centeredBaseline(for: subjectFont, in: message),
+            in: message, lineBreak: .byTruncatingTail)
+
+        func width(_ string: String) -> CGFloat {
+            // A point of slack: the measured advance rounds a hair under what
+            // is drawn, which clipped the last digit of a timestamp.
+            ceil((string as NSString).size(withAttributes: [.font: metaFont]).width) + 2
+        }
+        let baseline = SidebarCellDrawing.centeredBaseline(for: metaFont, in: bottom)
+        var trailing = bottom.maxX
+        if !date.isEmpty {
+            let box = NSRect(x: max(bottom.minX, trailing - width(date)), y: bottom.minY,
+                             width: min(width(date), bottom.width), height: bottom.height)
+            drawnDateRectForTesting = box
+            SidebarCellDrawing.text(date, font: metaFont, color: metaColor,
+                                    baseline: baseline, in: box,
+                                    lineBreak: .byClipping, alignment: .right)
+            trailing = box.minX
+        }
+        if !author.isEmpty {
+            let room = max(0, trailing - Self.columnGap - bottom.minX)
+            let box = NSRect(x: trailing - Self.columnGap - min(width(author), room),
+                             y: bottom.minY, width: min(width(author), room),
+                             height: bottom.height)
+            drawnAuthorRectForTesting = box
+            SidebarCellDrawing.text(author, font: metaFont, color: metaColor,
+                                    baseline: baseline, in: box,
+                                    lineBreak: .byTruncatingTail, alignment: .right)
+            trailing = box.minX
+        }
+        guard !branch.isEmpty else { return }
+        let box = NSRect(x: bottom.minX, y: bottom.minY,
+                         width: max(0, trailing - Self.columnGap - bottom.minX),
+                         height: bottom.height)
+        drawnBranchRectForTesting = box
+        SidebarCellDrawing.text(branch, font: metaFont, color: Theme.cursor,
+                                baseline: baseline, in: box, lineBreak: .byTruncatingTail)
     }
 
     var subjectForTesting: String { subject }
+    var branchForTesting: String { branch }
     var metaForTesting: String { "\(author)  ·  \(date)" }
     var toolTipForTesting: String { toolTip ?? "" }
 }

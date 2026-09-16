@@ -32,10 +32,17 @@ final class ProjectHistoryViewController: NSViewController {
     /// Short hashes not yet on the upstream branch — drawn with an ↑, as in
     /// the Git panel.
     private var unpushed: Set<String> = []
+    /// The branch each commit sits on: the list holds everything behind HEAD,
+    /// including commits made on a branch that was merged in.
+    private var branches: [String: String] = [:]
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
     private var rows: [Row] = []
     private var loading = false
+    /// Something moved while a read was already running. The reply in flight
+    /// speaks for the state before it, so another read has to follow — without
+    /// this the list sat one commit behind until the next thing moved.
+    private var loadAgain = false
 
     override func loadView() {
         let root = FlatView()
@@ -60,22 +67,19 @@ final class ProjectHistoryViewController: NSViewController {
         let scroll = NSScrollView()
         PuzzleScroller.adopt(scroll)
         scroll.documentView = table
+        // Reaching the end asks for the next page.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrolled),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = SidebarSectionHeader(title: "History")
-        header.translatesAutoresizingMaskIntoConstraints = false
-
-        root.addSubview(header)
         root.addSubview(scroll)
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.topAnchor),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            header.heightAnchor.constraint(equalToConstant: SidebarSectionHeader.height),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -93,9 +97,12 @@ final class ProjectHistoryViewController: NSViewController {
         self.state = state
         if switched {
             // Another project's commits must not sit here while its own load
-            // is still running.
+            // is still running, and its depth is not this one's.
+            limit = Self.pageSize
+            hasMore = true
             commits = []
             unpushed = []
+            branches = [:]
             expanded = []
             files = [:]
             rebuildRows()
@@ -105,17 +112,32 @@ final class ProjectHistoryViewController: NSViewController {
     }
 
     private func load(_ directory: URL) {
-        guard !loading else { return }
+        guard !loading else {
+            loadAgain = true
+            return
+        }
         loading = true
+        // Read on the main thread, where it is set; the queue below only uses
+        // the number.
+        let wanted = limit
         GitService.workQueue.async { [weak self] in
-            let log = GitService.log(in: directory, limit: Self.limit)
+            let log = GitService.log(in: directory, limit: wanted)
             let pending = GitService.unpushedHashes(in: directory)
+            let named = GitService.branchNames(for: log.map(\.shortHash), in: directory)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
+                defer {
+                    if self.loadAgain, let current = self.directory {
+                        self.loadAgain = false
+                        self.load(current)
+                    }
+                }
                 guard self.directory == directory else { return }
                 self.commits = log
+                self.hasMore = log.count >= wanted
                 self.unpushed = pending
+                self.branches = named
                 // A commit that is no longer listed cannot stay open.
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
@@ -125,8 +147,25 @@ final class ProjectHistoryViewController: NSViewController {
         }
     }
 
-    /// As many as the Git panel's own History tab reads.
-    static let limit = 40
+    /// Read in pages: a project's history is unbounded, and a list that holds
+    /// the first forty commits and stops has no way to say so. Another page is
+    /// read when the reader reaches the end of this one.
+    static var pageSize = 200
+    private var limit = pageSize
+    /// False once Git has fewer commits left than the page asked for.
+    private var hasMore = true
+
+    /// Another page once the end of this one is in view. Re-read from the top
+    /// rather than appended: one `git log` for the deeper list is simpler than
+    /// stitching pages together, and it cannot disagree with itself.
+    @objc private func scrolled() {
+        guard hasMore, !loading, let directory,
+              let clip = table.enclosingScrollView?.contentView else { return }
+        let remaining = table.bounds.height - clip.bounds.maxY
+        guard remaining < clip.bounds.height else { return }
+        limit += Self.pageSize
+        load(directory)
+    }
 
     private func rebuildRows() {
         var built: [Row] = []
@@ -191,11 +230,6 @@ final class ProjectHistoryViewController: NSViewController {
 
     // MARK: - Regression-test surface
 
-    /// The strip that names this list.
-    var headerForTesting: SidebarSectionHeader? {
-        _ = view
-        return view.subviews.compactMap { $0 as? SidebarSectionHeader }.first
-    }
     var rowCountForTesting: Int {
         _ = view
         return table.numberOfRows
@@ -214,17 +248,47 @@ final class ProjectHistoryViewController: NSViewController {
     var fileRowsForTesting: [String] {
         rows.compactMap { if case .file(let f, _) = $0 { return f.path } else { return nil } }
     }
+    /// The branch each commit row is labelled with.
+    var branchLabelsForTesting: [String] {
+        rows.compactMap {
+            guard case .commit(let commit) = $0 else { return nil }
+            return branches[commit.shortHash] ?? ""
+        }
+    }
     /// The subject a row draws, which is what the reader picks it out by.
     func rowSubjectForTesting(_ row: Int) -> String? {
         _ = view
         return (tableView(table, viewFor: nil, row: row) as? GitCommitCell)?.subjectForTesting
+    }
+    /// The cell a row builds, as it is drawn.
+    func rowCellForTesting(_ row: Int) -> GitCommitCell? {
+        _ = view
+        return tableView(table, viewFor: nil, row: row) as? GitCommitCell
+    }
+    /// How deep the list has read so far.
+    var limitForTesting: Int { limit }
+    /// Put the end of the list in view, the way scrolling to the bottom does.
+    func scrollToEndForTesting() {
+        _ = view
+        table.enclosingScrollView?.layoutSubtreeIfNeeded()
+        table.scrollToEndOfDocument(nil)
+        scrolled()
+    }
+    /// The room a row is given.
+    func rowHeightForTesting(_ row: Int) -> CGFloat {
+        _ = view
+        return tableView(table, heightOfRow: row)
+    }
+    /// The branch a row draws before the subject.
+    func rowBranchForTesting(_ row: Int) -> String? {
+        rowCellForTesting(row)?.branchForTesting
     }
     /// A click on a row, through the same path a real one takes.
     func clickRowForTesting(_ row: Int) { act(on: row) }
     /// Wait for a load already in flight, the way a test has to.
     func settleForTesting(timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
-        while (loading || commits.isEmpty), Date() < deadline {
+        while loading || loadAgain || commits.isEmpty, Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
     }
@@ -234,8 +298,13 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        // One `tree_line_height`, like every other list in the sidebar.
-        Theme.treeRowHeight()
+        // A commit reads over two lines here — the column is too narrow to
+        // hold a subject and its metadata on one. Its files stay single, like
+        // every other list in the sidebar.
+        guard rows.indices.contains(row), case .commit = rows[row] else {
+            return Theme.treeRowHeight()
+        }
+        return GitCommitCell.height(for: .twoLine)
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -255,7 +324,8 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
             let cell = (tableView.makeView(withIdentifier: id, owner: self) as? GitCommitCell)
                 ?? GitCommitCell()
             cell.identifier = id
-            cell.configure(commit: commit, pending: isUnpushed(commit.shortHash))
+            cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
+                           branch: branches[commit.shortHash] ?? "", layout: .twoLine)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

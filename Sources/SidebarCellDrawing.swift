@@ -278,12 +278,25 @@ enum SidebarCellDrawing {
                             y: floor(rect.midY - size.height / 2),
                             width: ceil(size.width), height: ceil(size.height))
         NSGraphicsContext.saveGraphicsState()
-        image.draw(in: fitted, from: .zero, operation: .sourceOver,
-                   fraction: 1, respectFlipped: true, hints: nil)
+        // `sourceAtop` paints wherever the *destination* is opaque, so tinting
+        // straight onto the cell filled the whole box with the colour and left
+        // a block where the glyph should be. Tinting inside an image of its
+        // own starts from transparency, where the glyph is the only opaque
+        // thing there is.
+        let painted: NSImage
         if let tint {
-            tint.setFill()
-            fitted.fill(using: .sourceAtop)
+            painted = NSImage(size: fitted.size, flipped: false) { rect in
+                image.draw(in: rect, from: .zero, operation: .sourceOver,
+                           fraction: 1, respectFlipped: true, hints: nil)
+                tint.setFill()
+                rect.fill(using: .sourceAtop)
+                return true
+            }
+        } else {
+            painted = image
         }
+        painted.draw(in: fitted, from: .zero, operation: .sourceOver,
+                     fraction: 1, respectFlipped: true, hints: nil)
         NSGraphicsContext.restoreGraphicsState()
     }
 

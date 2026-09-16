@@ -78,6 +78,7 @@ enum RegressionTests {
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
+        try testBranchMenu()
         try testTerminalLaunchScripts()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -491,6 +492,62 @@ enum RegressionTests {
         // by exactly one row when it appears.
         pane.showFindBar(seed: "let")
         let bar = pane.findBarForTesting
+
+        // Three round buttons ride beside the text while the search has
+        // something to step through: the bar itself is at the top of the pane,
+        // a long way from what is being read.
+        window.contentView?.layoutSubtreeIfNeeded()
+        let navigator = pane.searchNavigatorForTesting
+        try expect(!navigator.isHidden, "a search with results showed no buttons")
+        try expect(navigator.buttonsForTesting.count == 3,
+                   "the navigator has \(navigator.buttonsForTesting.count) buttons, not 3")
+        try expect(navigator.buttonsForTesting.allSatisfy {
+                    $0.frame.width == 48 && $0.frame.height == 48
+                   },
+                   "the buttons are not 48pt circles: "
+                     + "\(navigator.buttonsForTesting.map(\.frame.size))")
+        // Stacked downwards, each clear of the next.
+        let boxes = navigator.buttonsForTesting.map { $0.convert($0.bounds, to: navigator) }
+        try expect(zip(boxes, boxes.dropFirst()).allSatisfy { $0.minY >= $1.maxY },
+                   "the buttons are not stacked down the edge: \(boxes)")
+        // Against the text's own right edge, and centred on it — not on the
+        // pane, whose tab strip and find bar sit above the text.
+        let inPane = navigator.convert(navigator.bounds, to: pane.view)
+        let text = pane.scrollViewForTesting.convert(
+            pane.scrollViewForTesting.bounds, to: pane.view)
+        try expect(abs(inPane.midY - text.midY) <= 0.5,
+                   "the buttons are not centred on the code area: \(inPane) in \(text)")
+        try expect(abs(text.maxX - inPane.maxX - SearchNavigatorView.trailingInset) <= 0.5,
+                   "the buttons are not at the code area's right edge: "
+                     + "\(inPane) in \(text)")
+
+        // Under the pointer they say they can be clicked.
+        for button in navigator.buttonsForTesting {
+            button.resetCursorRects()
+            let claimed = button.cursorRectForTesting
+            try expect(claimed?.rect == button.bounds && claimed?.cursor == .pointingHand,
+                       "a button does not take the hand under the pointer: "
+                         + "\(String(describing: claimed))")
+        }
+
+        // A search that finds nothing has nothing for them to do.
+        pane.showFindBar(seed: "no-such-text-anywhere")
+        try expect(navigator.isHidden, "buttons showed for a search with no results")
+        pane.showFindBar(seed: "let")
+        try expect(!navigator.isHidden, "the buttons did not come back with the results")
+        // They step the search and close it.
+        let first = bar.currentMatchForTesting
+        navigator.clickNextForTesting()
+        try expect(bar.currentMatchForTesting != first,
+                   "the next button did not move to another match")
+        navigator.clickPreviousForTesting()
+        try expect(bar.currentMatchForTesting == first,
+                   "the previous button did not come back")
+        navigator.clickClearForTesting()
+        try expect(bar.isHidden && navigator.isHidden,
+                   "the clear button did not close the search")
+        pane.showFindBar(seed: "let")
+
         try expect(!bar.isReplaceVisibleForTesting, "the replace row was showing unasked")
         let findOnly = bar.preferredHeight
         pane.showFindBar(seed: "let", replacing: true)
@@ -1687,9 +1744,12 @@ enum RegressionTests {
         try Data("fixture".utf8).write(to: treeRoot.appendingPathComponent("file.txt"))
         workspace.sidebar.fileTree.setRoot(treeRoot)
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        // Inside the border that names the region, which is the 2pt the tree
+        // gives up at the top of its own column.
+        let treeTop = titlebarHeight + ProjectColumnsView.borderWidth
         let actualTop = workspace.sidebar.fileTree.firstRowTopInsetInWindowForTesting
-        try expect(actualTop.map { abs($0 - titlebarHeight) <= 0.5 } == true,
-                   "first file-tree row did not start at the 32pt file-tab boundary: "
+        try expect(actualTop.map { abs($0 - treeTop) <= 0.5 } == true,
+                   "first file-tree row did not start inside the file-tab boundary: "
                     + String(describing: actualTop))
     }
 
@@ -3370,6 +3430,37 @@ enum RegressionTests {
                    "an unknown extension did not fall back to the generic icon")
         try expect(FileIcons.folderIconName(for: "Sources", expanded: false) == "folder-src",
                    "the source folder did not get its own icon")
+        // A tinted symbol keeps its shape. `sourceAtop` paints wherever the
+        // *destination* is opaque, so tinting straight onto a filled cell
+        // turned every chevron in the sidebar into a solid block.
+        let box = NSRect(x: 8, y: 8, width: 16, height: 16)
+        let canvas = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
+            Theme.panelBackground.setFill()
+            rect.fill()
+            SidebarCellDrawing.image(Theme.symbol("chevron.down", pointSize: 12),
+                                     tint: Theme.red, in: box)
+            return true
+        }
+        guard let tiff = canvas.tiffRepresentation,
+              let drawn = NSBitmapImageRep(data: tiff) else {
+            throw Failure(description: "the symbol would not render")
+        }
+        let scale = CGFloat(drawn.pixelsWide) / 32
+        // The ground is near black; anything carrying the tint reads far above
+        // it in red.
+        var inked = 0
+        var clear = 0
+        for x in Int(box.minX * scale)..<Int(box.maxX * scale) {
+            for y in Int(box.minY * scale)..<Int(box.maxY * scale) {
+                guard let colour = drawn.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+                else { continue }
+                if colour.redComponent > 0.5 { inked += 1 } else { clear += 1 }
+            }
+        }
+        try expect(inked > 0, "the tinted symbol drew nothing")
+        try expect(clear > inked,
+                   "the tint filled the symbol's whole box: \(inked) inked, \(clear) clear")
+
         // The two marks the Projects panel heads its columns with have to be
         // among the icons that ship, or a column loses the one thing that says
         // which of the two it is.
@@ -4841,12 +4932,47 @@ enum RegressionTests {
         try expect(!commitRow.trailing.isEmpty
                     && commitRow.trailing != "Ada Lovelace",
                    "the time is missing from the right: \(commitRow.trailing)")
-        let hash = GitService.run(["rev-parse", "--short", "HEAD"], in: root)
-            .out.trimmingCharacters(in: .whitespacesAndNewlines)
-        for detail in [hash, "main", "the subject line", "Ada Lovelace"] {
-            try expect(commitRow.hover.contains(detail),
-                       "hovering a commit does not reveal \(detail): \(commitRow.hover)")
+        // Five columns on one line — the branch, the commit's id, the message,
+        // the name and the time — and no bubble: the row says all of it itself.
+        try expect(commitRow.hover.isEmpty,
+                   "a history row still carries a tip: \(commitRow.hover)")
+        guard let historyCell = panel.commitCellForTesting(0) else {
+            throw Failure(description: "the history row built no commit cell")
         }
+        historyCell.frame = NSRect(x: 0, y: 0, width: 520, height: Theme.treeRowHeight())
+        if let rep = historyCell.bitmapImageRepForCachingDisplay(in: historyCell.bounds) {
+            historyCell.cacheDisplay(in: historyCell.bounds, to: rep)
+        }
+        try expect(historyCell.branchForTesting == "main",
+                   "the row is not labelled with its branch: \(historyCell.branchForTesting)")
+        let branchBox = historyCell.drawnBranchRectForTesting
+        let idBox = historyCell.drawnHashRectForTesting
+        try expect(branchBox.width > 0 && idBox.width > 0,
+                   "the branch or the id column was not drawn: \(branchBox) / \(idBox)")
+        // Columns line up down the list: a longer branch name on one row gives
+        // every row's branch column its width, so no row's id or message is
+        // pushed out of line.
+        let narrow = GitCommitCell()
+        let wide = GitCommitCell()
+        let shared = GitCommitCell.branchColumnWidth(for: ["main", "a-much-longer-branch"])
+        for (cell, name) in [(narrow, "main"), (wide, "a-much-longer-branch")] {
+            cell.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
+                           branch: name, branchColumnWidth: shared)
+            cell.frame = NSRect(x: 0, y: 0, width: 520, height: Theme.treeRowHeight())
+            if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+            }
+        }
+        try expect(narrow.drawnHashRectForTesting.minX == wide.drawnHashRectForTesting.minX
+                    && narrow.drawnSubjectXForTesting == wide.drawnSubjectXForTesting,
+                   "rows with different branch names do not line up: "
+                     + "\(narrow.drawnHashRectForTesting.minX) vs "
+                     + "\(wide.drawnHashRectForTesting.minX)")
+        try expect(abs(idBox.minX - branchBox.maxX - GitCommitCell.columnGap) <= 0.5
+                    && abs(historyCell.drawnSubjectXForTesting - idBox.maxX
+                            - GitCommitCell.columnGap) <= 0.5,
+                   "the branch, the id and the message are not a column gap apart: "
+                     + "\(branchBox) \(idBox) \(historyCell.drawnSubjectXForTesting)")
 
         // Clicking the row is what expands it, so its files appear underneath.
         panel.expandCommit(at: 0)
@@ -5637,6 +5763,73 @@ enum RegressionTests {
                    "a normal file showed the diff header")
     }
 
+    private static func testBranchMenu() throws {
+        func branch(_ name: String, _ author: String, _ date: String,
+                    _ stamp: Int64, current: Bool = false,
+                    remote: Bool = false) -> GitService.Branch {
+            GitService.Branch(name: name, author: author, createdAt: date,
+                              createdTimestamp: stamp, isCurrent: current,
+                              isRemote: remote,
+                              upstreamRemote: remote ? "origin" : nil,
+                              upstreamBranch: remote ? name : nil)
+        }
+        // Most recent first is how GitService hands them over; the menu puts the
+        // checked-out branch at the top regardless, then caps the list.
+        var branches = (0..<15).map {
+            branch("topic-\($0)", "Author \($0)", "2026-08-\(10 + $0) 09:00", Int64(1000 - $0))
+        }
+        branches.insert(branch("main", "tyxu", "2026-07-01 12:00", 1, current: true), at: 7)
+        let entries = WorkspaceWindowController.branchMenuEntries(branches)
+        try expect(entries.count == WorkspaceWindowController.branchMenuLimit,
+                   "the menu listed \(entries.count) branches, not "
+                    + "\(WorkspaceWindowController.branchMenuLimit)")
+        try expect(entries.first?.name == "main",
+                   "the current branch is not first: \(entries.map(\.name))")
+        try expect(entries.dropFirst().map(\.name) == (0..<9).map { "topic-\($0)" },
+                   "the rest lost their recency order: \(entries.map(\.name))")
+        // A short list is not padded or truncated.
+        try expect(WorkspaceWindowController.branchMenuEntries(Array(branches.prefix(3))).count == 3,
+                   "a three-branch repo did not list all three")
+
+        // Each row carries the branch, its author and its date.
+        let title = WorkspaceWindowController.branchMenuTitle(
+            branch("release", "Ada", "2026-08-20 18:30", 900)).string
+        try expect(title.contains("release") && title.contains("Ada")
+                    && title.contains("2026-08-20 18:30"),
+                   "a menu row is missing branch, author or date: \(title.debugDescription)")
+        try expect(title.contains("\n"),
+                   "the row is not two lines: \(title.debugDescription)")
+
+        // What a click decides, before any alert is on screen: refuse with a
+        // reason, or confirm naming both ends.
+        let main = branch("main", "tyxu", "2026-07-01 12:00", 1, current: true)
+        let topic = branch("topic", "Ada", "2026-08-20 18:30", 900)
+        let danglingRemote = GitService.Branch(
+            name: "origin/HEAD", author: "Ada", createdAt: "2026-08-20 18:30",
+            createdTimestamp: 900, isCurrent: false, isRemote: true,
+            upstreamRemote: "origin", upstreamBranch: nil)
+
+        try expect(WorkspaceWindowController.branchSwitch(to: main, from: "main")
+                    == .alreadyCurrent,
+                   "switching to the checked-out branch was not refused")
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "topic")
+                    == .alreadyCurrent,
+                   "a branch matching HEAD by name was not treated as current")
+        if case .unavailable(let reason) = WorkspaceWindowController.branchSwitch(
+            to: danglingRemote, from: "main") {
+            try expect(!reason.isEmpty, "the refusal did not say why")
+        } else {
+            throw Failure(description: "a remote ref with no local name was offered as switchable")
+        }
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "main")
+                    == .confirm(from: "main", to: "topic"),
+                   "the confirmation did not name both ends")
+        // With no branch known yet the prompt still reads sensibly.
+        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: nil)
+                    == .confirm(from: "the current branch", to: "topic"),
+                   "an unknown current branch produced an empty prompt")
+    }
+
     private static func testTerminalLaunchScripts() throws {
         // Launching iTerm opens a window by itself, so the script must not add
         // a second one — that was two windows per click.
@@ -5710,7 +5903,7 @@ enum RegressionTests {
         try expect(projectsPanel.changes.rowCountForTesting == 0,
                    "a clean project's changes column is not empty")
         try Data("new\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
-        workspace.refreshGit()
+        workspace.refreshGit(requireFollowUp: true)
         let wanted = "\(root.lastPathComponent)  trunk  Puzzle Test  1"
         let countDeadline = Date().addingTimeInterval(5)
         while projectsPanel.rowsForTesting.first?.titleForTesting != wanted,
@@ -5834,6 +6027,32 @@ enum RegressionTests {
                      + "\(workspace.sidebar.fileTree.view.frame) / "
                      + "\(projectsPanel.gitColumnForTesting.frame)")
 
+        // A 2pt border inside each of the three regions, one hue each: the
+        // tree, what has changed, and what has been committed. Drawn inside,
+        // so a region's own content is inset by the width rather than running
+        // under its edge.
+        try expect(sameColor(columns.firstBorder,
+                             ProjectColumnsView.regionBorder(Theme.red))
+                    && sameColor(projectsPanel.gitColumnForTesting.firstBorder,
+                                 ProjectColumnsView.regionBorder(Theme.orange))
+                    && sameColor(projectsPanel.gitColumnForTesting.secondBorder,
+                                 ProjectColumnsView.regionBorder(Theme.purple)),
+                   "the three regions do not carry red, orange and purple")
+        try expect(ProjectColumnsView.borderWidth == 1,
+                   "the region borders are \(ProjectColumnsView.borderWidth)pt, not 1")
+        // Taken down from the hue itself: three saturated frames are the
+        // loudest thing in a panel whose palette is two steps off black.
+        try expect(ProjectColumnsView.regionBorder(Theme.red).alphaComponent < 0.6,
+                   "the region borders are drawn at full strength")
+        let treeFrame = workspace.sidebar.fileTree.view.frame
+        try expect(treeFrame.minX == ProjectColumnsView.borderWidth
+                    && treeFrame.minY == ProjectColumnsView.borderWidth,
+                   "the tree is not inset inside its own border: \(treeFrame)")
+        try expect(treeFrame.maxX == columns.firstPaneRect.maxX
+                    - ProjectColumnsView.borderWidth,
+                   "the tree runs under its own border: \(treeFrame) in "
+                     + "\(columns.firstPaneRect)")
+
         // The right column lists what the project has changed, and a click on
         // one asks for that file's diff — the same errand the Git panel's own
         // list runs.
@@ -5898,25 +6117,10 @@ enum RegressionTests {
         try expect(projectsPanel.history.fileRowsForTesting.isEmpty,
                    "clicking an open commit did not close it again")
 
-        // The lower list is the one nothing names — the changes have the
-        // branch in the row above them — so it carries its own strip, on a
-        // surface no row is ever drawn on. Tinting the three regions instead
-        // would have spent the range the rows' own states live in: from the
-        // ground to hovered is fifteen steps a channel, and a region tinted
-        // into that range makes a hovered row read as another region's ground.
-        let historyHeader = projectsPanel.history.headerForTesting
-        try expect(historyHeader?.titleForTesting == "History",
-                   "the history list is not named: "
-                     + "\(String(describing: historyHeader?.titleForTesting))")
-        try expect(sameColor(historyHeader?.fillColor, Theme.activeTab)
-                    && !sameColor(Theme.activeTab, Theme.panelBackground)
-                    && !sameColor(Theme.activeTab, Theme.hover)
-                    && !sameColor(Theme.activeTab, Theme.activeRow),
-                   "the heading shares its surface with a state a row can be in")
-        try expect(projectsPanel.changes.view.subviews
-                    .compactMap { $0 as? SidebarSectionHeader }.isEmpty,
-                   "the changes list took a heading, which puts back the gap under "
-                     + "the project row")
+        // Neither list carries a strip of its own: both start at their first
+        // row, under the headings the project's row already gives them.
+        try expect(projectsPanel.history.view.subviews.allSatisfy { $0 is NSScrollView },
+                   "the history list took a heading row back")
 
         // A commit moves HEAD and the list follows without being asked: the
         // window's own status refresh carries the commit it is on, and the log
@@ -5924,7 +6128,7 @@ enum RegressionTests {
         try Data("more\n".utf8).write(to: root.appendingPathComponent("file.txt"))
         try expect(GitService.commit("Second", in: root).code == 0,
                    "the fixture could not commit again")
-        workspace.refreshGit()
+        workspace.refreshGit(requireFollowUp: true)
         let historyDeadline = Date().addingTimeInterval(5)
         while !projectsPanel.history.commitSubjectsForTesting.contains("Second"),
               Date() < historyDeadline {
@@ -5951,7 +6155,7 @@ enum RegressionTests {
         _ = GitService.run(["remote", "add", "origin", remote.path], in: root)
         try expect(GitService.run(["push", "-q", "-u", "origin", "trunk"], in: root).code == 0,
                    "the fixture could not push")
-        workspace.refreshGit()
+        workspace.refreshGit(requireFollowUp: true)
         try settleHistory("everything is pushed, but the history still marks commits "
                             + "unpushed: \(projectsPanel.history.unpushedSubjectsForTesting)") {
             projectsPanel.history.unpushedSubjectsForTesting.isEmpty
@@ -5959,18 +6163,154 @@ enum RegressionTests {
         try Data("later\n".utf8).write(to: root.appendingPathComponent("file.txt"))
         try expect(GitService.commit("Third", in: root).code == 0,
                    "the fixture could not commit a third time")
-        workspace.refreshGit()
+        workspace.refreshGit(requireFollowUp: true)
         try settleHistory("a commit that is not pushed is not marked: "
                             + "\(projectsPanel.history.unpushedSubjectsForTesting)") {
             projectsPanel.history.unpushedSubjectsForTesting == ["Third"]
         }
         try expect(GitService.run(["push", "-q", "origin", "trunk"], in: root).code == 0,
                    "the fixture could not push again")
-        workspace.refreshGit()
+        workspace.refreshGit(requireFollowUp: true)
         try settleHistory("the ↑ outlived the push: "
                             + "\(projectsPanel.history.unpushedSubjectsForTesting)") {
             projectsPanel.history.unpushedSubjectsForTesting.isEmpty
         }
+
+        // Everything behind HEAD is listed, including commits made on another
+        // branch and merged in — and each row says which branch it sits on,
+        // which the subject alone does not.
+        _ = GitService.run(["checkout", "-q", "-b", "side"], in: root)
+        try Data("side\n".utf8).write(to: root.appendingPathComponent("side.txt"))
+        try expect(GitService.commit("Side work", in: root).code == 0,
+                   "the fixture could not commit on the side branch")
+        _ = GitService.run(["checkout", "-q", "trunk"], in: root)
+        try expect(GitService.run(["merge", "--no-ff", "-q", "-m", "Merge side", "side"],
+                                  in: root).code == 0,
+                   "the fixture could not merge the side branch")
+        workspace.refreshGit(requireFollowUp: true)
+        try settleHistory("the merge and the commit behind it are missing from the "
+                            + "list: \(projectsPanel.history.commitSubjectsForTesting)") {
+            let listed = projectsPanel.history.commitSubjectsForTesting
+            return listed.contains("Merge side") && listed.contains("Side work")
+        }
+        let labelled = Array(zip(projectsPanel.history.commitSubjectsForTesting,
+                                 projectsPanel.history.branchLabelsForTesting))
+        try expect(labelled.contains { $0.0 == "Side work" && $0.1 == "side" },
+                   "the merged-in commit is not labelled with its own branch: \(labelled)")
+        // Only the checked-out branch contains the merge itself; the commits
+        // behind it are on both, and which name they take is Git's own answer
+        // to "nearest", not something to hold a test to.
+        try expect(labelled.contains { $0.0 == "Merge side" && $0.1 == "trunk" },
+                   "the merge is not labelled with the branch it was made on: \(labelled)")
+        let sideRow = projectsPanel.history.commitSubjectsForTesting
+            .firstIndex(of: "Side work")
+        try expect(sideRow.flatMap { projectsPanel.history.rowBranchForTesting($0) } == "side",
+                   "the row does not draw the branch it is labelled with")
+        try expect(GitCommitCell.columnGap == 15,
+                   "the history columns are \(GitCommitCell.columnGap)pt apart, not 15")
+        // Drawn, not merely carried, and over two lines: the message has the
+        // first to itself, the branch, the name and the time share the second.
+        // One line in a column this narrow lost the message, which is what the
+        // row is read for.
+        guard let sideIndex = sideRow,
+              let sideCell = projectsPanel.history.rowCellForTesting(sideIndex) else {
+            throw Failure(description: "the side commit built no cell")
+        }
+        let rowHeight = GitCommitCell.height(for: .twoLine)
+        try expect(rowHeight > Theme.treeRowHeight(),
+                   "a two-line row is no taller than a one-line one")
+        sideCell.frame = NSRect(x: 0, y: 0, width: 320, height: rowHeight)
+        if let rep = sideCell.bitmapImageRepForCachingDisplay(in: sideCell.bounds) {
+            sideCell.cacheDisplay(in: sideCell.bounds, to: rep)
+        }
+        try expect(sideCell.drawnBranchRectForTesting.width > 0,
+                   "the branch column was not drawn")
+        try expect(sideCell.drawnSubjectRectForTesting.maxY
+                    <= sideCell.drawnBranchRectForTesting.minY,
+                   "the message and its metadata are on the same line: "
+                     + "\(sideCell.drawnSubjectRectForTesting) / "
+                     + "\(sideCell.drawnBranchRectForTesting)")
+        try expect(abs(sideCell.drawnAuthorRectForTesting.minX
+                        - sideCell.drawnBranchRectForTesting.maxX
+                        - GitCommitCell.columnGap) <= 0.5,
+                   "the second line's columns are not a gap apart: "
+                     + "\(sideCell.drawnBranchRectForTesting) then "
+                     + "\(sideCell.drawnAuthorRectForTesting)")
+        try expect(abs(sideCell.drawnDateRectForTesting.minX
+                        - sideCell.drawnAuthorRectForTesting.maxX
+                        - GitCommitCell.columnGap) <= 0.5,
+                   "the name and the time are not a gap apart: "
+                     + "\(sideCell.drawnAuthorRectForTesting) then "
+                     + "\(sideCell.drawnDateRectForTesting)")
+        try expect(projectsPanel.history.rowHeightForTesting(sideIndex) == rowHeight,
+                   "the list does not give a commit its two lines")
+        // The commit's id opens the first line, so a row can be named to Git
+        // without hunting for it.
+        try expect(sideCell.drawnHashRectForTesting.width > 0
+                    && sideCell.drawnHashRectForTesting.maxX
+                        <= sideCell.drawnSubjectRectForTesting.minX,
+                   "the commit id does not come before the message: "
+                     + "\(sideCell.drawnHashRectForTesting) / "
+                     + "\(sideCell.drawnSubjectRectForTesting)")
+        try expect(abs(sideCell.drawnSubjectRectForTesting.minX
+                        - sideCell.drawnHashRectForTesting.maxX
+                        - GitCommitCell.columnGap) <= 0.5,
+                   "the message does not start a column gap past the id")
+        // No bubble following the pointer down the list: two lines carry
+        // everything the row has to say.
+        try expect(sideCell.toolTip == nil,
+                   "a two-line commit row still carries a tip: "
+                     + "\(String(describing: sideCell.toolTip))")
+
+        // A pane is placed by hand and everything inside it by constraints, so
+        // the list has to be settled in the same pass: a clip view still the
+        // size it was before the pane moved scrolls by the wrong amount, or
+        // reports nothing to scroll at all.
+        let gitPane = projectsPanel.gitColumnForTesting
+        gitPane.setFrameSize(NSSize(width: gitPane.frame.width,
+                                    height: gitPane.frame.height + 90))
+        gitPane.layout()
+        let historyPane = projectsPanel.history.view
+        guard let historyScroll = historyPane.subviews
+                .compactMap({ $0 as? NSScrollView }).first else {
+            throw Failure(description: "the history list has no scroll view")
+        }
+        try expect(historyScroll.frame.height == historyPane.bounds.height
+                    && historyScroll.contentView.bounds.height == historyPane.bounds.height,
+                   "the list did not follow its pane: pane \(historyPane.bounds), "
+                     + "list \(historyScroll.frame), clip \(historyScroll.contentView.bounds)")
+
+        // The list is read in pages, and asks for another when the end of one
+        // comes into view — forty commits with no way to say there are more is
+        // not a history.
+        try expect(ProjectHistoryViewController.pageSize >= 200,
+                   "the history reads \(ProjectHistoryViewController.pageSize) commits a page")
+        try expect(projectsPanel.history.limitForTesting
+                    == ProjectHistoryViewController.pageSize,
+                   "the list did not start at one page")
+        projectsPanel.history.scrollToEndForTesting()
+        try expect(projectsPanel.history.limitForTesting
+                    == ProjectHistoryViewController.pageSize,
+                   "a history shorter than a page asked for another one")
+        // With more commits than a page holds, reaching the end reads deeper.
+        // Measured on a page of two, so the fixture needs no two hundred
+        // commits to prove it.
+        ProjectHistoryViewController.pageSize = 2
+        defer { ProjectHistoryViewController.pageSize = 200 }
+        let deep = ProjectHistoryViewController()
+        _ = deep.view
+        deep.view.frame = NSRect(x: 0, y: 0, width: 300, height: 80)
+        deep.view.layoutSubtreeIfNeeded()
+        deep.setSource(directory: root, state: .init(head: "deep"))
+        deep.settleForTesting()
+        try expect(deep.limitForTesting == 2 && deep.rowCountForTesting == 2,
+                   "the first page is not one page deep: \(deep.limitForTesting) / "
+                     + "\(deep.rowCountForTesting)")
+        deep.scrollToEndForTesting()
+        deep.settleForTesting()
+        try expect(deep.limitForTesting > 2 && deep.rowCountForTesting > 2,
+                   "reaching the end did not read deeper: \(deep.limitForTesting) / "
+                     + "\(deep.rowCountForTesting)")
 
         // Both dragged lines are remembered; a test writes that somewhere of
         // its own rather than into the user's defaults.
@@ -5985,11 +6325,10 @@ enum RegressionTests {
         try expect(abs(gitColumn.divider - gitHeight * 0.3) <= 1,
                    "the Git column's line did not follow the drag: "
                      + "\(gitColumn.divider) of \(gitHeight)")
-        // A point between them, which is where the line is drawn — under the
-        // pane's own edge it would be invisible.
+        // Clear of each other, with each region's own border between them.
         try expect(projectsPanel.changes.view.frame.minY
-                    == projectsPanel.history.view.frame.maxY + 1,
-                   "the changes and the history leave no gap for the line: "
+                    > projectsPanel.history.view.frame.maxY,
+                   "the changes and the history overlap: "
                      + "\(projectsPanel.changes.view.frame) / "
                      + "\(projectsPanel.history.view.frame)")
         projectsPanel.dragGitDividerForTesting(to: -400)
@@ -6060,14 +6399,32 @@ enum RegressionTests {
                    "clicking the project name did not show the Projects panel: "
                      + "\(workspace.sidebar.visiblePanel)")
 
-        // The branch beside it goes to this project's Git panel, the same place
-        // the branch on a project row goes. It used to drop a menu of branches
-        // to switch between, which the panel's own Branch tab does at length.
+        // The branch beside it drops the menu of branches to switch to,
+        // anchored under the name, and leaves the panel that is showing alone.
+        var shownMenu: (menu: NSMenu, origin: NSPoint, anchor: NSView)?
+        workspace.presentBranchMenu = { shownMenu = ($0, $1, $2) }
         title.clickForTesting(at: inBranch)
-        try expect(workspace.sidebar.visiblePanel == .git,
-                   "clicking the branch did not show the Git panel: "
+        let menuDeadline = Date().addingTimeInterval(5)
+        while shownMenu == nil, Date() < menuDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(shownMenu != nil, "clicking the branch dropped no menu")
+        try expect(shownMenu?.anchor === title
+                    && shownMenu?.origin == NSPoint(x: zones.branch.minX,
+                                                    y: zones.branch.maxY),
+                   "the menu is not anchored under the branch name: "
+                     + "\(String(describing: shownMenu?.origin))")
+        let menuItems = shownMenu?.menu.items.filter { !$0.isSeparatorItem } ?? []
+        let listed = menuItems.compactMap { item -> (String, NSControl.StateValue)? in
+            guard let branch = item.representedObject as? GitService.Branch else { return nil }
+            return (branch.name, item.state)
+        }
+        try expect(listed.contains { $0.0 == "trunk" && $0.1 == .on },
+                   "the menu does not list the checked-out branch, ticked: "
+                     + "\(listed.map(\.0))")
+        try expect(workspace.sidebar.visiblePanel == .project,
+                   "clicking the branch switched the sidebar away: "
                      + "\(workspace.sidebar.visiblePanel)")
-        workspace.sidebar.showFiles()
 
         // The terminal is its own button, past the one that opens another
         // project, at the end of the band.

@@ -601,6 +601,30 @@ enum GitService {
         let message: String
     }
 
+    /// Which branch each of these commits sits on, for a list that shows every
+    /// commit behind HEAD — including the ones made on a branch that was later
+    /// merged in. Git records no branch on a commit; `name-rev` answers the
+    /// question that does have an answer, the nearest branch that contains it,
+    /// and answers it for the whole list in one process.
+    static func branchNames(for hashes: [String],
+                            in directory: URL) -> [String: String] {
+        guard !hashes.isEmpty else { return [:] }
+        let result = run(["name-rev", "--name-only", "--refs=refs/heads/*"] + hashes,
+                         in: directory)
+        guard result.code == 0 else { return [:] }
+        let names = result.out.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        var found: [String: String] = [:]
+        for (hash, name) in zip(hashes, names) {
+            // `main~3`, `feature^2~1`: the branch is the part before the walk
+            // back from its tip. Commits no branch contains read "undefined".
+            let branch = name.prefix { $0 != "~" && $0 != "^" }
+            guard !branch.isEmpty, branch != "undefined" else { continue }
+            found[hash] = String(branch)
+        }
+        return found
+    }
+
     static func branches(in directory: URL) -> [Branch] {
         let current = run(["branch", "--show-current"], in: directory)
             .out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1038,7 +1062,13 @@ enum GitService {
         // a commit is never listed before one of its children, so a lane never
         // has to jump backwards.
         let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D"
-        let result = run(["--no-pager", "log", "-z", "--date-order",
+        // `--full-history` because of the pathspec: with one, Git simplifies
+        // the history it walks — a merge that changed nothing under the path
+        // relative to its first parent is dropped, and with it every commit
+        // that only ever reached this branch through that merge. The list is
+        // meant to hold everything behind HEAD, including work done on a
+        // branch that was merged in.
+        let result = run(["--no-pager", "log", "-z", "--date-order", "--full-history",
                           "--pretty=format:" + format,
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
                           "--", "."], in: directory)
