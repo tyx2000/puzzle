@@ -10,10 +10,19 @@ final class RootViewController: NSViewController {
     /// Panel width is preserved across panel switches. The floor is what the
     /// Git panel's rows need before names start truncating.
     static let minimumSidebarWidth: CGFloat = 300
-    /// What a window opens at.
-    static let defaultSidebarWidth: CGFloat = 500
+    /// What a window opens at: half its own width. The panel now holds the
+    /// file tree and the project's Git lists side by side, and a fixed width
+    /// that suited one of them left both cramped on a wide window.
+    static let defaultSidebarFraction: CGFloat = 0.5
+    /// The width the panel is given before the window has one of its own to
+    /// take half of — replaced on the first layout.
+    private static let provisionalSidebarWidth: CGFloat = 500
     private var minimumSidebarWidth: CGFloat { Self.minimumSidebarWidth }
-    private var lastSidebarWidth: CGFloat = RootViewController.defaultSidebarWidth
+    private var lastSidebarWidth: CGFloat = RootViewController.provisionalSidebarWidth
+    /// Whether the opening width has been settled. It is settled once: after
+    /// that the width is the one the reader dragged to, and a window that is
+    /// resized keeps its panel while the editor takes up the difference.
+    private var hasSettledOpeningWidth = false
     /// Owns the panel width so switching panels can never change it. Dragging the
     /// divider updates its constant, so the divider still works.
     private var sidebarWidthConstraint: NSLayoutConstraint!
@@ -94,6 +103,35 @@ final class RootViewController: NSViewController {
         dividerHandle.needsDisplay = true
     }
 
+    /// Until the window is on screen its width is still being decided — the
+    /// default frame, then a restored or requested one — so the panel follows
+    /// it. Settling on the very first layout took half of a width the window
+    /// was about to leave, and a panel too wide for the window it ended up in
+    /// pushed the window wider as soon as the editor needed its room.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard !hasSettledOpeningWidth, view.bounds.width > 0 else { return }
+        let opening = Self.openingSidebarWidth(forWindowWidth: view.bounds.width)
+        guard opening != sidebarWidthConstraint.constant else { return }
+        applyWidth(opening)
+    }
+
+    /// On screen: the width it opened at is the width it keeps.
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        if !hasSettledOpeningWidth, view.bounds.width > 0 {
+            applyWidth(Self.openingSidebarWidth(forWindowWidth: view.bounds.width))
+        }
+        hasSettledOpeningWidth = true
+    }
+
+    /// Half the window, inside the limits a drag is held to.
+    static func openingSidebarWidth(forWindowWidth width: CGFloat) -> CGFloat {
+        let half = (width * defaultSidebarFraction).rounded()
+        let limit = max(minimumSidebarWidth, (width * 0.8).rounded())
+        return min(max(half, minimumSidebarWidth), limit)
+    }
+
     func resizeSidebarForTesting(to width: CGFloat) { resizeSidebar(to: width) }
     var sidebarWidthForTesting: CGFloat { sidebarWidthConstraint.constant }
 
@@ -106,6 +144,8 @@ final class RootViewController: NSViewController {
     }
 
     private func resizeSidebar(to proposedWidth: CGFloat) {
+        // A width chosen by hand is not replaced by the opening default.
+        hasSettledOpeningWidth = true
         // Never let the panel take more than 80% of the window.
         let limit = max(minimumSidebarWidth, (view.bounds.width * 0.8).rounded())
         let width = min(max(proposedWidth, minimumSidebarWidth), limit)

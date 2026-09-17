@@ -1780,13 +1780,22 @@ enum RegressionTests {
         try Data("fixture".utf8).write(to: treeRoot.appendingPathComponent("file.txt"))
         workspace.sidebar.fileTree.setRoot(treeRoot)
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        // Inside the border that names the region, which is the 2pt the tree
-        // gives up at the top of its own column.
-        let treeTop = titlebarHeight + ProjectColumnsView.borderWidth
+        // No project is open here — the tree was only handed a folder — so it
+        // carries no frame and starts right at the file-tab boundary. (With a
+        // project open, the frame's 1pt comes out of the top; the Projects
+        // panel test measures that case.)
         let actualTop = workspace.sidebar.fileTree.firstRowTopInsetInWindowForTesting
-        try expect(actualTop.map { abs($0 - treeTop) <= 0.5 } == true,
-                   "first file-tree row did not start inside the file-tab boundary: "
+        try expect(actualTop.map { abs($0 - titlebarHeight) <= 0.5 } == true,
+                   "first file-tree row did not start at the file-tab boundary: "
                     + String(describing: actualTop))
+
+        // A window with nothing open draws no regions: no frames, no Git
+        // column. They were three empty outlines on the start page.
+        let emptyColumns = workspace.sidebar.projectsPanel.columnsForTesting
+        try expect(emptyColumns.firstBorder == nil && !emptyColumns.showsSecond,
+                   "an empty window still frames the regions of a project: "
+                     + "border \(String(describing: emptyColumns.firstBorder)), "
+                     + "second column \(emptyColumns.showsSecond)")
     }
 
     private static func testDocumentStoreProtectsNewBuffer() throws {
@@ -3865,6 +3874,11 @@ enum RegressionTests {
                      + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
         try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
                    "a project is still marked as showing after collapsing")
+        // Under a list of collapsed projects the space is left blank — no
+        // outline framing an empty tree.
+        try expect(panel.columnsForTesting.firstBorder == nil
+                    && !panel.columnsForTesting.showsSecond,
+                   "collapsed projects leave an empty frame under their rows")
         rows[0].clickForTesting()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
                    "the collapsed project could not be opened again")
@@ -5610,12 +5624,37 @@ enum RegressionTests {
                        "selection is brighter than the tree's own")
         }
 
-        // A window opens with room for the Git panel's rows.
-        try expect(RootViewController.defaultSidebarWidth == 500,
-                   "the sidebar no longer opens at 500pt")
-        try expect(RootViewController.defaultSidebarWidth
-                    >= RootViewController.minimumSidebarWidth,
-                   "the default sidebar width is below its own floor")
+        // A window opens with the panel at half its width — the tree and the
+        // Git lists sit side by side in it — within the same floor and ceiling
+        // a drag is held to.
+        try expect(RootViewController.defaultSidebarFraction == 0.5,
+                   "the sidebar no longer opens at half the window")
+        try expect(RootViewController.openingSidebarWidth(forWindowWidth: 1600) == 800,
+                   "a 1600pt window does not open with an 800pt panel")
+        try expect(RootViewController.openingSidebarWidth(forWindowWidth: 500)
+                    == RootViewController.minimumSidebarWidth,
+                   "a narrow window opened its panel below the floor")
+        let opening = RootViewController(sidebar: SidebarViewController(),
+                                         editor: EditorViewController())
+        _ = opening.view
+        opening.view.frame = NSRect(x: 0, y: 0, width: 1400, height: 700)
+        opening.view.layoutSubtreeIfNeeded()
+        try expect(opening.sidebarWidthForTesting == 700,
+                   "a 1400pt window opened its panel at \(opening.sidebarWidthForTesting)")
+        // Before it is on screen the window's width is still being decided —
+        // a restored frame, a requested one — and the panel follows it.
+        opening.view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        opening.view.layoutSubtreeIfNeeded()
+        try expect(opening.sidebarWidthForTesting == 500,
+                   "the panel kept half of a width the window had already left: "
+                     + "\(opening.sidebarWidthForTesting)")
+        // Settled once: a dragged width survives the window being resized.
+        opening.resizeSidebarForTesting(to: 420)
+        opening.view.frame = NSRect(x: 0, y: 0, width: 1800, height: 700)
+        opening.view.layoutSubtreeIfNeeded()
+        try expect(opening.sidebarWidthForTesting == 420,
+                   "resizing the window replaced the dragged panel width: "
+                     + "\(opening.sidebarWidthForTesting)")
     }
 
     private static func testSideBySideDiff() throws {
@@ -5881,6 +5920,22 @@ enum RegressionTests {
                    "a press on the divider did not take hold of it")
         try expect(abs(splitter.divider - 260) <= 1,
                    "dragging the divider did not move it: \(splitter.divider)")
+
+        // A bordered pane that has not been given any room yet gets an empty
+        // frame, not the null rect: that one's origin is infinite, and every
+        // constraint inside the pane was asked for an infinite constant.
+        let unsized = ProjectColumnsView(frame: .zero)
+        let unsizedPane = NSView()
+        unsized.first = unsizedPane
+        unsized.addSubview(unsizedPane)
+        unsized.firstBorder = Theme.red
+        unsized.layout()
+        // AppKit clamps the null rect's infinite origin to a huge finite one,
+        // so the check is that the pane sits where the splitter is.
+        try expect(unsizedPane.frame.origin.x <= ProjectColumnsView.borderWidth
+                    && unsizedPane.frame.origin.y <= ProjectColumnsView.borderWidth
+                    && unsizedPane.frame.width >= 0 && unsizedPane.frame.height >= 0,
+                   "a pane with no room was given a null frame: \(unsizedPane.frame)")
 
         // A refresh that lands while a row is being carried waits for it to be
         // put down: rearranging then put the row back where it started, and

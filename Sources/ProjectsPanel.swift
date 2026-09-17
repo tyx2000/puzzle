@@ -660,9 +660,16 @@ final class ProjectColumnsView: FlatView {
         }
     }
 
+    /// The pane less its border, never less than nothing. `insetBy` on a pane
+    /// smaller than its two borders — a column that has not been given any
+    /// room yet — returns the null rect, whose origin is infinite, and every
+    /// constraint inside the pane then asked for an infinite constant.
     private func content(of pane: NSRect, bordered: Bool) -> NSRect {
         guard bordered else { return pane }
-        return pane.insetBy(dx: Self.borderWidth, dy: Self.borderWidth)
+        let inset = Self.borderWidth
+        return NSRect(x: pane.minX + inset, y: pane.minY + inset,
+                      width: max(0, pane.width - inset * 2),
+                      height: max(0, pane.height - inset * 2))
     }
 
     /// A pane is positioned by hand, and everything inside it by constraints.
@@ -798,8 +805,8 @@ final class ProjectsPanelViewController: NSViewController {
         columns.first = fileTree.view
         columns.second = gitColumn
         // One hue per region, drawn inside it: the tree, what has changed, and
-        // what has been committed.
-        columns.firstBorder = ProjectColumnsView.regionBorder(Theme.red)
+        // what has been committed. The tree's own frame waits for a project
+        // to be opened — see `showRegions`.
         gitColumn.firstBorder = ProjectColumnsView.regionBorder(Theme.orange)
         gitColumn.secondBorder = ProjectColumnsView.regionBorder(Theme.purple)
         dividerFraction = Self.storedDividerFraction(dividerDefaults)
@@ -830,9 +837,24 @@ final class ProjectsPanelViewController: NSViewController {
         columns.setContentHuggingPriority(.init(1), for: .vertical)
         columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
         view = root
-        // A window with no project still shows the tree — empty, filling the
-        // panel — so the panel is never a blank rectangle.
+        // Nothing open yet: the space below the rows is left as the panel's
+        // own ground.
+        showRegions(forRepository: nil)
         layOut(active: nil)
+    }
+
+    /// The three regions, and the frames that name them, belong to a project
+    /// that is open. With none open they were three empty outlines on the
+    /// start page — or one, under a list of collapsed projects — framing
+    /// nothing. The columns stay in the stack, since they are what takes up
+    /// the height the rows leave, but draw no frame and no second column.
+    ///
+    /// `forRepository` is nil for no open project, and otherwise whether the
+    /// open one is a repository — which is what decides the Git column.
+    private func showRegions(forRepository isRepository: Bool?) {
+        columns.firstBorder = isRepository == nil
+            ? nil : ProjectColumnsView.regionBorder(Theme.red)
+        columns.showsSecond = isRepository == true
     }
 
     /// Rebuild the list. The tree is moved rather than remade, so switching
@@ -885,8 +907,9 @@ final class ProjectsPanelViewController: NSViewController {
         activeIndex = active
         // A project with no branch is not a repository: nothing to head the
         // right column with, and nothing to put in it.
-        columns.showsSecond = active.map { projects.indices.contains($0)
-            && !projects[$0].branch.isEmpty } ?? false
+        showRegions(forRepository: active.flatMap {
+            projects.indices.contains($0) ? !projects[$0].branch.isEmpty : nil
+        })
         layOut(active: active)
     }
 
