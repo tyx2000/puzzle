@@ -102,9 +102,24 @@ final class GitPanelViewController: NSViewController {
     private var activeOperationID: UUID?
     private var operationLocksMessage = false
 
+    /// History is read in pages, the same size the project's own history
+    /// reads: a repository's log is unbounded, and a list that held the first
+    /// forty commits and stopped had no way to say there were more. The next
+    /// page is read when the end of this one comes into view.
+    static var historyPageSize = 200
+    /// How deep History has read so far.
+    private var historyLimit = GitPanelViewController.historyPageSize
+    /// False once Git has handed back fewer commits than were asked for.
+    private var historyHasMore = true
+    /// A page is being read; another scroll to the end waits for it.
+    private var historyPageLoading = false
+    private(set) var historyLoadCountForTesting = 0
+
     func setDirectory(_ url: URL?) {
         directory = url
         entries.removeAll()
+        // Another repository's depth is not this one's.
+        resetHistoryDepth()
         history.removeAll()
         historyRows.removeAll()
         unpushed.removeAll()
@@ -128,10 +143,16 @@ final class GitPanelViewController: NSViewController {
         commitFiles.removeAll()
         entries.removeAll()
         history.removeAll()
+        resetHistoryDepth()
         unpushed.removeAll()
         branches.removeAll()
         remotes.removeAll()
         if isViewLoaded { table.reloadData() }
+    }
+
+    private func resetHistoryDepth() {
+        historyLimit = Self.historyPageSize
+        historyHasMore = true
     }
 
     override func loadView() {
@@ -185,6 +206,11 @@ final class GitPanelViewController: NSViewController {
         let scroll = NSScrollView()
         PuzzleScroller.adopt(scroll)
         scroll.documentView = table
+        // Reaching the end of History asks for the next page.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(historyScrolled),
+            name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.panelBackground
@@ -376,6 +402,8 @@ final class GitPanelViewController: NSViewController {
         refreshDirectory = directory
         let priority: RefreshPriority = showingBranches
             ? .branches : (showingHistory ? .history : .changes)
+        // Read here, where it is set: the queue below only uses the number.
+        let historyDepth = historyLimit
         gitQueue.async { [weak self] in
             guard let self else { return }
             var status = GitService.status(in: directory)
@@ -411,18 +439,10 @@ final class GitPanelViewController: NSViewController {
                 }
             }
             let loadHistory = {
-                let log = GitService.log(in: directory, limit: 40)
-                let pending = GitService.unpushedHashes(in: directory)
-                let named = GitService.branchNames(for: log.map(\.shortHash), in: directory)
+                let read = Self.readHistory(in: directory, depth: historyDepth)
                 DispatchQueue.main.async {
                     guard self.directory == directory else { return }
-                    self.history = log
-                    self.unpushed = pending
-                    self.historyBranches = named
-                    self.historyBranchColumnWidth =
-                        GitCommitCell.branchColumnWidth(for: named.values)
-                    self.rebuildHistoryRows()
-                    if self.showingHistory { self.table.reloadData() }
+                    self.applyHistory(read, depth: historyDepth)
                 }
             }
 
@@ -447,6 +467,53 @@ final class GitPanelViewController: NSViewController {
                     self.refreshAgain = false
                     self.requestRefresh(requireFollowUp: false)
                 }
+            }
+        }
+    }
+
+    private typealias HistoryRead = (log: [GitService.Commit], unpushed: Set<String>,
+                                     branches: [String: String])
+
+    /// The log to `depth` commits, what of it is not pushed, and the branch
+    /// each commit sits on. Runs on the Git queue.
+    private static func readHistory(in directory: URL, depth: Int) -> HistoryRead {
+        let log = GitService.log(in: directory, limit: depth)
+        return (log, GitService.unpushedHashes(in: directory),
+                GitService.branchNames(for: log.map(\.shortHash), in: directory))
+    }
+
+    private func applyHistory(_ read: HistoryRead, depth: Int) {
+        // Reads land in the order they were asked for — one serial queue —
+        // and each takes the depth of the moment it was asked, so a later
+        // one is never shallower.
+        historyLoadCountForTesting += 1
+        history = read.log
+        historyHasMore = read.log.count >= depth
+        unpushed = read.unpushed
+        historyBranches = read.branches
+        historyBranchColumnWidth = GitCommitCell.branchColumnWidth(for: read.branches.values)
+        rebuildHistoryRows()
+        if showingHistory { table.reloadData() }
+    }
+
+    /// The end of History came into view: read one page deeper. Only the log
+    /// is read again — nothing else the panel shows moved because the reader
+    /// scrolled.
+    @objc private func historyScrolled() {
+        guard showingHistory, historyHasMore, !historyPageLoading, let directory,
+              let clip = table.enclosingScrollView?.contentView else { return }
+        let remaining = table.bounds.height - clip.bounds.maxY
+        guard remaining < clip.bounds.height else { return }
+        historyLimit += Self.historyPageSize
+        historyPageLoading = true
+        let depth = historyLimit
+        gitQueue.async { [weak self] in
+            let read = Self.readHistory(in: directory, depth: depth)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.historyPageLoading = false
+                guard self.directory == directory else { return }
+                self.applyHistory(read, depth: depth)
             }
         }
     }
@@ -1281,6 +1348,22 @@ final class GitPanelViewController: NSViewController {
         segmented.selectedSegment = 2
         tabChanged()
     }
+    /// How deep History has read so far.
+    var historyLimitForTesting: Int { historyLimit }
+    /// Put the end of History in view, the way scrolling to the bottom does.
+    func scrollHistoryToEndForTesting() {
+        _ = view
+        table.enclosingScrollView?.layoutSubtreeIfNeeded()
+        table.scrollToEndOfDocument(nil)
+        historyScrolled()
+    }
+    /// Wait for the page being read, the way a test has to.
+    func settleHistoryForTesting(timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while historyPageLoading || refreshInFlight, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
     var historyRowIsCommitForTesting: [Bool] {
         historyRows.map { if case .commit = $0 { return true } else { return false } }
     }
@@ -1316,6 +1399,17 @@ final class GitPanelViewController: NSViewController {
     func contextMenuForTesting(row: Int) -> NSMenu? {
         _ = view
         return contextMenu(forRow: row)
+    }
+    /// The row as the list draws it, laid out and ready to be rendered.
+    func rowViewForTesting(_ row: Int) -> GitRowView? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.rowView(atRow: row, makeIfNecessary: true) as? GitRowView
+    }
+    func setHoveredRowForTesting(_ row: Int) {
+        _ = view
+        table.setHoveredRowForTesting(row)
     }
     /// True when the row lights up under the pointer.
     func hoverForTesting(row: Int) -> Bool {
@@ -1374,6 +1468,9 @@ extension GitPanelViewController: NSTableViewDataSource {
         view.identifier = id
         view.isHovered = table.hoveredRow == row
         view.isActiveFile = false
+        // Branches and commits are read across a wide row; alternate rows
+        // keep the line. Changes is a short list of names and stays plain.
+        view.isStriped = (showingBranches || showingHistory) && row % 2 == 1
         if showingBranches {
             return view
         } else if showingHistory, row < historyRows.count {

@@ -312,8 +312,10 @@ final class GitBranchCell: DrawnSidebarCell {
         date = branch.createdAt
         metadata = "\(branch.author)  ·  \(branch.createdAt)"
         isCurrent = branch.isCurrent
-        // A name that had to be truncated is worth reading in full.
-        toolTip = "\(branch.name)\n\(metadata)"
+        // No bubble: the row already says all of it, and one popping up over
+        // the list as the pointer passes was in the way of the rows under it.
+        // A screen reader still hears the whole of it.
+        toolTip = nil
         exposeToAccessibility("Branch \(branch.name), \(metadata)")
         needsDisplay = true
     }
@@ -621,9 +623,18 @@ final class GitRowView: NSTableRowView {
             needsDisplay = true
         }
     }
+    /// One of the alternate rows of a striped list. Set with the row's index
+    /// every time the list hands the view out; every list that stripes
+    /// reloads whole, so no row keeps the parity of a place it has left.
+    var isStriped = false {
+        didSet {
+            guard isStriped != oldValue else { return }
+            needsDisplay = true
+        }
+    }
 
     override func drawBackground(in dirtyRect: NSRect) {
-        Theme.panelBackground.setFill()
+        (isStriped ? Theme.stripedRow : Theme.panelBackground).setFill()
         bounds.fill()
         if isActiveFile {
             Theme.activeRow.setFill()

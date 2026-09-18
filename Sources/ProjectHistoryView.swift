@@ -299,6 +299,17 @@ final class ProjectHistoryViewController: NSViewController {
     }
     /// A click on a row, through the same path a real one takes.
     func clickRowForTesting(_ row: Int) { act(on: row) }
+    /// The row as the list draws it, laid out and ready to be rendered.
+    func rowViewForTesting(_ row: Int) -> GitRowView? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.rowView(atRow: row, makeIfNecessary: true) as? GitRowView
+    }
+    func setHoveredRowForTesting(_ row: Int) {
+        _ = view
+        table.setHoveredRowForTesting(row)
+    }
     /// Wait for a load already in flight, the way a test has to.
     func settleForTesting(timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
@@ -326,6 +337,10 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
         let view = (tableView.makeView(withIdentifier: id, owner: self) as? GitRowView)
             ?? GitRowView()
         view.identifier = id
+        // A recycled row must not bring the pointer, or the stripe, of the
+        // place it was last used.
+        view.isHovered = table.hoveredRow == row
+        view.isStriped = row % 2 == 1
         return view
     }
 

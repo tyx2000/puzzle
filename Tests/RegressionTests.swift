@@ -79,6 +79,8 @@ enum RegressionTests {
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
         try testProjectCommitLine()
+        try testStripedGitLists()
+        try testGitPanelHistoryPages()
         try testBranchMenu()
         try testSplitterAndRowGestures()
         try testTerminalLaunchScripts()
@@ -5077,6 +5079,9 @@ enum RegressionTests {
                    "the branch name is not the left of the row: \(branchRow.leading)")
         try expect(branchRow.trailing.contains("Ada Lovelace"),
                    "the branch row does not carry its author: \(branchRow.trailing)")
+        // Like the History rows, no bubble over the list.
+        try expect(branchRow.hover.isEmpty,
+                   "a branch row still carries a tip: \(branchRow.hover)")
     }
 
     private static func testStatusMatchesPorcelainV1() throws {
@@ -6437,6 +6442,259 @@ enum RegressionTests {
         try expect(waitUntil { row(second)?.hasSuffix("  1") == false },
                    "the row of a project left behind still counts what was committed: "
                      + "\(String(describing: row(second)))")
+    }
+
+    private static func testStripedGitLists() throws {
+        let root = try temporaryDirectory("striped-lists")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: root).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Puzzle Test"])
+        _ = git(["config", "user.email", "puzzle@example.invalid"])
+        for index in 1...5 {
+            try Data("\(index)\n".utf8).write(to: root.appendingPathComponent("f\(index).txt"))
+            try expect(GitService.commit("commit \(index)", in: root).code == 0,
+                       "fixture commit \(index) failed")
+        }
+        for branch in ["alpha", "beta", "gamma"] { _ = git(["branch", branch]) }
+        for name in ["new-one.txt", "new-two.txt"] {
+            try Data("new\n".utf8).write(to: root.appendingPathComponent(name))
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        let panel = GitPanelViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        window.setContentSize(NSSize(width: 380, height: 420))
+        defer { window.close() }
+
+        /// The colour a row is drawn in, from a corner no text reaches.
+        func ground(_ row: GitRowView?) throws -> NSColor? {
+            guard let row else { return nil }
+            row.layoutSubtreeIfNeeded()
+            guard let rep = row.bitmapImageRepForCachingDisplay(in: row.bounds) else {
+                throw Failure(description: "a row could not be drawn")
+            }
+            row.cacheDisplay(in: row.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / max(1, row.bounds.width)
+            return rep.colorAt(x: Int(scale), y: Int(scale))
+        }
+        /// A colour as the same window draws it, to compare like with like.
+        func asDrawn(_ colour: NSColor, in host: NSView) throws -> NSColor? {
+            let swatch = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+            swatch.fillColor = colour
+            host.addSubview(swatch)
+            defer { swatch.removeFromSuperview() }
+            guard let rep = swatch.bitmapImageRepForCachingDisplay(in: swatch.bounds) else {
+                throw Failure(description: "a swatch could not be drawn")
+            }
+            swatch.cacheDisplay(in: swatch.bounds, to: rep)
+            return rep.colorAt(x: 2, y: 2)
+        }
+        func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a, let b else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.01
+                && abs(a.greenComponent - b.greenComponent) < 0.01
+                && abs(a.blueComponent - b.blueComponent) < 0.01
+        }
+        let plain = try asDrawn(Theme.panelBackground, in: panel.view)
+        let stripe = try asDrawn(Theme.stripedRow, in: panel.view)
+        let hover = try asDrawn(Theme.hover, in: panel.view)
+        // Three colours, none of which passes for another: the two grounds a
+        // list alternates between, and the row under the pointer.
+        try expect(!same(plain, stripe) && !same(stripe, hover) && !same(plain, hover),
+                   "the stripe, the plain row and the hovered row are not three colours")
+
+        /// What the first rows are drawn in, as plain / stripe / hover.
+        func pattern(_ count: Int, _ rowView: (Int) -> GitRowView?) throws -> [String] {
+            try (0..<count).map { index in
+                let colour = try ground(rowView(index))
+                if same(colour, plain) { return "plain" }
+                if same(colour, stripe) { return "stripe" }
+                if same(colour, hover) { return "hover" }
+                return "other"
+            }
+        }
+
+        // Changes stays a plain list.
+        panel.setDirectory(root)
+        try expect(waitUntil { panel.rowCountForTesting == 2 }, "the changes never listed")
+        let changes = try pattern(2) { panel.rowViewForTesting($0) }
+        try expect(changes == ["plain", "plain"],
+                   "the Changes list is striped: \(changes)")
+
+        // History alternates, and the row under the pointer is its own colour
+        // whichever of the two it sits on — and gives it back when it goes.
+        panel.showHistory()
+        try expect(waitUntil { panel.rowCountForTesting >= 5 }, "the history never listed")
+        let history = try pattern(4) { panel.rowViewForTesting($0) }
+        try expect(history == ["plain", "stripe", "plain", "stripe"],
+                   "the History list does not alternate: \(history)")
+        panel.setHoveredRowForTesting(1)
+        let hoveredStripe = try pattern(3) { panel.rowViewForTesting($0) }
+        try expect(hoveredStripe == ["plain", "hover", "plain"],
+                   "hovering a striped commit: \(hoveredStripe)")
+        panel.setHoveredRowForTesting(2)
+        let hoveredPlain = try pattern(3) { panel.rowViewForTesting($0) }
+        try expect(hoveredPlain == ["plain", "stripe", "hover"],
+                   "hovering a plain commit, or the stripe did not come back: \(hoveredPlain)")
+        panel.setHoveredRowForTesting(-1)
+
+        // Branches alternate the same way.
+        panel.showBranchTab()
+        try expect(waitUntil { panel.rowCountForTesting == 4 }, "the branches never listed")
+        let branches = try pattern(4) { panel.rowViewForTesting($0) }
+        try expect(branches == ["plain", "stripe", "plain", "stripe"],
+                   "the Branch list does not alternate: \(branches)")
+        panel.setHoveredRowForTesting(0)
+        let hoveredBranch = try pattern(2) { panel.rowViewForTesting($0) }
+        try expect(hoveredBranch == ["hover", "stripe"],
+                   "hovering a branch: \(hoveredBranch)")
+        panel.setHoveredRowForTesting(-1)
+        // Back on Changes, a row that was a stripe a moment ago is plain again.
+        panel.showChangesForTesting()
+        let changesAgain = try pattern(2) { panel.rowViewForTesting($0) }
+        try expect(changesAgain == ["plain", "plain"],
+                   "a stripe followed its row back to the Changes list: \(changesAgain)")
+
+        // The history under a project's changes alternates too.
+        let history2 = ProjectHistoryViewController()
+        let window2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                               styleMask: [.titled], backing: .buffered, defer: false)
+        window2.contentViewController = history2
+        window2.setContentSize(NSSize(width: 380, height: 420))
+        defer { window2.close() }
+        history2.setSource(directory: root,
+                           state: .init(head: git(["rev-parse", "HEAD"]), ahead: 0,
+                                        hasUpstream: false))
+        history2.settleForTesting()
+        let projectRows = try pattern(4) { history2.rowViewForTesting($0) }
+        try expect(projectRows == ["plain", "stripe", "plain", "stripe"],
+                   "the project's history does not alternate: \(projectRows)")
+        history2.setHoveredRowForTesting(1)
+        let projectHover = try pattern(3) { history2.rowViewForTesting($0) }
+        try expect(projectHover == ["plain", "hover", "plain"],
+                   "hovering a commit in the project's history: \(projectHover)")
+        history2.setHoveredRowForTesting(-1)
+        // Opening a commit puts its files between the commits: every row
+        // below takes the colour of its new place, not the one it had.
+        history2.clickRowForTesting(0)
+        try expect(waitUntil { history2.rowCountForTesting > 5 },
+                   "the first commit did not open")
+        let opened = try pattern(4) { history2.rowViewForTesting($0) }
+        try expect(opened == ["plain", "stripe", "plain", "stripe"],
+                   "rows kept the colours of their old places: \(opened)")
+    }
+
+    private static func testGitPanelHistoryPages() throws {
+        // The panel's History reads as deep as the project's own does, a page
+        // at a time.
+        try expect(GitPanelViewController.historyPageSize == 200
+                    && GitPanelViewController.historyPageSize
+                        == ProjectHistoryViewController.pageSize,
+                   "the Git panel reads \(GitPanelViewController.historyPageSize) commits "
+                     + "a page, the project's history \(ProjectHistoryViewController.pageSize)")
+
+        let root = try temporaryDirectory("panel-history-pages")
+        let other = try temporaryDirectory("panel-history-pages-other")
+        defer {
+            for url in [root, other] { try? FileManager.default.removeItem(at: url) }
+        }
+        for directory in [root, other] {
+            _ = GitService.run(["init", "-q", "-b", "main"], in: directory)
+            _ = GitService.run(["config", "user.name", "Puzzle Test"], in: directory)
+            _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: directory)
+        }
+        for index in 1...7 {
+            try Data("\(index)\n".utf8).write(to: root.appendingPathComponent("f\(index).txt"))
+            try expect(GitService.commit("commit \(index)", in: root).code == 0,
+                       "fixture commit \(index) failed")
+        }
+        for index in 1...4 {
+            try Data("\(index)\n".utf8).write(to: other.appendingPathComponent("f\(index).txt"))
+            try expect(GitService.commit("other \(index)", in: other).code == 0,
+                       "fixture commit \(index) failed")
+        }
+
+        // Pages of three, so seven commits take three of them.
+        let savedPage = GitPanelViewController.historyPageSize
+        GitPanelViewController.historyPageSize = 3
+        defer { GitPanelViewController.historyPageSize = savedPage }
+        let panel = GitPanelViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        window.setContentSize(NSSize(width: 380, height: 420))
+        defer { window.close() }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        panel.setDirectory(root)
+        panel.showHistory()
+        try expect(waitUntil { panel.rowCountForTesting == 3 },
+                   "History did not open on its first page: \(panel.rowCountForTesting) rows")
+        panel.settleHistoryForTesting()
+
+        // Scrolled to the end of a list on another tab: nothing is read.
+        panel.showChangesForTesting()
+        let loadsOnChanges = panel.historyLoadCountForTesting
+        panel.scrollHistoryToEndForTesting()
+        panel.settleHistoryForTesting()
+        try expect(panel.historyLoadCountForTesting == loadsOnChanges
+                    && panel.historyLimitForTesting == 3,
+                   "scrolling another tab read History deeper")
+        panel.showHistoryForTesting()
+
+        panel.scrollHistoryToEndForTesting()
+        panel.settleHistoryForTesting()
+        try expect(panel.rowCountForTesting == 6 && panel.historyLimitForTesting == 6,
+                   "the end of the first page did not bring the second: "
+                     + "\(panel.rowCountForTesting) rows")
+        panel.scrollHistoryToEndForTesting()
+        panel.settleHistoryForTesting()
+        try expect(panel.rowCountForTesting == 7,
+                   "the last page did not arrive: \(panel.rowCountForTesting) rows")
+        try expect(panel.rowTextForTesting(6).leading == "commit 1",
+                   "the list does not end at the first commit: "
+                     + panel.rowTextForTesting(6).leading)
+        // Git gave back fewer than it was asked for: that was all of it.
+        let loadsAtEnd = panel.historyLoadCountForTesting
+        panel.scrollHistoryToEndForTesting()
+        panel.settleHistoryForTesting()
+        try expect(panel.historyLoadCountForTesting == loadsAtEnd
+                    && panel.historyLimitForTesting == 9,
+                   "History kept reading past its last commit")
+
+        // A refresh keeps the depth the reader scrolled to.
+        panel.refreshExternal()
+        panel.settleHistoryForTesting()
+        try expect(waitUntil { panel.historyLoadCountForTesting > loadsAtEnd }
+                    && panel.rowCountForTesting == 7,
+                   "a refresh put History back to its first page: "
+                     + "\(panel.rowCountForTesting) rows")
+
+        // Another repository starts from its own first page.
+        panel.setDirectory(other)
+        try expect(panel.historyLimitForTesting == 3,
+                   "another repository inherited this one's depth: "
+                     + "\(panel.historyLimitForTesting)")
+        try expect(waitUntil { panel.rowTextForTesting(0).leading == "other 4" }
+                    && panel.rowCountForTesting == 3,
+                   "the other repository did not open on its first page: "
+                     + "\(panel.rowCountForTesting) rows")
     }
 
     private static func testBranchMenu() throws {

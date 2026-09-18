@@ -48,6 +48,10 @@ enum Theme {
     static let selectedControlText = hex(0xe6e9ef)
     static let inactiveTab = hex(0x0d1017)
     static let hover = hex(0x1c212b)
+    /// Every other row of a list read across — branches, commits — so the eye
+    /// keeps its line over a wide row. A step off the panel, well short of
+    /// `hover`, so a stripe is never mistaken for the row under the pointer.
+    static let stripedRow = hex(0x131721)
     /// active file in the tree
     static let activeRow = hex(0x232a36)
     /// A match, wherever it is found, is underlined — never boxed and never
