@@ -41,6 +41,9 @@ final class SidebarViewController: NSViewController {
     var onGitDiff: ((GitService.Status.Entry, URL) -> Void)?
     var onGitCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
     var onGitChanged: (() -> Void)?
+    /// The commit line over a project's changes committed or pushed in this
+    /// repository — the project on screen, or one the user has since left.
+    var onProjectGitChanged: ((URL) -> Void)?
 
     private let containerView = NSView()
     /// The 1pt line under the traffic-light band — the same boundary the
@@ -126,6 +129,11 @@ final class SidebarViewController: NSViewController {
         projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
             self?.onGitDiff?(entry, directory)
         }
+        // A commit or push from the line over the changes moves everything
+        // that reads the repository, the Git panel included.
+        projectsPanel.changes.onChanged = { [weak self] directory in
+            self?.onProjectGitChanged?(directory)
+        }
         // A file inside a commit opens that commit's diff, as it does in the
         // Git panel's own History tab.
         projectsPanel.history.onOpenCommitDiff = { [weak self] commit, file, directory in
@@ -205,6 +213,8 @@ final class SidebarViewController: NSViewController {
     }
 
     var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
+    /// The Git panel, if it has been built.
+    var gitPanelForTesting: GitPanelViewController? { gitController }
     var titleSeparatorForTesting: FlatView { titleSeparator }
 
     /// `nil` when the window has no project left: the panels empty rather than
@@ -233,7 +243,11 @@ final class SidebarViewController: NSViewController {
     /// only when something it shows has moved.
     func setChanges(_ entries: [GitService.Status.Entry], in directory: URL?,
                     state: ProjectHistoryViewController.State) {
-        projectsPanel.changes.setEntries(entries, in: directory)
+        // Push on the commit line is live on the same terms as the Git panel's:
+        // something ahead, or no upstream yet. A folder that is not a
+        // repository has neither, and no column to show them in.
+        projectsPanel.changes.setEntries(entries, in: directory,
+                                         ahead: state.ahead, hasUpstream: state.hasUpstream)
         projectsPanel.history.setSource(directory: directory, state: state)
     }
 

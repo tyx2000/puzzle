@@ -78,6 +78,7 @@ enum RegressionTests {
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
+        try testProjectCommitLine()
         try testBranchMenu()
         try testSplitterAndRowGestures()
         try testTerminalLaunchScripts()
@@ -5999,6 +6000,445 @@ enum RegressionTests {
                    "a tinted symbol was rebuilt on a second draw")
     }
 
+    private static func testProjectCommitLine() throws {
+        func key(_ flags: NSEvent.ModifierFlags, keyCode: UInt16 = 36,
+                 characters: String = "\r", windowNumber: Int = 0) -> NSEvent {
+            // Only fails for an event type that is not a key event.
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber,
+                context: nil, characters: characters, charactersIgnoringModifiers: characters,
+                isARepeat: false, keyCode: keyCode)!
+        }
+        func waitUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        // One reading of the keys for both boxes: ⌘↩ commits, ⇧⌘↩ pushes,
+        // whether the Return is the main one or the keypad's, and whatever
+        // Caps Lock is doing. Anything else held down is not the shortcut.
+        try expect(CommitShortcut(key([.command])) == .commit
+                    && CommitShortcut(key([.command, .shift])) == .push,
+                   "⌘↩ and ⇧⌘↩ are not commit and push")
+        try expect(CommitShortcut(key([.command, .capsLock])) == .commit
+                    && CommitShortcut(key([.command, .numericPad], keyCode: 76)) == .commit,
+                   "Caps Lock or the keypad's Enter stops ⌘↩ committing")
+        try expect(CommitShortcut(key([])) == nil
+                    && CommitShortcut(key([.command, .option])) == nil
+                    && CommitShortcut(key([.command], keyCode: 0, characters: "a")) == nil,
+                   "a key that is not ⌘↩ or ⇧⌘↩ reads as one")
+
+        // A repository with a remote to push to.
+        let root = try temporaryDirectory("commit-line")
+        let remote = try temporaryDirectory("commit-line-remote")
+        let other = try temporaryDirectory("commit-line-other")
+        defer {
+            for url in [root, remote, other] { try? FileManager.default.removeItem(at: url) }
+        }
+        func git(_ args: [String], in directory: URL) -> String {
+            GitService.run(args, in: directory).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "--bare", "-b", "main"], in: remote)
+        _ = git(["init", "-q", "-b", "main"], in: root)
+        _ = git(["config", "user.name", "Puzzle Test"], in: root)
+        _ = git(["config", "user.email", "puzzle@example.invalid"], in: root)
+        try Data("one\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        _ = git(["remote", "add", "origin", remote.path], in: root)
+        try expect(GitService.run(["push", "-q", "-u", "origin", "main"], in: root).code == 0,
+                   "the fixture could not push to its remote")
+        try Data("two\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
+
+        let changes = ProjectChangesViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 260),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = changes
+        window.setContentSize(NSSize(width: 360, height: 260))
+        defer { window.close() }
+        var changedIn: [URL] = []
+        func show(_ directory: URL) {
+            let status = GitService.status(in: directory)
+            changes.setEntries(status.entries, in: directory,
+                               ahead: status.ahead, hasUpstream: status.hasUpstream)
+        }
+        changes.onChanged = { directory in
+            changedIn.append(directory)
+            show(directory)
+        }
+        show(root)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let bar = changes.commitBarForTesting
+        bar.layoutSubtreeIfNeeded()
+
+        // A line at the top of the column: the message, then Commit, then Push
+        // at the edge, all on one centre line, and the list under it.
+        try expect(bar.frame.height == ProjectCommitBar.height
+                    && bar.frame.maxY == changes.view.bounds.height,
+                   "the commit line is not a \(ProjectCommitBar.height)pt strip at the top: "
+                     + "\(bar.frame) in \(changes.view.bounds)")
+        let box = bar.messageBoxFrameForTesting
+        let commitFrame = bar.commitButton.frame
+        let pushFrame = bar.pushButton.frame
+        try expect(box.maxX + ProjectCommitBar.gap == commitFrame.minX
+                    && commitFrame.maxX + ProjectCommitBar.gap == pushFrame.minX
+                    && pushFrame.maxX == bar.bounds.width - ProjectCommitBar.inset,
+                   "the line is not message, Commit, Push: \(box) \(commitFrame) \(pushFrame)")
+        // The message is the Git panel's box in one line: out to the region's
+        // left edge and its full height, set apart by its fill and nothing
+        // drawn around it.
+        try expect(box.minX == 0 && box.minY == 0 && box.height == bar.bounds.height,
+                   "the message box does not run to the region's edges: \(box) in "
+                     + "\(bar.bounds)")
+        try expect(box.midY == commitFrame.midY && commitFrame.midY == pushFrame.midY,
+                   "the line's parts are not on one centre line")
+        // One ground for the whole line — the message, the gaps and both
+        // buttons — and no shape round either button while it is not lit.
+        func drawn(_ view: NSView) throws -> NSBitmapImageRep {
+            view.layoutSubtreeIfNeeded()
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Failure(description: "\(type(of: view)) could not be drawn")
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            return rep
+        }
+        /// A pixel of a flipped view, by its point.
+        func pixel(_ rep: NSBitmapImageRep, of view: NSView, at point: NSPoint) -> NSColor? {
+            let scale = CGFloat(rep.pixelsWide) / max(1, view.bounds.width)
+            return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))
+        }
+        /// A colour as this same window draws it, to compare like with like:
+        /// off the window, the same colour comes back in another space.
+        func asDrawn(_ colour: NSColor) throws -> NSColor? {
+            let reference = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+            reference.fillColor = colour
+            changes.view.addSubview(reference)
+            defer { reference.removeFromSuperview() }
+            return pixel(try drawn(reference), of: reference, at: NSPoint(x: 2, y: 2))
+        }
+        func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a, let b else { return false }
+            return abs(a.redComponent - b.redComponent) < 0.01
+                && abs(a.greenComponent - b.greenComponent) < 0.01
+                && abs(a.blueComponent - b.blueComponent) < 0.01
+        }
+        let ground = try asDrawn(Theme.activeTab)
+        let lit = try asDrawn(Theme.activeRow)
+        func ungrounded(_ rep: NSBitmapImageRep, _ points: [NSPoint]) -> [NSPoint] {
+            points.filter { !same(pixel(rep, of: bar, at: $0), ground) }
+        }
+        func buttonEdges(_ frame: NSRect) -> [NSPoint] {
+            [NSPoint(x: frame.minX + 1, y: frame.minY + 1),
+             NSPoint(x: frame.maxX - 1, y: frame.maxY - 1),
+             NSPoint(x: frame.minX + 1, y: frame.midY),
+             NSPoint(x: frame.midX, y: frame.minY + 1),
+             NSPoint(x: frame.minX + 3, y: frame.minY + 3)]
+        }
+        let rowPoints = [NSPoint(x: 1, y: 1), NSPoint(x: 1, y: bar.bounds.height - 1),
+                         NSPoint(x: box.maxX - 1, y: 1),
+                         NSPoint(x: box.midX, y: bar.bounds.height - 1),
+                         NSPoint(x: box.maxX + ProjectCommitBar.gap / 2, y: bar.bounds.midY),
+                         NSPoint(x: commitFrame.midX, y: 1),
+                         NSPoint(x: pushFrame.midX, y: bar.bounds.height - 1),
+                         NSPoint(x: bar.bounds.width - 1, y: bar.bounds.midY)]
+            + buttonEdges(commitFrame) + buttonEdges(pushFrame)
+        let off = ungrounded(try drawn(bar), rowPoints)
+        try expect(off.isEmpty,
+                   "the line is not one ground, or a button draws a shape at rest: \(off)")
+        // A disabled button never lights, pointer or not.
+        bar.commitButton.setHoveredForTesting(true)
+        let disabledHover = try drawn(bar)
+        try expect(!bar.commitButton.isEnabled && !bar.commitButton.isLitForTesting
+                    && ungrounded(disabledHover, buttonEdges(commitFrame)).isEmpty,
+                   "a disabled Commit lights up under the pointer")
+        bar.commitButton.setHoveredForTesting(false)
+        // The Git panel's Push keeps its frame; only the line's buttons go plain.
+        try expect(BadgeButton().style == .bordered
+                    && bar.commitButton.style == .plain && bar.pushButton.style == .plain,
+                   "the plain style reached the Git panel, or missed the line's buttons")
+
+        // Its text starts as far in as the Git panel's does.
+        let panelTextX: CGFloat = 4 + 5
+        try expect(bar.field.frame.minX + 2 == panelTextX,
+                   "the message starts \(bar.field.frame.minX + 2)pt in, not \(panelTextX)")
+        try expect(bar.pushButton.title == "Push" && bar.commitButton.title == "Commit",
+                   "the buttons are not Commit and Push")
+        try expect(changes.rowCountForTesting == 1
+                    && changes.rowNameForTesting(0) == "changed.txt",
+                   "the list under the line lost the change")
+
+        // The Git panel's rules and words: no message, no commit; nothing
+        // ahead of the remote, no push.
+        try expect(!bar.commitButton.isEnabled
+                    && bar.commitButton.toolTip == GitPanelViewController.commitHint(
+                        possible: false, hasChanges: true),
+                   "Commit is live, or explains itself differently, with no message")
+        try expect(!bar.pushButton.isEnabled && bar.pushButton.badge.isEmpty
+                    && bar.pushButton.toolTip == GitPanelViewController.pushHint(ahead: 0),
+                   "Push is live with nothing to push")
+        let headBefore = git(["rev-parse", "HEAD"], in: root)
+        window.makeFirstResponder(bar.field)
+        try expect(bar.field.currentEditor() != nil, "the message field could not be typed in")
+        try expect(bar.field.drawsPlaceholderForTesting,
+                   "the empty field shows no hint while it is being typed in")
+        try expect(window.performKeyEquivalent(with: key([.command])),
+                   "⌘↩ in the message field was not taken")
+        try expect(!changes.isBusyForTesting && git(["rev-parse", "HEAD"], in: root) == headBefore,
+                   "⌘↩ committed with no message")
+
+        // Typed, the message is enough.
+        bar.field.currentEditor()?.insertText("from the line")
+        try expect(!bar.field.drawsPlaceholderForTesting,
+                   "the hint stays under the typed message")
+        // The message sits on the same line typed and at rest. AppKit's own
+        // drawing at rest ignores the centred line and set a draft left in
+        // the field at the top of the strip.
+        func inkRows(_ rep: NSBitmapImageRep) -> ClosedRange<Int>? {
+            let scale = CGFloat(rep.pixelsWide) / max(1, bar.bounds.width)
+            var rows: [Int] = []
+            for y in 0..<rep.pixelsHigh {
+                for x in Int(22 * scale)..<Int(57 * scale) {
+                    if let c = rep.colorAt(x: x, y: y), c.brightnessComponent > 0.5 {
+                        rows.append(y)
+                        break
+                    }
+                }
+            }
+            guard let top = rows.min(), let bottom = rows.max() else { return nil }
+            return top...bottom
+        }
+        let typedRows = inkRows(try drawn(bar))
+        window.makeFirstResponder(nil)
+        let restingRows = inkRows(try drawn(bar))
+        try expect(typedRows != nil && typedRows == restingRows,
+                   "the message moves when the field is left: typed \(String(describing: typedRows)), "
+                     + "at rest \(String(describing: restingRows))")
+        window.makeFirstResponder(bar.field)
+        try expect(bar.commitButton.isEnabled
+                    && bar.commitButton.toolTip == GitPanelViewController.commitHint(
+                        possible: true, hasChanges: true),
+                   "typing a message did not make Commit live")
+        try expect(bar.commitButton.toolTip?.contains("⌘↩") == true
+                    && bar.pushButton.toolTip?.contains("⇧⌘↩") == true,
+                   "the buttons do not name the Git panel's shortcuts")
+        // Live, it shows as live: its label in the text colour, and under the
+        // pointer, the area a click lands in.
+        bar.commitButton.setHoveredForTesting(true)
+        let hovered = try drawn(bar)
+        // Inside the rounded corners, clear of the label.
+        let litPoints = [NSPoint(x: commitFrame.minX + 2, y: commitFrame.midY),
+                         NSPoint(x: commitFrame.maxX - 2, y: commitFrame.midY),
+                         NSPoint(x: commitFrame.midX, y: commitFrame.minY + 2),
+                         NSPoint(x: commitFrame.midX, y: commitFrame.maxY - 2)]
+        try expect(bar.commitButton.isLitForTesting
+                    && litPoints.allSatisfy {
+                        same(pixel(hovered, of: bar, at: $0), lit) },
+                   "hovering a live Commit does not light the area it answers to")
+        try expect(ungrounded(hovered, buttonEdges(pushFrame)).isEmpty,
+                   "hovering Commit lit Push as well")
+        bar.commitButton.setHoveredForTesting(false)
+        let left = try drawn(bar)
+        try expect(ungrounded(left, buttonEdges(commitFrame)).isEmpty,
+                   "Commit stays lit after the pointer leaves")
+        // Only the field being typed in answers ⌘↩: out of it, the key
+        // belongs to whatever else is focused.
+        window.makeFirstResponder(nil)
+        try expect(!window.performKeyEquivalent(with: key([.command])),
+                   "⌘↩ was taken by a message field nobody is typing in")
+        try expect(!changes.isBusyForTesting, "⌘↩ committed from outside the field")
+
+        window.makeFirstResponder(bar.field)
+        try expect(window.performKeyEquivalent(with: key([.command])),
+                   "⌘↩ in the message field was not taken")
+        try expect(changes.isBusyForTesting && !bar.commitButton.isEnabled
+                    && !bar.pushButton.isEnabled && !bar.field.isEditable,
+                   "a running commit left the line live")
+        try expect(waitUntil { !changes.isBusyForTesting }, "the commit never finished")
+        try expect(git(["log", "-1", "--format=%s"], in: root) == "from the line",
+                   "⌘↩ did not commit the message: "
+                     + git(["log", "-1", "--format=%s"], in: root))
+        try expect(bar.field.stringValue.isEmpty && bar.field.isEditable,
+                   "the used message stayed in the field: '\(bar.field.stringValue)'")
+        try expect(changedIn == [root],
+                   "the commit was not reported for its repository: \(changedIn)")
+        try expect(changes.rowCountForTesting == 0, "the committed change is still listed")
+
+        // One commit ahead: Push counts it, as the Git panel's does.
+        try expect(bar.pushButton.isEnabled && bar.pushButton.badge == "1"
+                    && bar.pushButton.toolTip == GitPanelViewController.pushHint(ahead: 1),
+                   "Push does not offer the commit just made: "
+                     + "\(bar.pushButton.isEnabled) '\(bar.pushButton.badge)'")
+        // ⇧⌘↩ through the real event path, typed into the field. A window
+        // off screen is sent no keys at all, so this one is put up; whether
+        // it is key or not, the shortcut must arrive.
+        window.orderFront(nil)
+        window.makeFirstResponder(bar.field)
+        let push = key([.command, .shift], windowNumber: window.windowNumber)
+        NSApp.postEvent(push, atStart: false)
+        let pushDeadline = Date().addingTimeInterval(10)
+        while changedIn.count < 2 && Date() < pushDeadline {
+            if let event = NSApp.nextEvent(matching: .any,
+                                           until: Date().addingTimeInterval(0.02),
+                                           inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
+        try expect(waitUntil { changedIn.count == 2 && !changes.isBusyForTesting },
+                   "⇧⌘↩ did not push: \(changedIn)")
+        try expect(git(["rev-parse", "main"], in: remote) == git(["rev-parse", "HEAD"], in: root),
+                   "the remote did not receive the commit")
+        try expect(!bar.pushButton.isEnabled && bar.pushButton.badge.isEmpty,
+                   "Push still offers what it has just pushed")
+        let remoteHead = git(["rev-parse", "main"], in: remote)
+        window.makeFirstResponder(bar.field)
+        try expect(window.performKeyEquivalent(with: key([.command, .shift]))
+                    && !changes.isBusyForTesting,
+                   "⇧⌘↩ pushed with nothing to push")
+        try expect(git(["rev-parse", "main"], in: remote) == remoteHead,
+                   "the remote moved on a push that had nothing to send")
+
+        // A message belongs to its project. Half-typed and left for another
+        // project, it is not there to be committed with that project's
+        // changes; back again, it is.
+        _ = git(["init", "-q", "-b", "main"], in: other)
+        try Data("three\n".utf8).write(to: root.appendingPathComponent("again.txt"))
+        show(root)
+        window.makeFirstResponder(bar.field)
+        bar.field.currentEditor()?.insertText("half written")
+        show(other)
+        try expect(bar.field.stringValue.isEmpty && bar.field.currentEditor() == nil,
+                   "the message followed the switch to another project: "
+                     + "'\(bar.field.stringValue)'")
+        show(root)
+        try expect(bar.field.stringValue == "half written",
+                   "the draft did not come back with its project: '\(bar.field.stringValue)'")
+
+        // A commit still running when the user moves on finishes in its own
+        // project: the message there is used up, the one now showing is not.
+        bar.field.stringValue = "committed while away"
+        try expect(bar.commitButton.clickForTesting(), "Commit is not live with a message")
+        changes.setEntries([], in: other)
+        bar.field.stringValue = "other draft"
+        try expect(waitUntil { !changes.isBusyForTesting }, "the commit never finished")
+        try expect(git(["log", "-1", "--format=%s"], in: root) == "committed while away",
+                   "the commit started before the switch did not land in its project")
+        try expect(changedIn.last == root,
+                   "the commit was reported for the project on screen, not its own")
+        changes.setEntries([], in: other)
+        try expect(bar.field.stringValue == "other draft",
+                   "a commit finishing elsewhere cleared this project's message")
+        show(root)
+        try expect(bar.field.stringValue.isEmpty,
+                   "the message a commit used came back as a draft")
+
+        // Where the branch stands is not known until the refresh says: Push
+        // waits for it instead of guessing there is no upstream.
+        changes.setEntries([], in: other)
+        try expect(!bar.pushButton.isEnabled,
+                   "Push is live before anything is known about the remote")
+
+        // Dragged narrower than its buttons, the line gives up the message
+        // box rather than a constraint.
+        window.setContentSize(NSSize(width: 90, height: 260))
+        window.contentView?.layoutSubtreeIfNeeded()
+        bar.layoutSubtreeIfNeeded()
+        try expect(bar.messageBoxFrameForTesting.width == 0
+                    && bar.messageBoxFrameForTesting.minX == 0,
+                   "a narrow line lays its message box out at "
+                     + "\(bar.messageBoxFrameForTesting)")
+
+        // The Git panel's ⇧⌘↩ follows its Push button too: nothing to push,
+        // nothing started.
+        let panel = GitPanelViewController()
+        panel.setDirectoryForTesting(root)
+        var clean = GitService.Status(branch: "main", entries: [], isRepo: true)
+        clean.hasUpstream = true
+        panel.applyStatusForTesting(clean, in: root)
+        try expect(!panel.pushEnabledForTesting, "the fixture left the panel's Push live")
+        panel.pressPushShortcutForTesting()
+        try expect(!panel.isOperationRunningForTesting,
+                   "⇧⌘↩ in the Git panel pushed with nothing to push")
+        // And both run their Git on one queue, so neither stages under the
+        // other's push.
+        try expect(panel.operationQueueForTesting === GitService.operationQueue,
+                   "the Git panel and the commit line run Git on different queues")
+
+        // In the window: a commit from the line moves everything that reads
+        // the repository, the Git panel too; one finishing in a project left
+        // behind moves that project's row.
+        let first = try temporaryDirectory("commit-line-first")
+        let second = try temporaryDirectory("commit-line-second")
+        defer {
+            for url in [first, second] { try? FileManager.default.removeItem(at: url) }
+        }
+        for directory in [first, second] {
+            _ = git(["init", "-q", "-b", "main"], in: directory)
+            _ = git(["config", "user.name", "Puzzle Test"], in: directory)
+            _ = git(["config", "user.email", "puzzle@example.invalid"], in: directory)
+            try Data("one\n".utf8).write(to: directory.appendingPathComponent("file.txt"))
+            try expect(GitService.commit("fixture", in: directory).code == 0,
+                       "fixture commit failed")
+            try Data("two\n".utf8).write(to: directory.appendingPathComponent("changed.txt"))
+        }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(second)
+        workspace.openProject(first)
+        let projectsPanel = workspace.sidebar.projectsPanel
+        _ = projectsPanel.view
+        func row(_ directory: URL) -> String? {
+            let path = directory.standardizedFileURL.resolvingSymlinksInPath().path
+            return projectsPanel.rowsForTesting.first { $0.pathForTesting == path }?.titleForTesting
+        }
+        try expect(waitUntil { projectsPanel.changes.rowCountForTesting == 1
+                                && row(second)?.hasSuffix("  1") == true },
+                   "the fixture's changes never showed: "
+                     + "\(String(describing: row(first))) / \(String(describing: row(second)))")
+        workspace.sidebar.showGit()
+        guard let gitPanel = workspace.sidebar.gitPanelForTesting else {
+            throw Failure(description: "the Git panel was not built")
+        }
+        try expect(waitUntil { gitPanel.changesTabBadgeForTesting == "1" },
+                   "the Git panel never counted the change")
+        workspace.sidebar.showFiles()
+        let line = projectsPanel.changes.commitBarForTesting
+        // No upstream yet: Push is live to set one up, in the line as in the
+        // Git panel, from the state the window's own refresh hands down.
+        try expect(line.pushButton.isEnabled && gitPanel.pushEnabledForTesting,
+                   "the line's Push does not follow the panel's with no upstream: "
+                     + "\(line.pushButton.isEnabled) / \(gitPanel.pushEnabledForTesting)")
+        // What the line reports is taken in at once — not left to the watcher
+        // on .git, which gets there later or, for a change it cannot see, not
+        // at all.
+        let panelReads = gitPanel.externalRefreshCountForTesting
+        let windowReads = workspace.gitRefreshRequestCountForTesting
+        workspace.sidebar.onProjectGitChanged?(first.standardizedFileURL.resolvingSymlinksInPath())
+        try expect(gitPanel.externalRefreshCountForTesting == panelReads + 1
+                    && workspace.gitRefreshRequestCountForTesting == windowReads + 1,
+                   "a commit from the line did not have the window and the Git panel re-read")
+        line.field.stringValue = "from the project row"
+        try expect(line.commitButton.clickForTesting(), "Commit is not live in the window")
+        try expect(waitUntil {
+                        projectsPanel.changes.rowCountForTesting == 0
+                            && row(first)?.hasSuffix("  1") == false
+                            && projectsPanel.history.commitSubjectsForTesting.first
+                                == "from the project row"
+                   }, "the window did not take in the commit: "
+                        + "\(String(describing: row(first))) / "
+                        + "\(projectsPanel.history.commitSubjectsForTesting)")
+        try expect(waitUntil { gitPanel.changesTabBadgeForTesting.isEmpty },
+                   "the Git panel still counts the change the line committed")
+        try expect(GitService.commit("elsewhere", in: second).code == 0,
+                   "the second project's commit failed")
+        workspace.sidebar.onProjectGitChanged?(second.standardizedFileURL.resolvingSymlinksInPath())
+        try expect(waitUntil { row(second)?.hasSuffix("  1") == false },
+                   "the row of a project left behind still counts what was committed: "
+                     + "\(String(describing: row(second)))")
+    }
+
     private static func testBranchMenu() throws {
         func branch(_ name: String, _ author: String, _ date: String,
                     _ stamp: Int64, current: Bool = false,
@@ -6296,14 +6736,19 @@ enum RegressionTests {
                     && projectsPanel.changes.rowNameForTesting(0) == "changed.txt",
                    "the changes column does not list the change: "
                      + "\(projectsPanel.changes.entriesForTesting.map(\.path))")
-        // It starts level with the tree beside it, directly under the row that
-        // heads them both. A table left on the system's own style insets its
-        // first row, which set this list ten points lower than the tree.
+        // The commit line over it starts level with the tree beside it,
+        // directly under the row that heads them both, and the list starts
+        // directly under the line. A table left on the system's own style
+        // insets its first row, which set this list ten points lower still.
+        let barTop = projectsPanel.changes.commitBarTopInsetInWindowForTesting
         let changesTop = projectsPanel.changes.firstRowTopInsetInWindowForTesting
         let treeTop = workspace.sidebar.fileTree.firstRowTopInsetInWindowForTesting
+        try expect(barTop != nil && treeTop != nil && abs(barTop! - treeTop!) <= 0.5,
+                   "the commit line does not start level with the tree: "
+                     + "\(String(describing: barTop)) vs \(String(describing: treeTop))")
         try expect(changesTop != nil && treeTop != nil
-                    && abs(changesTop! - treeTop!) <= 0.5,
-                   "the changes list does not start level with the tree: "
+                    && abs(changesTop! - (treeTop! + ProjectCommitBar.height)) <= 0.5,
+                   "the changes list does not start under the commit line: "
                      + "\(String(describing: changesTop)) vs \(String(describing: treeTop))")
         var openedDiff: String?
         let realDiffHandler = workspace.sidebar.onGitDiff

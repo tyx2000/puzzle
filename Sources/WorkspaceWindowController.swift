@@ -161,12 +161,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onGitCommitDiff = { [weak self] commit, file, directory in
             self?.showCommitDiff(commit: commit, file: file, in: directory)
         }
-        sidebar.onGitChanged = { [weak self] in
-            self?.refreshGit(requireFollowUp: true)
-            // Committing rewrites authorship for the committed lines, and
-            // clears the gutter marks for everything it took.
-            self?.editor.invalidateBlame()
-            self?.editor.refreshGitLineChanges()
+        sidebar.onGitChanged = { [weak self] in self?.gitChanged() }
+        sidebar.onProjectGitChanged = { [weak self] directory in
+            guard let self else { return }
+            self.gitChanged()
+            // The Git panel did not run this one, so it has not read it yet.
+            self.sidebar.refreshGitPanelIfLoaded()
+            // Finished after the user moved to another project: the row of the
+            // one it ran in still counts the changes it committed.
+            if directory != self.projectURL { self.refreshProjectSummaries(all: true) }
         }
         sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
         // The name goes back to the list it was chosen from; the terminal has
@@ -626,7 +629,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     static let gitRefreshAfterSaveDelay: TimeInterval = 0.4
     private var gitRefreshAfterSave: DispatchWorkItem?
 
+    /// Something committed, pushed or otherwise moved the repository.
+    private func gitChanged() {
+        refreshGit(requireFollowUp: true)
+        // Committing rewrites authorship for the committed lines, and clears
+        // the gutter marks for everything it took.
+        editor.invalidateBlame()
+        editor.refreshGitLineChanges()
+    }
+
     func refreshGit(requireFollowUp: Bool = false) {
+        gitRefreshRequestCountForTesting += 1
         guard let projectURL else { return }
         if gitSummaryRefreshInFlight {
             // Coalesced into the one in flight — unless that one no longer
@@ -1200,6 +1213,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
     /// How many sweeps over the other projects have started.
     private(set) var summarySweepCountForTesting = 0
+    /// How many times the project on screen has been asked to re-read Git.
+    private(set) var gitRefreshRequestCountForTesting = 0
 
     /// What the panel reports for the project on screen, which is fresher than
     /// anything cached — it arrives with every Git refresh.

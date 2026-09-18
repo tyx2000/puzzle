@@ -305,10 +305,17 @@ enum GitService {
     /// a clean/smudge filter — is slow rather than stuck, and a deadline short
     /// enough to catch a hang is short enough to abandon a legitimate result.
     /// Network operations keep their own timeout, where a stall really can be
-    /// permanent, and run on the Git panel's own queue so a 300-second push
-    /// never sits in front of a gutter refresh. Callers that no longer want
-    /// their answer cancel instead of waiting for it.
+    /// permanent, and run on `operationQueue` so a 300-second push never sits
+    /// in front of a gutter refresh. Callers that no longer want their answer
+    /// cancel instead of waiting for it.
     static let workQueue = DispatchQueue(label: "app.puzzle.git", qos: .userInitiated)
+
+    /// Commits, pushes and every other command that changes a repository.
+    /// Two places commit — the Git panel and the line over a project's changes
+    /// — and one queue between them keeps a commit from one staging while a
+    /// checkout or a push from the other is still running.
+    static let operationQueue = DispatchQueue(label: "app.puzzle.git-operations",
+                                              qos: .userInitiated)
 
     static let maxDiffBytes = 8 * 1024 * 1024
     static let maxBlobBytes = Document.maxImageFileBytes

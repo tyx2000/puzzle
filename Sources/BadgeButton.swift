@@ -7,6 +7,18 @@ import AppKit
 final class BadgeButton: NSView {
     var onClick: (() -> Void)?
 
+    /// `.bordered` is the Git panel's Push: filled and outlined. `.plain` draws
+    /// no shape of its own until the pointer is over it — for a strip that is
+    /// already the controls' ground, like the commit line over a project's
+    /// changes, where a frame round each button would split the line up.
+    enum Style {
+        case bordered
+        case plain
+    }
+    var style: Style = .bordered {
+        didSet { needsDisplay = true }
+    }
+
     var title = "" {
         didSet {
             guard title != oldValue else { return }
@@ -68,7 +80,9 @@ final class BadgeButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        guard isEnabled else { return }
+        // Tracked while disabled too, and only drawn while enabled: a button
+        // that comes back to life under the pointer lights up without the
+        // pointer having to leave and come back.
         hovered = true
         needsDisplay = true
     }
@@ -93,13 +107,20 @@ final class BadgeButton: NSView {
         onClick?()
     }
 
+    /// Whether the pointer is showing this button can be clicked.
+    private var isLit: Bool { isEnabled && (pressed || hovered) }
+
     override func draw(_ dirtyRect: NSRect) {
+        guard style == .bordered else {
+            drawPlain()
+            return
+        }
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: 5, yRadius: 5)
         // Disabled keeps the shape but stops looking pressable.
         (isEnabled ? Theme.activeTab : Theme.inactiveTab).setFill()
         path.fill()
-        if isEnabled, pressed || hovered {
+        if isLit {
             Theme.hover.setFill()
             NSGraphicsContext.saveGraphicsState()
             path.addClip()
@@ -119,6 +140,24 @@ final class BadgeButton: NSView {
             in: bounds)
     }
 
+    /// Nothing but the label until the pointer is over it; then the area a
+    /// click lands in. Disabled is the label dimmed, never lit.
+    private func drawPlain() {
+        if isLit {
+            Theme.activeRow.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        }
+        let ink = isEnabled ? Theme.foreground : Theme.dimText
+        // The badge keeps its own round against the lit background as well as
+        // the strip's.
+        SidebarCellDrawing.attributedText(
+            SidebarCellDrawing.labelWithBadge(
+                title, badge: badge, font: labelFont, colour: ink,
+                badgeBackground: Theme.panelBackground, badgeForeground: ink,
+                alignment: .center),
+            in: bounds)
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
@@ -134,4 +173,9 @@ final class BadgeButton: NSView {
         return true
     }
     var isHoveredForTesting: Bool { hovered }
+    var isLitForTesting: Bool { isLit }
+    func setHoveredForTesting(_ on: Bool) {
+        hovered = on
+        needsDisplay = true
+    }
 }

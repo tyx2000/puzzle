@@ -646,6 +646,28 @@ final class GitRowView: NSTableRowView {
     }
 }
 
+/// The keys that commit and push from wherever a commit message is typed:
+/// ⌘↩ commits, ⇧⌘↩ pushes. Both the Git panel's box and the one-line field
+/// over a project's changes read them here, so the two cannot drift apart.
+enum CommitShortcut {
+    case commit
+    case push
+
+    init?(_ event: NSEvent) {
+        // Return, or the keypad's Enter.
+        guard event.type == .keyDown, event.keyCode == 36 || event.keyCode == 76 else {
+            return nil
+        }
+        // Only the keys a person holds down count: Caps Lock, or the keypad
+        // flag Enter carries, must not turn ⌘↩ into something else.
+        switch event.modifierFlags.intersection([.command, .shift, .option, .control]) {
+        case [.command]: self = .commit
+        case [.command, .shift]: self = .push
+        default: return nil
+        }
+    }
+}
+
 /// The commit box. Two things a plain NSTextView does not do: show a hint while
 /// it is empty, and treat ⌘↩ as "commit" the way every Git client does.
 final class CommitMessageTextView: NSTextView {
@@ -672,18 +694,11 @@ final class CommitMessageTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if event.keyCode == 36 || event.keyCode == 76 {
-            if modifiers == [.command] {
-                onCommitShortcut?()
-                return
-            }
-            if modifiers == [.command, .shift] {
-                onPushShortcut?()
-                return
-            }
+        switch CommitShortcut(event) {
+        case .commit?: onCommitShortcut?()
+        case .push?: onPushShortcut?()
+        case nil: super.keyDown(with: event)
         }
-        super.keyDown(with: event)
     }
 
     override func draw(_ dirtyRect: NSRect) {

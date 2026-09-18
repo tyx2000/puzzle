@@ -96,8 +96,9 @@ final class GitPanelViewController: NSViewController {
     /// Deliberately *not* `GitService.workQueue`. That queue carries the short
     /// reads the UI fires off by itself — a gutter baseline on every tab switch
     /// — while this one carries push, fetch and pull, which are allowed 300
-    /// seconds. Sharing one queue would put that behind a gutter refresh.
-    private let gitQueue = DispatchQueue(label: "app.puzzle.git-panel", qos: .userInitiated)
+    /// seconds. Sharing one queue would put that behind a gutter refresh. It is
+    /// the queue the commit line over a project's changes uses too.
+    private let gitQueue = GitService.operationQueue
     private var activeOperationID: UUID?
     private var operationLocksMessage = false
 
@@ -207,8 +208,9 @@ final class GitPanelViewController: NSViewController {
         }
         commitField.onPushShortcut = { [weak self] in
             // The same rule the Push button follows: one Git operation at a
-            // time, and nothing to explain that the panel has not already said.
-            guard let self, self.activeOperationID == nil else {
+            // time, something to push, and nothing to explain that the panel
+            // has not already said.
+            guard let self, self.pushIsPossible, self.activeOperationID == nil else {
                 NSSound.beep()
                 return
             }
@@ -352,8 +354,11 @@ final class GitPanelViewController: NSViewController {
     /// External repository events and completed Git mutations must not be lost
     /// if they arrive while a snapshot is already being collected.
     func refreshExternal() {
+        externalRefreshCountForTesting += 1
         requestRefresh(requireFollowUp: true)
     }
+    /// How many times something outside the panel has asked it to re-read.
+    private(set) var externalRefreshCountForTesting = 0
 
     private enum RefreshPriority {
         case changes, branches, history
@@ -568,9 +573,22 @@ final class GitPanelViewController: NSViewController {
         // The shortcut lives here rather than in the message box: a hint
         // printed inside the box sits where the message goes and is read every
         // time, long after it is news.
-        commitButton.toolTip = commitIsPossible ? "Commit  (⌘↩)"
-            : (hasChanges ? "Describe the change to commit it"
-                          : "Nothing to commit")
+        commitButton.toolTip = Self.commitHint(possible: commitIsPossible,
+                                               hasChanges: hasChanges)
+    }
+
+    /// What Commit says about itself. The commit line over a project's changes
+    /// asks here too, so the two never describe the same state differently.
+    static func commitHint(possible: Bool, hasChanges: Bool) -> String {
+        possible ? "Commit  (⌘↩)"
+            : (hasChanges ? "Describe the change to commit it" : "Nothing to commit")
+    }
+
+    /// What Push says about itself, with how many commits it would send.
+    static func pushHint(ahead: Int) -> String {
+        ahead > 0
+            ? "Push \(ahead) commit\(ahead == 1 ? "" : "s")  (⇧⌘↩)"
+            : "Push the current branch  (⇧⌘↩)"
     }
 
     private func refreshPushButton() {
@@ -578,9 +596,7 @@ final class GitPanelViewController: NSViewController {
         // Nothing to push, nothing to do. A branch with no upstream is the
         // exception: pushing is what sets one up.
         pushControl.isEnabled = pushIsPossible
-        pushControl.toolTip = aheadCount > 0
-            ? "Push \(aheadCount) commit\(aheadCount == 1 ? "" : "s")  (⇧⌘↩)"
-            : "Push the current branch  (⇧⌘↩)"
+        pushControl.toolTip = Self.pushHint(ahead: aheadCount)
         pushControl.invalidateIntrinsicContentSize()
     }
 
@@ -1224,6 +1240,17 @@ final class GitPanelViewController: NSViewController {
         _ = view
         commitField.string = message
     }
+    /// ⇧⌘↩ in the message box, through the box's own key handling.
+    func pressPushShortcutForTesting() {
+        _ = view
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .shift],
+            timestamp: 0, windowNumber: 0, context: nil, characters: "\r",
+            charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else { return }
+        commitField.keyDown(with: event)
+    }
+    var isOperationRunningForTesting: Bool { activeOperationID != nil }
+    var operationQueueForTesting: DispatchQueue { gitQueue }
 
     /// The line above the commit box: project, branch and commit author.
     /// Push's label, its menu, and the tab's own count — the three places a
