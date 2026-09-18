@@ -1119,8 +1119,7 @@ enum RegressionTests {
         }
 
         // Everything behind HEAD is listed, including commits made on another
-        // branch and merged in — and each row says which branch it sits on,
-        // which the subject alone does not.
+        // branch and merged in.
         _ = GitService.run(["checkout", "-q", "-b", "side"], in: root)
         try Data("side\n".utf8).write(to: root.appendingPathComponent("side.txt"))
         try expect(GitService.commit("Side work", in: root).code == 0,
@@ -1135,23 +1134,13 @@ enum RegressionTests {
             let listed = projectsPanel.history.commitSubjectsForTesting
             return listed.contains("Merge side") && listed.contains("Side work")
         }
-        let labelled = Array(zip(projectsPanel.history.commitSubjectsForTesting,
-                                 projectsPanel.history.branchLabelsForTesting))
-        try expect(labelled.contains { $0.0 == "Side work" && $0.1 == "side" },
-                   "the merged-in commit is not labelled with its own branch: \(labelled)")
-        // Only the checked-out branch contains the merge itself; the commits
-        // behind it are on both, and which name they take is Git's own answer
-        // to "nearest", not something to hold a test to.
-        try expect(labelled.contains { $0.0 == "Merge side" && $0.1 == "trunk" },
-                   "the merge is not labelled with the branch it was made on: \(labelled)")
         let sideRow = projectsPanel.history.commitSubjectsForTesting
             .firstIndex(of: "Side work")
-        try expect(sideRow.flatMap { projectsPanel.history.rowBranchForTesting($0) } == "side",
-                   "the row does not draw the branch it is labelled with")
         try expect(GitCommitCell.columnGap == 10,
                    "the history columns are \(GitCommitCell.columnGap)pt apart, not 10")
-        // One line per commit: branch, commit ID, message, author, time — each
-        // a column of its own, in that order, a gap apart.
+        // One line per commit: commit ID, message, author, time — each a column
+        // of its own, in that order, a gap apart. No branch: Git does not record
+        // which branch a commit was made on, so there is no one name to show.
         guard let sideIndex = sideRow,
               let sideCell = projectsPanel.history.rowCellForTesting(sideIndex) else {
             throw Failure(description: "the side commit built no cell")
@@ -1166,9 +1155,8 @@ enum RegressionTests {
             if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
                 cell.cacheDisplay(in: cell.bounds, to: rep)
             }
-            return [cell.drawnBranchRectForTesting, cell.drawnHashRectForTesting,
-                    cell.drawnSubjectRectForTesting, cell.drawnAuthorRectForTesting,
-                    cell.drawnDateRectForTesting]
+            return [cell.drawnHashRectForTesting, cell.drawnSubjectRectForTesting,
+                    cell.drawnAuthorRectForTesting, cell.drawnDateRectForTesting]
         }
         let wideColumns = drawn(sideCell, width: 640)
         try expect(wideColumns.allSatisfy { $0.width > 0 },
@@ -1182,21 +1170,24 @@ enum RegressionTests {
         try expect(sideCell.dateForTesting.range(
                     of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$"#, options: .regularExpression) != nil,
                    "the row's time is not absolute: \(sideCell.dateForTesting)")
-        try expect(abs(wideColumns[4].maxX - (640 - 8)) <= 0.5,
-                   "the time does not end at the row's edge: \(wideColumns[4])")
+        // The commit ID opens the row, at its leading edge; the time closes it.
+        try expect(abs(wideColumns[0].minX - 8) <= 0.5,
+                   "the commit ID does not start the row: \(wideColumns[0])")
+        try expect(abs(wideColumns[3].maxX - (640 - 8)) <= 0.5,
+                   "the time does not end at the row's edge: \(wideColumns[3])")
         try expect(sideCell.authorForTesting.hasSuffix("Gift Test"),
                    "the author column reads \(sideCell.authorForTesting)")
         // Every other column keeps its width: whatever the row gains or loses
         // is the message's.
         let narrowColumns = drawn(sideCell, width: 520)
-        for index in [0, 1, 3, 4] {
+        for index in [0, 2, 3] {
             try expect(narrowColumns[index].width == wideColumns[index].width,
                        "column \(index) changed width with the row: "
                          + "\(wideColumns[index]) → \(narrowColumns[index])")
         }
-        try expect(abs((wideColumns[2].width - narrowColumns[2].width) - 120) <= 0.5,
+        try expect(abs((wideColumns[1].width - narrowColumns[1].width) - 120) <= 0.5,
                    "the message did not take the 120pt the row lost: "
-                     + "\(wideColumns[2].width) → \(narrowColumns[2].width)")
+                     + "\(wideColumns[1].width) → \(narrowColumns[1].width)")
         // No bubble following the pointer down the list: the row carries
         // everything it has to say.
         try expect(sideCell.toolTip == nil,
@@ -1208,15 +1199,15 @@ enum RegressionTests {
             .compactMap { index -> [CGFloat]? in
                 guard let cell = projectsPanel.history.rowCellForTesting(index) else { return nil }
                 let columns = drawn(cell, width: 640)
-                return [columns[1].minX, columns[2].minX, columns[3].minX, columns[4].minX]
+                return columns.map(\.minX)
             }
         try expect(Set(starts).count == 1,
                    "the columns do not start in one place down the list: \(starts)")
-        // Too narrow for every column, the author and then the branch give way
-        // before the message goes below its minimum.
+        // Too narrow for every column, the author gives way before the message
+        // goes below its minimum.
         let squeezed = GitCommitCell.layout(
-            .init(branch: 120, commitID: 50, author: 120, date: 90),
-            in: NSRect(x: 0, y: 0, width: 300, height: rowHeight))
+            .init(commitID: 50, author: 120, date: 90),
+            in: NSRect(x: 0, y: 0, width: 260, height: rowHeight))
         try expect(squeezed.subject.width >= GitCommitCell.minimumSubjectWidth - 0.5
                     && squeezed.author.width < 120 && squeezed.date.width == 90
                     && squeezed.commitID.width == 50,
@@ -2398,15 +2389,6 @@ enum RegressionTests {
                     && panel.rowsForTesting.allSatisfy { $0.titleForTesting.hasSuffix("main") },
                    "the refresh held during a drag was never applied: "
                      + "\(panel.rowsForTesting.map(\.titleForTesting))")
-
-        // `name-rev` skips an argument it cannot resolve. Pairing its lines
-        // with the hashes by position then gave every later commit its
-        // neighbour's branch; they are read by the hash each line names.
-        let named = GitService.parseBranchNames(
-            "aaa1111 main~2\nccc3333 topic^2~1\nddd4444 undefined\n",
-            for: ["aaa1111", "bbb2222", "ccc3333", "ddd4444"])
-        try expect(named == ["aaa1111": "main", "ccc3333": "topic"],
-                   "branch names were not read by the hash each line names: \(named)")
 
         // A tinted symbol is made once and kept: every visible tree row draws
         // its chevron on every redraw.

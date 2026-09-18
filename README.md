@@ -16,8 +16,9 @@ else — no editor, no file tree, no search, no settings.
   diff; right-click it to copy its path, reveal it in Finder, or discard it (or
   every change) — confirmed first, with new files going to the Trash.
 - **History** — under the changes, one line per commit:
-  branch · commit ID · message · author · time (`yyyy-MM-dd HH:mm`), 10pt
-  apart. Every column but the message is as wide as its widest entry, so the
+  commit ID · message · author · time (`yyyy-MM-dd HH:mm`), 10pt apart. There
+  is no branch column: Git does not record which branch a commit was made on,
+  and a commit on several branches has no one name to show. Every column but the message is as wide as its widest entry, so the
   columns line up; the message takes whatever width is left. Unpushed commits
   are marked ↑. Click a commit to list its files, and a file to see
   that commit's diff; right-click to copy the ID or message. The list reads 200
@@ -26,9 +27,7 @@ else — no editor, no file tree, no search, no settings.
 - **Branches** — click the branch beside the traffic lights for the branch
   menu: switch to a local branch (remote ones in a submenu), create one from a
   chosen base, or delete a merged one. (The branch on a project row is only a
-  label; clicking it is clicking the row.) A commit's branch label is Git's
-  nearest branch containing it (`git name-rev`): Git does not record which
-  branch a commit was made on.
+  label; clicking it is clicking the row.)
 - **Terminal** — the `>_` button at the top of the panel, past `+`, opens the
   project in iTerm (a new window) or, without iTerm, Terminal.
 - **Diffs** — read-only, one tab per file (and per commit), unified or side by

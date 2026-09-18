@@ -1,7 +1,7 @@
 import AppKit
 
 /// The current branch's commits, under the changes of the same project: one
-/// line per commit — branch, commit ID, message, author, time — and its files
+/// line per commit — commit ID, message, author, time — and its files
 /// underneath when it is opened.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
@@ -31,9 +31,6 @@ final class ProjectHistoryViewController: NSViewController {
     private var commits: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — drawn with an ↑.
     private var unpushed: Set<String> = []
-    /// The branch each commit sits on: the list holds everything behind HEAD,
-    /// including commits made on a branch that was merged in.
-    private var branches: [String: String] = [:]
     /// The column widths every row shares, so each column starts at the same
     /// place down the whole list.
     private var columns = GitCommitCell.Columns()
@@ -116,7 +113,6 @@ final class ProjectHistoryViewController: NSViewController {
         hasMore = true
         commits = []
         unpushed = []
-        branches = [:]
         columns = GitCommitCell.Columns()
         expanded = []
         files = [:]
@@ -139,7 +135,6 @@ final class ProjectHistoryViewController: NSViewController {
         GitService.workQueue.async { [weak self] in
             let log = GitService.log(in: directory, limit: wanted)
             let pending = GitService.unpushedHashes(in: directory)
-            let named = GitService.branchNames(for: log.map(\.shortHash), in: directory)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
@@ -153,9 +148,8 @@ final class ProjectHistoryViewController: NSViewController {
                 self.commits = log
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
-                self.branches = named
                 self.columns = GitCommitCell.Columns.measuring(
-                    branches: named.values, commitIDs: log.map(\.shortHash),
+                    commitIDs: log.map(\.shortHash),
                     authors: log.map {
                         GitCommitCell.authorText($0, pending: self.isUnpushed($0.shortHash))
                     },
@@ -313,13 +307,6 @@ final class ProjectHistoryViewController: NSViewController {
     var fileRowsForTesting: [String] {
         rows.compactMap { if case .file(let f, _) = $0 { return f.path } else { return nil } }
     }
-    /// The branch each commit row is labelled with.
-    var branchLabelsForTesting: [String] {
-        rows.compactMap {
-            guard case .commit(let commit) = $0 else { return nil }
-            return branches[commit.shortHash] ?? ""
-        }
-    }
     /// The subject a row draws, which is what the reader picks it out by.
     func rowSubjectForTesting(_ row: Int) -> String? {
         _ = view
@@ -343,10 +330,6 @@ final class ProjectHistoryViewController: NSViewController {
     func rowHeightForTesting(_ row: Int) -> CGFloat {
         _ = view
         return tableView(table, heightOfRow: row)
-    }
-    /// The branch a row draws before the subject.
-    func rowBranchForTesting(_ row: Int) -> String? {
-        rowCellForTesting(row)?.branchForTesting
     }
     /// A click on a row, through the same path a real one takes.
     func clickRowForTesting(_ row: Int) { act(on: row) }
@@ -399,7 +382,6 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           branch: branches[commit.shortHash] ?? "",
                            columns: columns)
             return cell
         case .file(let file, _):

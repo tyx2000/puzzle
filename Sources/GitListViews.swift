@@ -4,24 +4,26 @@ import AppKit
 /// and row subclasses that carry their hover and stripes. None of it touches
 /// a list's state — they are handed what to draw and draw it.
 
-/// One commit on one line, in columns: branch, commit ID, message, author,
-/// time. Every column but the message is as wide as the widest entry down the
-/// list, so each starts at the same place on every row; the message takes
-/// whatever width is left.
+/// One commit on one line, in columns: commit ID, message, author, time.
+/// Every column but the message is as wide as the widest entry down the list,
+/// so each starts at the same place on every row; the message takes whatever
+/// width is left.
+///
+/// There is no branch column: Git does not record which branch a commit was
+/// made on, and a commit on several branches has no one name to show.
 final class GitCommitCell: DrawnSidebarCell {
     private var subject = ""
     private var author = ""
     private var date = ""
-    private var branch = ""
     private var commitID = ""
     private var metaColor = NSColor.clear
     private var columns: Columns?
     /// Between every column in the row.
     static let columnGap: CGFloat = 10
-    /// What the message keeps before the author and the branch give way, on a
-    /// panel dragged too narrow for every column.
+    /// What the message keeps before the author gives way, on a panel dragged
+    /// too narrow for every column.
     static let minimumSubjectWidth: CGFloat = 60
-    /// What the branch and the author are squeezed to at most.
+    /// What the author is squeezed to at most.
     static let minimumSqueezedWidth: CGFloat = 30
     static var height: CGFloat { Theme.treeRowHeight() }
     static var subjectFont: NSFont { Theme.uiFont(11) }
@@ -30,21 +32,19 @@ final class GitCommitCell: DrawnSidebarCell {
     /// The widths a list of these rows shares. Zero for a column with nothing
     /// in it anywhere in the list, which then takes no room and no gap.
     struct Columns: Equatable {
-        var branch: CGFloat = 0
         var commitID: CGFloat = 0
         var author: CGFloat = 0
         var date: CGFloat = 0
 
         /// The widest of each, as drawn.
-        static func measuring(branches: some Sequence<String>,
-                              commitIDs: some Sequence<String>,
+        static func measuring(commitIDs: some Sequence<String>,
                               authors: some Sequence<String>,
                               dates: some Sequence<String>) -> Columns {
             func widest(_ strings: some Sequence<String>) -> CGFloat {
                 strings.reduce(0) { max($0, GitCommitCell.width(of: $1)) }
             }
-            return Columns(branch: widest(branches), commitID: widest(commitIDs),
-                           author: widest(authors), date: widest(dates))
+            return Columns(commitID: widest(commitIDs), author: widest(authors),
+                           date: widest(dates))
         }
     }
 
@@ -64,16 +64,13 @@ final class GitCommitCell: DrawnSidebarCell {
 
     /// Where the last draw put each column, so the gaps between them can be
     /// measured rather than eyeballed.
-    private(set) var drawnBranchRectForTesting: NSRect = .zero
     private(set) var drawnHashRectForTesting: NSRect = .zero
     private(set) var drawnSubjectRectForTesting: NSRect = .zero
     private(set) var drawnAuthorRectForTesting: NSRect = .zero
     private(set) var drawnDateRectForTesting: NSRect = .zero
 
     /// `columns` is the list's; left out, the row measures its own.
-    func configure(commit: GitService.Commit, pending: Bool, branch: String = "",
-                   columns: Columns? = nil) {
-        self.branch = branch
+    func configure(commit: GitService.Commit, pending: Bool, columns: Columns? = nil) {
         self.columns = columns
         commitID = commit.shortHash
         subject = commit.subject
@@ -84,34 +81,24 @@ final class GitCommitCell: DrawnSidebarCell {
         // every row is only something that follows the pointer down the list.
         toolTip = nil
         exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
-                                + (branch.isEmpty ? "" : "on \(branch), ")
                                 + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
     }
 
     /// Each column's rectangle across `content`, message included.
     static func layout(_ columns: Columns, in content: NSRect)
-        -> (branch: NSRect, commitID: NSRect, subject: NSRect, author: NSRect, date: NSRect) {
-        var branch = columns.branch
-        var author = columns.author
-        let fixed = [branch, columns.commitID, author, columns.date].filter { $0 > 0 }
+        -> (commitID: NSRect, subject: NSRect, author: NSRect, date: NSRect) {
+        let fixed = [columns.commitID, columns.author, columns.date].filter { $0 > 0 }
         let gaps = CGFloat(fixed.count) * columnGap
-        // Too narrow for every column: the author gives way first, then the
-        // branch, before the message goes below its minimum.
-        var shortfall = fixed.reduce(0, +) + gaps + minimumSubjectWidth - content.width
-        func squeeze(_ width: inout CGFloat) {
-            let give = min(max(0, shortfall), max(0, width - minimumSqueezedWidth))
-            width -= give
-            shortfall -= give
-        }
-        squeeze(&author)
-        squeeze(&branch)
+        // Too narrow for every column: the author gives way before the
+        // message goes below its minimum.
+        let shortfall = fixed.reduce(0, +) + gaps + minimumSubjectWidth - content.width
+        let author = columns.author
+            - min(max(0, shortfall), max(0, columns.author - minimumSqueezedWidth))
         func box(_ x: CGFloat, _ width: CGFloat) -> NSRect {
             NSRect(x: x, y: content.minY, width: max(0, width), height: content.height)
         }
         var x = content.minX
-        let branchBox = box(x, branch)
-        if branch > 0 { x += branch + columnGap }
         let idBox = box(x, columns.commitID)
         if columns.commitID > 0 { x += columns.commitID + columnGap }
         var right = content.maxX
@@ -119,14 +106,14 @@ final class GitCommitCell: DrawnSidebarCell {
         if columns.date > 0 { right -= columns.date + columnGap }
         let authorBox = box(right - author, author)
         if author > 0 { right -= author + columnGap }
-        return (branchBox, idBox, box(x, right - x), authorBox, dateBox)
+        return (idBox, box(x, right - x), authorBox, dateBox)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
                              height: bounds.height)
         let columns = self.columns ?? Columns.measuring(
-            branches: [branch], commitIDs: [commitID], authors: [author], dates: [date])
+            commitIDs: [commitID], authors: [author], dates: [date])
         let boxes = Self.layout(columns, in: content)
         let baseline = SidebarCellDrawing.centeredBaseline(for: Self.subjectFont, in: content)
         func draw(_ text: String, font: NSFont, color: NSColor, in box: NSRect,
@@ -136,8 +123,6 @@ final class GitCommitCell: DrawnSidebarCell {
                                     in: box, lineBreak: lineBreak)
             return box
         }
-        drawnBranchRectForTesting = draw(branch, font: Self.metaFont, color: Theme.accent,
-                                         in: boxes.branch, lineBreak: .byTruncatingTail)
         drawnHashRectForTesting = draw(commitID, font: Self.metaFont, color: Theme.dimText,
                                        in: boxes.commitID, lineBreak: .byClipping)
         drawnSubjectRectForTesting = draw(subject, font: Self.subjectFont,
@@ -150,7 +135,6 @@ final class GitCommitCell: DrawnSidebarCell {
     }
 
     var subjectForTesting: String { subject }
-    var branchForTesting: String { branch }
     var authorForTesting: String { author }
     var dateForTesting: String { date }
     var toolTipForTesting: String { toolTip ?? "" }
