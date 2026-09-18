@@ -21,10 +21,6 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
-    /// The branch name is its own target: it selects the project and drops
-    /// the menu of branches to switch to, create or delete. The rectangle is
-    /// the branch's, in this row's coordinates, for the menu to hang from.
-    var onSelectBranch: ((NSRect) -> Void)?
     /// Dragging this row: the panel decides whether the list may be reordered
     /// at all, and tracks where the row is going.
     var onDragBegan: (() -> Bool)?
@@ -50,7 +46,6 @@ final class ProjectRowView: NSView {
     /// the lists that belong to it.
     var showsDivider = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
-    private var branchIsHovered = false
     private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
@@ -72,9 +67,6 @@ final class ProjectRowView: NSView {
         self.path = path
         self.isActive = isActive
         toolTip = path
-        // The branch's hit box moved with the name; the pointing hand over it
-        // has to be measured again.
-        window?.invalidateCursorRects(for: self)
         var label = branch.isEmpty ? name : "\(name), branch \(branch)"
         if !user.isEmpty { label += ", \(user)" }
         if changes > 0 { label += ", \(changes) changed" }
@@ -124,9 +116,9 @@ final class ProjectRowView: NSView {
                       height: bounds.height)
     }
 
-    /// Where the branch name lands, so a click on it can be told from a click
-    /// on the rest of the row. Empty when there is no branch, or when its
-    /// column has no room left.
+    /// Where the branch name lands. Empty when there is no branch, or when its
+    /// column has no room left. It is a label, not a target: a click on it is
+    /// a click on the row.
     private var branchRect: NSRect {
         guard !branch.isEmpty else { return .zero }
         let column = branchColumnRect
@@ -135,13 +127,6 @@ final class ProjectRowView: NSView {
         guard column.width > 0 else { return .zero }
         return NSRect(x: column.minX, y: 0, width: min(width, column.width),
                       height: bounds.height)
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        let branch = branchRect
-        guard !branch.isEmpty else { return }
-        addCursorRect(branch, cursor: .pointingHand)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -197,16 +182,11 @@ final class ProjectRowView: NSView {
     /// files changed but not committed, in the badge the sidebar uses for a
     /// count everywhere else.
     private func branchLabel() -> NSAttributedString {
-        // Underlined under the pointer, the way a link is: it is the one part
-        // of the row that goes somewhere else.
-        var attributes: [NSAttributedString.Key: Any] = [
+        let attributes: [NSAttributedString.Key: Any] = [
             .font: Self.nameFont(),
             .foregroundColor: ink,
             .paragraphStyle: Self.truncating,
         ]
-        if branchIsHovered {
-            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-        }
         let label = NSMutableAttributedString(string: branch, attributes: attributes)
         if !user.isEmpty {
             label.append(gap())
@@ -281,24 +261,18 @@ final class ProjectRowView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let onClose = closeRect.insetBy(dx: -4, dy: -4).contains(point)
-        let onBranch = !onClose && branchRect.contains(point)
-        guard !isHovered || onClose != closeIsHovered
-                || onBranch != branchIsHovered else { return }
+        guard !isHovered || onClose != closeIsHovered else { return }
         isHovered = true
         closeIsHovered = onClose
-        branchIsHovered = onBranch
-        // Back to the project's path once the pointer leaves the ✕. The branch
-        // says what it does by underlining itself; a bubble over it as well is
-        // one explanation too many.
+        // Back to the project's path once the pointer leaves the ✕.
         toolTip = onClose ? "Close this project" : path
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
-        guard isHovered || closeIsHovered || branchIsHovered else { return }
+        guard isHovered || closeIsHovered else { return }
         isHovered = false
         closeIsHovered = false
-        branchIsHovered = false
         toolTip = path
         needsDisplay = true
     }
@@ -354,7 +328,7 @@ final class ProjectRowView: NSView {
             }
         }
         // A row that travelled was moved, not clicked; a row that stayed put
-        // was clicked, on the branch or beside it.
+        // was clicked.
         guard !dragging else {
             onDragEnded?()
             return
@@ -364,11 +338,7 @@ final class ProjectRowView: NSView {
         // click either. Selecting then closed every tab of the project being
         // left, for a press the reader had already abandoned.
         guard let released, bounds.contains(released) else { return }
-        if branchRect.contains(start), onSelectBranch != nil {
-            onSelectBranch?(branchRect)
-        } else {
-            onSelect?()
-        }
+        onSelect?()
     }
 
     /// What the row reads as, both columns, with the badge written out as its
@@ -721,9 +691,6 @@ final class ProjectsPanelViewController: NSViewController {
     let history = ProjectHistoryViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    /// The branch name on a row was clicked: the row's index, and where the
-    /// branch sits in this panel's coordinates, for its menu to hang from.
-    var onSelectBranch: ((Int, NSRect) -> Void)?
     /// A row was dragged to another place in the list.
     var onReorder: ((Int, Int) -> Void)?
 
@@ -862,10 +829,6 @@ final class ProjectsPanelViewController: NSViewController {
                 let row = ProjectRowView()
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
-                row.onSelectBranch = { [weak self, weak row] rect in
-                    guard let self, let row else { return }
-                    self.onSelectBranch?(index, row.convert(rect, to: self.view))
-                }
                 row.onDragBegan = { [weak self, weak row] in
                     guard let self, let row else { return false }
                     return self.beginRowDrag(row)

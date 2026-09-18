@@ -4,6 +4,10 @@ import AppKit
 /// and row subclasses that carry their hover and stripes. None of it touches
 /// a list's state — they are handed what to draw and draw it.
 
+/// One commit on one line, in columns: branch, commit ID, message, author,
+/// time. Every column but the message is as wide as the widest entry down the
+/// list, so each starts at the same place on every row; the message takes
+/// whatever width is left.
 final class GitCommitCell: DrawnSidebarCell {
     private var subject = ""
     private var author = ""
@@ -11,52 +15,73 @@ final class GitCommitCell: DrawnSidebarCell {
     private var branch = ""
     private var commitID = ""
     private var metaColor = NSColor.clear
+    private var columns: Columns?
     /// Between every column in the row.
-    static let columnGap: CGFloat = 15
+    static let columnGap: CGFloat = 10
+    /// What the message keeps before the author and the branch give way, on a
+    /// panel dragged too narrow for every column.
+    static let minimumSubjectWidth: CGFloat = 60
+    /// What the branch and the author are squeezed to at most.
+    static let minimumSqueezedWidth: CGFloat = 30
     static var height: CGFloat { Theme.treeRowHeight() }
+    static var subjectFont: NSFont { Theme.uiFont(11) }
+    static var metaFont: NSFont { Theme.uiFont(9.5) }
+
+    /// The widths a list of these rows shares. Zero for a column with nothing
+    /// in it anywhere in the list, which then takes no room and no gap.
+    struct Columns: Equatable {
+        var branch: CGFloat = 0
+        var commitID: CGFloat = 0
+        var author: CGFloat = 0
+        var date: CGFloat = 0
+
+        /// The widest of each, as drawn.
+        static func measuring(branches: some Sequence<String>,
+                              commitIDs: some Sequence<String>,
+                              authors: some Sequence<String>,
+                              dates: some Sequence<String>) -> Columns {
+            func widest(_ strings: some Sequence<String>) -> CGFloat {
+                strings.reduce(0) { max($0, GitCommitCell.width(of: $1)) }
+            }
+            return Columns(branch: widest(branches), commitID: widest(commitIDs),
+                           author: widest(authors), date: widest(dates))
+        }
+    }
+
+    /// A point of slack over the measured advance, which rounds a hair under
+    /// what is drawn and clipped the last digit of a timestamp.
+    static func width(of text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return ceil((text as NSString).size(withAttributes: [.font: metaFont]).width) + 2
+    }
+
+    /// What the author column says: the name, after an ↑ for a commit that is
+    /// not pushed yet — the reason Push is live, so it has to be tellable
+    /// apart at a glance.
+    static func authorText(_ commit: GitService.Commit, pending: Bool) -> String {
+        pending ? "↑ " + commit.author : commit.author
+    }
 
     /// Where the last draw put each column, so the gaps between them can be
     /// measured rather than eyeballed.
     private(set) var drawnBranchRectForTesting: NSRect = .zero
-    private(set) var drawnSubjectXForTesting: CGFloat = 0
+    private(set) var drawnHashRectForTesting: NSRect = .zero
     private(set) var drawnSubjectRectForTesting: NSRect = .zero
     private(set) var drawnAuthorRectForTesting: NSRect = .zero
     private(set) var drawnDateRectForTesting: NSRect = .zero
-    private(set) var drawnHashRectForTesting: NSRect = .zero
 
-    /// The width every row in the list gives its branch, so the id and the
-    /// message start at the same place on each — they are columns, and a
-    /// longer branch name on one row must not push that row's out of line.
-    private var branchColumnWidth: CGFloat?
-
-    /// The width a list of these rows should give the branch column: its
-    /// widest name.
-    static func branchColumnWidth(for names: some Sequence<String>) -> CGFloat {
-        let font = Theme.uiFont(9.5)
-        return names.reduce(0) { widest, name in
-            max(widest, ceil((name as NSString).size(withAttributes: [.font: font]).width) + 2)
-        }
-    }
-
-    /// `now` is when "3 hours ago" is measured from — the moment the list was
-    /// read, so every row in it agrees.
+    /// `columns` is the list's; left out, the row measures its own.
     func configure(commit: GitService.Commit, pending: Bool, branch: String = "",
-                   branchColumnWidth: CGFloat? = nil, now: Date = Date()) {
+                   columns: Columns? = nil) {
         self.branch = branch
-        self.branchColumnWidth = branchColumnWidth
+        self.columns = columns
         commitID = commit.shortHash
         subject = commit.subject
-        // The name gives way before the timestamp does: a truncated name still
-        // reads, a truncated date does not.
-        author = pending ? "↑  " + commit.author : commit.author
-        date = commit.relativeDate(now: now)
-        // Unpushed commits are the reason Push is enabled, so they still have
-        // to be tellable apart at a glance — the arrow rides with the metadata
-        // rather than taking room from the subject.
+        author = Self.authorText(commit, pending: pending)
+        date = commit.absoluteDate
         metaColor = pending ? Theme.accent : Theme.dimText
-        // No bubble: the row carries the branch, the id, the message, the name
-        // and the time itself, and a tip over every row is then only something
-        // that follows the pointer down the list.
+        // No bubble: the row carries everything it has to say, and a tip over
+        // every row is only something that follows the pointer down the list.
         toolTip = nil
         exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
                                 + (branch.isEmpty ? "" : "on \(branch), ")
@@ -64,60 +89,70 @@ final class GitCommitCell: DrawnSidebarCell {
         needsDisplay = true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        drawnBranchRectForTesting = .zero
-        drawnAuthorRectForTesting = .zero
-        drawnDateRectForTesting = .zero
-        drawnHashRectForTesting = .zero
-        var content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
-                             height: bounds.height)
-        // Branch, then the commit's id, each a column of its own ahead of the
-        // message: the list holds commits merged in from other branches, and
-        // the id is what names one to Git.
-        let metaFont = Theme.uiFont(9.5)
-        let baseline = SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11), in: content)
-        /// A column of its own. With a width shared down the list it is kept
-        /// even for a row that has nothing to put in it — a commit no branch
-        /// contains — or that row's later columns start out of line.
-        func leadingColumn(_ text: String, color: NSColor, share: CGFloat,
-                           lineBreak: NSLineBreakMode, width fixed: CGFloat? = nil) -> NSRect? {
-            let reserved = (fixed ?? 0) > 0
-            guard !text.isEmpty || reserved else { return nil }
-            let natural = fixed ?? ceil((text as NSString)
-                                            .size(withAttributes: [.font: metaFont]).width) + 2
-            let width = min(natural, floor(content.width * share))
-            let box = NSRect(x: content.minX, y: content.minY,
-                             width: width, height: content.height)
-            if !text.isEmpty {
-                SidebarCellDrawing.text(text, font: metaFont, color: color,
-                                        baseline: baseline, in: box, lineBreak: lineBreak)
-            }
-            let taken = width + Self.columnGap
-            content = NSRect(x: content.minX + taken, y: content.minY,
-                             width: max(0, content.width - taken), height: content.height)
-            return text.isEmpty ? nil : box
+    /// Each column's rectangle across `content`, message included.
+    static func layout(_ columns: Columns, in content: NSRect)
+        -> (branch: NSRect, commitID: NSRect, subject: NSRect, author: NSRect, date: NSRect) {
+        var branch = columns.branch
+        var author = columns.author
+        let fixed = [branch, columns.commitID, author, columns.date].filter { $0 > 0 }
+        let gaps = CGFloat(fixed.count) * columnGap
+        // Too narrow for every column: the author gives way first, then the
+        // branch, before the message goes below its minimum.
+        var shortfall = fixed.reduce(0, +) + gaps + minimumSubjectWidth - content.width
+        func squeeze(_ width: inout CGFloat) {
+            let give = min(max(0, shortfall), max(0, width - minimumSqueezedWidth))
+            width -= give
+            shortfall -= give
         }
-        // A quarter at most for the branch: the message is what the row is
-        // read for, and a long branch name must not take the whole line.
-        drawnBranchRectForTesting = leadingColumn(
-            branch, color: Theme.accent, share: 0.25, lineBreak: .byTruncatingTail,
-            width: branchColumnWidth) ?? .zero
-        drawnHashRectForTesting = leadingColumn(
-            commitID, color: Theme.dimText, share: 0.25, lineBreak: .byClipping) ?? .zero
-        drawnSubjectXForTesting = content.minX
-        drawnSubjectRectForTesting = content
-        SidebarCellDrawing.leadingAndTrailing(
-            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
-            trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
-            trailingPinned: date, in: content, gap: Self.columnGap,
-            // With a branch ahead of it the subject is down to whatever the
-            // other three leave; the name and the date give way first.
-            trailingShare: branch.isEmpty ? 0.6 : 0.5)
+        squeeze(&author)
+        squeeze(&branch)
+        func box(_ x: CGFloat, _ width: CGFloat) -> NSRect {
+            NSRect(x: x, y: content.minY, width: max(0, width), height: content.height)
+        }
+        var x = content.minX
+        let branchBox = box(x, branch)
+        if branch > 0 { x += branch + columnGap }
+        let idBox = box(x, columns.commitID)
+        if columns.commitID > 0 { x += columns.commitID + columnGap }
+        var right = content.maxX
+        let dateBox = box(right - columns.date, columns.date)
+        if columns.date > 0 { right -= columns.date + columnGap }
+        let authorBox = box(right - author, author)
+        if author > 0 { right -= author + columnGap }
+        return (branchBox, idBox, box(x, right - x), authorBox, dateBox)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
+                             height: bounds.height)
+        let columns = self.columns ?? Columns.measuring(
+            branches: [branch], commitIDs: [commitID], authors: [author], dates: [date])
+        let boxes = Self.layout(columns, in: content)
+        let baseline = SidebarCellDrawing.centeredBaseline(for: Self.subjectFont, in: content)
+        func draw(_ text: String, font: NSFont, color: NSColor, in box: NSRect,
+                  lineBreak: NSLineBreakMode) -> NSRect {
+            guard !text.isEmpty, box.width > 0 else { return .zero }
+            SidebarCellDrawing.text(text, font: font, color: color, baseline: baseline,
+                                    in: box, lineBreak: lineBreak)
+            return box
+        }
+        drawnBranchRectForTesting = draw(branch, font: Self.metaFont, color: Theme.accent,
+                                         in: boxes.branch, lineBreak: .byTruncatingTail)
+        drawnHashRectForTesting = draw(commitID, font: Self.metaFont, color: Theme.dimText,
+                                       in: boxes.commitID, lineBreak: .byClipping)
+        drawnSubjectRectForTesting = draw(subject, font: Self.subjectFont,
+                                          color: Theme.foreground, in: boxes.subject,
+                                          lineBreak: .byTruncatingTail)
+        drawnAuthorRectForTesting = draw(author, font: Self.metaFont, color: metaColor,
+                                         in: boxes.author, lineBreak: .byTruncatingTail)
+        drawnDateRectForTesting = draw(date, font: Self.metaFont, color: metaColor,
+                                       in: boxes.date, lineBreak: .byClipping)
     }
 
     var subjectForTesting: String { subject }
     var branchForTesting: String { branch }
-    var metaForTesting: String { "\(author)  ·  \(date)" }
+    var authorForTesting: String { author }
+    var dateForTesting: String { date }
     var toolTipForTesting: String { toolTip ?? "" }
 }
 

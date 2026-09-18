@@ -1,8 +1,8 @@
 import AppKit
 
 /// The current branch's commits, under the changes of the same project: one
-/// line per commit — branch, id, message, author, how long ago — and its
-/// files underneath when it is opened.
+/// line per commit — branch, commit ID, message, author, time — and its files
+/// underneath when it is opened.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -34,12 +34,9 @@ final class ProjectHistoryViewController: NSViewController {
     /// The branch each commit sits on: the list holds everything behind HEAD,
     /// including commits made on a branch that was merged in.
     private var branches: [String: String] = [:]
-    /// One width for the branch column down the whole list, so the ids and
-    /// messages after it start at the same place on every row.
-    private var branchColumnWidth: CGFloat = 0
-    /// When the log was read: "3 hours ago" is measured from here, so every
-    /// row agrees and a redraw does not change what a row says.
-    private var readAt = Date()
+    /// The column widths every row shares, so each column starts at the same
+    /// place down the whole list.
+    private var columns = GitCommitCell.Columns()
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
     private var rows: [Row] = []
@@ -120,7 +117,7 @@ final class ProjectHistoryViewController: NSViewController {
         commits = []
         unpushed = []
         branches = [:]
-        branchColumnWidth = 0
+        columns = GitCommitCell.Columns()
         expanded = []
         files = [:]
         rebuildRows()
@@ -157,8 +154,12 @@ final class ProjectHistoryViewController: NSViewController {
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
                 self.branches = named
-                self.branchColumnWidth = GitCommitCell.branchColumnWidth(for: named.values)
-                self.readAt = Date()
+                self.columns = GitCommitCell.Columns.measuring(
+                    branches: named.values, commitIDs: log.map(\.shortHash),
+                    authors: log.map {
+                        GitCommitCell.authorText($0, pending: self.isUnpushed($0.shortHash))
+                    },
+                    dates: log.map(\.absoluteDate))
                 // A commit that is no longer listed cannot stay open.
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
@@ -399,7 +400,7 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
                            branch: branches[commit.shortHash] ?? "",
-                           branchColumnWidth: branchColumnWidth, now: readAt)
+                           columns: columns)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

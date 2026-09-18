@@ -13,13 +13,13 @@ final class SidebarViewController: NSViewController {
     /// A project row was chosen, or its ✕ was clicked.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
-    /// The branch on a project row was clicked: the row, and where its branch
-    /// sits in this panel's view, for the branch menu to hang from.
-    var onSelectProjectBranchRow: ((Int, NSRect) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
-    /// The button at the end of the title band opens another project.
+    /// The buttons at the end of the title band: one opens another project,
+    /// the one past it opens a terminal on the project showing.
     private let addProjectButton = NSButton()
+    private let terminalButton = NSButton()
     var onAddProject: (() -> Void)?
+    var onOpenTerminal: (() -> Void)?
 
     var onGitDiff: ((GitService.Status.Entry, URL) -> Void)?
     var onGitCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -45,18 +45,16 @@ final class SidebarViewController: NSViewController {
         titleSeparator.fillColor = Theme.border
         root.addSubview(panel)
         root.addSubview(projectTitle)
-        addProjectButton.image = Theme.symbol("plus", accessibilityDescription: "Open project",
-                                              pointSize: 12)
-        addProjectButton.isBordered = false
-        addProjectButton.bezelStyle = .regularSquare
-        addProjectButton.imageScaling = .scaleProportionallyDown
-        addProjectButton.contentTintColor = Theme.dimText
-        addProjectButton.toolTip = "Open another project"
-        addProjectButton.setAccessibilityLabel("Open project")
-        addProjectButton.target = self
-        addProjectButton.action = #selector(addProjectAction)
-        addProjectButton.translatesAutoresizingMaskIntoConstraints = false
+        configure(addProjectButton,
+                  image: Theme.symbol("plus", accessibilityDescription: "Open project",
+                                      pointSize: 12),
+                  label: "Open project", tip: "Open another project",
+                  action: #selector(addProjectAction))
         root.addSubview(addProjectButton)
+        configure(terminalButton, image: Self.promptImage(),
+                  label: "Open terminal", tip: "Open this project in a terminal",
+                  action: #selector(openTerminalAction))
+        root.addSubview(terminalButton)
         root.addSubview(titleSeparator)
 
         containerTopConstraint = panel.topAnchor.constraint(
@@ -76,11 +74,16 @@ final class SidebarViewController: NSViewController {
             // The name truncates rather than pushing the button off the end.
             projectTitle.trailingAnchor.constraint(
                 lessThanOrEqualTo: addProjectButton.leadingAnchor, constant: -6),
-            addProjectButton.trailingAnchor.constraint(equalTo: root.trailingAnchor,
-                                                       constant: -8),
+            addProjectButton.trailingAnchor.constraint(
+                equalTo: terminalButton.leadingAnchor, constant: -2),
             addProjectButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             addProjectButton.widthAnchor.constraint(equalToConstant: 22),
             addProjectButton.heightAnchor.constraint(equalToConstant: 20),
+            terminalButton.trailingAnchor.constraint(equalTo: root.trailingAnchor,
+                                                     constant: -8),
+            terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            terminalButton.widthAnchor.constraint(equalToConstant: 22),
+            terminalButton.heightAnchor.constraint(equalToConstant: 20),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: panel.topAnchor),
@@ -94,10 +97,6 @@ final class SidebarViewController: NSViewController {
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
-        projectsPanel.onSelectBranch = { [weak self] index, rect in
-            guard let self else { return }
-            self.onSelectProjectBranchRow?(index, self.projectsPanel.view.convert(rect, to: root))
-        }
         projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
             self?.onGitDiff?(entry, directory)
         }
@@ -115,9 +114,50 @@ final class SidebarViewController: NSViewController {
         }
     }
 
+    /// The title band's buttons, drawn alike.
+    private func configure(_ button: NSButton, image: NSImage?, label: String,
+                           tip: String, action: Selector) {
+        button.image = image
+        button.isBordered = false
+        button.bezelStyle = .regularSquare
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = Theme.dimText
+        button.toolTip = tip
+        button.setAccessibilityLabel(label)
+        button.target = self
+        button.action = action
+        button.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    /// A shell prompt: one chevron and the cursor's underscore, drawn at the
+    /// weight of the SF Symbol beside it. The `terminal` symbol puts a window
+    /// frame around the same two marks, which at this size reads as a filled
+    /// box next to the bare `+`.
+    private static func promptImage() -> NSImage {
+        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { _ in
+            let path = NSBezierPath()
+            path.lineWidth = 1.3
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.move(to: NSPoint(x: 3, y: 10.25))
+            path.line(to: NSPoint(x: 6.5, y: 7))
+            path.line(to: NSPoint(x: 3, y: 3.75))
+            path.move(to: NSPoint(x: 8, y: 3.75))
+            path.line(to: NSPoint(x: 11.5, y: 3.75))
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        // Tinted by the button, like every other mark in the band.
+        image.isTemplate = true
+        return image
+    }
+
     @objc private func addProjectAction() { onAddProject?() }
+    @objc private func openTerminalAction() { onOpenTerminal?() }
 
     var addProjectButtonForTesting: NSButton { addProjectButton }
+    var terminalButtonForTesting: NSButton { terminalButton }
 
     func setTabRowHeight(_ height: CGFloat) {
         containerTopConstraint.constant = height

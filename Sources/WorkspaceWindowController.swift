@@ -100,6 +100,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self, selector: #selector(applicationDidBecomeActive(_:)),
             name: NSApplication.didBecomeActiveNotification, object: nil)
         sidebar.onAddProject = { [weak self] in self?.openFolder(nil) }
+        sidebar.onOpenTerminal = { [weak self] in
+            guard let directory = self?.projectURL else { return }
+            TerminalLauncher.open(at: directory)
+        }
         sidebar.onSelectProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             let wanted = self.projects[index]
@@ -110,15 +114,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             } else {
                 self.activateProject(wanted)
             }
-        }
-        // The branch on a row drops that project's branch menu: it brings the
-        // project forward if it is not the one showing, and never collapses
-        // the one that is.
-        sidebar.onSelectProjectBranchRow = { [weak self] index, rect in
-            guard let self, self.projects.indices.contains(index) else { return }
-            let wanted = self.projects[index]
-            if self.projectURL != wanted { self.activateProject(wanted) }
-            self.showBranchMenu(from: rect, in: self.sidebar.view)
         }
         sidebar.onReorderProjectRows = { [weak self] from, to in
             self?.moveProject(from: from, to: to)
@@ -141,7 +136,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             // one it ran in still counts the changes it committed.
             if directory != self.projectURL { self.refreshProjectSummaries(all: true) }
         }
-        // The branch in the title band drops the same menu, anchored under it.
+        // The branch in the title band drops the branch menu, anchored under it.
         sidebar.projectTitle.onBranchClick = { [weak self] rect in
             guard let self else { return }
             self.showBranchMenu(from: rect, in: self.sidebar.projectTitle)

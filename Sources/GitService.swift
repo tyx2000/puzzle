@@ -72,16 +72,6 @@ enum GitService {
         /// Branch and tag names pointing here, as Git decorates them
         /// ("HEAD -> main, origin/main"). Empty for most commits.
         var refs: String = ""
-        /// When the commit was authored, in seconds since 1970. Zero when the
-        /// log was read without it.
-        var timestamp: Int64 = 0
-
-        /// How long ago the commit was authored, the way the history reads it.
-        func relativeDate(now: Date = Date()) -> String {
-            guard timestamp > 0 else { return absoluteDate }
-            return GitService.relativeDate(
-                Date(timeIntervalSince1970: TimeInterval(timestamp)), now: now)
-        }
 
         /// Blame summary shown as the commit record's secondary line.
         var blameSummary: String { "\(author)  ·  \(absoluteDate)" }
@@ -892,7 +882,7 @@ enum GitService {
         // draws. `--date-order` is what a graph needs: still newest first, but
         // a commit is never listed before one of its children, so a lane never
         // has to jump backwards.
-        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D%x00%at"
+        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D"
         // `--full-history` because of the pathspec: with one, Git simplifies
         // the history it walks — a merge that changed nothing under the path
         // relative to its first parent is dropped, and with it every commit
@@ -904,7 +894,7 @@ enum GitService {
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
                           "--", "."], in: directory)
         guard result.code == 0 else { return [] }
-        return parseLog(result.out, fieldsPerCommit: 8)
+        return parseLog(result.out, fieldsPerCommit: 7)
     }
 
     /// Splits `-z` log output into commits. `fieldsPerCommit` says whether the
@@ -925,34 +915,10 @@ enum GitService {
                 commit.refs = String(fields[index + 6])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            if fieldsPerCommit >= 8 {
-                commit.timestamp = Int64(fields[index + 7]
-                    .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-            }
             commits.append(commit)
             index += fieldsPerCommit
         }
         return commits
-    }
-
-    /// "just now", "5 minutes ago", "yesterday", "3 weeks ago". Written out
-    /// rather than left to a formatter, so the list reads the same whatever
-    /// the system's language — the rest of the app is English.
-    static func relativeDate(_ date: Date, now: Date = Date()) -> String {
-        let seconds = Int(now.timeIntervalSince(date))
-        func ago(_ count: Int, _ unit: String) -> String {
-            "\(count) \(unit)\(count == 1 ? "" : "s") ago"
-        }
-        switch seconds {
-        case ..<60: return "just now"
-        case ..<3_600: return ago(seconds / 60, "minute")
-        case ..<86_400: return ago(seconds / 3_600, "hour")
-        case ..<172_800: return "yesterday"
-        case ..<604_800: return ago(seconds / 86_400, "day")
-        case ..<2_592_000: return ago(seconds / 604_800, "week")
-        case ..<31_536_000: return ago(max(1, seconds / 2_592_000), "month")
-        default: return ago(seconds / 31_536_000, "year")
-        }
     }
 
     /// Unified diff for one path. Untracked files have no diff against the

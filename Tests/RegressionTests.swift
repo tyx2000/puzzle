@@ -28,6 +28,7 @@ enum RegressionTests {
         try testProjectCommitLine()
         try testStripedGitLists()
         try testBranchMenu()
+        try testTerminalLaunchScripts()
         try testBranchMenuActions()
         try testSplitterAndRowGestures()
         try testMaterialFileIcons()
@@ -220,12 +221,10 @@ enum RegressionTests {
         }
         try expect(newest.subject == unusualSubject,
                    "commit metadata delimiters corrupted the history subject")
-        // The time the history reads as "just now" comes from the log itself.
-        try expect(newest.timestamp > 0
-                    && abs(Date().timeIntervalSince1970 - TimeInterval(newest.timestamp)) < 600,
-                   "the log did not carry the commit's time: \(newest.timestamp)")
-        try expect(newest.relativeDate() == "just now",
-                   "a commit made seconds ago reads \(newest.relativeDate())")
+        // The time the history shows is the author date, to the minute.
+        try expect(newest.absoluteDate.range(of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$"#,
+                                             options: .regularExpression) != nil,
+                   "the log's time is not yyyy-MM-dd HH:mm: \(newest.absoluteDate)")
 
         try Data("changed".utf8).write(to: project.appendingPathComponent(renamed))
         try expect(GitService.stageAll(in: project).code == 0,
@@ -1149,10 +1148,10 @@ enum RegressionTests {
             .firstIndex(of: "Side work")
         try expect(sideRow.flatMap { projectsPanel.history.rowBranchForTesting($0) } == "side",
                    "the row does not draw the branch it is labelled with")
-        try expect(GitCommitCell.columnGap == 15,
-                   "the history columns are \(GitCommitCell.columnGap)pt apart, not 15")
-        // One line per commit: the branch, the id, the message, then who and
-        // how long ago — each a column of its own, in that order.
+        try expect(GitCommitCell.columnGap == 10,
+                   "the history columns are \(GitCommitCell.columnGap)pt apart, not 10")
+        // One line per commit: branch, commit ID, message, author, time — each
+        // a column of its own, in that order, a gap apart.
         guard let sideIndex = sideRow,
               let sideCell = projectsPanel.history.rowCellForTesting(sideIndex) else {
             throw Failure(description: "the side commit built no cell")
@@ -1162,44 +1161,66 @@ enum RegressionTests {
                    "a commit row is \(rowHeight)pt, not one list row")
         try expect(projectsPanel.history.rowHeightForTesting(sideIndex) == rowHeight,
                    "the list does not give a commit one line")
-        sideCell.frame = NSRect(x: 0, y: 0, width: 640, height: rowHeight)
-        if let rep = sideCell.bitmapImageRepForCachingDisplay(in: sideCell.bounds) {
-            sideCell.cacheDisplay(in: sideCell.bounds, to: rep)
+        func drawn(_ cell: GitCommitCell, width: CGFloat) -> [NSRect] {
+            cell.frame = NSRect(x: 0, y: 0, width: width, height: rowHeight)
+            if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+            }
+            return [cell.drawnBranchRectForTesting, cell.drawnHashRectForTesting,
+                    cell.drawnSubjectRectForTesting, cell.drawnAuthorRectForTesting,
+                    cell.drawnDateRectForTesting]
         }
-        let branchRect = sideCell.drawnBranchRectForTesting
-        let hashRect = sideCell.drawnHashRectForTesting
-        let subjectRect = sideCell.drawnSubjectRectForTesting
-        try expect(branchRect.width > 0 && hashRect.width > 0,
-                   "the branch or the id was not drawn: \(branchRect) / \(hashRect)")
-        try expect(abs(hashRect.minX - branchRect.maxX - GitCommitCell.columnGap) <= 0.5
-                    && abs(subjectRect.minX - hashRect.maxX - GitCommitCell.columnGap) <= 0.5,
-                   "branch, id and message are not columns a gap apart: "
-                     + "\(branchRect) / \(hashRect) / \(subjectRect)")
-        try expect(branchRect.midY == hashRect.midY && hashRect.midY == subjectRect.midY,
-                   "the columns are not on one line")
-        // Who, and how long ago: a commit made moments ago reads as such.
-        try expect(sideCell.metaForTesting.contains("Gift Test")
-                    && sideCell.metaForTesting.hasSuffix("just now"),
-                   "the row does not end with the author and a relative time: "
-                     + "\(sideCell.metaForTesting)")
+        let wideColumns = drawn(sideCell, width: 640)
+        try expect(wideColumns.allSatisfy { $0.width > 0 },
+                   "a column was not drawn: \(wideColumns)")
+        for (left, right) in zip(wideColumns, wideColumns.dropFirst()) {
+            try expect(abs(right.minX - left.maxX - GitCommitCell.columnGap) <= 0.5,
+                       "the columns are not \(GitCommitCell.columnGap)pt apart: \(wideColumns)")
+        }
+        try expect(Set(wideColumns.map(\.midY)).count == 1, "the columns are not on one line")
+        // The time is the commit's own, written out, at the trailing edge.
+        try expect(sideCell.dateForTesting.range(
+                    of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$"#, options: .regularExpression) != nil,
+                   "the row's time is not absolute: \(sideCell.dateForTesting)")
+        try expect(abs(wideColumns[4].maxX - (640 - 8)) <= 0.5,
+                   "the time does not end at the row's edge: \(wideColumns[4])")
+        try expect(sideCell.authorForTesting.hasSuffix("Gift Test"),
+                   "the author column reads \(sideCell.authorForTesting)")
+        // Every other column keeps its width: whatever the row gains or loses
+        // is the message's.
+        let narrowColumns = drawn(sideCell, width: 520)
+        for index in [0, 1, 3, 4] {
+            try expect(narrowColumns[index].width == wideColumns[index].width,
+                       "column \(index) changed width with the row: "
+                         + "\(wideColumns[index]) → \(narrowColumns[index])")
+        }
+        try expect(abs((wideColumns[2].width - narrowColumns[2].width) - 120) <= 0.5,
+                   "the message did not take the 120pt the row lost: "
+                     + "\(wideColumns[2].width) → \(narrowColumns[2].width)")
         // No bubble following the pointer down the list: the row carries
         // everything it has to say.
         try expect(sideCell.toolTip == nil,
                    "a commit row still carries a tip: "
                      + "\(String(describing: sideCell.toolTip))")
-        // Every row gives the branch the same width, so the ids line up down
-        // the list however long the names are.
-        let hashStarts = (0..<projectsPanel.history.commitSubjectsForTesting.count)
-            .compactMap { index -> CGFloat? in
+        // Every column but the message is as wide as its widest entry down the
+        // list, so each starts at the same place on every row.
+        let starts = (0..<projectsPanel.history.commitSubjectsForTesting.count)
+            .compactMap { index -> [CGFloat]? in
                 guard let cell = projectsPanel.history.rowCellForTesting(index) else { return nil }
-                cell.frame = NSRect(x: 0, y: 0, width: 640, height: rowHeight)
-                if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
-                    cell.cacheDisplay(in: cell.bounds, to: rep)
-                }
-                return cell.drawnHashRectForTesting.minX
+                let columns = drawn(cell, width: 640)
+                return [columns[1].minX, columns[2].minX, columns[3].minX, columns[4].minX]
             }
-        try expect(Set(hashStarts).count == 1,
-                   "the commit ids do not start in one column: \(hashStarts)")
+        try expect(Set(starts).count == 1,
+                   "the columns do not start in one place down the list: \(starts)")
+        // Too narrow for every column, the author and then the branch give way
+        // before the message goes below its minimum.
+        let squeezed = GitCommitCell.layout(
+            .init(branch: 120, commitID: 50, author: 120, date: 90),
+            in: NSRect(x: 0, y: 0, width: 300, height: rowHeight))
+        try expect(squeezed.subject.width >= GitCommitCell.minimumSubjectWidth - 0.5
+                    && squeezed.author.width < 120 && squeezed.date.width == 90
+                    && squeezed.commitID.width == 50,
+                   "a narrow row squeezed the wrong columns: \(squeezed)")
 
         // A pane is placed by hand and everything inside it by constraints, so
         // the list has to be settled in the same pass: a clip view still the
@@ -1327,14 +1348,36 @@ enum RegressionTests {
                    "the menu does not list the checked-out branch, ticked: "
                      + "\(listed.map(\.0))")
 
-        // The button that opens another project sits at the end of the band.
+        // At the end of the band: the button that opens another project, and
+        // past it the one that opens this project in a terminal.
         let addButton = workspace.sidebar.addProjectButtonForTesting
+        let terminalButton = workspace.sidebar.terminalButtonForTesting
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(addButton.toolTip?.isEmpty == false && addButton.image != nil,
                    "the add-project button says nothing about what it does")
-        try expect(addButton.frame.maxX <= workspace.sidebar.view.bounds.maxX
-                    && addButton.frame.minX >= title.frame.maxX,
-                   "the add-project button is not at the end of the band: \(addButton.frame)")
+        try expect(addButton.frame.minX >= title.frame.maxX,
+                   "the add-project button overlaps the title: \(addButton.frame)")
+        try expect(terminalButton.toolTip?.isEmpty == false && terminalButton.image != nil,
+                   "the terminal button says nothing about what it does")
+        // Drawn here rather than taken from SF Symbols, whose `terminal` puts a
+        // window frame around the prompt. A template image so the band tints it
+        // like everything else in it.
+        try expect(terminalButton.image?.isTemplate == true
+                    && terminalButton.image?.size == NSSize(width: 14, height: 14),
+                   "the terminal mark is not the band's own 14pt template: "
+                     + "\(String(describing: terminalButton.image?.size))")
+        try expect(terminalButton.frame.minX >= addButton.frame.maxX
+                    && terminalButton.frame.maxX <= workspace.sidebar.view.bounds.maxX,
+                   "the terminal button is not past the add-project button: "
+                     + "\(terminalButton.frame) vs \(addButton.frame)")
+        try expect(workspace.sidebar.onOpenTerminal != nil,
+                   "nothing answers the terminal button")
+        var openedTerminal = false
+        let realTerminal = workspace.sidebar.onOpenTerminal
+        workspace.sidebar.onOpenTerminal = { openedTerminal = true }
+        terminalButton.performClick(nil)
+        workspace.sidebar.onOpenTerminal = realTerminal
+        try expect(openedTerminal, "the terminal button did nothing")
 
         // The window controller must have claimed the click handler, and the
         // transparent titlebar sitting over this band must not swallow it.
@@ -2024,6 +2067,46 @@ enum RegressionTests {
         let opened = try pattern(4) { history2.rowViewForTesting($0) }
         try expect(opened == ["plain", "stripe", "plain", "stripe"],
                    "rows kept the colours of their old places: \(opened)")
+    }
+
+    private static func testTerminalLaunchScripts() throws {
+        // It opens the folder in iTerm, with Terminal as the fallback where
+        // iTerm is not installed.
+        let iTerm = URL(fileURLWithPath: "/Applications/iTerm.app")
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let installed: [String: URL] = ["com.googlecode.iterm2": iTerm,
+                                        "com.apple.Terminal": terminal]
+        try expect(TerminalLauncher.terminalApplication { installed[$0] } == iTerm,
+                   "iTerm is installed but was not preferred")
+        try expect(TerminalLauncher.terminalApplication {
+                       $0 == "com.apple.Terminal" ? terminal : nil
+                   } == terminal,
+                   "without iTerm the click did not fall back to Terminal")
+        try expect(TerminalLauncher.terminalApplication { _ in nil } == nil,
+                   "a machine with neither terminal still resolved one")
+
+        // Launching iTerm opens a window by itself, so the script must not add
+        // a second one — that was two windows per click.
+        let cold = TerminalLauncher.iTermScript(command: "cd /tmp", reusingLaunchWindow: true)
+        try expect(cold.contains("count of windows") && cold.contains("current window"),
+                   "the cold-start script does not wait for the launch window")
+        let warm = TerminalLauncher.iTermScript(command: "cd /tmp", reusingLaunchWindow: false)
+        try expect(!warm.contains("count of windows"),
+                   "the warm script waits for a window that already exists")
+        try expect(warm.components(separatedBy: "create window").count == 2
+                    && cold.components(separatedBy: "create window").count == 2,
+                   "a script does not create exactly one window as its last resort")
+        try expect(cold.contains("cd /tmp") && warm.contains("cd /tmp"),
+                   "the script does not carry the command")
+
+        // The terminal command is quoted, so a space or a quote in the path
+        // cannot run as shell syntax.
+        let quoted = TerminalLauncher.shellQuoted("/tmp/my project's code")
+        try expect(quoted == "'/tmp/my project'\\''s code'",
+                   "the path was not shell-quoted: \(quoted)")
+        let escaped = TerminalLauncher.appleScriptQuoted("say \"hi\" \\ now")
+        try expect(escaped == "say \\\"hi\\\" \\\\ now",
+                   "the AppleScript literal was not escaped: \(escaped)")
     }
 
     private static func testBranchMenu() throws {
@@ -3450,8 +3533,8 @@ enum RegressionTests {
         panel.rowsForTesting[0].clickForTesting()
         try expect(host.projectURL == nil, "the fixture did not collapse")
 
-        // The branch name is a target of its own: it brings the project
-        // forward and drops its branch menu.
+        // The branch name is a label, not a target: nothing marks it under
+        // the pointer, and a click on it is a click on the row.
         host.sidebar.setProjects(host.projects.map {
             (name: $0.lastPathComponent, branch: "main", user: "", changes: 0,
              path: $0.path)
@@ -3461,51 +3544,29 @@ enum RegressionTests {
         let branchBox = branchRow.branchRectForTesting
         try expect(branchBox.width > 0 && branchBox.minX > ProjectRowView.markerWidth
                     && branchBox.maxX < branchRow.closeRectForTesting.minX,
-                   "the branch name has no hit box between the name and the ✕: \(branchBox)")
-        // Under the pointer the branch underlines itself, the way a link does —
-        // and only itself: the underline once ran back across the gap between
-        // the project's name and its branch.
+                   "the branch name is not drawn between the name and the ✕: \(branchBox)")
         branchRow.hoverForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         let hovered = branchRow.labelForTesting
-        var underlined: [String] = []
+        var underlined = false
         hovered.enumerateAttribute(.underlineStyle,
                                    in: NSRange(location: 0, length: hovered.length)) {
-            value, range, _ in
-            guard value != nil else { return }
-            underlined.append((hovered.string as NSString).substring(with: range))
+            value, _, _ in
+            if value != nil { underlined = true }
         }
-        try expect(underlined == ["main"],
-                   "the hover underline covers \(underlined), not the branch name alone")
-        // The underline says where it goes; a bubble saying it again does not.
+        try expect(!underlined, "the branch underlines itself under the pointer")
         try expect(branchRow.toolTip == branchRow.pathForTesting,
-                   "hovering the branch put a tip over it: "
+                   "hovering the branch changed the row's tip: "
                      + "\(String(describing: branchRow.toolTip))")
-        branchRow.hoverForTesting(at: NSPoint(x: 20, y: branchBox.midY))
-        let plain = branchRow.labelForTesting
-        try expect(plain.attribute(.underlineStyle, at: plain.length - 1,
-                                   effectiveRange: nil) == nil,
-                   "the branch stays underlined with the pointer elsewhere")
-
-        // Only a repository has branches to list, so the fixture is made one.
-        _ = GitService.run(["init", "-q", "-b", "main"], in: host.projects[0])
         var menuShown = 0
         host.presentBranchMenu = { _, _, _ in menuShown += 1 }
         branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.projectURL == host.projects[0],
-                   "clicking the branch did not bring its project forward")
-        let menuDeadline = Date().addingTimeInterval(5)
-        while menuShown == 0, Date() < menuDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        try expect(menuShown == 1, "clicking the branch dropped no menu")
-        // Clicking the branch of the project already showing must not fold it
-        // away — that would take back the menu it just asked for.
+                   "a click on the branch did not select its row")
         branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
-        try expect(host.projectURL == host.projects[0],
-                   "clicking the branch again collapsed the project")
-        panel.rowsForTesting[0].clickForTesting()
         try expect(host.projectURL == nil,
-                   "the fixture did not collapse after the branch check")
+                   "a second click on the branch did not collapse the row like the name does")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        try expect(menuShown == 0, "a click on a row's branch dropped the branch menu")
 
         // The ✕ is always there, at the row's trailing end, so the name's room
         // never changes as the pointer crosses the panel.
