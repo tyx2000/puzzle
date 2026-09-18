@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/build/Puzzle.app"
+ICON_BASENAME="Puzzle-AppIcon"
 SDK="$(xcrun --show-sdk-path)"
 V="$ROOT/vendor"
 TS_INC="$V/tree-sitter/lib/include"
@@ -77,17 +78,18 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/queries"
 
 # App icon: generated once from Tools/makeicon.swift + Tools/appicon.jpg,
 # then cached.
-ICNS="$OBJ/AppIcon.icns"
+ICONSET="$OBJ/$ICON_BASENAME.iconset"
+ICNS="$OBJ/$ICON_BASENAME.icns"
 if [ ! -f "$ICNS" ] || [ "$ROOT/Tools/makeicon.swift" -nt "$ICNS" ] \
    || [ "$ROOT/Tools/appicon.jpg" -nt "$ICNS" ]; then
   echo "==> Generating app icon"
   swiftc -Onone -sdk "$SDK" -target "$TARGET" -framework AppKit \
     "$ROOT/Tools/makeicon.swift" -o "$OBJ/makeicon" 2>/dev/null
-  rm -rf "$OBJ/AppIcon.iconset"
-  "$OBJ/makeicon" "$OBJ/AppIcon.iconset" "$ROOT/Tools/appicon.jpg" >/dev/null
-  iconutil -c icns "$OBJ/AppIcon.iconset" -o "$ICNS"
+  rm -rf "$ICONSET"
+  "$OBJ/makeicon" "$ICONSET" "$ROOT/Tools/appicon.jpg" >/dev/null
+  iconutil -c icns "$ICONSET" -o "$ICNS"
 fi
-cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ICNS" "$APP/Contents/Resources/$ICON_BASENAME.icns"
 
 echo "==> Compiling Swift (arm64, $MODE)"
 swiftc \
@@ -147,7 +149,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>         <string>2.0</string>
     <key>CFBundleShortVersionString</key> <string>2.0</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
-    <key>CFBundleIconFile</key>        <string>AppIcon</string>
+    <key>CFBundleIconFile</key>        <string>Puzzle-AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Puzzle asks iTerm to open a terminal window for the current project.</string>
