@@ -1,8 +1,8 @@
 import AppKit
 
 /// One project in the Projects panel: its name, the branch it is on, and the
-/// button that takes it out of the window. Selecting it expands its file tree
-/// underneath.
+/// button that takes it out of the window. Selecting it expands its changes
+/// and history underneath.
 final class ProjectRowView: NSView {
     static let height: CGFloat = 32
     /// The ✕'s square at the trailing end, held clear of the panel's edge.
@@ -11,9 +11,9 @@ final class ProjectRowView: NSView {
     /// The band down the leading edge of the project being shown. Every row
     /// leaves room for it, so a name does not shift as the selection moves.
     static let markerWidth: CGFloat = 5
-    /// A mark at the head of each column saying what it holds: the folder the
-    /// tree below it lists, Git's own for the changes. The two headings are
-    /// otherwise set alike, and these carry their own colours.
+    /// A mark before each heading saying what it is: the folder for the
+    /// project, Git's own for the branch. The two headings are otherwise set
+    /// alike, and these carry their own colours.
     static let iconSize: CGFloat = 14
     private static let iconGap: CGFloat = 5
     private static let nameIcon = "folder-base"
@@ -21,10 +21,10 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
-    /// The branch name is its own target: it selects the project and shows
-    /// that project's Git panel, which otherwise costs a second trip to the
-    /// Git button at the foot of the sidebar.
-    var onSelectBranch: (() -> Void)?
+    /// The branch name is its own target: it selects the project and drops
+    /// the menu of branches to switch to, create or delete. The rectangle is
+    /// the branch's, in this row's coordinates, for the menu to hang from.
+    var onSelectBranch: ((NSRect) -> Void)?
     /// Dragging this row: the panel decides whether the list may be reordered
     /// at all, and tracks where the row is going.
     var onDragBegan: (() -> Bool)?
@@ -47,7 +47,7 @@ final class ProjectRowView: NSView {
     private var isHovered = false
     /// A line above the row, so the list reads as rows rather than one block.
     /// The first row has none, and neither does the gap between a project and
-    /// the tree that belongs to it.
+    /// the lists that belong to it.
     var showsDivider = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
     private var branchIsHovered = false
@@ -88,17 +88,15 @@ final class ProjectRowView: NSView {
                width: Self.closeWidth, height: Self.closeWidth)
     }
 
-    /// Both headings are drawn alike: the branch names the right column the
-    /// way the project names the left one, so the row reads as two headings
-    /// rather than a name with a note after it.
+    /// Both headings are drawn alike, so the row reads as two headings rather
+    /// than a name with a note after it.
     private static func nameFont() -> NSFont { Theme.uiFont(12) }
-    /// The row is divided: the project's name heads the file tree below it,
-    /// the branch heads that project's changes. Both columns carry on down
-    /// through the panel, so a row reads as the two headings it is — and the
-    /// line moves where the reader drags it, in the lists below.
-    var dividerFraction: CGFloat = 0.5 { didSet { needsDisplay = true } }
+    /// Where the name gives way to the branch: after the name, but never past
+    /// half the row — the branch, who commits and the count need the rest.
     var columnDivider: CGFloat {
-        ProjectColumnsView.divider(at: dividerFraction, in: bounds.width)
+        let start = Self.markerWidth + 6 + Self.iconSize + Self.iconGap
+        let natural = ceil((name as NSString).size(withAttributes: [.font: Self.nameFont()]).width)
+        return min(start + natural + 14, (bounds.width / 2).rounded())
     }
     /// Where each column's mark sits: at the head of its own column.
     private var nameIconRect: NSRect {
@@ -159,16 +157,12 @@ final class ProjectRowView: NSView {
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         }
         if isActive {
-            Theme.cursor.setFill()
+            Theme.accent.setFill()
             NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height).fill()
         }
         SidebarCellDrawing.icon(.material(Self.nameIcon), in: nameIconRect)
         SidebarCellDrawing.attributedText(nameLabel(), in: nameRect)
-        // The line between the two columns, carried on down the panel by the
-        // pair of lists below.
         if !branch.isEmpty {
-            Theme.border.setFill()
-            NSRect(x: columnDivider, y: 0, width: 1, height: bounds.height).fill()
             SidebarCellDrawing.icon(.material(Self.branchIcon), in: branchIconRect)
             SidebarCellDrawing.attributedText(branchLabel(), in: branchColumnRect)
         }
@@ -371,7 +365,7 @@ final class ProjectRowView: NSView {
         // left, for a press the reader had already abandoned.
         guard let released, bounds.contains(released) else { return }
         if branchRect.contains(start), onSelectBranch != nil {
-            onSelectBranch?()
+            onSelectBranch?(branchRect)
         } else {
             onSelect?()
         }
@@ -448,9 +442,9 @@ final class ProjectRowView: NSView {
     }
 }
 
-/// What an expanded project shows: its file tree and its changes, side by
-/// side under the two headings its row draws. Laid out by hand so the line
-/// between the columns lands on exactly the point the row's does.
+/// Two panes split by a line the reader can drag: under an expanded project,
+/// its changes over its history. Laid out by hand so the line lands on a
+/// whole point.
 final class ProjectColumnsView: FlatView {
     /// Which way the pair is split: side by side, or one above the other.
     enum Axis { case horizontal, vertical }
@@ -720,41 +714,33 @@ final class ProjectColumnsView: FlatView {
 }
 
 /// The Projects panel: the window's projects listed down the side, with the
-/// selected one's file tree and changes expanded directly underneath its row.
-///
-/// The tree is the same controller the panel always used; only where it sits
-/// changes, so nothing about browsing a project moves.
+/// selected one's changes and history expanded directly underneath its row.
 final class ProjectsPanelViewController: NSViewController {
-    let fileTree: FileTreeViewController
-    /// The right-hand column, itself split: what the expanded project has
-    /// changed, over the commits behind it.
+    /// What the expanded project has changed, over the commits behind it.
     let changes = ProjectChangesViewController()
     let history = ProjectHistoryViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    /// The branch name on a row was clicked: show that project's Git panel.
-    var onSelectBranch: ((Int) -> Void)?
+    /// The branch name on a row was clicked: the row's index, and where the
+    /// branch sits in this panel's coordinates, for its menu to hang from.
+    var onSelectBranch: ((Int, NSRect) -> Void)?
     /// A row was dragged to another place in the list.
     var onReorder: ((Int, Int) -> Void)?
 
     private let stack = NSStackView()
-    private let columns = ProjectColumnsView()
-    /// The right column's own split, between the changes and the history.
+    /// Everything under the expanded project's row: the Git lists, or the
+    /// note saying the folder is not a repository.
+    private let detail = FlatView()
+    /// The changes over the history, split by a line the reader can move.
     private let gitColumn = ProjectColumnsView()
-    /// Where the reader last put the line between the two columns. Remembered
-    /// across launches: it is a deliberate choice about a window's shape, not
-    /// a passing state.
-    private static let dividerKey = "projects_panel_divider"
-    /// The line inside the Git column, between the changes and the history.
+    private let notRepository = NSTextField(labelWithString: "Not a Git repository")
+    /// The line between the changes and the history. Remembered across
+    /// launches: it is a deliberate choice about a window's shape, not a
+    /// passing state.
     private static let gitDividerKey = "projects_panel_git_divider"
     /// Where that choice is kept. Injectable, so a test moving the line does
     /// not reach into the user's own defaults.
     var dividerDefaults: UserDefaults = .standard
-    private var dividerFraction: CGFloat = 0.5
-
-    private static func storedDividerFraction(_ defaults: UserDefaults) -> CGFloat {
-        storedFraction(dividerKey, in: defaults)
-    }
 
     private static func storedFraction(_ key: String, in defaults: UserDefaults) -> CGFloat {
         let stored = defaults.object(forKey: key) as? Double
@@ -768,16 +754,10 @@ final class ProjectsPanelViewController: NSViewController {
     private var pendingConfiguration: (projects: [(name: String, branch: String,
                                                    user: String, changes: Int,
                                                    path: String)],
-                                       active: Int?)?
+                                       active: Int?, isRepository: Bool?)?
     private var rows: [ProjectRowView] = []
     private var shown: [String] = []
     private var activeIndex: Int?
-
-    init(fileTree: FileTreeViewController) {
-        self.fileTree = fileTree
-        super.init(nibName: nil, bundle: nil)
-    }
-    required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
         let root = FlatView()
@@ -785,42 +765,45 @@ final class ProjectsPanelViewController: NSViewController {
         // Layer-backed for one reason: the rows slide to their new places when
         // a project is picked, which needs implicit animation.
         root.wantsLayer = true
-        addChild(fileTree)
         addChild(changes)
         addChild(history)
-        // Both columns live in the container for good: taking a view out of
-        // the hierarchy and putting it back leaves an outline view that draws
-        // nothing until it is reloaded.
-        fileTree.view.translatesAutoresizingMaskIntoConstraints = true
+        // Both lists live in the container for good: taking a view out of the
+        // hierarchy and putting it back leaves a table that draws nothing
+        // until it is reloaded.
         changes.view.translatesAutoresizingMaskIntoConstraints = true
         history.view.translatesAutoresizingMaskIntoConstraints = true
-        gitColumn.translatesAutoresizingMaskIntoConstraints = true
-        // The Git column is itself two lists, one over the other.
+        gitColumn.translatesAutoresizingMaskIntoConstraints = false
         gitColumn.axis = .vertical
         gitColumn.minimumPane = ProjectColumnsView.minimumRow
         gitColumn.first = changes.view
         gitColumn.second = history.view
         gitColumn.addSubview(changes.view)
         gitColumn.addSubview(history.view)
-        columns.first = fileTree.view
-        columns.second = gitColumn
-        // One hue per region, drawn inside it: the tree, what has changed, and
-        // what has been committed. The tree's own frame waits for a project
-        // to be opened — see `showRegions`.
+        // One hue per region, drawn inside it: what has changed, and what has
+        // been committed.
         gitColumn.firstBorder = ProjectColumnsView.regionBorder(Theme.orange)
         gitColumn.secondBorder = ProjectColumnsView.regionBorder(Theme.purple)
-        dividerFraction = Self.storedDividerFraction(dividerDefaults)
-        columns.fraction = dividerFraction
-        columns.onFractionChanged = { [weak self] fraction in
-            self?.applyDividerFraction(fraction)
-        }
         gitColumn.fraction = Self.storedFraction(Self.gitDividerKey, in: dividerDefaults)
         gitColumn.onFractionChanged = { [weak self] fraction in
             guard let self else { return }
             self.dividerDefaults.set(Double(fraction), forKey: Self.gitDividerKey)
         }
-        columns.addSubview(fileTree.view)
-        columns.addSubview(gitColumn)
+        notRepository.font = Theme.uiFont(12)
+        notRepository.textColor = Theme.dimText
+        notRepository.alignment = .center
+        notRepository.translatesAutoresizingMaskIntoConstraints = false
+        detail.fillColor = Theme.panelBackground
+        detail.addSubview(gitColumn)
+        detail.addSubview(notRepository)
+        NSLayoutConstraint.activate([
+            gitColumn.topAnchor.constraint(equalTo: detail.topAnchor),
+            gitColumn.leadingAnchor.constraint(equalTo: detail.leadingAnchor),
+            gitColumn.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+            gitColumn.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
+            notRepository.centerXAnchor.constraint(equalTo: detail.centerXAnchor),
+            notRepository.topAnchor.constraint(equalTo: detail.topAnchor, constant: 24),
+        ])
+
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 0
@@ -833,42 +816,39 @@ final class ProjectsPanelViewController: NSViewController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        // The columns take whatever the rows leave.
-        columns.setContentHuggingPriority(.init(1), for: .vertical)
-        columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
+        // The lists take whatever the rows leave.
+        detail.setContentHuggingPriority(.init(1), for: .vertical)
+        detail.setContentCompressionResistancePriority(.init(1), for: .vertical)
         view = root
-        // Nothing open yet: the space below the rows is left as the panel's
-        // own ground.
+        // Nothing open yet: the space below the rows is the panel's own ground.
         showRegions(forRepository: nil)
         layOut(active: nil)
     }
 
-    /// The three regions, and the frames that name them, belong to a project
-    /// that is open. With none open they were three empty outlines on the
-    /// start page — or one, under a list of collapsed projects — framing
-    /// nothing. The columns stay in the stack, since they are what takes up
-    /// the height the rows leave, but draw no frame and no second column.
+    /// The lists, and the frames that name them, belong to a repository that
+    /// is open. With none open the space stays in the stack, since it is what
+    /// takes up the height the rows leave, but draws nothing.
     ///
-    /// `forRepository` is nil for no open project, and otherwise whether the
-    /// open one is a repository — which is what decides the Git column.
+    /// `forRepository` is nil for no open project — or one whose first Git
+    /// read has not landed yet — and otherwise whether the open one is a
+    /// repository.
     private func showRegions(forRepository isRepository: Bool?) {
-        columns.firstBorder = isRepository == nil
-            ? nil : ProjectColumnsView.regionBorder(Theme.red)
-        columns.showsSecond = isRepository == true
+        gitColumn.isHidden = isRepository != true
+        notRepository.isHidden = isRepository != false
     }
 
-    /// Rebuild the list. The tree is moved rather than remade, so switching
-    /// projects does not cost a fresh scroll view.
+    /// Rebuild the list. `isRepository` speaks for the active project: nil
+    /// while that is not known yet.
     func configure(projects: [(name: String, branch: String, user: String,
                                changes: Int, path: String)],
-                   active: Int?) {
+                   active: Int?, isRepository: Bool? = nil) {
         _ = view
         // A refresh can land in the middle of a row drag — the drag's own
         // event loop still runs the main queue. Rearranging then put the row
         // back where it started, or rebuilt the rows out from under it; the
         // newest state waits until the row is put down.
         guard draggingRow == nil else {
-            pendingConfiguration = (projects, active)
+            pendingConfiguration = (projects, active, isRepository)
             return
         }
         let identity = projects.map { "\($0.path)|\($0.branch)" }
@@ -882,7 +862,10 @@ final class ProjectsPanelViewController: NSViewController {
                 let row = ProjectRowView()
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
-                row.onSelectBranch = { [weak self] in self?.onSelectBranch?(index) }
+                row.onSelectBranch = { [weak self, weak row] rect in
+                    guard let self, let row else { return }
+                    self.onSelectBranch?(index, row.convert(rect, to: self.view))
+                }
                 row.onDragBegan = { [weak self, weak row] in
                     guard let self, let row else { return false }
                     return self.beginRowDrag(row)
@@ -896,25 +879,20 @@ final class ProjectsPanelViewController: NSViewController {
             }
         }
         for (index, project) in projects.enumerated() where rows.indices.contains(index) {
-            rows[index].dividerFraction = dividerFraction
             rows[index].configure(name: project.name, branch: project.branch,
                                   user: project.user, changes: project.changes,
                                   path: project.path, isActive: index == active)
-            // Between rows only: not under the project whose tree follows it,
+            // Between rows only: not under the project whose lists follow it,
             // where a line would cut the project off from its own contents.
             rows[index].showsDivider = index > 0
         }
         activeIndex = active
-        // A project with no branch is not a repository: nothing to head the
-        // right column with, and nothing to put in it.
-        showRegions(forRepository: active.flatMap {
-            projects.indices.contains($0) ? !projects[$0].branch.isEmpty : nil
-        })
+        showRegions(forRepository: active == nil ? nil : isRepository)
         layOut(active: active)
     }
 
-    /// Rows in order, with the expanded project's two columns inserted
-    /// straight after its row.
+    /// Rows in order, with the expanded project's lists inserted straight
+    /// after its row.
     ///
     /// Views are *moved* into place rather than torn down and rebuilt: taking
     /// a list out of the hierarchy and putting it back leaves an outline view
@@ -924,10 +902,10 @@ final class ProjectsPanelViewController: NSViewController {
         var desired: [NSView] = []
         for (index, row) in rows.enumerated() {
             desired.append(row)
-            if index == active { desired.append(columns) }
+            if index == active { desired.append(detail) }
         }
-        // No project: the tree still fills the panel, empty.
-        if active == nil || rows.isEmpty { desired.append(columns) }
+        // No project: the space under the rows is still taken, empty.
+        if active == nil || rows.isEmpty { desired.append(detail) }
         guard desired != stack.arrangedSubviews else { return }
         // Nothing to slide from when the panel is being filled for the first
         // time: a window opening should find its project already there.
@@ -945,7 +923,7 @@ final class ProjectsPanelViewController: NSViewController {
             extra.removeFromSuperview()
         }
         // The rows below the chosen project have to travel the height of a
-        // whole file tree. Jumping there reads as the list being rebuilt;
+        // whole list. Jumping there reads as the list being rebuilt;
         // sliding reads as the one project opening.
         guard hadRows else {
             lastLayoutDurationForTesting = 0
@@ -963,18 +941,10 @@ final class ProjectsPanelViewController: NSViewController {
     static let switchDuration: TimeInterval = 0.3
     private(set) var lastLayoutDurationForTesting: TimeInterval?
 
-    /// The line moved: the headings follow it, and it is where the next
-    /// window will find it.
-    private func applyDividerFraction(_ fraction: CGFloat) {
-        dividerFraction = fraction
-        rows.forEach { $0.dividerFraction = fraction }
-        dividerDefaults.set(Double(fraction), forKey: Self.dividerKey)
-    }
-
     // MARK: - Reordering
 
     /// Reordering is offered only when every project is collapsed. With one
-    /// expanded, the tree sits between the rows and "where will it land" has
+    /// expanded, its lists sit between the rows and "where will it land" has
     /// no honest answer.
     private var canReorder: Bool { activeIndex == nil && rows.count > 1 }
 
@@ -1018,7 +988,8 @@ final class ProjectsPanelViewController: NSViewController {
             return
         }
         if let pending {
-            configure(projects: pending.projects, active: pending.active)
+            configure(projects: pending.projects, active: pending.active,
+                      isRepository: pending.isRepository)
         }
     }
 
@@ -1031,19 +1002,17 @@ final class ProjectsPanelViewController: NSViewController {
         rowDragMoved(rows[index], by: travel)
     }
     func endDragForTesting() { endRowDrag() }
-    var columnsForTesting: ProjectColumnsView { columns }
     var gitColumnForTesting: ProjectColumnsView { gitColumn }
     /// Drag the line inside the Git column, the way a pointer moves it.
     func dragGitDividerForTesting(to y: CGFloat) { gitColumn.moveDivider(to: y) }
-    var dividerFractionForTesting: CGFloat { dividerFraction }
-    /// Drag the line to `x`, the way a pointer moves it.
-    func dragDividerForTesting(to x: CGFloat) { columns.moveDivider(to: x) }
+    var notRepositoryVisibleForTesting: Bool { !notRepository.isHidden }
+    var gitListsVisibleForTesting: Bool { !gitColumn.isHidden }
     var visualOrderForTesting: [String] {
         stack.arrangedSubviews.compactMap { ($0 as? ProjectRowView)?.titleForTesting }
     }
-    /// Where the expanded columns sit among the rows, which is what "expanded
+    /// Where the expanded lists sit among the rows, which is what "expanded
     /// underneath" means in layout terms.
-    var treePositionForTesting: Int? {
-        stack.arrangedSubviews.firstIndex(of: columns)
+    var detailPositionForTesting: Int? {
+        stack.arrangedSubviews.firstIndex(of: detail)
     }
 }

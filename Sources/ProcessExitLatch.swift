@@ -9,12 +9,12 @@ import Foundation
 /// nothing ever runs the run loop there — gets its chance to fire in the middle
 /// of a Git call, on a background thread.
 ///
-/// That is how Puzzle died: PDFKit had left a coalesced annotations-changed
-/// notification on a pooled thread, `git status` picked the same thread up and
-/// ran the run loop inside `waitUntilExit()`, and the notification drove
-/// `NSCollectionView.reloadItems` → `addSubview:` → the Auto Layout engine off
-/// the main thread. AppKit threw, and an Objective-C exception crossing Swift
-/// frames is an abort, not an error.
+/// That is how the editor this app grew out of died: PDFKit had left a
+/// coalesced notification on a pooled thread, `git status` picked the same
+/// thread up and ran the run loop inside `waitUntilExit()`, and the
+/// notification drove the Auto Layout engine off the main thread. AppKit
+/// threw, and an Objective-C exception crossing Swift frames is an abort, not
+/// an error.
 ///
 /// The latch has to be built before `run()`: a termination handler installed
 /// after the process has already exited may never be called.

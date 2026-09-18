@@ -1,42 +1,33 @@
 import AppKit
 
-/// Flat file tabs. Each row follows the owning window's traffic-light geometry;
+/// Flat diff tabs. Each row follows the owning window's traffic-light geometry;
 /// tabs wrap onto rows of that same height when they do not fit.
-final class EditorTabBar: NSView {
+final class DiffTabBar: NSView {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onCloseOthers: ((Int) -> Void)?
     var onCloseRight: ((Int) -> Void)?
 
 
-    var paneActive = true { didSet { needsDisplay = true } }
-
     struct TabInfo {
         let title: String
-        let modified: Bool
-        /// Full file path, shown as the tab's hover tooltip.
+        /// What the tab shows, in full, as its hover tooltip.
         let path: String
     }
 
     private var pills: [TabPillView] = []
     /// Fallback until the owning window reports its traffic-light geometry.
     static let defaultRowHeight: CGFloat = 32
-    private(set) var rowHeight: CGFloat = EditorTabBar.defaultRowHeight
+    private(set) var rowHeight: CGFloat = DiffTabBar.defaultRowHeight
     private let gap: CGFloat = 0
     private let padding: CGFloat = 0
-    /// Space kept clear on the right for the window's own actions, which are
-    /// drawn over this bar by the editor container so they survive an empty
-    /// window with no tabs at all.
-    static let actionAreaWidth: CGFloat = 34
-    private var contentHeight: CGFloat = EditorTabBar.defaultRowHeight
+    private var contentHeight: CGFloat = DiffTabBar.defaultRowHeight
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-
-
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -77,8 +68,7 @@ final class EditorTabBar: NSView {
         }
         for (index, tab) in tabs.enumerated() {
             let pill = pills[index]
-            pill.configure(title: tab.title, modified: tab.modified,
-                           active: index == active, path: tab.path)
+            pill.configure(title: tab.title, active: index == active, path: tab.path)
             pill.onSelect = { [weak self] in self?.onSelect?(index) }
             pill.onClose = { [weak self] in self?.onClose?(index) }
             pill.onCloseOthers = { [weak self] in self?.onCloseOthers?(index) }
@@ -97,7 +87,7 @@ final class EditorTabBar: NSView {
     }
 
     private func layoutPills() {
-        let available = max(80, bounds.width - Self.actionAreaWidth - padding)
+        let available = max(80, bounds.width - padding)
         var x = padding
         var y = padding
         var rows = 1
@@ -158,11 +148,11 @@ final class TabPillView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(title: String, modified: Bool, active: Bool, path: String) {
+    func configure(title: String, active: Bool, path: String) {
         self.active = active
-        label.stringValue = modified ? "\(title) ●" : title
+        label.stringValue = title
         label.font = Theme.uiFont(11.5)
-        // The open file reads like the selected item everywhere else does: its
+        // The open tab reads like the selected item everywhere else does: its
         // own surface and its own ink. The rest stay legible rather than
         // greyed, so the strip does not look half-disabled.
         label.textColor = active ? Theme.selectedControlText : Theme.foreground

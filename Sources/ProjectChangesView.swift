@@ -1,17 +1,14 @@
 import AppKit
 
-/// The changed files of one project, listed beside its file tree, under a line
-/// to commit them from.
+/// The changed files of one project, under a line to commit them from.
 ///
-/// The Git panel shows the same list with everything that surrounds committing;
-/// this is the list with the two actions that matter most — commit, push — in
-/// the half of the Projects panel the branch name heads. Clicking a row opens
-/// that file's diff, as it does there, and ⌘↩ / ⇧⌘↩ in the message do what they
-/// do in the panel's own box.
+/// Clicking a row opens that file's diff; right-clicking it offers the rest —
+/// copying its path, showing it in Finder, and discarding it. ⌘↩ / ⇧⌘↩ in the
+/// message commit and push.
 final class ProjectChangesViewController: NSViewController {
     /// A changed file was clicked: show its diff.
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
-    /// A commit or a push ran in `directory`, whether or not it worked:
+    /// A commit, a push or a discard ran in `directory`, whether or not it worked:
     /// whatever shows that repository's state has to read it again.
     var onChanged: ((URL) -> Void)?
 
@@ -34,7 +31,7 @@ final class ProjectChangesViewController: NSViewController {
     private var message: String {
         commitBar.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    /// The Git panel's rule: something changed, and something said about it.
+    /// Something changed, and something said about it.
     private var commitIsPossible: Bool { !entries.isEmpty && !message.isEmpty }
     /// Something waiting to go up, or a branch with nowhere to go yet — pushing
     /// is what sets its upstream.
@@ -48,8 +45,8 @@ final class ProjectChangesViewController: NSViewController {
         root.fillColor = Theme.panelBackground
 
         table.headerView = nil
-        // `.automatic` insets the first row by 10pt, which would set this list
-        // below the tree beside it; both start at the row under the heading.
+        // `.automatic` insets the first row by 10pt; the list starts right
+        // under the commit line.
         table.style = .plain
         table.rowSizeStyle = .custom
         table.backgroundColor = Theme.panelBackground
@@ -61,12 +58,13 @@ final class ProjectChangesViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("change"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
 
         let scroll = NSScrollView()
-        PuzzleScroller.adopt(scroll)
+        GiftScroller.adopt(scroll)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
@@ -81,8 +79,8 @@ final class ProjectChangesViewController: NSViewController {
         commitBar.field.stringValue = directory.flatMap { drafts[$0] } ?? ""
         commitBar.translatesAutoresizingMaskIntoConstraints = false
 
-        // The commit line is the column's only strip: its top is level with
-        // the tree's first row beside it, and the list starts under it.
+        // The commit line is the column's only strip, and the list starts
+        // under it.
         root.addSubview(commitBar)
         root.addSubview(scroll)
         NSLayoutConstraint.activate([
@@ -151,12 +149,25 @@ final class ProjectChangesViewController: NSViewController {
         guard isViewLoaded else { return }
         let idle = operation == nil
         commitBar.commitButton.isEnabled = idle && commitIsPossible
-        commitBar.commitButton.toolTip = GitPanelViewController.commitHint(
+        commitBar.commitButton.toolTip = Self.commitHint(
             possible: commitIsPossible, hasChanges: !entries.isEmpty)
         commitBar.pushButton.isEnabled = idle && pushIsPossible
         commitBar.pushButton.badge = (remote?.ahead ?? 0) > 0 ? "\(remote!.ahead)" : ""
-        commitBar.pushButton.toolTip = GitPanelViewController.pushHint(ahead: remote?.ahead ?? 0)
+        commitBar.pushButton.toolTip = Self.pushHint(ahead: remote?.ahead ?? 0)
         commitBar.needsLayout = true
+    }
+
+    /// What Commit says about itself.
+    static func commitHint(possible: Bool, hasChanges: Bool) -> String {
+        possible ? "Commit  (⌘↩)"
+            : (hasChanges ? "Describe the change to commit it" : "Nothing to commit")
+    }
+
+    /// What Push says about itself, with how many commits it would send.
+    static func pushHint(ahead: Int) -> String {
+        ahead > 0
+            ? "Push \(ahead) commit\(ahead == 1 ? "" : "s")  (⇧⌘↩)"
+            : "Push the current branch  (⇧⌘↩)"
     }
 
     /// ⌘↩ and the Commit button: the same rule for both, and a beep for a
@@ -225,6 +236,137 @@ final class ProjectChangesViewController: NSViewController {
         refreshButtons()
     }
 
+    // MARK: - Context menu
+
+    /// Right-click on a changed file. The row is not selected by it: the diff
+    /// on the right stays what it was.
+    private func contextMenu(forRow row: Int) -> NSMenu? {
+        guard let directory, entries.indices.contains(row) else { return nil }
+        let entry = entries[row]
+        let fileURL = directory.appendingPathComponent(entry.path)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        add(to: menu, title: "Show Changes") { [weak self] in
+            self?.onOpenDiff?(entry, directory)
+        }
+        menu.addItem(.separator())
+        add(to: menu, title: "Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.path, forType: .string)
+        }
+        add(to: menu, title: "Reveal in Finder",
+            enabled: FileManager.default.fileExists(atPath: fileURL.path)) {
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        }
+        menu.addItem(.separator())
+        let idle = operation == nil
+        add(to: menu, title: "Discard Changes…", enabled: idle) { [weak self] in
+            self?.discardChanges(entry, in: directory)
+        }
+        add(to: menu, title: entries.count == 1 ? "Discard All Changes…"
+                : "Discard All \(entries.count) Changes…", enabled: idle) { [weak self] in
+            self?.discardAllChanges(in: directory)
+        }
+        return menu
+    }
+
+    private func add(to menu: NSMenu, title: String, enabled: Bool = true,
+                     action: @escaping () -> Void) {
+        let item = NSMenuItem(title: title, action: #selector(runMenuAction(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = MenuAction(run: action)
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    /// Boxes a closure so it can ride on an `NSMenuItem`.
+    private final class MenuAction {
+        let run: () -> Void
+        init(run: @escaping () -> Void) { self.run = run }
+    }
+
+    @objc private func runMenuAction(_ sender: NSMenuItem) {
+        (sender.representedObject as? MenuAction)?.run()
+    }
+
+    /// Put one file back as HEAD has it. Confirmed first, and the alert says
+    /// what cannot be recovered: a file Git has never committed goes to the
+    /// Trash rather than back to an earlier version.
+    private func discardChanges(_ entry: GitService.Status.Entry, in directory: URL) {
+        let removesFile = GitService.discardRemovesFile(entry, in: directory)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Discard changes to “\(entry.path)”?"
+        var affected = "File:\n\(directory.appendingPathComponent(entry.path).path)"
+        if entry.code.contains("R"), let originalPath = entry.originalPath {
+            affected += "\nOriginal path:\n\(directory.appendingPathComponent(originalPath).path)"
+        }
+        let consequence = removesFile
+            ? "This file has no committed version. It will be removed from Git and moved to Trash. Gift cannot undo the action; recovery is possible only while the item remains in Trash."
+            : "All uncommitted changes to this file, including staged changes, will be replaced with the version in HEAD. Git cannot restore the discarded edits."
+        alert.informativeText = "\(affected)\n\n\(consequence)"
+        alert.addButton(withTitle: "Discard Changes")
+        alert.addButton(withTitle: "Cancel")
+        guard confirm(alert), operation == nil else { return }
+        let id = begin("Discarding changes", in: directory, locksMessage: false)
+        GitService.operationQueue.async { [weak self] in
+            let result = GitService.discard(entry, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.operation?.id == id else { return }
+                self.finish(id)
+                self.onChanged?(directory)
+                if !result.ok {
+                    self.presentError(title: "Discard changes failed", message: result.message)
+                }
+            }
+        }
+    }
+
+    /// Throw away every change in the project, on the same terms.
+    private func discardAllChanges(in directory: URL) {
+        let entries = self.entries
+        guard !entries.isEmpty else { return }
+        let newFiles = entries.filter { GitService.discardRemovesFile($0, in: directory) }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = entries.count == 1
+            ? "Discard the 1 change in this project?"
+            : "Discard all \(entries.count) changes in this project?"
+        var detail = "Project:\n\(directory.path)\n\n"
+        detail += "Every uncommitted change, staged included, will be replaced with the "
+            + "version in HEAD. Git cannot restore the discarded edits."
+        if !newFiles.isEmpty {
+            detail += "\n\n\(newFiles.count) file\(newFiles.count == 1 ? "" : "s") "
+                + "never committed will be removed from Git and moved to Trash; "
+                + "recovery is possible only while the item remains in Trash:\n"
+            detail += newFiles.prefix(10).map { "• \($0.path)" }.joined(separator: "\n")
+            if newFiles.count > 10 { detail += "\n• …and \(newFiles.count - 10) more" }
+        }
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Discard All Changes")
+        alert.addButton(withTitle: "Cancel")
+        guard confirm(alert), operation == nil else { return }
+        let id = begin("Discarding all changes", in: directory, locksMessage: false)
+        GitService.operationQueue.async { [weak self] in
+            let result = GitService.discardAll(entries, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.operation?.id == id else { return }
+                self.finish(id)
+                self.onChanged?(directory)
+                if let failure = result.failure {
+                    self.presentError(
+                        title: "Discard all changes failed",
+                        message: "\(result.discarded) of \(entries.count) discarded.\n\(failure)")
+                }
+            }
+        }
+    }
+
+    /// Asks before a discard. A test answers in place of the alert.
+    var confirmDiscard: (NSAlert) -> Bool = { $0.runModal() == .alertFirstButtonReturn }
+    private func confirm(_ alert: NSAlert) -> Bool { confirmDiscard(alert) }
+
     private func presentError(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -244,8 +386,7 @@ final class ProjectChangesViewController: NSViewController {
         return commitBar
     }
     var isBusyForTesting: Bool { operation != nil }
-    /// Where the commit line starts, measured from the window's top like the
-    /// first row below.
+    /// Where the commit line starts, measured from the window's top.
     var commitBarTopInsetInWindowForTesting: CGFloat? {
         _ = view
         guard let window = view.window else { return nil }
@@ -256,8 +397,7 @@ final class ProjectChangesViewController: NSViewController {
         _ = view
         return table.numberOfRows
     }
-    /// Where the first row starts, measured from the window's top, so it can
-    /// be held level with the tree in the column beside it.
+    /// Where the first row starts, measured from the window's top.
     var firstRowTopInsetInWindowForTesting: CGFloat? {
         _ = view
         guard table.numberOfRows > 0, let window = view.window else { return nil }
@@ -270,6 +410,33 @@ final class ProjectChangesViewController: NSViewController {
         _ = view
         return (tableView(table, viewFor: nil, row: row) as? GitChangeCell)?.nameForTesting
     }
+    /// The row as the list draws it, laid out and ready to be rendered.
+    func rowViewForTesting(_ row: Int) -> GitRowView? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.rowView(atRow: row, makeIfNecessary: true) as? GitRowView
+    }
+    /// The menu a right-click on a row brings up.
+    func contextMenuForTesting(row: Int) -> NSMenu? {
+        _ = view
+        return contextMenu(forRow: row)
+    }
+    /// Choose an item from that menu by its title.
+    @discardableResult
+    func runMenuItemForTesting(_ title: String, row: Int) -> Bool {
+        guard let item = contextMenuForTesting(row: row)?.items
+                .first(where: { $0.title == title }), item.isEnabled else { return false }
+        runMenuAction(item)
+        return true
+    }
+    /// Wait for a commit, push or discard to finish.
+    func settleForTesting(timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while operation != nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
     /// A click on a row, through the same path a real one takes.
     func clickRowForTesting(_ row: Int) {
         guard let directory, entries.indices.contains(row) else { return }
@@ -281,7 +448,6 @@ extension ProjectChangesViewController: NSTableViewDataSource, NSTableViewDelega
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        // The same unit the tree beside it uses, so the two columns line up.
         Theme.treeRowHeight()
     }
 
@@ -309,8 +475,7 @@ extension ProjectChangesViewController: NSTableViewDataSource, NSTableViewDelega
 /// Push. Laid out by hand so a column dragged narrower than the two buttons
 /// squeezes the message to nothing rather than breaking a constraint.
 ///
-/// The message takes the Git panel's box as its model: set apart by its fill
-/// alone, no frame, running out to the edges of the region it sits in. The
+/// The message is set apart by its fill alone, no frame, running out to the edges of the region it sits in. The
 /// fill is the whole strip's, buttons included; they draw no shape of their
 /// own, only the area a click lands in when the pointer is over them.
 final class ProjectCommitBar: NSView {
@@ -322,7 +487,7 @@ final class ProjectCommitBar: NSView {
     let field = CommitLineField()
     let commitButton = BadgeButton()
     let pushButton = BadgeButton()
-    /// The Git panel's progress band, along the strip's lower edge.
+    /// The progress band, along the strip's lower edge.
     let progress = GitProgressShimmerView()
     private let box = CommitLineBox()
 
@@ -376,10 +541,9 @@ final class ProjectCommitBar: NSView {
 }
 
 /// Where the one-line message sits. It draws nothing: the strip under it is
-/// the Git panel's message fill, and nothing is drawn around it.
+/// the message's fill, and nothing is drawn around it.
 final class CommitLineBox: NSView {
-    /// Where the text starts, the same distance in as the Git panel's box sets
-    /// its own (a 4pt inset and the text view's 5pt line padding); the field
+    /// Where the text starts: a 4pt inset and 5pt of padding; the field
     /// editor adds its 2pt to this.
     static let textInset: CGFloat = 7
 
@@ -404,10 +568,9 @@ final class CommitLineBox: NSView {
     }
 }
 
-/// The one-line commit message. The Git panel's box is a text view and hears
-/// ⌘↩ in its own `keyDown`; a field's keys go to the window's shared field
-/// editor instead, so this one takes them as key equivalents — and only while
-/// it is the field being typed in.
+/// The one-line commit message. A field's keys go to the window's shared field
+/// editor rather than to the field, so this one takes ⌘↩ and ⇧⌘↩ as key
+/// equivalents — and only while it is the field being typed in.
 final class CommitLineField: NSTextField, NSTextFieldDelegate {
     var onCommitShortcut: (() -> Void)?
     var onPushShortcut: (() -> Void)?

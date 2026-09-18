@@ -1,0 +1,51 @@
+#!/bin/bash
+# GIFT_LAUNCHER=1
+# gift — open a repository in Gift from the terminal.
+#
+#   gift              open the current directory
+#   gift ~/code/app   open that folder
+set -euo pipefail
+
+# Search the usual places. Tools/install.sh rewrites DEV_BUILD to the build it
+# installed from, so `gift` keeps working even for a dev build that was never
+# copied into /Applications.
+DEV_BUILD=""
+
+APP=""
+for candidate in "${GIFT_APP:-}" \
+                 "/Applications/Gift.app" \
+                 "$HOME/Applications/Gift.app" \
+                 "$DEV_BUILD"; do
+  if [ -n "$candidate" ] && [ -d "$candidate" ]; then APP="$candidate"; break; fi
+done
+
+if [ -z "$APP" ]; then
+  cat >&2 <<'MSG'
+gift: Gift.app not found.
+Looked in: $GIFT_APP, /Applications/Gift.app, ~/Applications/Gift.app
+
+  GIFT_APP=/path/to/Gift.app gift .      # one-off
+  cp -R /path/to/Gift.app /Applications  # install it properly
+MSG
+  exit 1
+fi
+
+# No arguments means "here".
+if [ "$#" -eq 0 ]; then
+  set -- "."
+fi
+
+# Resolve every existing path to an absolute one; pass the rest through.
+args=()
+for a in "$@"; do
+  if [ -e "$a" ]; then
+    args+=("$(cd "$a" 2>/dev/null && pwd || echo "$(cd "$(dirname "$a")" && pwd)/$(basename "$a")")")
+  else
+    args+=("$a")
+  fi
+done
+
+# Pass paths as documents (NOT --args) so a RUNNING Gift handles them and
+# opens them in the same process. `open -n` would fork a whole second copy of
+# the app for every invocation.
+exec open -a "$APP" "${args[@]}"

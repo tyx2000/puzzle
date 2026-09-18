@@ -1,7 +1,7 @@
 import AppKit
 
-/// Shown centred in the editor area when no file is open: the app name, an
-/// "Open Folder…" button, and the recently opened projects.
+/// Shown centred on the diff side when no project is open: the app name, an
+/// "Open" button, and the recently opened projects.
 final class WelcomeView: FlatView {
     var onOpenFolder: (() -> Void)?
     var onOpenRecent: ((URL) -> Void)?
@@ -17,7 +17,7 @@ final class WelcomeView: FlatView {
         super.init(frame: frameRect)
         fillColor = .clear
 
-        let title = NSTextField(labelWithString: "Puzzle")
+        let title = NSTextField(labelWithString: "Gift")
         title.font = Theme.uiFont(22)
         title.textColor = Theme.foreground
         title.alignment = .center

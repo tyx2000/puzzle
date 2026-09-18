@@ -25,7 +25,7 @@ ITEM = re.compile(r"'([^']*)'")
 
 # The generic file and folder icons are drawn by the upstream generator rather
 # than committed as files (src/core/generator/{file,folder}Generator.ts), so
-# Puzzle writes them out here with the same paths and default colour.
+# Gift writes them out here with the same paths and default colour.
 DEFAULT_COLOR = "#90a4ae"
 GENERATED = {
     "file": "m8.668 6h3.6641l-3.6641-3.668v3.668m-4.668-4.668h5.332l4 4v8c0 0.73828-0.59375 "

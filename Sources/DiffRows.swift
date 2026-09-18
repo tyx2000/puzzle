@@ -1,11 +1,12 @@
 import AppKit
 
-/// Turns a unified diff into aligned left/right rows for the side-by-side view.
+/// Turns a unified diff into the rows the diff view draws.
 ///
+/// `rows(from:)` is the side-by-side form: aligned left/right rows.
 /// Alignment is what makes the mode worth having: inside one hunk the removed
 /// lines are paired with the added ones in order, so a rewritten line sits
 /// opposite its replacement, and whichever side runs out is padded with blanks.
-enum SideBySideDiff {
+enum DiffRows {
     struct Row: Equatable {
         enum Kind: Equatable { case context, change, hunk }
         let kind: Kind
@@ -30,6 +31,52 @@ enum SideBySideDiff {
         }
 
         var isChange: Bool { kind == .change }
+    }
+
+    /// The unified form: every line in the order Git wrote it, removed lines
+    /// carrying only their old number and added lines only their new one.
+    /// File headers are left out — the strip above the diff names the file.
+    static func unifiedRows(from diff: String) -> [Row] {
+        var rows: [Row] = []
+        var oldNext = 0
+        var newNext = 0
+        var inHunk = false
+        for rawLine in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            if line.hasPrefix("@@") {
+                if let start = hunkStart(line) {
+                    oldNext = start.old
+                    newNext = start.new
+                    inHunk = true
+                    rows.append(.hunk(line))
+                } else {
+                    inHunk = false
+                }
+                continue
+            }
+            guard inHunk, let first = line.first else {
+                inHunk = false
+                continue
+            }
+            let body = String(line.dropFirst())
+            switch first {
+            case "-":
+                rows.append(.change(left: (oldNext, body), right: nil))
+                oldNext += 1
+            case "+":
+                rows.append(.change(left: nil, right: (newNext, body)))
+                newNext += 1
+            case " ":
+                rows.append(.context(oldNext, newNext, body))
+                oldNext += 1
+                newNext += 1
+            case "\\":
+                break                       // "\ No newline at end of file"
+            default:
+                inHunk = false
+            }
+        }
+        return rows
     }
 
     static func rows(from diff: String) -> [Row] {

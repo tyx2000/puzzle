@@ -1,6 +1,6 @@
 import AppKit
 
-/// Material Icon Theme icons for the file tree and the Git panel.
+/// Material Icon Theme icons for the changes list and the project rows.
 ///
 /// `build.sh` bundles the mapping (`file-icons.json`) and the SVGs it needs
 /// (`icons/`) from the vendored theme. Everything is loaded lazily and cached:

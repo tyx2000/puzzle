@@ -19,7 +19,7 @@ import AppKit
 enum ExceptionLog {
     static var fileURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/Puzzle/exceptions.log")
+            .appendingPathComponent("Library/Logs/Gift/exceptions.log")
     }
 
     static func install() {

@@ -1,6 +1,6 @@
 import AppKit
 
-// Puzzle's app icon: the artwork in Tools/appicon.jpg, unchanged, behind the
+// Gift's app icon: the artwork in Tools/appicon.jpg, unchanged, behind the
 // standard macOS rounded-square mask. Emits an .iconset which build.sh turns
 // into AppIcon.icns.
 

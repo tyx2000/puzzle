@@ -1,13 +1,14 @@
 import AppKit
 
-/// A flat button with an optional count badge — the Git panel's Push control.
+/// A flat button with an optional count badge — Commit and Push on the line
+/// over a project's changes.
 ///
 /// Drawn rather than assembled from an `NSButton`, because AppKit's button has
 /// nowhere to put a badge that stays on the label's baseline.
 final class BadgeButton: NSView {
     var onClick: (() -> Void)?
 
-    /// `.bordered` is the Git panel's Push: filled and outlined. `.plain` draws
+    /// `.bordered` is filled and outlined. `.plain` draws
     /// no shape of its own until the pointer is over it — for a strip that is
     /// already the controls' ground, like the commit line over a project's
     /// changes, where a frame round each button would split the line up.

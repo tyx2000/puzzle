@@ -1,14 +1,14 @@
 import Foundation
 import Darwin
 
-/// Keeps the `pz` terminal launcher available after a normal Finder/DMG app
+/// Keeps the `gift` terminal launcher available after a normal Finder/DMG app
 /// installation, where Tools/install.sh is never executed.
 enum LauncherInstaller {
-    private static let marker = "PUZZLE_PZ_LAUNCHER=1"
+    private static let marker = "GIFT_LAUNCHER=1"
 
     /// Installation can briefly start the user's login shell, so never hold up
-    /// window creation. Re-running this on every launch also refreshes `pz`
-    /// automatically when Puzzle itself is updated.
+    /// window creation. Re-running this on every launch also refreshes `gift`
+    /// automatically when Gift itself is updated.
     static func installIfNeeded() {
         DispatchQueue.global(qos: .utility).async {
             _ = installBundledLauncher()
@@ -17,28 +17,28 @@ enum LauncherInstaller {
 
     @discardableResult
     static func installBundledLauncher() -> URL? {
-        guard let source = Bundle.main.url(forResource: "pz", withExtension: nil,
+        guard let source = Bundle.main.url(forResource: "gift", withExtension: nil,
                                            subdirectory: "bin"),
               let launcher = try? Data(contentsOf: source) else { return nil }
 
         let directories = candidateDirectories()
 
-        // Prefer updating a launcher Puzzle already owns, even if the user's
+        // Prefer updating a launcher Gift already owns, even if the user's
         // PATH order has changed since it was installed.
         let existing = directories.first { directory in
-            let target = directory.appendingPathComponent("pz")
+            let target = directory.appendingPathComponent("gift")
             return FileManager.default.fileExists(atPath: target.path)
-                && isPuzzleLauncher(at: target)
+                && isGiftLauncher(at: target)
                 && FileManager.default.isWritableFile(atPath: target.path)
         }
 
         let directory = existing ?? directories.first(where: writableDirectory)
         guard let directory else { return nil }
 
-        let target = directory.appendingPathComponent("pz")
+        let target = directory.appendingPathComponent("gift")
         if FileManager.default.fileExists(atPath: target.path) {
             // Never silently replace a command belonging to another tool.
-            guard isPuzzleLauncher(at: target) else { return nil }
+            guard isGiftLauncher(at: target) else { return nil }
             if (try? Data(contentsOf: target)) == launcher { return target }
         }
 
@@ -51,12 +51,9 @@ enum LauncherInstaller {
         }
     }
 
-    private static func isPuzzleLauncher(at url: URL) -> Bool {
+    private static func isGiftLauncher(at url: URL) -> Bool {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
-        // The second clause recognizes launchers installed by older Puzzle
-        // builds, before the explicit ownership marker was added.
         return text.contains(marker)
-            || (text.contains("# pz — open a folder") && text.contains("Puzzle.app"))
     }
 
     private static func writableDirectory(_ url: URL) -> Bool {
@@ -64,7 +61,7 @@ enum LauncherInstaller {
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
             && isDirectory.boolValue
             && FileManager.default.isWritableFile(atPath: url.path)
-            && !FileManager.default.fileExists(atPath: url.appendingPathComponent("pz").path)
+            && !FileManager.default.fileExists(atPath: url.appendingPathComponent("gift").path)
     }
 
     /// Finder-launched apps inherit a minimal PATH, so ask a clean login shell

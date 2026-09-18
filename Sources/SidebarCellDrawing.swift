@@ -1,7 +1,7 @@
 import AppKit
 
 /// What a sidebar row draws in its icon slot: a Material Icon Theme icon, which
-/// brings its own colours, or the tinted SF Symbol Puzzle falls back to when the
+/// brings its own colours, or the tinted SF Symbol Gift falls back to when the
 /// icon resources are unavailable.
 enum SidebarIcon {
     case material(String)
@@ -13,27 +13,7 @@ enum SidebarIcon {
         if let name = FileIcons.fileIconName(for: url.lastPathComponent) {
             return .material(name)
         }
-        return .symbol(Theme.symbol(FileTreeViewController.iconName(for: url.pathExtension)),
-                       Theme.dimText)
-    }
-
-    /// The icon for a folder, which also depends on whether it is open.
-    static func folder(_ url: URL, expanded: Bool) -> SidebarIcon {
-        if let name = FileIcons.folderIconName(for: url.lastPathComponent, expanded: expanded) {
-            return .material(name)
-        }
-        return .symbol(Theme.symbol(expanded ? "folder.fill" : "folder"),
-                       expanded ? Theme.blue : Theme.folderClosed)
-    }
-
-    /// The placeholder icon for a row being named for the first time.
-    static func newItem(folder: Bool) -> SidebarIcon {
-        if folder {
-            return FileIcons.folderIconName(for: "", expanded: false).map(SidebarIcon.material)
-                ?? .symbol(Theme.symbol("folder"), Theme.folderClosed)
-        }
-        return FileIcons.fileIconName(for: "").map(SidebarIcon.material)
-            ?? .symbol(Theme.symbol("doc.text"), Theme.dimText)
+        return .symbol(Theme.symbol("doc.text"), Theme.dimText)
     }
 }
 
@@ -46,7 +26,7 @@ enum SidebarCellDrawing {
     /// value for adjacent labels with different font sizes so their glyphs sit
     /// on one line instead of each label being centered independently.
     static func centeredBaseline(for font: NSFont, in rect: NSRect) -> CGFloat {
-        // These helpers assume a flipped view, which every drawn view in Puzzle
+        // These helpers assume a flipped view, which every drawn view in Gift
         // is; an unflipped host lands its text somewhere else entirely.
         //
         // Rounded to a half point: a whole device pixel on a 2x display.
@@ -116,7 +96,7 @@ enum SidebarCellDrawing {
     ///
     /// The circle is placed by its centre and the digits are rendered through an
     /// offscreen image, so the badge lands identically in flipped views (the
-    /// sidebar cells) and unflipped ones (the activity bar). Deriving the
+    /// sidebar cells) and unflipped ones. Deriving the
     /// position from a text baseline instead had it drawn on three different
     /// lines depending on the host.
     enum Badge {

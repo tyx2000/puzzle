@@ -11,19 +11,14 @@ for source in "$ROOT"/Sources/*.swift; do
   fi
 done
 
+mkdir -p "$ROOT/.obj"
 swiftc -Onone \
   -sdk "$SDK" \
   -target "$TARGET" \
   -framework AppKit \
   -framework CoreServices \
-  -framework AVKit \
-  -framework AVFoundation \
-  -framework PDFKit \
-  -import-objc-header "$ROOT/Sources/ts_bridge.h" \
-  -Xcc -I"$ROOT/vendor/tree-sitter/lib/include" \
   -o "$ROOT/.obj/regression-tests" \
   "${SOURCES[@]}" \
-  "$ROOT/Tests/RegressionTests.swift" \
-  "$ROOT"/.obj/*.o
+  "$ROOT/Tests/RegressionTests.swift"
 
 "$ROOT/.obj/regression-tests"

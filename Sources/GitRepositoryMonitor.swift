@@ -4,10 +4,10 @@ import Foundation
 /// Watches Git's private metadata rather than the whole project tree. External
 /// commit, push, fetch, checkout, branch and index operations all update this
 /// area, while ordinary compiler/build output does not continuously wake the
-/// Git panel.
+/// Git lists.
 final class GitRepositoryMonitor {
     private static let resolutionQueue = DispatchQueue(
-        label: "app.puzzle.git-monitor-resolution", qos: .utility)
+        label: "app.gift.git-monitor-resolution", qos: .utility)
     private var stream: FSEventStreamRef?
     private var pendingDelivery: DispatchWorkItem?
     private var onChange: (() -> Void)?

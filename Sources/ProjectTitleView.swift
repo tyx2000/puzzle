@@ -1,13 +1,9 @@
 import AppKit
 
-/// The project name and current branch shown beside the traffic lights, the way
-/// Zed labels its window. It fills the whole title band, so its text sits on the
-/// traffic lights' centre line.
+/// The project name and current branch shown beside the traffic lights. It
+/// fills the whole title band, so its text sits on the traffic lights' centre
+/// line. The name is a label; the branch is a button.
 final class ProjectTitleView: NSView {
-    /// Clicking the project name shows the Projects panel — the list this name
-    /// was chosen from. A terminal is opened from the button at the end of the
-    /// band instead, where it does not sit on top of the more common errand.
-    var onProjectClick: (() -> Void)?
     /// Clicking the branch name asks for the branch menu, anchored under the
     /// branch text (the rect is in this view's coordinates).
     var onBranchClick: ((NSRect) -> Void)?
@@ -40,11 +36,10 @@ final class ProjectTitleView: NSView {
         self.project = project
         self.branch = branch
         if hadProject != !project.isEmpty { window?.invalidateCursorRects(for: self) }
-        toolTip = project.isEmpty ? nil
-            : "Click the name for the projects, the branch to switch"
+        toolTip = branch.isEmpty ? nil : "Click the branch to switch, create or delete one"
         setAccessibilityLabel(
             branch.isEmpty ? project : "\(project), branch \(branch)")
-        setAccessibilityHelp("Shows the Projects panel.")
+        setAccessibilityHelp(branch.isEmpty ? nil : "Shows the branch menu.")
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -74,14 +69,13 @@ final class ProjectTitleView: NSView {
     /// its own, so nothing in the title band moves under the cursor.
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard !project.isEmpty else { return }
-        addCursorRect(projectRect(), cursor: .pointingHand)
-        if !branch.isEmpty { addCursorRect(branchRect(), cursor: .pointingHand) }
+        guard !project.isEmpty, !branch.isEmpty else { return }
+        addCursorRect(branchRect(), cursor: .pointingHand)
     }
 
-    /// The two halves are separate targets, so the same text the reader sees is
-    /// exactly what they click. Both are derived from one layout pass shared
-    /// with `draw`.
+    /// Where the name and the branch are drawn, so the branch the reader sees
+    /// is exactly what they click. Derived from one layout pass shared with
+    /// `draw`.
     private func layoutZones() -> (project: NSRect, branch: NSRect) {
         let content = bounds.insetBy(dx: Self.horizontalPadding, dy: 0)
         guard content.width > 0, !project.isEmpty else { return (.zero, .zero) }
@@ -100,7 +94,6 @@ final class ProjectTitleView: NSView {
                                     width: branchWidth, height: content.height))
     }
 
-    private func projectRect() -> NSRect { layoutZones().project }
     private func branchRect() -> NSRect { layoutZones().branch }
 
     private func zone(at point: NSPoint) -> Zone? {
@@ -124,10 +117,8 @@ final class ProjectTitleView: NSView {
     }
 
     private func act(on zone: Zone) {
-        switch zone {
-        case .project: onProjectClick?()
-        case .branch: onBranchClick?(branchRect())
-        }
+        guard zone == .branch else { return }
+        onBranchClick?(branchRect())
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -153,7 +144,7 @@ final class ProjectTitleView: NSView {
     // MARK: - Regression-test surface
 
     var titleForTesting: (project: String, branch: String) { (project, branch) }
-    var hasClickHandlerForTesting: Bool { onProjectClick != nil && onBranchClick != nil }
+    var hasClickHandlerForTesting: Bool { onBranchClick != nil }
     var zonesForTesting: (project: NSRect, branch: NSRect) { layoutZones() }
     /// A click that landed in whichever half `point` falls in.
     func clickForTesting(at point: NSPoint) {

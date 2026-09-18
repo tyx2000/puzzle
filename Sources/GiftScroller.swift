@@ -5,7 +5,7 @@ import AppKit
 /// AppKit's dark-mode knob is a fixed light grey, and against surfaces this
 /// near black it is the brightest thing on screen. Drawing it ourselves keeps
 /// it in the palette.
-final class PuzzleScroller: NSScroller {
+final class GiftScroller: NSScroller {
     /// Required, or AppKit silently falls back to its own scroller for the
     /// overlay style every window here uses.
     override class var isCompatibleWithOverlayScrollers: Bool { true }
@@ -50,8 +50,8 @@ final class PuzzleScroller: NSScroller {
     /// the branch list sat further from the toolbar above it than the toolbar
     /// sat from the tabs.
     static func adopt(_ scrollView: NSScrollView) {
-        scrollView.verticalScroller = PuzzleScroller()
-        scrollView.horizontalScroller = PuzzleScroller()
+        scrollView.verticalScroller = GiftScroller()
+        scrollView.horizontalScroller = GiftScroller()
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentInsets = NSEdgeInsets()
     }
@@ -60,7 +60,7 @@ final class PuzzleScroller: NSScroller {
 
     /// The colour a knob actually paints with, read back from a render.
     static func knobColourForTesting(size: NSSize = NSSize(width: 15, height: 60)) -> NSColor? {
-        let scroller = PuzzleScroller(frame: NSRect(origin: .zero, size: size))
+        let scroller = GiftScroller(frame: NSRect(origin: .zero, size: size))
         scroller.knobProportion = 0.6
         scroller.doubleValue = 0.5
         // Drawn directly: an overlay scroller shows its knob only while

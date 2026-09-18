@@ -1,6 +1,6 @@
 import AppKit
 
-/// An explicit invisible target over the sidebar/editor divider. Keeping this
+/// An explicit invisible target over the panel/diff divider. Keeping this
 /// separate from the drawn one-pixel divider makes the interaction predictable
 /// even when AppKit's effective-divider rect varies between macOS releases.
 final class SplitDividerHandleView: NSView {
@@ -24,7 +24,7 @@ final class SplitDividerHandleView: NSView {
 
     /// The handle straddles the divider, so painting its middle column replaces
     /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
-    /// activity bar and the title band draw.
+    /// title band draws.
     override func draw(_ dirtyRect: NSRect) {
         Theme.border.setFill()
         NSRect(x: bounds.midX, y: 0,

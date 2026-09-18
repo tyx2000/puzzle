@@ -26,46 +26,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return windows.last
     }
 
-    /// Settings have to be in place before any view exists.
-    ///
-    /// Views cache the fonts and metrics they are built with, and `openFiles:`
-    /// — how Finder and `pz` start the app with a project — runs *before*
-    /// `applicationDidFinishLaunching`. Loading settings there meant a window
-    /// opened that way was built against the defaults rather than the user's.
+    /// The appearance has to be in place before any view exists: `openFiles:`
+    /// — how Finder and `gift` start the app with a project — runs *before*
+    /// `applicationDidFinishLaunching`.
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Before anything else can throw: a crash report names the frames but
         // not the exception, and the reason is what says which invariant went.
         ExceptionLog.install()
-        prepareSettings()
-    }
-
-    /// Idempotent: `applicationDidFinishLaunching` still calls it in case a
-    /// future entry point reaches that first.
-    private func prepareSettings() {
-        guard !settingsPrepared else { return }
-        settingsPrepared = true
-        Settings.shared.load()
         Theme.applyAppearance()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        prepareSettings()
+        Theme.applyAppearance()
         LauncherInstaller.installIfNeeded()
-        // A settings.json written by an older build lacks options added since;
-        // rewrite it with the full documented set, keeping the user's values.
-        Settings.shared.upgradeFileIfNeeded()
         setupMenu()
         setupMemoryPressureHandling()
-        // Diff buffers are synthetic, so nothing could read one back once it was
-        // dropped and they were excluded from eviction entirely. With a way to
-        // rebuild them from their URL they take part like every other buffer.
-        WorkspaceWindowController.registerDiffContentProvider()
 
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(settingsChanged),
-            name: Settings.didChange, object: nil)
-
-        // When the app is launched WITH a document (Finder open-with, or `pz`),
+        // When the app is launched WITH a folder (Finder open-with, or `gift`),
         // `application(_:openFiles:)` fires BEFORE this method and has already
         // made a window for it. Creating one unconditionally here left an extra
         // empty welcome window alongside the project.
@@ -74,27 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyLaunchArguments(to: controller)
     }
 
-    private var settingsPrepared = false
-    var settingsPreparedForTesting: Bool { settingsPrepared }
-
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// Quitting is not closing a window, and AppKit only sends
-    /// `windowShouldClose` for the latter. Puzzle is not an NSDocument app, so
-    /// nothing else reviews open buffers on the way out: without this, ⌘Q threw
-    /// away every edit made since the last focus change, along with any document
-    /// whose autosave had been held back by a change on disk.
-    ///
-    /// Cancelling one of those conflict questions cancels the quit, the same way
-    /// it keeps a window open.
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        for controller in windows {
-            guard controller.editor.confirmClose() else { return .terminateCancel }
-        }
-        return .terminateNow
-    }
-
-    /// FSEvents normally delivers external Git changes while Puzzle is in the
+    /// FSEvents normally delivers external Git changes while Gift is in the
     /// background. Refresh on activation as a fallback for coalesced/missed
     /// events and for repositories whose metadata directory was replaced.
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -108,80 +67,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setupMemoryPressureHandling() {
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical], queue: .main)
-        source.setEventHandler { [weak self] in
-            self?.windows.forEach { $0.releaseTransientMemory() }
-            DocumentStore.shared.releaseTransientMemory()
+        source.setEventHandler {
             FileIcons.releaseTransientMemory()
         }
         source.resume()
         memoryPressureSource = source
     }
 
-    /// Finder and `pz` use the same routing as the in-app file picker.
+    /// Finder and `gift` use the same routing as the in-app folder picker.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         // This can be the first delegate call of the process, before any
-        // window — and therefore any cached colour — exists.
-        prepareSettings()
+        // window exists.
+        Theme.applyAppearance()
         let handled = openURLs(filenames.map { URL(fileURLWithPath: $0) })
         NSApp.activate(ignoringOtherApps: true)
         sender.reply(toOpenOrPrint: handled ? .success : .failure)
     }
 
-    /// Reuse an owning project before considering the requesting welcome
+    /// Reuse an owning project before considering the requesting start-page
     /// window or creating a workspace. Every external/open-panel entry point
     /// goes through this method so it cannot create duplicate project windows.
+    ///
+    /// Gift opens folders. A file stands for the folder it is in, so dropping
+    /// one on the Dock icon still opens something sensible.
     @discardableResult
     func openURLs(_ urls: [URL], from source: WorkspaceWindowController? = nil) -> Bool {
         var handled = false
-        // Open explicitly selected folders before their files, regardless of
-        // the order returned by a multiple-selection panel or Finder.
-        let items = urls.compactMap { url -> (url: URL, isDirectory: Bool)? in
+        var folders: [URL] = []
+        for url in urls {
             var isDir: ObjCBool = false
             guard url.isFileURL,
-                  FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
-            return (url.standardizedFileURL.resolvingSymlinksInPath(), isDir.boolValue)
+                  FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            let folder = (isDir.boolValue ? url : url.deletingLastPathComponent())
+                .standardizedFileURL.resolvingSymlinksInPath()
+            if !folders.contains(folder) { folders.append(folder) }
         }
-        for item in items.filter(\.isDirectory) + items.filter({ !$0.isDirectory }) {
-            let url = item.url
+        for url in folders {
             let welcome = source.flatMap { $0.hasProject ? nil : $0 }
                 ?? windows.first { !$0.hasProject }
-            if item.isDirectory {
-                // Already open somewhere: switch that window to it rather than
-                // stacking a second copy of the same workspace.
-                if let found = Self.projectIndex(matching: url,
-                                                 in: windows.map(\.projects)) {
-                    let target = windows[found.window]
-                    target.activateProject(found.project)
-                    target.window?.makeKeyAndOrderFront(nil)
-                } else if let source, source.hasProject {
-                    // Asked for from a window — its own `+`, or its file picker
-                    // — so it joins that window's projects.
-                    source.openProject(url)
-                    source.window?.makeKeyAndOrderFront(nil)
-                } else {
-                    let target = welcome ?? makeWindow()
-                    target.openProject(url)
-                    target.window?.makeKeyAndOrderFront(nil)
-                }
+            // Already open somewhere: switch that window to it rather than
+            // stacking a second copy of the same workspace.
+            if let found = Self.projectIndex(matching: url,
+                                             in: windows.map(\.projects)) {
+                let target = windows[found.window]
+                target.activateProject(found.project)
+                target.window?.makeKeyAndOrderFront(nil)
+            } else if let source, source.hasProject {
+                // Asked for from a window — its own `+`, or its folder picker
+                // — so it joins that window's projects.
+                source.openProject(url)
+                source.window?.makeKeyAndOrderFront(nil)
             } else {
-                // A file inside an open project becomes a tab there, in that
-                // project: the window switches to the project first, so the
-                // tree, Git panel and search are showing the file's own
-                // workspace rather than whichever one happened to be up.
-                if let found = Self.projectIndex(owning: url,
-                                                 in: windows.map(\.projects)) {
-                    let target = windows[found.window]
-                    target.activateProject(found.project)
-                    target.editor.open(url: url)
-                    target.window?.makeKeyAndOrderFront(nil)
-                } else {
-                    let target = welcome ?? makeWindow()
-                    if target.projectURL == nil {
-                        target.openProject(url.deletingLastPathComponent())
-                    }
-                    target.editor.open(url: url)
-                    target.window?.makeKeyAndOrderFront(nil)
-                }
+                let target = welcome ?? makeWindow()
+                target.openProject(url)
+                target.window?.makeKeyAndOrderFront(nil)
             }
             handled = true
         }
@@ -196,41 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .map { windows[$0.window] }
     }
 
-    /// The window whose project contains this file.
-    func window(containing file: URL) -> WorkspaceWindowController? {
-        Self.projectIndex(owning: file, in: windows.map(\.projectURL)).map { windows[$0] }
-    }
-
     /// Paths are compared symlink-resolved: `/tmp/x` and `/private/tmp/x` are
-    /// the same project, and a plain string prefix would miss that.
+    /// the same project, and a plain string comparison would miss that.
     private static func normalized(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
-    }
-
-    /// Which open project is exactly this folder.
-    static func projectIndex(matching folder: URL, in roots: [URL?]) -> Int? {
-        let target = normalized(folder)
-        return roots.firstIndex { $0.map(normalized) == target }
-    }
-
-    /// Which open project contains this file — the deepest one wins, so a file
-    /// inside a nested workspace lands in that workspace rather than its parent.
-    /// The window whose projects own this file, and which of them it is. A
-    /// window holds several projects now, so the answer is a pair; the deepest
-    /// project still wins, as a nested workspace must keep its own files.
-    static func projectIndex(owning file: URL,
-                             in projects: [[URL]]) -> (window: Int, project: URL)? {
-        let path = normalized(file)
-        return projects.enumerated()
-            .flatMap { index, roots in roots.map { (index, $0) } }
-            .compactMap { index, root -> (Int, URL, Int)? in
-                let rootPath = normalized(root)
-                let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-                guard path.hasPrefix(prefix) else { return nil }
-                return (index, root, rootPath.count)
-            }
-            .max { $0.2 < $1.2 }
-            .map { (window: $0.0, project: $0.1) }
     }
 
     /// The window holding exactly this project.
@@ -243,19 +151,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return nil
-    }
-
-    static func projectIndex(owning file: URL, in roots: [URL?]) -> Int? {
-        let path = normalized(file)
-        return roots.enumerated()
-            .compactMap { index, root -> (Int, Int)? in
-                guard let root else { return nil }
-                let rootPath = normalized(root)
-                let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-                guard path.hasPrefix(prefix) else { return nil }
-                return (index, rootPath.count)
-            }
-            .max { $0.1 < $1.1 }?.0
     }
 
     /// Clicking the dock icon with no windows open makes a fresh one.
@@ -301,8 +196,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return controller
     }
 
-    /// ⌘N — an empty window: the welcome screen with recent projects and an
-    /// Open Folder button. Nothing is assumed about which project it is for.
+    /// ⌘N — an empty window: the start page with recent projects and an
+    /// Open button. Nothing is assumed about which project it is for.
     @objc private func newWindow(_ sender: Any?) {
         _ = makeWindow()
     }
@@ -314,59 +209,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let preset = args.dropFirst().first(where: {
             var isDir: ObjCBool = false
             return FileManager.default.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue
-        }) ?? ProcessInfo.processInfo.environment["PUZZLE_OPEN"]
-
-        let fileArgs = args.dropFirst().filter {
-            var isDir: ObjCBool = false
-            return FileManager.default.fileExists(atPath: $0, isDirectory: &isDir) && !isDir.boolValue
-        }
+        }) ?? ProcessInfo.processInfo.environment["GIFT_OPEN"]
 
         DispatchQueue.main.async {
-            // No auto file-picker: with no arguments the window shows the
-            // welcome screen (recent projects + an Open Folder button).
-            // Skip if openFiles already gave this window a project.
+            // No auto folder-picker: with no arguments the window shows the
+            // start page (recent projects + an Open button). Skip if openFiles
+            // already gave this window a project.
             if let preset, !preset.isEmpty, !controller.hasProject {
                 controller.openProject(URL(fileURLWithPath: preset))
             }
-            for f in fileArgs { controller.editor.open(url: URL(fileURLWithPath: f)) }
-
-            if let i = args.firstIndex(of: "--panel"), i + 1 < args.count {
-                switch args[i + 1] {
-                case "search":   controller.sidebar.showSearch()
-                case "git":      controller.sidebar.showGit()
-                case "settings": controller.openSettings()
-                default:         controller.sidebar.showFiles()
-                }
-            }
-            if let i = args.firstIndex(of: "--search"), i + 1 < args.count {
-                controller.sidebar.showSearch()
-                controller.sidebar.performSearch(args[i + 1])
-            }
-            if let i = args.firstIndex(of: "--find"), i + 1 < args.count {
-                controller.editor.showFindBar(seed: args[i + 1])
-            }
-            // `--history N`: open the History tab and expand the Nth commit.
-            if let i = args.firstIndex(of: "--history"), i + 1 < args.count,
-                let n = Int(args[i + 1]) {
-                controller.sidebar.showGit()
-                controller.sidebar.showHistory()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    controller.sidebar.expandCommit(at: n)
-                    // `--history-file M` also opens that file's diff.
-                    if let j = args.firstIndex(of: "--history-file"), j + 1 < args.count,
-                        let m = Int(args[j + 1]) {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                            controller.sidebar.openCommitFile(commitIndex: n, fileIndex: m)
-                        }
-                    }
-                }
-            }
-            // `--diff <relative-path>`: show that file's git diff (scripting).
+            // `--diff <relative-path>`: show that file's diff (scripting).
             if let i = args.firstIndex(of: "--diff"), i + 1 < args.count,
                let dir = controller.projectURL {
                 let path = args[i + 1]
                 if let entry = GitService.status(in: dir).entries.first(where: { $0.path == path }) {
-                    controller.sidebar.showGit()
                     controller.showDiff(for: entry, in: dir)
                 }
             }
@@ -386,13 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Puzzle", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About Gift", action: #selector(showAbout), keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Settings…",
-                        action: #selector(WorkspaceWindowController.showSettings(_:)),
-                        keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Hide Gift",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit Puzzle",
+        appMenu.addItem(withTitle: "Quit Gift",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
@@ -408,15 +263,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recentItem.submenu = recentMenu
         fileMenu.addItem(recentItem)
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Quick Open…",
-                         action: #selector(WorkspaceWindowController.quickOpen(_:)),
-                         keyEquivalent: "p")
-        fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Save",
-                         action: #selector(WorkspaceWindowController.saveDocument(_:)), keyEquivalent: "s")
-        fileMenu.addItem(.separator())
-        // ⌘W closes the tab, as it does in every editor; the window needs the
-        // shift. Closing the last tab still closes the window.
+        // ⌘W closes the diff tab; the window needs the shift. With no tab
+        // open ⌘W still closes the window.
         fileMenu.addItem(withTitle: "Close Tab",
                          action: #selector(WorkspaceWindowController.closeTab(_:)),
                          keyEquivalent: "w")
@@ -431,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          keyEquivalent: "T")
         fileMenuItem.submenu = fileMenu
 
+        // Copy for the diff, and the text editing the commit line needs.
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
@@ -441,38 +290,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Find in File…",
-                         action: #selector(WorkspaceWindowController.findInFile(_:)), keyEquivalent: "f")
-        let replaceItem = NSMenuItem(
-            title: "Find and Replace…",
-            action: #selector(WorkspaceWindowController.findAndReplace(_:)),
-            keyEquivalent: "f")
-        replaceItem.keyEquivalentModifierMask = [.command, .option]
-        editMenu.addItem(replaceItem)
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Go to Line…",
-                         action: #selector(WorkspaceWindowController.goToLine(_:)),
-                         keyEquivalent: "l")
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Find in Folder…",
-                         action: #selector(WorkspaceWindowController.findInFolder(_:)), keyEquivalent: "F")
         editMenuItem.submenu = editMenu
 
         let viewMenuItem = NSMenuItem()
         mainMenu.addItem(viewMenuItem)
         let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Show Files",
-                         action: #selector(WorkspaceWindowController.showFiles(_:)), keyEquivalent: "1")
-        viewMenu.addItem(withTitle: "Show Search",
-                         action: #selector(WorkspaceWindowController.findInFolder(_:)), keyEquivalent: "2")
-        viewMenu.addItem(withTitle: "Show Git",
-                         action: #selector(WorkspaceWindowController.showGit(_:)), keyEquivalent: "3")
-        viewMenu.addItem(withTitle: "Show Sidebar",
-                         action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
+        viewMenu.addItem(withTitle: "Refresh",
+                         action: #selector(WorkspaceWindowController.refreshRepository(_:)),
+                         keyEquivalent: "r")
         viewMenu.addItem(.separator())
-        // The shortcut every tabbed editor and browser uses; without it the
-        // tabs could only be reached with the mouse.
         let nextTab = NSMenuItem(title: "Next Tab",
                                  action: #selector(WorkspaceWindowController.selectNextTab(_:)),
                                  keyEquivalent: "]")
@@ -554,19 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func clearRecents() { recentProjects.clear() }
 
-    @objc private func settingsChanged() {
-        // Fonts and metrics are baked into each cached highlighter's attribute
-        // table, so the cache cannot survive a settings change.
-        HighlightService.shared.evictUnused(keeping: [])
-        // Re-apply fonts/metrics to every open window.
-        DocumentStore.shared.reapplyDisplaySettings()
-        windows.forEach { $0.refreshDisplay() }
-    }
-
     @objc private func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "Puzzle"
-        alert.informativeText = "A minimal native code editor.\nSwift + AppKit."
+        alert.messageText = "Gift"
+        alert.informativeText = "A minimal native Git client.\nSwift + AppKit."
         alert.runModal()
     }
 }

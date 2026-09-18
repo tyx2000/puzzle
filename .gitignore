@@ -14,7 +14,7 @@
 *.xcuserstate
 xcuserdata/
 
-# Puzzle build products and compiler caches
+# Gift build products and compiler caches
 /.obj/
 /build/
 

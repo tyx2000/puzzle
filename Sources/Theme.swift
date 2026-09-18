@@ -4,7 +4,6 @@ import AppKit
 /// app paints. Every colour is one fixed value: nothing here follows the system
 /// appearance and there is no theme setting, so a token means the same thing
 /// everywhere it is read and views may cache what they are built with.
-/// Font and exact row heights still come from settings.json.
 enum Theme {
     /// Colours are stored, not computed: one NSColor per token for the life of
     /// the process, so a draw call never allocates one.
@@ -22,28 +21,20 @@ enum Theme {
     }
 
     // Surfaces
-    static let editorBackground = hex(0x0d1017)
+    static let diffBackground = hex(0x0d1017)
     static let panelBackground = hex(0x0d1017)
     static let barBackground = hex(0x0d1017)
-    static let activityBar = hex(0x0d1017)
     /// Scrollbars. AppKit's dark knob is a fixed light grey, which these near
     /// black surfaces turn into the brightest thing on screen.
     static let scrollerKnob = hex(0x39404e)
     static let scrollerSlot = hex(0x11151d)
     static let border = hex(0x1b1f29)
-    static let selection = hex(0x193155)
+    /// Behind a diff's hunk headers.
     static let lineHighlight = hex(0x232a36)
-    // The code area matches the panel, so the active tab cannot also match the
-    // editor without vanishing into the tab strip: it keeps the surface one step
-    // lighter, which is the only thing marking which tab is open.
+    /// A surface one step lighter than the bar: a live button's ground.
     static let activeTab = hex(0x161a24)
-    /// Behind whatever is selected in a strip of controls: the panel tab, the
-    /// activity-bar button, the open file's tab. One token so the three read as
-    /// the same state, and far enough from the bar behind them to be seen —
-    /// `activeTab` sits a couple of percent off its background, which was
-    /// barely a shadow.
-    /// Kept in the same family as `activeRow`, the tone the file tree already
-    /// selects with, rather than a brighter one of its own.
+    /// Behind whatever is selected: the open diff's tab, the project being
+    /// shown. One token so the two read as the same state.
     static let selectedControl = hex(0x232a36)
     static let selectedControlText = hex(0xe6e9ef)
     static let inactiveTab = hex(0x0d1017)
@@ -52,33 +43,16 @@ enum Theme {
     /// keeps its line over a wide row. A step off the panel, well short of
     /// `hover`, so a stripe is never mistaken for the row under the pointer.
     static let stripedRow = hex(0x131721)
-    /// active file in the tree
+    /// The row a list has selected, and the hunk headers in a diff.
     static let activeRow = hex(0x232a36)
-    /// A match, wherever it is found, is underlined — never boxed and never
-    /// washed. An outline steals a couple of points on every side of the text
-    /// and a background competes with both the syntax colours over it and the
-    /// selection under it; a rule below the baseline touches neither.
-    static let matchUnderline = red
-    static let matchUnderlineWidth: CGFloat = 2
-    /// The match the ↑↓ buttons are on: the same rule in the accent yellow.
-    static let currentMatchUnderline = yellow
-    /// How far under the text baseline the first rule sits.
-    static let matchUnderlineOffset: CGFloat = 2
-
     // Text
     static let foreground = hex(0xbfbdb6)
     static let dimText = hex(0x5a6378)
     static let gutter = hex(0x404758)
-    static let gutterActive = hex(0x5a6378)
-    static let cursor = hex(0xe6b450)
-    /// collapsed folder icon
-    static let folderClosed = hex(0x5a6378)
+    /// Ayu's accent: the branch in a commit row, the ↑ on one not pushed, the
+    /// mark on the change the diff's ↑↓ buttons are on.
+    static let accent = hex(0xe6b450)
 
-    // Search / find input
-    static let inputBackground = hex(0x10141c)
-    static let inputBorder = hex(0x1a1f2a)
-    static let inputBorderFocused = hex(0x5a6378)
-    static let toggleActiveBackground = hex(0x232a36)
     // Git diff: Ayu's markup.inserted / markup.deleted, with backgrounds mixed
     // down to sit under code without drowning it.
     static let diffAddedText = hex(0x70bf56)
@@ -86,112 +60,44 @@ enum Theme {
     static let diffAddedBackground = hex(0x18251b)
     static let diffRemovedBackground = hex(0x2a1a1d)
 
-    // Accent hues. These name a *hue*: the panels use them for git status,
-    // links and markers.
+    // Accent hues. These name a *hue*: the panels use them for git status and
+    // the regions' frames.
     static let red = hex(0xf07178)
     static let green = hex(0xaad94c)
     static let yellow = hex(0xffb454)
-    /// Ayu's own orange — the hue it paints keywords in, named here as a hue
-    /// so a panel can ask for it without asking for "keyword".
     static let orange = hex(0xff8f40)
     static let blue = hex(0x39bae6)
     static let purple = hex(0xd2a6ff)
-    static let cyan = hex(0x95e6cb)
-    static let comment = hex(0x5a6673)
-    static let punct = hex(0x8a8983)
 
-    // Syntax roles are named for the role, not the hue: Ayu paints types blue
-    // and calls yellow, which is the reverse of most palettes, and code that
-    // asked for `blue` would have to know that.
-    static let syntaxType = hex(0x39bae6)
-    static let syntaxFunction = hex(0xffb454)
-    static let syntaxKeyword = hex(0xff8f40)
-    static let syntaxConstant = hex(0xd2a6ff)
+    // Fonts and row metrics are fixed: Gift has no settings.
 
-    // Font + exact row metrics come from settings.json.
-
-    static func editorFont() -> NSFont {
+    /// Monaco 12 for diff text and line numbers.
+    static func monoFont() -> NSFont {
         if let cachedFont { return cachedFont }
-        let f = Settings.shared.editorFont()
+        let f = NSFont(name: "Monaco", size: 12)
+            ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         cachedFont = f
         return f
     }
 
-    /// UI font for the left panel / tabs / panels. `size` is a 12pt-baseline
-    /// hint; `ui_font_size` in settings.json scales the whole hierarchy.
+    /// UI font for the panel, tabs and headers. `size` is the point size.
     static func uiFont(_ size: CGFloat = 12) -> NSFont {
-        Settings.shared.uiFont(baseline: size)
+        if let hit = cachedUIFonts[size] { return hit }
+        let resolved = max(8, size)
+        let font = NSFont(name: "Monaco", size: resolved) ?? NSFont.systemFont(ofSize: resolved)
+        cachedUIFonts[size] = font
+        return font
     }
 
-    /// Exact file-tree row height in points.
-    static func treeRowHeight() -> CGFloat {
-        Settings.shared.treeLineHeight
-    }
+    /// Exact list row height in points.
+    static func treeRowHeight() -> CGFloat { 22 }
 
-    /// Natural vs. target line height. The layout-manager delegate fixes every
-    /// fragment to this target and centers its baseline inside the line box.
-    static func lineMetrics() -> (natural: CGFloat, target: CGFloat) {
-        let font = editorFont()
-        let natural = NSLayoutManager().defaultLineHeight(for: font)
-        return (natural, Settings.shared.codeLineHeight)
-    }
+    /// Exact diff row height in points.
+    static func diffRowHeight() -> CGFloat { 22 }
 
-    /// Width of one character (the editor font is monospaced).
-    static func characterWidth() -> CGFloat {
-        if let cachedCharWidth { return cachedCharWidth }
-        let w = ("0" as NSString).size(withAttributes: [.font: editorFont()]).width
-        cachedCharWidth = w
-        return w
-    }
-
-    // Font, paragraph style and the editor attribute dictionary are immutable
-    // for a given settings generation, and are asked for constantly (every
-    // document open, every re-highlight, every gutter draw). Building them each
-    // time meant a font lookup plus a text measurement per call, and a fresh
-    // NSParagraphStyle object retained by every attribute run in every buffer.
-    // Cache them and invalidate when settings change.
     private static var cachedFont: NSFont?
-    private static var cachedParagraph: NSParagraphStyle?
-    private static var cachedCharWidth: CGFloat?
-    private static var cachedAttributes: [NSColor: [NSAttributedString.Key: Any]] = [:]
+    private static var cachedUIFonts: [CGFloat: NSFont] = [:]
     private static var cachedSymbols: [String: NSImage] = [:]
-
-    /// Called from Settings.reload() so cached metrics don't go stale.
-    static func invalidateCaches() {
-        cachedFont = nil
-        cachedParagraph = nil
-        cachedCharWidth = nil
-        cachedAttributes.removeAll()
-        // Symbols are appearance-independent templates, but clearing here also
-        // bounds the cache if future settings add configurable symbol sizes.
-        cachedSymbols.removeAll()
-    }
-
-    static func paragraphStyle() -> NSParagraphStyle {
-        if let cachedParagraph { return cachedParagraph }
-        let p = NSMutableParagraphStyle()
-        let target = lineMetrics().target
-        p.minimumLineHeight = target
-        p.maximumLineHeight = target
-        p.defaultTabInterval = characterWidth() * CGFloat(Settings.shared.tabSize)
-        p.tabStops = []
-        let frozen = p.copy() as! NSParagraphStyle
-        cachedParagraph = frozen
-        return frozen
-    }
-
-    /// Attributes shared by the editor text and the gutter numbers, so both sit
-    /// on the same baseline.
-    static func textAttributes(color: NSColor) -> [NSAttributedString.Key: Any] {
-        if let hit = cachedAttributes[color] { return hit }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: editorFont(),
-            .foregroundColor: color,
-            .paragraphStyle: paragraphStyle(),
-        ]
-        cachedAttributes[color] = attrs
-        return attrs
-    }
 
     /// SF Symbols are immutable template images. Creating them repeatedly in
     /// table-cell configuration builds CoreSVG representations and internal

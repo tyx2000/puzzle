@@ -1,10 +1,8 @@
 import AppKit
 
-/// The current branch's commits, under the changes of the same project.
-///
-/// The Git panel's History tab shows the same list; this is that list in the
-/// column the branch heads, in the same form — one line per commit, its files
-/// underneath when it is opened.
+/// The current branch's commits, under the changes of the same project: one
+/// line per commit — branch, id, message, author, how long ago — and its
+/// files underneath when it is opened.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -31,12 +29,17 @@ final class ProjectHistoryViewController: NSViewController {
         var hasUpstream = false
     }
     private var commits: [GitService.Commit] = []
-    /// Short hashes not yet on the upstream branch — drawn with an ↑, as in
-    /// the Git panel.
+    /// Short hashes not yet on the upstream branch — drawn with an ↑.
     private var unpushed: Set<String> = []
     /// The branch each commit sits on: the list holds everything behind HEAD,
     /// including commits made on a branch that was merged in.
     private var branches: [String: String] = [:]
+    /// One width for the branch column down the whole list, so the ids and
+    /// messages after it start at the same place on every row.
+    private var branchColumnWidth: CGFloat = 0
+    /// When the log was read: "3 hours ago" is measured from here, so every
+    /// row agrees and a redraw does not change what a row says.
+    private var readAt = Date()
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
     private var rows: [Row] = []
@@ -62,12 +65,13 @@ final class ProjectHistoryViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("commit"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
 
         let scroll = NSScrollView()
-        PuzzleScroller.adopt(scroll)
+        GiftScroller.adopt(scroll)
         scroll.documentView = table
         // Reaching the end asks for the next page.
         scroll.contentView.postsBoundsChangedNotifications = true
@@ -116,6 +120,7 @@ final class ProjectHistoryViewController: NSViewController {
         commits = []
         unpushed = []
         branches = [:]
+        branchColumnWidth = 0
         expanded = []
         files = [:]
         rebuildRows()
@@ -152,6 +157,8 @@ final class ProjectHistoryViewController: NSViewController {
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
                 self.branches = named
+                self.branchColumnWidth = GitCommitCell.branchColumnWidth(for: named.values)
+                self.readAt = Date()
                 // A commit that is no longer listed cannot stay open.
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
@@ -236,6 +243,49 @@ final class ProjectHistoryViewController: NSViewController {
             }
         }
     }
+
+    // MARK: - Context menu
+
+    private func contextMenu(forRow row: Int) -> NSMenu? {
+        guard let directory, rows.indices.contains(row) else { return nil }
+        let menu = NSMenu()
+        switch rows[row] {
+        case .commit(let commit):
+            add(to: menu, title: "Copy Commit ID") { Self.copy(commit.shortHash) }
+            add(to: menu, title: "Copy Commit Message") { Self.copy(commit.subject) }
+        case .file(let file, let commit):
+            add(to: menu, title: "Show Changes in This Commit") { [weak self] in
+                self?.onOpenCommitDiff?(commit, file, directory)
+            }
+            add(to: menu, title: "Copy Path") { Self.copy(file.path) }
+        }
+        return menu
+    }
+
+    private static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func add(to menu: NSMenu, title: String, action: @escaping () -> Void) {
+        let item = NSMenuItem(title: title, action: #selector(runMenuAction(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = MenuAction(run: action)
+        menu.addItem(item)
+    }
+
+    /// Boxes a closure so it can ride on an `NSMenuItem`.
+    private final class MenuAction {
+        let run: () -> Void
+        init(run: @escaping () -> Void) { self.run = run }
+    }
+
+    @objc private func runMenuAction(_ sender: NSMenuItem) {
+        (sender.representedObject as? MenuAction)?.run()
+    }
+
+    func contextMenuForTesting(row: Int) -> NSMenu? { contextMenu(forRow: row) }
 
     func refreshFonts() {
         guard isViewLoaded else { return }
@@ -323,13 +373,7 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        // A commit reads over two lines here — the column is too narrow to
-        // hold a subject and its metadata on one. Its files stay single, like
-        // every other list in the sidebar.
-        guard rows.indices.contains(row), case .commit = rows[row] else {
-            return Theme.treeRowHeight()
-        }
-        return GitCommitCell.height(for: .twoLine)
+        Theme.treeRowHeight()
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -354,7 +398,8 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           branch: branches[commit.shortHash] ?? "", layout: .twoLine)
+                           branch: branches[commit.shortHash] ?? "",
+                           branchColumnWidth: branchColumnWidth, now: readAt)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

@@ -4,7 +4,7 @@ import Foundation
 /// Backs both the welcome screen and File ▸ Open Recent.
 final class RecentProjects {
     static let shared = RecentProjects()
-    static let didChange = Notification.Name("PuzzleRecentProjectsDidChange")
+    static let didChange = Notification.Name("GiftRecentProjectsDidChange")
 
     private let defaults: UserDefaults
     private let key: String
@@ -14,7 +14,7 @@ final class RecentProjects {
     private let limit: Int
 
     init(defaults: UserDefaults = .standard,
-         key: String = "PuzzleRecentProjects",
+         key: String = "GiftRecentProjects",
          limit: Int = RecentProjects.displayLimit) {
         self.defaults = defaults
         self.key = key
@@ -61,7 +61,7 @@ final class RecentProjects {
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
-    /// "~/Desktop/Puzzle" — the parent folder, shown under each entry.
+    /// "~/Desktop/Gift" — the parent folder, shown under each entry.
     static func displayParent(for url: URL) -> String {
         let parent = url.deletingLastPathComponent().path
         let home = FileManager.default.homeDirectoryForCurrentUser.path

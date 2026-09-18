@@ -58,12 +58,6 @@ enum GitService {
         let upstreamBranch: String?
     }
 
-    struct Remote {
-        let name: String
-        let fetchURL: String
-        let pushURL: String
-    }
-
     struct Commit {
         let shortHash: String
         let subject: String
@@ -78,6 +72,16 @@ enum GitService {
         /// Branch and tag names pointing here, as Git decorates them
         /// ("HEAD -> main, origin/main"). Empty for most commits.
         var refs: String = ""
+        /// When the commit was authored, in seconds since 1970. Zero when the
+        /// log was read without it.
+        var timestamp: Int64 = 0
+
+        /// How long ago the commit was authored, the way the history reads it.
+        func relativeDate(now: Date = Date()) -> String {
+            guard timestamp > 0 else { return absoluteDate }
+            return GitService.relativeDate(
+                Date(timeIntervalSince1970: TimeInterval(timestamp)), now: now)
+        }
 
         /// Blame summary shown as the commit record's secondary line.
         var blameSummary: String { "\(author)  ·  \(absoluteDate)" }
@@ -114,7 +118,7 @@ enum GitService {
 
     /// Git guards `.git/index` with `.git/index.lock` and, finding one, fails
     /// outright — "Another git process seems to be running in this repository"
-    /// — rather than waiting. Puzzle reaches that on its own: it stages every
+    /// — rather than waiting. Gift reaches that on its own: it stages every
     /// change as it is made, the panel stages again while it refreshes, and a
     /// commit stages before it commits.
     ///
@@ -202,7 +206,7 @@ enum GitService {
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        // Git must never sit waiting for input Puzzle cannot deliver: with no
+        // Git must never sit waiting for input Gift cannot deliver: with no
         // terminal it would block the serial Git queue, and the panel's
         // single-operation gate would refuse everything after it.
         var environment = ProcessInfo.processInfo.environment
@@ -210,7 +214,7 @@ enum GitService {
         // Reads — `status`, `diff`, `log` — otherwise take the index lock
         // opportunistically, to write back refreshed stat information. That
         // housekeeping is worth nothing here and collides with the staging
-        // Puzzle does on every change.
+        // Gift does on every change.
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
         environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
@@ -271,7 +275,7 @@ enum GitService {
         var timedOut = false
         if let timeout {
             // A stalled transfer (a dropped VPN mid-push) would otherwise hang
-            // this call, and with it every later Git action, until Puzzle quits.
+            // this call, and with it every later Git action, until Gift quits.
             if !latch.wait(seconds: timeout) {
                 timedOut = true
                 process.terminate()
@@ -308,24 +312,16 @@ enum GitService {
     /// permanent, and run on `operationQueue` so a 300-second push never sits
     /// in front of a gutter refresh. Callers that no longer want their answer
     /// cancel instead of waiting for it.
-    static let workQueue = DispatchQueue(label: "app.puzzle.git", qos: .userInitiated)
+    static let workQueue = DispatchQueue(label: "app.gift.git", qos: .userInitiated)
 
     /// Commits, pushes and every other command that changes a repository.
-    /// Two places commit — the Git panel and the line over a project's changes
-    /// — and one queue between them keeps a commit from one staging while a
-    /// checkout or a push from the other is still running.
-    static let operationQueue = DispatchQueue(label: "app.puzzle.git-operations",
+    /// One queue for all of them keeps a commit from staging while a checkout,
+    /// a discard or a push is still running.
+    static let operationQueue = DispatchQueue(label: "app.gift.git-operations",
                                               qos: .userInitiated)
 
     static let maxDiffBytes = 8 * 1024 * 1024
-    static let maxBlobBytes = Document.maxImageFileBytes
     static let maxProcessStderrBytes = 1024 * 1024
-
-    enum BlobResult {
-        case data(Data)
-        case tooLarge(Int)
-        case unavailable(String)
-    }
 
     /// Capture a bounded prefix while continuing to drain Git's pipe, so the
     /// child cannot block and a pathological diff cannot consume unbounded RAM.
@@ -339,70 +335,6 @@ enum GitService {
             text += "\n\n[Diff truncated at 8 MB to limit memory use.]\n"
         }
         return (text, result.code)
-    }
-
-    /// Raw bytes from a git command. `run` decodes to String, which mangles
-    /// binary payloads — image blobs must come back as Data.
-    static func runData(_ args: [String], in directory: URL,
-                        limit: Int? = nil) -> Data? {
-        let result = runProcess(executable: URL(fileURLWithPath: "/usr/bin/env"),
-                                arguments: ["git"] + args, in: directory,
-                                stdoutLimit: limit)
-        return result.code == 0 && !result.stdoutTruncated ? result.stdout : nil
-    }
-
-    /// Whether HEAD lists a path at all.
-    ///
-    /// Asked of the tree, which is a different object from the blob: "HEAD has
-    /// no such path" and "the blob is there and will not read" both come back
-    /// from `cat-file` as the same failure, and reading the second as the first
-    /// reports a file that is entirely present as brand new — which is what
-    /// Revert then writes over it.
-    enum HeadPathState { case listed, absent, unknown }
-
-    static func headState(ofProjectPath path: String, in directory: URL) -> HeadPathState {
-        // No commits yet is an answer, not a failure: nothing is in HEAD.
-        guard run(["rev-parse", "--verify", "--quiet", "HEAD"], in: directory).code == 0 else {
-            return .absent
-        }
-        // `--full-tree` because the path is relative to the repository root
-        // rather than to the directory the project was opened on.
-        let listed = run(["ls-tree", "--name-only", "--full-tree", "HEAD", "--",
-                          repositoryRelativePath(path, in: directory)], in: directory)
-        guard listed.code == 0 else { return .unknown }
-        return listed.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? .absent : .listed
-    }
-
-    /// A file's contents as of a commit (`git show <hash>:<path>`).
-    ///
-    /// `path` is project-relative, as everything outside this type is. The
-    /// translation matters: `HEAD:x` names `x` at the *repository* root, so a
-    /// project opened on a subdirectory that skips it asks for the wrong file —
-    /// and is answered, successfully, with a different file's contents whenever
-    /// the root holds one by the same name.
-    static func blob(inCommit hash: String, path: String, in directory: URL) -> BlobResult {
-        blob(object: "\(hash):\(repositoryRelativePath(path, in: directory))", in: directory)
-    }
-
-    /// One Git object, read with a ceiling on it.
-    ///
-    /// The size is asked for first so an oversized blob is reported rather than
-    /// half-read: the working file may be small while the history behind it is
-    /// not, and the limits that bound an open document say nothing about what
-    /// `HEAD` still holds.
-    static func blob(object: String, in directory: URL) -> BlobResult {
-        let sizeResult = run(["cat-file", "-s", object], in: directory)
-        guard sizeResult.code == 0,
-              let size = Int(sizeResult.out.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return .unavailable(sizeResult.err.isEmpty ? sizeResult.out : sizeResult.err)
-        }
-        guard size <= maxBlobBytes else { return .tooLarge(size) }
-        guard let data = runData(["--no-pager", "show", object],
-                                 in: directory, limit: maxBlobBytes) else {
-            return .unavailable("Git could not read the blob.")
-        }
-        return .data(data)
     }
 
     /// One `git status` call, not seven.
@@ -652,7 +584,7 @@ enum GitService {
         // turned `main` into an invalid name such as `main%x00origin/main`.
         // Read tip metadata in the same `for-each-ref` process. The previous
         // implementation spawned an additional `git log` for every branch,
-        // making the Branch tab scale linearly with process startup cost.
+        // making the branch menu scale linearly with process startup cost.
         let refs = run([
             "for-each-ref",
             "--format=%(refname:short)%00%(upstream:short)%00%(authorname)%00%(authordate:format:%Y-%m-%d %H:%M)%00%(authordate:unix)",
@@ -724,22 +656,6 @@ enum GitService {
         }
     }
 
-    static func remotes(in directory: URL) -> [Remote] {
-        let names = run(["remote"], in: directory)
-        guard names.code == 0 else { return [] }
-        return names.out.split(separator: "\n", omittingEmptySubsequences: true).compactMap { raw in
-            let name = String(raw)
-            let fetch = run(["remote", "get-url", name], in: directory)
-            guard fetch.code == 0 else { return nil }
-            let push = run(["remote", "get-url", "--push", name], in: directory)
-            return Remote(
-                name: name,
-                fetchURL: fetch.out.trimmingCharacters(in: .whitespacesAndNewlines),
-                pushURL: (push.code == 0 ? push.out : fetch.out)
-                    .trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-    }
-
     static func createBranch(_ name: String, from base: String,
                              in directory: URL) -> RemoteResult {
         remote(["checkout", "-b", name, base], in: directory, verb: "Create branch")
@@ -770,49 +686,6 @@ enum GitService {
         }
         return remote(["push", remoteName, "--delete", remoteBranch],
                       in: directory, verb: "Delete remote branch")
-    }
-
-    static func saveRemote(name: String, fetchURL: String, pushURL: String,
-                           in directory: URL) -> RemoteResult {
-        let existing = run(["remote", "get-url", name], in: directory).code == 0
-        let result = existing
-            ? run(["remote", "set-url", name, fetchURL], in: directory)
-            : run(["remote", "add", name, fetchURL], in: directory)
-        guard result.code == 0 else {
-            return RemoteResult(ok: false, message: result.err.isEmpty ? result.out : result.err)
-        }
-
-        let push = pushURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !push.isEmpty, push != fetchURL else {
-            // An omitted/equal push URL means "use the fetch URL". Remove a
-            // previously configured pushurl instead of silently retaining it.
-            let unset = run(["config", "--unset-all", "remote.\(name).pushurl"],
-                            in: directory)
-            guard unset.code == 0 || unset.code == 5 else {
-                return RemoteResult(ok: false,
-                                    message: unset.err.isEmpty ? unset.out : unset.err)
-            }
-            return RemoteResult(ok: true, message: "Remote \(name) saved.")
-        }
-        let pushResult = run(["remote", "set-url", "--push", name, push], in: directory)
-        guard pushResult.code == 0 else {
-            return RemoteResult(ok: false,
-                                message: pushResult.err.isEmpty ? pushResult.out : pushResult.err)
-        }
-        return RemoteResult(ok: true, message: "Remote \(name) saved.")
-    }
-
-    static func push(to remoteName: String, in directory: URL) -> RemoteResult {
-        let branch = run(["branch", "--show-current"], in: directory)
-            .out.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !branch.isEmpty else {
-            return RemoteResult(ok: false, message: "Detached HEAD — nothing to push.")
-        }
-        let hasUpstream = aheadCount(in: directory).hasUpstream
-        let args = hasUpstream
-            ? ["push", remoteName, branch]
-            : ["push", "--set-upstream", remoteName, branch]
-        return remote(args, in: directory, verb: "Push")
     }
 
     /// Anything that talks to a server. Local work has no ceiling — a big
@@ -858,17 +731,11 @@ enum GitService {
         } else {
             return RemoteResult(
                 ok: false,
-                message: "This branch has no upstream. Choose a specific ‘Push to …’ item from the Push menu.")
+                message: "This branch has no upstream, and there are several remotes "
+                    + "(\(remoteNames.joined(separator: ", "))). Set one with "
+                    + "`git push -u <remote> \(branch)`, then push from here.")
         }
         return remote(["push", "--set-upstream", target, branch], in: directory, verb: "Push")
-    }
-
-    static func fetch(in directory: URL) -> RemoteResult {
-        remote(["fetch", "--all", "--prune"], in: directory, verb: "Fetch")
-    }
-
-    static func pull(in directory: URL) -> RemoteResult {
-        remote(["pull", "--ff-only"], in: directory, verb: "Pull")
     }
 
     /// Stage every change inside the opened project, without reaching into
@@ -1015,62 +882,7 @@ enum GitService {
         return run(["commit", "-m", message, "--", "."], in: directory)
     }
 
-    /// Authorship of a single line, for the inline blame annotation.
-    struct BlameLine {
-        let author: String
-        let date: String            // "2026-07-27 12:04"
-        let summary: String         // commit subject
-        let isUncommitted: Bool
-
-        /// What the editor renders at the end of the line.
-        var inlineText: String {
-            isUncommitted ? "You · Uncommitted changes"
-                          : "\(author) · \(date) · \(summary)"
-        }
-    }
-
-    /// Blame one line of a file. `line` is 1-based.
-    ///
-    /// Uses `--porcelain` because the human-readable format's columns shift
-    /// with name and date width, and it's the only form that reliably marks an
-    /// uncommitted line (all-zero hash).
-    static func blame(file: URL, line: Int, in directory: URL) -> BlameLine? {
-        guard line > 0 else { return nil }
-        let relative = file.path.hasPrefix(directory.path + "/")
-            ? String(file.path.dropFirst(directory.path.count + 1))
-            : file.path
-        let result = run(["--no-pager", "blame", "--porcelain",
-                          "-L", "\(line),\(line)", "--", relative], in: directory)
-        guard result.code == 0, !result.out.isEmpty else { return nil }
-
-        var author = "", summary = ""
-        var timestamp: TimeInterval?
-        var uncommitted = false
-        for raw in result.out.split(separator: "\n", omittingEmptySubsequences: false) {
-            let text = String(raw)
-            if text.hasPrefix("author ") {
-                author = String(text.dropFirst(7))
-            } else if text.hasPrefix("author-time ") {
-                timestamp = TimeInterval(String(text.dropFirst(12)))
-            } else if text.hasPrefix("summary ") {
-                summary = String(text.dropFirst(8))
-            }
-            // A not-yet-committed line blames to the all-zero hash.
-            if text.hasPrefix("00000000") { uncommitted = true }
-        }
-        guard !author.isEmpty || uncommitted else { return nil }
-
-        var stamp = ""
-        if let timestamp {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd HH:mm"
-            stamp = formatter.string(from: Date(timeIntervalSince1970: timestamp))
-        }
-        return BlameLine(author: author.isEmpty ? "You" : author, date: stamp,
-                         summary: summary, isUncommitted: uncommitted)
-    }
-
-    /// Recent commits for the History tab.
+    /// Recent commits for the history under a project's changes.
     static func log(in directory: URL, limit: Int = 40) -> [Commit] {
         // NUL is the one byte commit metadata cannot contain, so neither an
         // unusual subject nor an author name can shift these fields.
@@ -1080,7 +892,7 @@ enum GitService {
         // draws. `--date-order` is what a graph needs: still newest first, but
         // a commit is never listed before one of its children, so a lane never
         // has to jump backwards.
-        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D"
+        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D%x00%at"
         // `--full-history` because of the pathspec: with one, Git simplifies
         // the history it walks — a merge that changed nothing under the path
         // relative to its first parent is dropped, and with it every commit
@@ -1092,7 +904,7 @@ enum GitService {
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
                           "--", "."], in: directory)
         guard result.code == 0 else { return [] }
-        return parseLog(result.out, fieldsPerCommit: 7)
+        return parseLog(result.out, fieldsPerCommit: 8)
     }
 
     /// Splits `-z` log output into commits. `fieldsPerCommit` says whether the
@@ -1113,63 +925,38 @@ enum GitService {
                 commit.refs = String(fields[index + 6])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
+            if fieldsPerCommit >= 8 {
+                commit.timestamp = Int64(fields[index + 7]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            }
             commits.append(commit)
             index += fieldsPerCommit
         }
         return commits
     }
 
-    /// Commits that touched one file, following it across renames.
-    static func log(file: URL, in directory: URL, limit: Int = 100) -> [Commit] {
-        let root = directory.standardizedFileURL.path
-        let path = file.standardizedFileURL.path
-        let prefix = root.hasSuffix("/") ? root : root + "/"
-        guard path.hasPrefix(prefix) else { return [] }
-        let relative = String(path.dropFirst(prefix.count))
-        let format = "%h%x00%s%x00%an%x00%ad%x00%ae"
-        let result = run(["--no-pager", "log", "-z", "--follow",
-                          "--pretty=format:" + format,
-                          "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
-                          "--", relative], in: directory)
-        guard result.code == 0 else { return [] }
-        let fields = result.out.split(separator: "\0", omittingEmptySubsequences: false)
-        var commits: [Commit] = []
-        var index = 0
-        while index + 4 < fields.count {
-            commits.append(Commit(shortHash: String(fields[index]),
-                                  subject: String(fields[index + 1]),
-                                  author: String(fields[index + 2]),
-                                  absoluteDate: String(fields[index + 3]),
-                                  email: String(fields[index + 4])))
-            index += 5
+    /// "just now", "5 minutes ago", "yesterday", "3 weeks ago". Written out
+    /// rather than left to a formatter, so the list reads the same whatever
+    /// the system's language — the rest of the app is English.
+    static func relativeDate(_ date: Date, now: Date = Date()) -> String {
+        let seconds = Int(now.timeIntervalSince(date))
+        func ago(_ count: Int, _ unit: String) -> String {
+            "\(count) \(unit)\(count == 1 ? "" : "s") ago"
         }
-        return commits
+        switch seconds {
+        case ..<60: return "just now"
+        case ..<3_600: return ago(seconds / 60, "minute")
+        case ..<86_400: return ago(seconds / 3_600, "hour")
+        case ..<172_800: return "yesterday"
+        case ..<604_800: return ago(seconds / 86_400, "day")
+        case ..<2_592_000: return ago(seconds / 604_800, "week")
+        case ..<31_536_000: return ago(max(1, seconds / 2_592_000), "month")
+        default: return ago(seconds / 31_536_000, "year")
+        }
     }
 
     /// Unified diff for one path. Untracked files have no diff against the
     /// index, so they're rendered as an all-additions diff of the file itself.
-    /// The diff for one working-tree path, without taking a status snapshot.
-    ///
-    /// This runs when a diff tab whose buffer was dropped is opened again, on
-    /// the main thread, so it asks Git about one path rather than scanning the
-    /// repository. Nil when the path no longer has a change to show.
-    static func diff(forPath path: String, in directory: URL) -> String? {
-        for args in [["--no-pager", "diff", "--no-color", "--", path],
-                     ["--no-pager", "diff", "--no-color", "--cached", "--", path]] {
-            let result = runDiff(args, in: directory)
-            if !result.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return result.out
-            }
-        }
-        // Git prints nothing for an untracked file; the panel shows the whole
-        // file as an addition instead, and so must this.
-        let untracked = run(["ls-files", "--others", "--error-unmatch", "--", path],
-                            in: directory)
-        guard untracked.code == 0 else { return nil }
-        return diff(for: Status.Entry(code: "??", path: path, originalPath: nil),
-                    in: directory)
-    }
-
     static func diff(for entry: Status.Entry, in directory: URL) -> String {
         if entry.isUntracked {
             let url = directory.appendingPathComponent(entry.path)
@@ -1235,51 +1022,6 @@ enum GitService {
         return text
     }
 
-    /// The two versions an SVG diff is about: HEAD's picture and the working
-    /// tree's. Nil for anything that is not an SVG, so the ordinary diff tab is
-    /// unaffected.
-    ///
-    /// Either side may be missing on its own — a file being added has no before
-    /// and one being deleted has no after — and a diff with neither is not
-    /// worth two empty panes.
-    static func svgDiffSides(for path: String, in directory: URL) -> SVGDiffSides? {
-        guard isVectorPath(path) else { return nil }
-        var before: Data?
-        if case .data(let data) = blob(inCommit: "HEAD", path: path, in: directory) {
-            before = data
-        }
-        // The working tree, which is what the "+" side of the diff describes.
-        let file = directory.appendingPathComponent(path)
-        let after = try? Data(contentsOf: file)
-        guard before != nil || after != nil else { return nil }
-        return SVGDiffSides(before: before, after: after)
-    }
-
-    /// The same two versions for a file as one commit left it: the parent's
-    /// picture and the commit's own.
-    ///
-    /// A commit that adds the file has no parent version, and the root commit
-    /// has no parent at all — both come back with no `before`, which is what
-    /// tells the pane to show one picture rather than two.
-    static func svgDiffSides(inCommit commit: String, path: String,
-                             in directory: URL) -> SVGDiffSides? {
-        guard isVectorPath(path) else { return nil }
-        var before: Data?
-        if case .data(let data) = blob(inCommit: commit + "^", path: path, in: directory) {
-            before = data
-        }
-        var after: Data?
-        if case .data(let data) = blob(inCommit: commit, path: path, in: directory) {
-            after = data
-        }
-        guard before != nil || after != nil else { return nil }
-        return SVGDiffSides(before: before, after: after)
-    }
-
-    private static func isVectorPath(_ path: String) -> Bool {
-        Document.vectorImageExtensions.contains((path as NSString).pathExtension.lowercased())
-    }
-
     /// One file touched by a commit.    /// One file touched by a commit.
     struct CommitFile {
         let status: String      // A, M, D, R…
@@ -1328,21 +1070,6 @@ enum GitService {
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "No changes recorded for \(path) in \(hash).\n"
             : text
-    }
-
-    /// Changed paths split by kind, for colouring the file tree the way git
-    /// itself distinguishes them: new files read differently from edited ones.
-    /// Split an existing snapshot rather than running `git status` again — the
-    /// window needs both this and the snapshot itself on every refresh.
-    static func trackedAndUntracked(in s: Status) -> (modified: Set<String>,
-                                                      untracked: Set<String>) {
-        var modified: Set<String> = []
-        var untracked: Set<String> = []
-        for entry in s.entries {
-            if entry.isUntracked { untracked.insert(entry.path) }
-            else { modified.insert(entry.path) }
-        }
-        return (modified, untracked)
     }
 
     /// Repository-root prefix of the opened project, with no trailing slash.
