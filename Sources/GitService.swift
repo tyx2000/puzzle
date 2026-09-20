@@ -2,9 +2,33 @@ import Foundation
 
 /// Thin wrapper over the `git` CLI, run in the project directory.
 enum GitService {
+    /// What one pipe has produced so far. Locked because a call that gives up
+    /// on a deadline reads it while its reader is still running: a child that
+    /// outlives `kill` — or a grandchild holding the pipe — keeps the reader
+    /// blocked, and the caller must not be held with it.
     private final class PipeCapture: @unchecked Sendable {
-        var data = Data()
-        var truncated = false
+        private let lock = NSLock()
+        private var storage = Data()
+        private var truncatedStorage = false
+
+        /// Append a chunk, keeping at most `limit` bytes in all.
+        func append(_ chunk: Data, limit: Int?) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let limit else {
+                storage.append(chunk)
+                return
+            }
+            let room = max(0, limit - storage.count)
+            if room > 0 { storage.append(chunk.prefix(room)) }
+            if chunk.count > room { truncatedStorage = true }
+        }
+
+        var snapshot: (data: Data, truncated: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (storage, truncatedStorage)
+        }
     }
 
     struct ProcessResult {
@@ -254,13 +278,7 @@ enum GitService {
             while true {
                 let chunk = outPipe.fileHandleForReading.readData(ofLength: 64 * 1024)
                 guard !chunk.isEmpty else { break }
-                if let limit = stdoutLimit {
-                    let remaining = max(0, limit - stdout.data.count)
-                    if remaining > 0 { stdout.data.append(chunk.prefix(remaining)) }
-                    if chunk.count > remaining { stdout.truncated = true }
-                } else {
-                    stdout.data.append(chunk)
-                }
+                stdout.append(chunk, limit: stdoutLimit)
             }
             readers.leave()
         }
@@ -269,13 +287,12 @@ enum GitService {
             while true {
                 let chunk = errPipe.fileHandleForReading.readData(ofLength: 64 * 1024)
                 guard !chunk.isEmpty else { break }
-                let remaining = max(0, Self.maxProcessStderrBytes - stderr.data.count)
-                if remaining > 0 { stderr.data.append(chunk.prefix(remaining)) }
-                if chunk.count > remaining { stderr.truncated = true }
+                stderr.append(chunk, limit: Self.maxProcessStderrBytes)
             }
             readers.leave()
         }
         var timedOut = false
+        var readersStranded = false
         if let timeout {
             // A stalled transfer (a dropped VPN mid-push) would otherwise hang
             // this call, and with it every later Git action, until Gift quits.
@@ -287,21 +304,40 @@ enum GitService {
                     latch.wait()
                 }
             }
+            // The child is gone, but whatever it spawned may still hold the
+            // pipes open — `ssh` under `git push`, a hook's daemon — and the
+            // readers see no end of file. Waiting for them here gave the
+            // deadline away: a 0.2s timeout returned after 5s in a test where
+            // a grandchild ignored TERM. Past this grace the call returns what
+            // was read and leaves the readers to finish on their own.
+            readersStranded = readers.wait(timeout: .now() + Self.readerGrace) == .timedOut
         } else {
+            // No deadline asked for: local Git is slow rather than stuck, and
+            // truncating its output would be worse than waiting for it.
             latch.wait()
+            readers.wait()
         }
-        readers.wait()
+        let out = stdout.snapshot
+        let err = stderr.snapshot
         if timedOut {
-            let note = Data("\ngit gave up after \(Int(timeout ?? 0))s with no result.\n".utf8)
-            return ProcessResult(stdout: stdout.data, stderr: stderr.data + note,
+            var note = "\ngit gave up after \(Int(timeout ?? 0))s with no result.\n"
+            if readersStranded {
+                note += "Something it started is still holding its output open, "
+                    + "so this may be only part of what it wrote.\n"
+            }
+            return ProcessResult(stdout: out.data, stderr: err.data + Data(note.utf8),
                                  code: process.terminationStatus == 0 ? -1
                                      : process.terminationStatus,
-                                 stdoutTruncated: stdout.truncated)
+                                 stdoutTruncated: out.truncated)
         }
-        return ProcessResult(stdout: stdout.data, stderr: stderr.data,
+        return ProcessResult(stdout: out.data, stderr: err.data,
                              code: process.terminationStatus,
-                             stdoutTruncated: stdout.truncated)
+                             stdoutTruncated: out.truncated)
     }
+
+    /// How long a timed-out call waits for its readers to see the end of the
+    /// pipes before returning what it has.
+    static let readerGrace: TimeInterval = 2
 
     /// Git subcommands that raise rather than accept literal pathspecs.
     static let literalPathspecRefusers: Set<String> = ["check-ignore"]

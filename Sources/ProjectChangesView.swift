@@ -290,11 +290,41 @@ final class ProjectChangesViewController: NSViewController {
         (sender.representedObject as? MenuAction)?.run()
     }
 
+    /// What the alert has to know before it can be written: which of these
+    /// files Git has never committed, and so cannot restore. Each answer is a
+    /// `cat-file`, which is a subprocess — asked here, off the main thread,
+    /// because asking for a few hundred files froze the window before the
+    /// question was even on screen.
+    private func prepareDiscard(of entries: [GitService.Status.Entry], in directory: URL,
+                                then ask: @escaping ([GitService.Status.Entry]) -> Void) {
+        guard operation == nil else {
+            NSSound.beep()
+            return
+        }
+        let id = begin("Checking what can be restored", in: directory, locksMessage: false)
+        GitService.operationQueue.async { [weak self] in
+            let newFiles = entries.filter { GitService.discardRemovesFile($0, in: directory) }
+            DispatchQueue.main.async {
+                guard let self, self.operation?.id == id else { return }
+                self.finish(id)
+                // The reader moved on while Git was answering.
+                guard self.directory == directory else { return }
+                ask(newFiles)
+            }
+        }
+    }
+
     /// Put one file back as HEAD has it. Confirmed first, and the alert says
     /// what cannot be recovered: a file Git has never committed goes to the
     /// Trash rather than back to an earlier version.
     private func discardChanges(_ entry: GitService.Status.Entry, in directory: URL) {
-        let removesFile = GitService.discardRemovesFile(entry, in: directory)
+        prepareDiscard(of: [entry], in: directory) { [weak self] newFiles in
+            self?.confirmDiscardOf(entry, removesFile: !newFiles.isEmpty, in: directory)
+        }
+    }
+
+    private func confirmDiscardOf(_ entry: GitService.Status.Entry, removesFile: Bool,
+                                  in directory: URL) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Discard changes to “\(entry.path)”?"
@@ -327,7 +357,14 @@ final class ProjectChangesViewController: NSViewController {
     private func discardAllChanges(in directory: URL) {
         let entries = self.entries
         guard !entries.isEmpty else { return }
-        let newFiles = entries.filter { GitService.discardRemovesFile($0, in: directory) }
+        prepareDiscard(of: entries, in: directory) { [weak self] newFiles in
+            self?.confirmDiscardOfAll(entries, newFiles: newFiles, in: directory)
+        }
+    }
+
+    private func confirmDiscardOfAll(_ entries: [GitService.Status.Entry],
+                                     newFiles: [GitService.Status.Entry],
+                                     in directory: URL) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = entries.count == 1

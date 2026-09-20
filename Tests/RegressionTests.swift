@@ -12,6 +12,7 @@ enum RegressionTests {
         _ = NSApplication.shared
         try testProcessDrain()
         try testProcessTimeoutsAndIconCache()
+        try testTimeoutSurvivesAHeldPipe()
         try testScopedStatusAndStaging()
         try testFileNamesAreNotPatterns()
         try testGitIgnoreRefreshReconciliation()
@@ -93,6 +94,30 @@ enum RegressionTests {
                    "bounded process capture did not retain the requested prefix")
         try expect(bounded.stdoutTruncated,
                    "bounded process capture did not report discarded output")
+    }
+
+    /// A deadline has to hold even when the process leaves something behind
+    /// that keeps its output open: `git push` over a stuck `ssh`, a hook's
+    /// daemon. Killing the child does not close the pipes, and waiting for
+    /// them to end gave the deadline away entirely.
+    private static func testTimeoutSurvivesAHeldPipe() throws {
+        let directory = try temporaryDirectory("held-pipe")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let timeout: TimeInterval = 0.2
+        let started = Date()
+        let result = GitService.runProcess(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            // The child ignores TERM and a grandchild holds stdout open.
+            arguments: ["-c", "sh -c 'trap \"\" TERM; sleep 5' & wait"],
+            in: directory, timeout: timeout)
+        let elapsed = Date().timeIntervalSince(started)
+        try expect(result.code != 0, "a process past its deadline reported success")
+        try expect(elapsed < timeout + GitService.readerGrace + 1,
+                   "the deadline waited \(elapsed)s for a pipe nothing was going to close")
+        let said = String(decoding: result.stderr, as: UTF8.self)
+        try expect(said.contains("gave up"), "the timeout did not say what happened")
+        try expect(said.contains("holding its output open"),
+                   "it did not say the result may be partial: \(said)")
     }
 
     private static func testProcessTimeoutsAndIconCache() throws {
@@ -2953,6 +2978,11 @@ enum RegressionTests {
         else { throw Failure(description: "tracked.txt is not listed") }
         try expect(changes.runMenuItemForTesting("Discard Changes…", row: trackedRow),
                    "Discard Changes is off")
+        // The question is prepared off the main thread: asking Git which files
+        // it can restore is a subprocess each, and a few hundred of them froze
+        // the window before the alert was even on screen.
+        try expect(asked.isEmpty && changes.isBusyForTesting,
+                   "the confirmation was prepared on the main thread")
         changes.settleForTesting()
         try expect(asked.last?.contains("tracked.txt") == true,
                    "the discard was not confirmed naming the file: \(asked)")
