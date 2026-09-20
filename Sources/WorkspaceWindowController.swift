@@ -540,7 +540,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         addAction(to: menu, title: "New Branch…") { [weak self] in
             self?.createBranch(from: branches, in: directory)
         }
-        let deletable = local.filter { !$0.isCurrent }
+        // Neither the branch this tree is on nor one another tree holds can be
+        // deleted; Git refuses both.
+        let deletable = local.filter { !$0.isCurrent && $0.heldByWorktree == nil }
         let delete = NSMenuItem(title: "Delete Branch", action: nil, keyEquivalent: "")
         let deleteMenu = NSMenu()
         deleteMenu.autoenablesItems = false
@@ -570,6 +572,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.switchBranch(branch, in: directory)
         }
         item.state = branch.isCurrent ? .on : .off
+        // A branch another working tree has checked out cannot be switched to
+        // — Git refuses — so the menu says so rather than offering it.
+        item.isEnabled = branch.heldByWorktree == nil
         return item
     }
 
@@ -591,18 +596,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         (sender.representedObject as? MenuAction)?.run()
     }
 
-    /// Two lines per item: the branch, then who last touched it and when.
+    /// Two lines per item: the branch, then who last touched it and when — or,
+    /// for one another working tree holds, where it is instead.
     static func branchMenuTitle(_ branch: GitService.Branch) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 1
+        let held = branch.heldByWorktree != nil
         let title = NSMutableAttributedString(
             string: branch.name,
             attributes: [.font: Theme.uiFont(11.5),
-                         .foregroundColor: Theme.foreground,
+                         .foregroundColor: held ? Theme.dimText : Theme.foreground,
                          .paragraphStyle: paragraph])
-        let detail = branch.author.isEmpty
-            ? branch.createdAt
-            : "\(branch.author) · \(branch.createdAt)"
+        let detail: String
+        if let worktree = branch.heldByWorktree {
+            detail = "in use by \((worktree as NSString).lastPathComponent)"
+        } else {
+            detail = branch.author.isEmpty
+                ? branch.createdAt
+                : "\(branch.author) · \(branch.createdAt)"
+        }
         title.append(NSAttributedString(
             string: "\n" + detail,
             attributes: [.font: Theme.uiFont(9.5),
@@ -623,6 +635,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     static func branchSwitch(to branch: GitService.Branch,
                              from current: String?) -> BranchSwitch {
         if branch.isCurrent { return .alreadyCurrent }
+        if let worktree = branch.heldByWorktree {
+            // Git allows a branch in one working tree at a time. Said plainly,
+            // with the place to look, rather than passed on as its fatal.
+            return .unavailable(reason:
+                "“\(branch.name)” is checked out in another working tree:\n\(worktree)\n\n"
+                    + "Git keeps a branch in one working tree at a time. Switch that tree "
+                    + "to something else, or remove it with `git worktree remove`, and "
+                    + "“\(branch.name)” is free again.")
+        }
         if branch.isRemote, branch.upstreamBranch == nil {
             return .unavailable(reason:
                 "This remote-tracking ref has no branch name to check out locally.")

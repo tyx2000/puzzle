@@ -31,6 +31,7 @@ enum RegressionTests {
         try testProjectCommitLine()
         try testStripedGitLists()
         try testBranchMenu()
+        try testBranchesHeldByAnotherWorktree()
         try testTerminalLaunchScripts()
         try testBranchMenuActions()
         try testSplitterAndRowGestures()
@@ -2203,6 +2204,80 @@ enum RegressionTests {
         let opened = try pattern(4) { history2.rowViewForTesting($0) }
         try expect(opened == ["plain", "stripe", "plain", "stripe"],
                    "rows kept the colours of their old places: \(opened)")
+    }
+
+    /// Git keeps a branch in one working tree at a time. A branch another
+    /// tree holds is listed as such and cannot be chosen, rather than being
+    /// offered and answered with Git's fatal.
+    private static func testBranchesHeldByAnotherWorktree() throws {
+        let root = try temporaryDirectory("worktrees")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: repository).out
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Gift Test"])
+        _ = git(["config", "user.email", "gift@example.invalid"])
+        try Data("one\n".utf8).write(to: repository.appendingPathComponent("file.txt"))
+        try expect(GitService.commit("fixture", in: repository).code == 0,
+                   "fixture commit failed")
+        _ = git(["branch", "side"])
+        // A second working tree, as `git worktree add` leaves one.
+        let elsewhere = root.appendingPathComponent("side-tree", isDirectory: true)
+        try expect(GitService.run(["worktree", "add", "-q", elsewhere.path, "side"],
+                                  in: repository).code == 0,
+                   "the fixture worktree was not created")
+
+        let branches = GitService.branches(in: repository)
+        guard let side = branches.first(where: { $0.name == "side" }),
+              let main = branches.first(where: { $0.name == "main" }) else {
+            throw Failure(description: "the fixture's branches are missing: "
+                            + "\(branches.map(\.name))")
+        }
+        try expect(side.heldByWorktree.map { $0.hasSuffix("side-tree") } == true,
+                   "the branch in the other tree does not say where it is: "
+                     + "\(String(describing: side.heldByWorktree))")
+        // The branch this window is on is held by this tree, which is not
+        // something to warn about.
+        try expect(main.isCurrent && main.heldByWorktree == nil,
+                   "the checked-out branch was reported as held elsewhere")
+
+        // Choosing it is refused before Git is asked, and the refusal says
+        // where to look.
+        guard case .unavailable(let reason) =
+                WorkspaceWindowController.branchSwitch(to: side, from: "main") else {
+            throw Failure(description: "a branch held by another tree was offered as switchable")
+        }
+        try expect(reason.contains("side-tree") && reason.contains("working tree"),
+                   "the refusal does not say where the branch is: \(reason)")
+
+        // And the menu shows it dimmed, with the tree it is in, rather than
+        // offering it.
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        let menu = workspace.branchMenu(branches, in: repository)
+        guard let item = menu.items.first(where: {
+            $0.title.components(separatedBy: "\n")[0] == "side"
+        }) else {
+            throw Failure(description: "the menu does not list the branch: "
+                            + "\(menu.items.map(\.title))")
+        }
+        try expect(!item.isEnabled, "a branch held by another tree can still be chosen")
+        try expect(item.title.contains("in use by side-tree"),
+                   "the item does not say which tree holds it: \(item.title)")
+        // Deleting it is not offered either, for the same reason Git refuses.
+        let deletable = menu.items.first { $0.title == "Delete Branch" }?
+            .submenu?.items.map { $0.title.components(separatedBy: "\n")[0] } ?? []
+        try expect(!deletable.contains("side"),
+                   "deleting a branch another tree holds is still offered: \(deletable)")
+
+        _ = GitService.run(["worktree", "remove", "--force", elsewhere.path], in: repository)
+        let freed = GitService.branches(in: repository)
+        try expect(freed.first(where: { $0.name == "side" })?.heldByWorktree == nil,
+                   "the branch is still held after its tree was removed")
     }
 
     private static func testTerminalLaunchScripts() throws {

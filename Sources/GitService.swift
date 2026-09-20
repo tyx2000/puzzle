@@ -80,6 +80,10 @@ enum GitService {
         let isRemote: Bool
         let upstreamRemote: String?
         let upstreamBranch: String?
+        /// The working tree that has this branch checked out, when it is not
+        /// this one. Git allows a branch in one working tree at a time, so a
+        /// branch held by another cannot be switched to from here.
+        var heldByWorktree: String?
     }
 
     struct Commit {
@@ -605,7 +609,7 @@ enum GitService {
         // making the branch menu scale linearly with process startup cost.
         let refs = run([
             "for-each-ref",
-            "--format=%(refname:short)%00%(upstream:short)%00%(authorname)%00%(authordate:format:%Y-%m-%d %H:%M)%00%(authordate:unix)",
+            "--format=%(refname:short)%00%(upstream:short)%00%(authorname)%00%(authordate:format:%Y-%m-%d %H:%M)%00%(authordate:unix)%00%(worktreepath)",
             "refs/heads",
         ], in: directory)
         guard refs.code == 0 else { return [] }
@@ -623,6 +627,9 @@ enum GitService {
             let upstream = String(fields[1])
             if !upstream.isEmpty { representedRemoteRefs.insert(upstream) }
             let upstreamParts = upstream.split(separator: "/", maxSplits: 1).map(String.init)
+            // The branch on screen is held by this working tree, which is not
+            // something to warn about.
+            let worktree = fields.count >= 6 ? String(fields[5]) : ""
             branches.append(Branch(
                 name: name,
                 author: String(fields[2]),
@@ -631,7 +638,8 @@ enum GitService {
                 isCurrent: name == current,
                 isRemote: false,
                 upstreamRemote: upstreamParts.first,
-                upstreamBranch: upstreamParts.count > 1 ? upstreamParts[1] : nil))
+                upstreamBranch: upstreamParts.count > 1 ? upstreamParts[1] : nil,
+                heldByWorktree: worktree.isEmpty || name == current ? nil : worktree))
         }
 
         // Include remote-only branches already known to this clone. Symbolic
