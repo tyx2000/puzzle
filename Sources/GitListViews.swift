@@ -4,7 +4,7 @@ import AppKit
 /// and row subclasses that carry their hover and stripes. None of it touches
 /// a list's state — they are handed what to draw and draw it.
 
-/// One commit on one line, in columns: commit ID, message, author, time.
+/// One commit on one line: graph, commit ID, message, author, time.
 /// Every column but the message is as wide as the widest entry down the list,
 /// so each starts at the same place on every row; the message takes whatever
 /// width is left.
@@ -18,6 +18,8 @@ final class GitCommitCell: DrawnSidebarCell {
     private var commitID = ""
     private var metaColor = NSColor.clear
     private var columns: Columns?
+    private var graphRow: GitHistoryGraph.Row?
+    private var graphWidth: CGFloat = 0
     /// Between every column in the row.
     static let columnGap: CGFloat = 10
     /// What the message keeps before the author gives way, on a panel dragged
@@ -68,10 +70,14 @@ final class GitCommitCell: DrawnSidebarCell {
     private(set) var drawnSubjectRectForTesting: NSRect = .zero
     private(set) var drawnAuthorRectForTesting: NSRect = .zero
     private(set) var drawnDateRectForTesting: NSRect = .zero
+    private(set) var drawnGraphRectForTesting: NSRect = .zero
 
     /// `columns` is the list's; left out, the row measures its own.
-    func configure(commit: GitService.Commit, pending: Bool, columns: Columns? = nil) {
+    func configure(commit: GitService.Commit, pending: Bool, columns: Columns? = nil,
+                   graphRow: GitHistoryGraph.Row? = nil, graphWidth: CGFloat = 0) {
         self.columns = columns
+        self.graphRow = graphRow
+        self.graphWidth = graphWidth
         commitID = commit.shortHash
         subject = commit.subject
         author = Self.authorText(commit, pending: pending)
@@ -80,7 +86,11 @@ final class GitCommitCell: DrawnSidebarCell {
         // No bubble: the row carries everything it has to say, and a tip over
         // every row is only something that follows the pointer down the list.
         toolTip = nil
-        exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
+        let graphDescription = graphRow.map {
+            "\($0.isHead ? "HEAD, " : "")\($0.isMerge ? "Merge, " : "")"
+        } ?? ""
+        exposeToAccessibility(graphDescription
+                                + "\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
                                 + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
     }
@@ -110,7 +120,19 @@ final class GitCommitCell: DrawnSidebarCell {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
+        NSGraphicsContext.saveGraphicsState()
+        bounds.clip()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        drawnGraphRectForTesting = .zero
+        if let graphRow, graphWidth > 0 {
+            let graphRect = NSRect(x: 8, y: 0,
+                                   width: graphWidth - GitHistoryGraphDrawing.trailingGap,
+                                   height: bounds.height)
+            GitHistoryGraphDrawing.draw(graphRow, in: graphRect)
+            drawnGraphRectForTesting = graphRect
+        }
+        let content = NSRect(x: 8 + graphWidth, y: 0,
+                             width: max(0, bounds.width - 16 - graphWidth),
                              height: bounds.height)
         let columns = self.columns ?? Columns.measuring(
             commitIDs: [commitID], authors: [author], dates: [date])
@@ -138,6 +160,8 @@ final class GitCommitCell: DrawnSidebarCell {
     var authorForTesting: String { author }
     var dateForTesting: String { date }
     var toolTipForTesting: String { toolTip ?? "" }
+    var graphWidthForTesting: CGFloat { graphWidth }
+    var graphRowForTesting: GitHistoryGraph.Row? { graphRow }
 }
 
 final class GitHistoryFileCell: DrawnSidebarCell {
@@ -145,7 +169,12 @@ final class GitHistoryFileCell: DrawnSidebarCell {
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
-    func configure(file: GitService.CommitFile) {
+    private var graphLanes: [GitHistoryGraph.Lane] = []
+    private var graphWidth: CGFloat = 0
+    func configure(file: GitService.CommitFile,
+                   graphLanes: [GitHistoryGraph.Lane] = [], graphWidth: CGFloat = 0) {
+        self.graphLanes = graphLanes
+        self.graphWidth = graphWidth
         status = file.status
         statusColor = Self.statusColor(file.status)
         name = (file.path as NSString).lastPathComponent
@@ -165,18 +194,30 @@ final class GitHistoryFileCell: DrawnSidebarCell {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Indented under the commit it belongs to, which is what says these
-        // rows are its files now that no lane is drawn behind them.
+        NSGraphicsContext.saveGraphicsState()
+        bounds.clip()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        if graphWidth > 0 {
+            GitHistoryGraphDrawing.drawContinuation(graphLanes,
+                in: NSRect(x: 8, y: 0,
+                           width: graphWidth - GitHistoryGraphDrawing.trailingGap,
+                           height: bounds.height))
+        }
+        // Files stay indented under the commit text, clear of every graph lane.
         SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
-                                in: NSRect(x: 18, y: 0, width: 14, height: bounds.height),
+                                in: NSRect(x: 18 + graphWidth, y: 0,
+                                           width: 14, height: bounds.height),
                                 alignment: .center)
-        let textX: CGFloat = 38
+        let textX: CGFloat = 38 + graphWidth
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
             in: NSRect(x: textX, y: 0, width: max(0, bounds.width - textX - 6),
                        height: bounds.height))
     }
+
+    var graphLanesForTesting: [GitHistoryGraph.Lane] { graphLanes }
+    var graphWidthForTesting: CGFloat { graphWidth }
 }
 
 final class GitChangeCell: DrawnSidebarCell {

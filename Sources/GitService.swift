@@ -93,13 +93,15 @@ enum GitService {
         /// Full timestamp, shown below the commit subject in History.
         let absoluteDate: String
         let email: String
-        /// Short hashes of this commit's parents, first-parent first. Two or
-        /// more means a merge. Empty for the root commit — and for a parent
-        /// that the log's own filters pruned away.
+        /// Full parent IDs, first-parent first. For a scoped project Git
+        /// rewrites these to the nearest ancestors included in its history.
         var parents: [String] = []
         /// Branch and tag names pointing here, as Git decorates them
         /// ("HEAD -> main, origin/main"). Empty for most commits.
         var refs: String = ""
+        /// Keep graph identity independent of the configurable display hash.
+        var fullHash: String = ""
+        var graphID: String { fullHash.isEmpty ? shortHash : fullHash }
 
         /// Blame summary shown as the commit record's secondary line.
         var blameSummary: String { "\(author)  ·  \(absoluteDate)" }
@@ -913,24 +915,25 @@ enum GitService {
         // NUL is the one byte commit metadata cannot contain, so neither an
         // unusual subject nor an author name can shift these fields.
         //
-        // `%p` and `%D` carry the shape of the history — who each commit came
-        // from, and which branches point at it — which is what the graph column
-        // draws. `--date-order` is what a graph needs: still newest first, but
-        // a commit is never listed before one of its children, so a lane never
-        // has to jump backwards.
-        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%p%x00%D"
+        // Full IDs identify graph nodes; the abbreviated hash is display only.
+        // Topological order keeps children above parents, even with skewed
+        // clocks, and groups each branch instead of interleaving its dates.
+        let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%P%x00%D%x00%H"
         // `--full-history` because of the pathspec: with one, Git simplifies
         // the history it walks — a merge that changed nothing under the path
         // relative to its first parent is dropped, and with it every commit
         // that only ever reached this branch through that merge. The list is
         // meant to hold everything behind HEAD, including work done on a
         // branch that was merged in.
-        let result = run(["--no-pager", "log", "-z", "--date-order", "--full-history",
+        // `--parents` also enables parent rewriting: commits touching only a
+        // sibling project must not leave dangling edges in the visible graph.
+        let result = run(["--no-pager", "log", "-z", "--topo-order", "--full-history",
+                          "--parents",
                           "--pretty=format:" + format,
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
                           "--", "."], in: directory)
         guard result.code == 0 else { return [] }
-        return parseLog(result.out, fieldsPerCommit: 7)
+        return parseLog(result.out, fieldsPerCommit: 8)
     }
 
     /// Splits `-z` log output into commits. `fieldsPerCommit` says whether the
@@ -950,6 +953,9 @@ enum GitService {
                     .split(separator: " ").map(String.init)
                 commit.refs = String(fields[index + 6])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if fieldsPerCommit >= 8 {
+                commit.fullHash = String(fields[index + 7])
             }
             commits.append(commit)
             index += fieldsPerCommit

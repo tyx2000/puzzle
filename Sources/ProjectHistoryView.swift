@@ -1,7 +1,7 @@
 import AppKit
 
 /// The current branch's commits, under the changes of the same project: one
-/// line per commit — commit ID, message, author, time — and its files
+/// line per commit — graph, commit ID, message, author, time — and its files
 /// underneath when it is opened.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
@@ -34,6 +34,8 @@ final class ProjectHistoryViewController: NSViewController {
     /// The column widths every row shares, so each column starts at the same
     /// place down the whole list.
     private var columns = GitCommitCell.Columns()
+    private var graphRows: [String: GitHistoryGraph.Row] = [:]
+    private var graphWidth: CGFloat = 0
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
     private var rows: [Row] = []
@@ -55,6 +57,7 @@ final class ProjectHistoryViewController: NSViewController {
         table.intercellSpacing = .zero
         table.selectionHighlightStyle = .none
         table.usesAlternatingRowBackgroundColors = false
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.dataSource = self
         table.delegate = self
         table.target = self
@@ -73,6 +76,11 @@ final class ProjectHistoryViewController: NSViewController {
             self, selector: #selector(scrolled),
             name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         scroll.hasVerticalScroller = true
+        // Deeply branched histories keep distinct lanes. When they no longer
+        // fit beside the text, scroll rather than folding tracks together.
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -114,6 +122,8 @@ final class ProjectHistoryViewController: NSViewController {
         commits = []
         unpushed = []
         columns = GitCommitCell.Columns()
+        graphRows = [:]
+        graphWidth = 0
         expanded = []
         files = [:]
         rebuildRows()
@@ -135,6 +145,7 @@ final class ProjectHistoryViewController: NSViewController {
         GitService.workQueue.async { [weak self] in
             let log = GitService.log(in: directory, limit: wanted)
             let pending = GitService.unpushedHashes(in: directory)
+            let graph = GitHistoryGraph(commits: log)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
@@ -148,6 +159,9 @@ final class ProjectHistoryViewController: NSViewController {
                 self.commits = log
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
+                self.graphRows = Dictionary(uniqueKeysWithValues:
+                    zip(log, graph.rows).map { ($0.0.graphID, $0.1) })
+                self.graphWidth = GitHistoryGraphDrawing.columnWidth(laneCount: graph.laneCount)
                 self.columns = GitCommitCell.Columns.measuring(
                     commitIDs: log.map(\.shortHash),
                     authors: log.map {
@@ -194,6 +208,15 @@ final class ProjectHistoryViewController: NSViewController {
         }
         rows = built
         guard isViewLoaded else { return }
+        if let column = table.tableColumns.first {
+            let fixedColumns = [columns.commitID, min(columns.author, GitCommitCell.minimumSqueezedWidth),
+                                columns.date].filter { $0 > 0 }
+            column.minWidth = 16 + graphWidth + fixedColumns.reduce(0, +)
+                + CGFloat(fixedColumns.count) * GitCommitCell.columnGap
+                + GitCommitCell.minimumSubjectWidth
+            column.width = max(column.width, column.minWidth)
+            table.sizeLastColumnToFit()
+        }
         table.reloadData()
     }
 
@@ -317,6 +340,10 @@ final class ProjectHistoryViewController: NSViewController {
         _ = view
         return tableView(table, viewFor: nil, row: row) as? GitCommitCell
     }
+    func fileCellForTesting(_ row: Int) -> GitHistoryFileCell? {
+        _ = view
+        return tableView(table, viewFor: nil, row: row) as? GitHistoryFileCell
+    }
     /// How deep the list has read so far.
     var limitForTesting: Int { limit }
     /// Put the end of the list in view, the way scrolling to the bottom does.
@@ -382,14 +409,16 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           columns: columns)
+                           columns: columns, graphRow: graphRows[commit.graphID],
+                           graphWidth: graphWidth)
             return cell
-        case .file(let file, _):
+        case .file(let file, let commit):
             let id = NSUserInterfaceItemIdentifier("project-history-file")
             let cell = (tableView.makeView(withIdentifier: id, owner: self)
                         as? GitHistoryFileCell) ?? GitHistoryFileCell()
             cell.identifier = id
-            cell.configure(file: file)
+            cell.configure(file: file, graphLanes: graphRows[commit.graphID]?.bottomLanes ?? [],
+                           graphWidth: graphWidth)
             return cell
         }
     }

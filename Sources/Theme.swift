@@ -69,6 +69,10 @@ enum Theme {
     static let blue = hex(0x39bae6)
     static let purple = hex(0xd2a6ff)
 
+    /// Distinct categorical tracks, as in VS Code's SCM graph. Use the Ayu
+    /// hues already present in Gift; graph colours denote ancestry, not status.
+    static let gitGraphColors: [NSColor] = [blue, purple, green, yellow, red, orange]
+
     // Fonts and row metrics are fixed: Gift has no settings.
 
     /// Monaco 12 for diff text and line numbers.

@@ -16,7 +16,13 @@ else — no editor, no file tree, no search, no settings.
   diff; right-click it to copy its path, reveal it in Finder, or discard it (or
   every change) — confirmed first, with new files going to the Trash.
 - **History** — under the changes, one line per commit:
-  commit ID · message · author · time (`yyyy-MM-dd HH:mm`), 10pt apart. There
+  Git graph · commit ID · message · author · time (`yyyy-MM-dd HH:mm`), 10pt apart.
+  The first column follows ancestry with coloured lanes and curved merge
+  lines: solid commit dots, hollow merge dots, and an outer ring for HEAD.
+  Its cyan, purple, green, amber, coral, and orange tracks use Gift's Ayu Dark
+  palette; colours identify tracks, not file status or branch names. Lanes
+  continue through expanded file rows and across loaded pages. Wide graphs
+  can scroll horizontally without hiding lanes. There
   is no branch column: Git does not record which branch a commit was made on,
   and a commit on several branches has no one name to show. Every column but the message is as wide as its widest entry, so the
   columns line up; the message takes whatever width is left. Unpushed commits
