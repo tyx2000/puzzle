@@ -18,6 +18,9 @@ final class DiffPaneViewController: NSViewController {
         let path: String
         let source: Source
         var diff: String
+        /// True when the body was dropped under memory pressure: the tab is
+        /// still listed, but has to be read again before it can be shown.
+        var needsReread = false
 
         /// One tab per file and source: opening the same one again refreshes
         /// it rather than adding another.
@@ -36,6 +39,19 @@ final class DiffPaneViewController: NSViewController {
             }
         }
     }
+
+    /// What a closed tab leaves behind: how to read it again, not the diff
+    /// itself. A diff runs to 8 MiB, and twenty of them kept "in case" cost
+    /// more than reading one back costs.
+    private struct ClosedTab: Equatable {
+        let directory: URL
+        let path: String
+        let source: Tab.Source
+    }
+
+    /// Read this diff again — reopened from ⇧⌘T, or shown after its body was
+    /// released. The window controller answers by opening the tab afresh.
+    var onReadAgain: ((URL, String, Tab.Source) -> Void)?
 
     /// Start-page actions, forwarded to the window controller.
     var onOpenFolder: (() -> Void)?
@@ -57,7 +73,7 @@ final class DiffPaneViewController: NSViewController {
     private(set) var tabs: [Tab] = []
     private(set) var activeIndex: Int?
     /// What ⇧⌘T brings back, newest last.
-    private var closed: [Tab] = []
+    private var closed: [ClosedTab] = []
     private static let closedLimit = 20
     /// The layout sticks for the session, so switching files does not switch
     /// back.
@@ -150,8 +166,9 @@ final class DiffPaneViewController: NSViewController {
     /// the file moving under the reader must not throw them back to the top.
     func update(id: String, diff: String) {
         guard let index = tabs.firstIndex(where: { $0.id == id }),
-              tabs[index].diff != diff else { return }
+              tabs[index].diff != diff || tabs[index].needsReread else { return }
         tabs[index].diff = diff
+        tabs[index].needsReread = false
         guard index == activeIndex else { return }
         showActive(keepingPosition: true)
     }
@@ -160,6 +177,22 @@ final class DiffPaneViewController: NSViewController {
         guard tabs.indices.contains(index), index != activeIndex else { return }
         activeIndex = index
         reload()
+    }
+
+    /// The tab now showing lost its body under memory pressure: ask for it.
+    private func readAgainIfNeeded() {
+        guard let tab = activeTab, tab.needsReread else { return }
+        onReadAgain?(tab.directory, tab.path, tab.source)
+    }
+
+    /// Let go of every diff not being read. The tabs stay; each is read again
+    /// when it is next shown.
+    func releaseInactiveBodies() {
+        closed.removeAll()
+        for index in tabs.indices where index != activeIndex && !tabs[index].diff.isEmpty {
+            tabs[index].diff = ""
+            tabs[index].needsReread = true
+        }
     }
 
     func close(index: Int) {
@@ -227,17 +260,19 @@ final class DiffPaneViewController: NSViewController {
         reload()
     }
 
-    /// ⇧⌘T. False when nothing has been closed.
+    /// ⇧⌘T. False when nothing has been closed. The diff is read again rather
+    /// than kept: what it showed when it was closed may not be true any more.
     @discardableResult
     func reopenLastClosed() -> Bool {
         guard let tab = closed.popLast() else { return false }
-        open(tab)
+        onReadAgain?(tab.directory, tab.path, tab.source)
         return true
     }
 
     private func remember(_ tab: Tab) {
-        closed.removeAll { $0.id == tab.id }
-        closed.append(tab)
+        let closing = ClosedTab(directory: tab.directory, path: tab.path, source: tab.source)
+        closed.removeAll { $0 == closing }
+        closed.append(closing)
         if closed.count > Self.closedLimit { closed.removeFirst() }
     }
 
@@ -251,6 +286,7 @@ final class DiffPaneViewController: NSViewController {
         updateTabHeight()
         showActive(keepingPosition: false)
         updatePlaceholder()
+        readAgainIfNeeded()
     }
 
     private func tooltip(for tab: Tab) -> String {
@@ -290,6 +326,9 @@ final class DiffPaneViewController: NSViewController {
     var diffViewForTesting: DiffView { _ = view; return diffView }
     var headerForTesting: DiffHeaderView { _ = view; return header }
     var tabTitlesForTesting: [String] { tabs.map(\.title) }
+    /// How much diff text the pane is holding, open tabs and closed ones.
+    var heldDiffBytesForTesting: Int { tabs.reduce(0) { $0 + $1.diff.utf8.count } }
+    var closedCountForTesting: Int { closed.count }
     var tabRowHeightForTesting: CGFloat { _ = view; return tabBar.rowHeight }
     var welcomeVisibleForTesting: Bool { _ = view; return !welcome.isHidden }
     var hintVisibleForTesting: Bool { _ = view; return !hint.isHidden }

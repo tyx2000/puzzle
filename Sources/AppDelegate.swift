@@ -67,7 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setupMemoryPressureHandling() {
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical], queue: .main)
-        source.setEventHandler {
+        source.setEventHandler { [weak self] in
+            self?.windows.forEach { $0.releaseTransientMemory() }
             FileIcons.releaseTransientMemory()
         }
         source.resume()

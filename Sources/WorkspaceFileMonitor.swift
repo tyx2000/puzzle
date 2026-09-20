@@ -1,17 +1,28 @@
 import CoreServices
 import Foundation
 
-/// Watches ordinary project files. Events are coalesced briefly so an atomic
-/// save (temporary file + rename) is observed as one final state rather than a
-/// sequence of incomplete intermediate states.
+/// Watches ordinary project files and says only that something changed: the
+/// answer is always the same, a fresh `git status` for the whole project, so
+/// the paths are never read and are not carried.
+///
+/// Events are coalesced so an atomic save (temporary file + rename) is
+/// observed as one final state rather than a sequence of incomplete ones.
 final class WorkspaceFileMonitor {
     private var stream: FSEventStreamRef?
     private var pendingDelivery: DispatchWorkItem?
-    private var pendingPaths: Set<String> = []
-    private var onChange: (([URL], Date) -> Void)?
+    /// When the burst now waiting to be delivered began.
+    private var pendingSince: Date?
+    private var onChange: (() -> Void)?
     private var stopped = false
 
-    init(directory: URL, onChange: @escaping ([URL], Date) -> Void) {
+    /// How long the tree has to be quiet before a burst is delivered.
+    static let quietWindow: TimeInterval = 0.10
+    /// …and how long a burst may hold delivery back. Without this, a build
+    /// writing a file every few milliseconds pushed the refresh out for as
+    /// long as it ran, and the changes list sat still through all of it.
+    static let maximumDelay: TimeInterval = 1.0
+
+    init(directory: URL, onChange: @escaping () -> Void) {
         self.onChange = onChange
         start(path: directory.standardizedFileURL.path)
     }
@@ -53,7 +64,7 @@ final class WorkspaceFileMonitor {
         stopped = true
         pendingDelivery?.cancel()
         pendingDelivery = nil
-        pendingPaths.removeAll()
+        pendingSince = nil
         onChange = nil
         guard let stream else { return }
         FSEventStreamStop(stream)
@@ -62,27 +73,33 @@ final class WorkspaceFileMonitor {
         self.stream = nil
     }
 
-    fileprivate func filesChanged(paths: [String]) {
+    /// Something under the project changed. Called on the main queue, from
+    /// the stream and from tests.
+    func noteChange() {
         guard !stopped else { return }
-        pendingPaths.formUnion(paths)
+        let now = Date()
+        let since = pendingSince ?? now
+        pendingSince = since
+        // Settle after the last event, but never past the burst's deadline.
+        let delay = min(Self.quietWindow,
+                        max(0, Self.maximumDelay - now.timeIntervalSince(since)))
         pendingDelivery?.cancel()
         let delivery = DispatchWorkItem { [weak self] in
             guard let self, !self.stopped else { return }
-            let urls = self.pendingPaths.map { URL(fileURLWithPath: $0) }
-            self.pendingPaths.removeAll(keepingCapacity: true)
-            self.onChange?(urls, Date())
+            self.pendingSince = nil
+            self.onChange?()
         }
         pendingDelivery = delivery
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10, execute: delivery)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: delivery)
     }
 }
 
 private let workspaceFileEventCallback: FSEventStreamCallback = {
-    _, context, count, paths, _, _ in
+    _, context, _, _, _, _ in
     guard let context else { return }
-    let raw = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as NSArray
-    let changed = (0..<count).compactMap { raw[Int($0)] as? String }
+    // The paths are deliberately not read: every event means the same thing,
+    // and turning thousands of them into strings was work for nobody.
     Unmanaged<WorkspaceFileMonitor>.fromOpaque(context)
         .takeUnretainedValue()
-        .filesChanged(paths: changed)
+        .noteChange()
 }

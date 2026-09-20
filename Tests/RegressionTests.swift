@@ -16,6 +16,7 @@ enum RegressionTests {
         try testFileNamesAreNotPatterns()
         try testGitIgnoreRefreshReconciliation()
         try testPushSelection()
+        try testWorkspaceFileMonitorDelivery()
         try testGitRepositoryMonitor()
         try testBranchListing()
         try testDockRecentProjectsMenu()
@@ -409,6 +410,51 @@ enum RegressionTests {
         try expect(!ambiguous.ok && ambiguous.message.contains("backup, second"),
                    "push arbitrarily selected one of multiple non-origin remotes, or did "
                      + "not name them: \(ambiguous.message)")
+    }
+
+    /// The working-tree watcher says only that something changed, coalesces a
+    /// burst into one refresh, and delivers even while the events keep coming.
+    private static func testWorkspaceFileMonitorDelivery() throws {
+        let directory = try temporaryDirectory("workspace-monitor")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var deliveries = 0
+        let monitor = WorkspaceFileMonitor(directory: directory) { deliveries += 1 }
+        defer { monitor.stop() }
+        func spin(_ seconds: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+        }
+
+        // A burst — one save is several events — is one refresh.
+        for _ in 0..<20 { monitor.noteChange() }
+        try expect(deliveries == 0, "the burst was delivered before it settled")
+        spin(WorkspaceFileMonitor.quietWindow + 0.2)
+        try expect(deliveries == 1, "a burst delivered \(deliveries) refreshes, not one")
+
+        // Events that never stop — a build writing files — must not hold the
+        // refresh back past the deadline. Each one lands inside the quiet
+        // window, so a plain trailing debounce would deliver nothing at all.
+        deliveries = 0
+        let started = Date()
+        var deliveredAfter: TimeInterval?
+        while Date().timeIntervalSince(started) < WorkspaceFileMonitor.maximumDelay * 1.5 {
+            monitor.noteChange()
+            spin(WorkspaceFileMonitor.quietWindow / 2)
+            if deliveries > 0, deliveredAfter == nil {
+                deliveredAfter = Date().timeIntervalSince(started)
+            }
+        }
+        guard let deliveredAfter else {
+            throw Failure(description: "continuous events never delivered a refresh")
+        }
+        try expect(deliveredAfter <= WorkspaceFileMonitor.maximumDelay + 0.3,
+                   "the deadline delivered after \(deliveredAfter)s")
+
+        // Stopped, it is done: nothing is delivered afterwards.
+        monitor.stop()
+        deliveries = 0
+        monitor.noteChange()
+        spin(WorkspaceFileMonitor.quietWindow + 0.2)
+        try expect(deliveries == 0, "a stopped monitor still delivered \(deliveries)")
     }
 
     private static func testGitRepositoryMonitor() throws {
@@ -3329,6 +3375,12 @@ enum RegressionTests {
             .init(directory: directory, path: path, source: source,
                   diff: "@@ -1 +1 @@\n-a\n+b\n")
         }
+        // Reading a diff is the window controller's errand; here it is this.
+        var readAgain: [String] = []
+        pane.onReadAgain = { directory, path, source in
+            readAgain.append(path)
+            pane.open(tab(path, source, in: directory))
+        }
         pane.open(tab("a.txt"))
         pane.open(tab("a.txt", .commit("abc1234")))
         pane.open(tab("b.txt"))
@@ -3346,9 +3398,12 @@ enum RegressionTests {
         try expect(pane.closeActive(), "⌘W had nothing to close")
         try expect(pane.activeTab?.title == "a.txt @ abc1234",
                    "closing a tab did not show the next: \(String(describing: pane.activeTab?.title))")
-        // ⇧⌘T brings it back.
+        // ⇧⌘T brings it back — by reading the diff again, not from a copy
+        // kept aside: what it showed when it was closed may not be true now.
         try expect(pane.reopenLastClosed() && pane.activeTab?.path == "c.txt",
                    "the closed tab did not come back")
+        try expect(readAgain == ["c.txt"],
+                   "reopening did not read the diff again: \(readAgain)")
         // Stepping wraps round.
         pane.select(3)
         pane.step(by: 1)
@@ -3360,9 +3415,35 @@ enum RegressionTests {
         pane.closeTabs(in: one)
         try expect(pane.tabs.map(\.directory) == [two],
                    "closing a project took other tabs, or left its own")
+        // Closed tabs cost a path each, not a diff: twenty 8 MiB diffs kept
+        // "in case" outweigh reading one back.
         pane.closeAll()
         try expect(pane.tabs.isEmpty && !pane.closeActive(),
                    "tabs survived closing them all")
+        try expect(pane.heldDiffBytesForTesting == 0 && pane.closedCountForTesting > 0,
+                   "closing every tab still holds \(pane.heldDiffBytesForTesting) bytes of diff")
+
+        // Under memory pressure the tabs stay and their bodies go; the one
+        // being read is left alone, and the others are read again when shown.
+        readAgain = []
+        pane.open(tab("p.txt"))
+        pane.open(tab("q.txt"))
+        let held = pane.heldDiffBytesForTesting
+        try expect(held > 0, "the fixture holds no diff")
+        pane.releaseInactiveBodies()
+        try expect(pane.tabs.count == 2, "releasing bodies closed a tab")
+        try expect(pane.heldDiffBytesForTesting < held,
+                   "releasing kept every body: \(pane.heldDiffBytesForTesting) of \(held)")
+        try expect(pane.activeTab?.diff.isEmpty == false,
+                   "the tab being read lost its body")
+        try expect(readAgain.isEmpty, "releasing read a diff back immediately")
+        pane.select(0)
+        try expect(readAgain == ["p.txt"],
+                   "showing a released tab did not read it again: \(readAgain)")
+        try expect(pane.activeTab?.diff.isEmpty == false,
+                   "the released tab came back empty")
+        try expect(pane.heldDiffBytesForTesting == held,
+                   "the re-read tab did not restore what was released")
     }
 
     private static func testFoldersRouteToTheirProjectWindow() throws {

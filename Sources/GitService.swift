@@ -913,6 +913,26 @@ enum GitService {
         return commits
     }
 
+    /// The diff for one working-tree path, without taking a status snapshot —
+    /// for a tab read again after its body was dropped, or reopened after it
+    /// was closed. Nil when the path has no change left to show.
+    static func diff(forPath path: String, in directory: URL) -> String? {
+        for args in [["--no-pager", "diff", "--no-color", "--", path],
+                     ["--no-pager", "diff", "--no-color", "--cached", "--", path]] {
+            let result = runDiff(args, in: directory)
+            if !result.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return result.out
+            }
+        }
+        // Git prints nothing for an untracked file; the list shows the whole
+        // file as an addition instead, and so must this.
+        let untracked = run(["ls-files", "--others", "--error-unmatch", "--", path],
+                            in: directory)
+        guard untracked.code == 0 else { return nil }
+        return diff(for: Status.Entry(code: "??", path: path, originalPath: nil),
+                    in: directory)
+    }
+
     /// Unified diff for one path. Untracked files have no diff against the
     /// index, so they're rendered as an all-additions diff of the file itself.
     static func diff(for entry: Status.Entry, in directory: URL) -> String {

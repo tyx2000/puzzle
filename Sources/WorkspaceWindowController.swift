@@ -141,6 +141,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             self.showBranchMenu(from: rect, in: self.sidebar.projectTitle)
         }
+        // A tab reopened with ⇧⌘T, or shown after its body was released under
+        // memory pressure, is read from Git again rather than from a copy kept
+        // aside: what it showed then may not be true now.
+        diffs.onReadAgain = { [weak self] directory, path, source in
+            guard let self else { return }
+            switch source {
+            case .workingTree: self.showDiff(forPath: path, in: directory)
+            case .commit(let hash): self.showCommitDiff(hash: hash, path: path, in: directory)
+            }
+        }
         diffs.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         diffs.onOpenRecent = { [weak self] url in self?.openSelection([url]) }
         // Every ticked project joins this window, and the last one read becomes
@@ -263,7 +273,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self.refreshExternalGitState()
         }
         // The working tree: an edit in any editor is a change to list.
-        workspaceFileMonitor = WorkspaceFileMonitor(directory: url) { [weak self] _, _ in
+        workspaceFileMonitor = WorkspaceFileMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
             self.refreshGit(requireFollowUp: true)
         }
@@ -294,15 +304,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// The same, for a path alone: the status entry a tab was opened from is
+    /// not kept, and the file may have changed since.
+    func showDiff(forPath path: String, in directory: URL) {
+        GitService.workQueue.async { [weak self] in
+            let text = GitService.diff(forPath: path, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.projectURL == directory else { return }
+                self.diffs.open(.init(directory: directory, path: path,
+                                      source: .workingTree, diff: text ?? ""))
+            }
+        }
+    }
+
     /// Show how one file changed in a specific commit.
     func showCommitDiff(commit: GitService.Commit, file: GitService.CommitFile,
                         in directory: URL) {
+        showCommitDiff(hash: commit.shortHash, path: file.path, in: directory)
+    }
+
+    func showCommitDiff(hash: String, path: String, in directory: URL) {
         GitService.workQueue.async { [weak self] in
-            let text = GitService.diff(inCommit: commit.shortHash, path: file.path, in: directory)
+            let text = GitService.diff(inCommit: hash, path: path, in: directory)
             DispatchQueue.main.async {
                 guard let self, self.projectURL == directory else { return }
-                self.diffs.open(.init(directory: directory, path: file.path,
-                                      source: .commit(commit.shortHash), diff: text))
+                self.diffs.open(.init(directory: directory, path: path,
+                                      source: .commit(hash), diff: text))
             }
         }
     }
@@ -871,6 +898,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         guard !diffs.reopenLastClosed() else { return }
         NSSound.beep()
     }
+    /// Under memory pressure: let go of every diff not being read. Each is
+    /// read again when its tab is next shown.
+    func releaseTransientMemory() {
+        diffs.releaseInactiveBodies()
+    }
+
     /// ⌘R: read the project again, as returning to the app does.
     @objc func refreshRepository(_ sender: Any?) {
         refreshExternalGitState()
