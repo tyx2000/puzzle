@@ -80,6 +80,7 @@ enum RegressionTests {
         try testProjectTitleStrip()
         try testProjectCommitLine()
         try testChangeRowActions()
+        try testHistoryRowOpenActions()
         try testStripedGitLists()
         try testGitPanelHistoryPages()
         try testBranchMenu()
@@ -6854,6 +6855,151 @@ enum RegressionTests {
         try expect(waitUntil { panel.rowCountForTesting >= 1 }, "the history never listed")
         try expect(panel.contextMenuForTesting(row: 0) != nil,
                    "a commit row lost its menu as well")
+    }
+
+    private static func testHistoryRowOpenActions() throws {
+        let root = try temporaryDirectory("history-row-open")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, result.err)
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Puzzle Test"])
+        try git(["config", "user.email", "puzzle@example.invalid"])
+        let source = project.appendingPathComponent("source.swift")
+        let missing = project.appendingPathComponent("removed.swift")
+        try Data("let value = 1\n".utf8).write(to: source)
+        try Data("removed\n".utf8).write(to: missing)
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        try FileManager.default.removeItem(at: missing)
+
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        func draw(_ cell: GitHistoryFileCell) {
+            cell.layoutSubtreeIfNeeded()
+            if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+            }
+        }
+        func clickOpen(_ cell: GitHistoryFileCell) throws {
+            draw(cell)
+            let box = cell.actionRectForTesting(.open)
+            try expect(box.width == GitChangeCell.actionSize
+                        && box.maxX + GitChangeCell.actionInset == cell.bounds.maxX,
+                       "history open is not aligned with the Changes action")
+            try expect(cell.actionRectForTesting(.discard) == .zero,
+                       "history unexpectedly offers discard")
+            try expect(cell.drawnNameRectForTesting.maxX < box.minX,
+                       "history text overlaps its open button")
+            cell.resetCursorRects()
+            try expect(cell.cursorRectsForTesting == [box], "history open has no hand cursor")
+            cell.moveMouseForTesting(to: NSPoint(x: box.midX, y: box.midY))
+            try expect(cell.hoveredActionForTesting == .open, "history open does not highlight")
+            try expect(cell.clickForTesting(at: NSPoint(x: box.midX, y: box.midY)) == .open,
+                       "history open did not consume its click")
+        }
+
+        // Use the sidebar's actual forwarding callback for the Projects list.
+        let sidebar = SidebarViewController()
+        _ = sidebar.view
+        var opened: [URL] = []
+        var diffs = 0
+        sidebar.onGitFile = { opened.append($0) }
+        sidebar.onGitCommitDiff = { _, _, _ in diffs += 1 }
+        let history = sidebar.projectsPanel.history
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = history
+        window.setContentSize(NSSize(width: 360, height: 220))
+        defer { window.close() }
+        let status = GitService.status(in: project)
+        history.setSource(directory: project, state: .init(head: status.head))
+        try expect(waitUntil { history.rowCountForTesting == 1 }, "project history did not load")
+        history.clickRowForTesting(0)
+        try expect(waitUntil { history.fileRowsForTesting.count == 2 }, "history did not expand")
+        guard let sourceIndex = history.fileRowsForTesting.firstIndex(of: "source.swift"),
+              let missingIndex = history.fileRowsForTesting.firstIndex(of: "removed.swift") else {
+            throw Failure(description: "fixture files missing from history")
+        }
+        let sourceRow = sourceIndex + 1
+        let missingRow = missingIndex + 1
+        history.setHoveredRowForTesting(-1)
+        guard let cell = history.fileCellForTesting(sourceRow) else {
+            throw Failure(description: "project history did not build a file cell")
+        }
+        try expect(cell.actionRectForTesting(.open) == .zero, "history button is always visible")
+        history.setHoveredRowForTesting(sourceRow)
+        try clickOpen(cell)
+        try expect(opened == [source] && diffs == 0,
+                   "project history open did not route only the current source file")
+        history.clickRowForTesting(sourceRow)
+        try expect(diffs == 1 && opened == [source], "ordinary history click no longer opens diff")
+        history.setHoveredRowForTesting(missingRow)
+        try expect(history.fileCellForTesting(missingRow)?.onOpenFile == nil,
+                   "missing source still offers open")
+        try expect(cell.actionRectForTesting(.open) == .zero, "hover exit left the button visible")
+
+        // The Git panel's History uses the same cell and forwarding route.
+        sidebar.showHistory()
+        guard let panel = sidebar.gitPanelForTesting else {
+            throw Failure(description: "sidebar did not create its Git panel")
+        }
+        let panelWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                                   styleMask: [.titled], backing: .buffered, defer: false)
+        panelWindow.contentViewController = panel
+        panelWindow.setContentSize(NSSize(width: 380, height: 420))
+        defer { panelWindow.close() }
+        panel.setDirectory(project)
+        try expect(waitUntil { panel.historyRowIsCommitForTesting == [true] },
+                   "Git History did not load")
+        panel.expandCommit(at: 0)
+        try expect(waitUntil { panel.historyRowIsCommitForTesting == [true, false, false] },
+                   "Git History did not expand")
+        panel.setHoveredRowForTesting(sourceRow)
+        guard let panelCell = panel.historyFileCellForTesting(sourceRow) else {
+            throw Failure(description: "Git History did not build a file cell")
+        }
+        try clickOpen(panelCell)
+        try expect(opened == [source, source] && diffs == 1,
+                   "Git History open did not route only the current source file")
+        panel.openCommitFile(commitIndex: 0, fileIndex: sourceRow - 1)
+        try expect(diffs == 2, "Git History lost its commit diff action")
+        panel.setHoveredRowForTesting(missingRow)
+        try expect(panel.historyFileCellForTesting(missingRow)?.onOpenFile == nil,
+                   "Git History offers an absent working-tree file")
+
+        // Reuse, renames and a file disappearing between drawing and clicking.
+        let reused = GitHistoryFileCell(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        window.contentView?.addSubview(reused)
+        reused.configure(file: .init(status: "R", path: "source.swift"), directory: project) {
+            opened.append($0)
+        }
+        reused.isRowHovered = true
+        try clickOpen(reused)
+        try expect(opened.last == source && opened.count == 3, "rename did not use destination")
+        reused.configure(file: .init(status: "D", path: "removed.swift"), directory: project) {
+            opened.append($0)
+        }
+        try expect(reused.onOpenFile == nil, "reused deleted row kept the previous callback")
+        reused.configure(file: .init(status: "M", path: "project"), directory: root) { _ in }
+        try expect(reused.onOpenFile == nil, "directory/submodule was offered as a source file")
+        reused.configure(file: .init(status: "M", path: "source.swift"), directory: nil) { _ in }
+        try expect(reused.onOpenFile == nil, "row without a project kept an action")
+        reused.configure(file: .init(status: "M", path: "source.swift"), directory: project) {
+            opened.append($0)
+        }
+        try FileManager.default.removeItem(at: source)
+        try clickOpen(reused)
+        try expect(opened.count == 3 && reused.onOpenFile == nil,
+                   "a stale button opened a file that disappeared")
     }
 
     private static func testBranchMenu() throws {

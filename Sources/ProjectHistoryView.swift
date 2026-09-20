@@ -8,6 +8,8 @@ import AppKit
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
+    /// Open the current working-tree file from the row's trailing button.
+    var onOpenFile: ((URL) -> Void)?
 
     /// A commit, or one of its files while the commit is open.
     private enum Row {
@@ -266,6 +268,12 @@ final class ProjectHistoryViewController: NSViewController {
         _ = view
         return tableView(table, viewFor: nil, row: row) as? GitCommitCell
     }
+    func fileCellForTesting(_ row: Int) -> GitHistoryFileCell? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.view(atColumn: 0, row: row, makeIfNecessary: true) as? GitHistoryFileCell
+    }
     /// How deep the list has read so far.
     var limitForTesting: Int { limit }
     /// Put the end of the list in view, the way scrolling to the bottom does.
@@ -340,7 +348,12 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
             let cell = (tableView.makeView(withIdentifier: id, owner: self)
                         as? GitHistoryFileCell) ?? GitHistoryFileCell()
             cell.identifier = id
-            cell.configure(file: file)
+            let directory = self.directory
+            cell.configure(file: file, directory: directory) { [weak self] url in
+                guard let self, self.directory == directory else { return }
+                self.onOpenFile?(url)
+            }
+            cell.isRowHovered = table.hoveredRow == row
             return cell
         }
     }

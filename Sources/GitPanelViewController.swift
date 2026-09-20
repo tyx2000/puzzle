@@ -1265,6 +1265,12 @@ final class GitPanelViewController: NSViewController {
         guard row >= 0, row < table.numberOfRows else { return nil }
         return table.view(atColumn: 0, row: row, makeIfNecessary: true) as? GitChangeCell
     }
+    func historyFileCellForTesting(_ row: Int) -> GitHistoryFileCell? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard showingHistory, row >= 0, row < table.numberOfRows else { return nil }
+        return table.view(atColumn: 0, row: row, makeIfNecessary: true) as? GitHistoryFileCell
+    }
     func applyStatusForTesting(_ status: GitService.Status, in directory: URL) {
         _ = view
         applyStatus(status, in: directory)
@@ -1502,7 +1508,12 @@ extension GitPanelViewController: NSTableViewDelegate {
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitHistoryFileCell) ?? GitHistoryFileCell()
                 cell.identifier = id
-                cell.configure(file: file)
+                let directory = self.directory
+                cell.configure(file: file, directory: directory) { [weak self] url in
+                    guard let self, self.directory == directory else { return }
+                    self.onOpenFile?(url)
+                }
+                cell.isRowHovered = table.hoveredRow == row
                 return cell
             }
         }

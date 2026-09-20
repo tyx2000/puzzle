@@ -92,19 +92,40 @@ final class GitCommitCell: DrawnSidebarCell {
     var toolTipForTesting: String { toolTip ?? "" }
 }
 
-final class GitHistoryFileCell: DrawnSidebarCell {
+final class GitHistoryFileCell: GitFileActionCell {
     private var status = ""
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
-    func configure(file: GitService.CommitFile) {
+    func configure(file: GitService.CommitFile, directory: URL?,
+                   openFile: @escaping (URL) -> Void) {
         status = file.status
         statusColor = GitPanelViewController.statusColor(file.status)
         name = (file.path as NSString).lastPathComponent
         folder = (file.path as NSString).deletingLastPathComponent
         toolTip = file.path
         exposeToAccessibility("\(file.status), \(file.path)")
+        // History describes an old commit; opening the source means its
+        // current working-tree file. Deleted paths and submodules have no
+        // source file to open. Always replace a recycled cell's callback.
+        onOpenFile = nil
+        if let url = directory?.appendingPathComponent(file.path), Self.isSourceFile(url) {
+            onOpenFile = { [weak self] in
+                // The file may have disappeared since this row was drawn.
+                guard Self.isSourceFile(url) else {
+                    self?.onOpenFile = nil
+                    return
+                }
+                openFile(url)
+            }
+        }
         needsDisplay = true
+    }
+
+    private static func isSourceFile(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && !isDirectory.boolValue
     }
     override func draw(_ dirtyRect: NSRect) {
         // Indented under the commit it belongs to, which is what says these
@@ -113,12 +134,18 @@ final class GitHistoryFileCell: DrawnSidebarCell {
                                 in: NSRect(x: 18, y: 0, width: 14, height: bounds.height),
                                 alignment: .center)
         let textX: CGFloat = 38
+        let nameBox = NSRect(x: textX, y: 0,
+                             width: max(0, bounds.width - textX - 6 - actionsWidth),
+                             height: bounds.height)
+        drawnNameRectForTesting = nameBox
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: NSRect(x: textX, y: 0, width: max(0, bounds.width - textX - 6),
-                       height: bounds.height))
+            in: nameBox)
+        drawActions()
     }
+
+    private(set) var drawnNameRectForTesting: NSRect = .zero
 }
 
 /// Test seam: the row type is private, so expose a probe that builds one.
@@ -173,16 +200,18 @@ protocol RowHoverAware: AnyObject {
     var isRowHovered: Bool { get set }
 }
 
-final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
-    private var status = ""
-    private var icon: SidebarIcon?
-    private var name = ""
-    private var folder = ""
-    private var statusColor = NSColor.clear
+/// Shared drawing and hit testing for the trailing file actions in Changes
+/// and History. History only supplies open; Changes also supplies discard.
+class GitFileActionCell: DrawnSidebarCell, RowHoverAware {
+    /// Unset actions are not drawn, including after a cell is reused.
+    var onDiscard: (() -> Void)? { didSet { actionsChanged() } }
+    var onOpenFile: (() -> Void)? { didSet { actionsChanged() } }
 
-    /// The two actions at the trailing edge. Unset ones are not drawn.
-    var onDiscard: (() -> Void)?
-    var onOpenFile: (() -> Void)?
+    private func actionsChanged() {
+        hoveredAction = nil
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+    }
 
     /// Both actions appear with the pointer and go with it: a row that showed
     /// them always would put two marks against every name in the list.
@@ -214,7 +243,7 @@ final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
     }
 
     /// The room the actions take at the trailing edge, nothing when none show.
-    private var actionsWidth: CGFloat {
+    var actionsWidth: CGFloat {
         let count = CGFloat(shownActions.count)
         guard count > 0 else { return 0 }
         return count * Self.actionSize + (count - 1) * Self.actionGap + Self.actionInset
@@ -232,33 +261,7 @@ final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
                       width: Self.actionSize, height: Self.actionSize)
     }
 
-    func configure(entry: GitService.Status.Entry) {
-        status = entry.displayCode
-        statusColor = entry.isUntracked ? Theme.green : Theme.yellow
-        icon = .file(URL(fileURLWithPath: entry.path))
-        name = (entry.path as NSString).lastPathComponent
-        folder = (entry.path as NSString).deletingLastPathComponent
-        toolTip = entry.path
-        exposeToAccessibility("Automatically staged \(entry.displayCode), \(entry.path)")
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
-                                in: NSRect(x: 6, y: 0, width: 18, height: bounds.height),
-                                alignment: .center)
-        SidebarCellDrawing.icon(icon,
-                                in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
-                                           width: 13, height: 13))
-        // The name has the row to itself until the pointer arrives; then it
-        // gives the actions their room rather than being drawn under them.
-        let nameBox = NSRect(x: 44, y: 0, width: max(0, bounds.width - 52 - actionsWidth),
-                             height: bounds.height)
-        drawnNameRectForTesting = nameBox
-        SidebarCellDrawing.primaryAndSecondary(
-            primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
-            secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: nameBox, gap: 5, primaryLineBreak: .byTruncatingMiddle)
+    func drawActions() {
         for action in shownActions { draw(action) }
     }
 
@@ -337,9 +340,6 @@ final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
         }
     }
 
-    var nameForTesting: String { name }
-    /// The room the name was last given, which the actions take from.
-    private(set) var drawnNameRectForTesting: NSRect = .zero
     /// Where an action is drawn, and whether it is lit under the pointer.
     func actionRectForTesting(_ action: ChangeRowAction) -> NSRect { rect(of: action) }
     var hoveredActionForTesting: ChangeRowAction? { hoveredAction }
@@ -358,6 +358,46 @@ final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
         return performedActionForTesting
     }
     private(set) var performedActionForTesting: ChangeRowAction?
+}
+
+final class GitChangeCell: GitFileActionCell {
+    private var status = ""
+    private var icon: SidebarIcon?
+    private var name = ""
+    private var folder = ""
+    private var statusColor = NSColor.clear
+
+    func configure(entry: GitService.Status.Entry) {
+        status = entry.displayCode
+        statusColor = entry.isUntracked ? Theme.green : Theme.yellow
+        icon = .file(URL(fileURLWithPath: entry.path))
+        name = (entry.path as NSString).lastPathComponent
+        folder = (entry.path as NSString).deletingLastPathComponent
+        toolTip = entry.path
+        exposeToAccessibility("Automatically staged \(entry.displayCode), \(entry.path)")
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        SidebarCellDrawing.text(status, font: Theme.uiFont(10), color: statusColor,
+                                in: NSRect(x: 6, y: 0, width: 18, height: bounds.height),
+                                alignment: .center)
+        SidebarCellDrawing.icon(icon,
+                                in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
+                                           width: 13, height: 13))
+        // Leave room for the actions only while the pointer is on the row.
+        let nameBox = NSRect(x: 44, y: 0, width: max(0, bounds.width - 52 - actionsWidth),
+                             height: bounds.height)
+        drawnNameRectForTesting = nameBox
+        SidebarCellDrawing.primaryAndSecondary(
+            primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
+            secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
+            in: nameBox, gap: 5, primaryLineBreak: .byTruncatingMiddle)
+        drawActions()
+    }
+
+    var nameForTesting: String { name }
+    private(set) var drawnNameRectForTesting: NSRect = .zero
 }
 
 final class GitBranchCell: DrawnSidebarCell {

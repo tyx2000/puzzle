@@ -137,6 +137,7 @@ final class SidebarViewController: NSViewController {
         // The open button on a change row asks for the file itself, which is
         // the errand the Git panel's own list runs with `onOpenFile`.
         projectsPanel.changes.onOpenFile = { [weak self] url in self?.onGitFile?(url) }
+        projectsPanel.history.onOpenFile = { [weak self] url in self?.onGitFile?(url) }
         // A file inside a commit opens that commit's diff, as it does in the
         // Git panel's own History tab.
         projectsPanel.history.onOpenCommitDiff = { [weak self] commit, file, directory in
