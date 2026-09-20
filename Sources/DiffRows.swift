@@ -7,6 +7,38 @@ import AppKit
 /// lines are paired with the added ones in order, so a rewritten line sits
 /// opposite its replacement, and whichever side runs out is padded with blanks.
 enum DiffRows {
+    /// How many lines of a diff are turned into rows. A row costs far more
+    /// than the line it stands for — the struct, plus a string per side — so
+    /// a generated file's million-line diff modelled in full cost hundreds of
+    /// megabytes for something nobody reads to the end. What is left out is
+    /// counted and said, above the diff.
+    static var lineBudget = 50_000
+
+    /// A parsed diff, and what the budget left out of it.
+    struct Parsed: Equatable {
+        var rows: [Row] = []
+        /// Lines past the budget, not modelled. Zero when the diff is whole.
+        var omittedLines = 0
+    }
+
+    /// The diff's lines, up to `budget` of them, and how many were left.
+    private static func lines(of diff: String, budget: Int)
+        -> (lines: [Substring], omitted: Int) {
+        var pieces = diff.split(separator: "\n", maxSplits: max(0, budget),
+                                omittingEmptySubsequences: false)
+        // `maxSplits` leaves everything past the budget in one last piece,
+        // which is the part being dropped — counted here rather than parsed.
+        guard pieces.count > budget else { return (pieces, 0) }
+        let rest = pieces.removeLast()
+        guard !rest.isEmpty else { return (pieces, 0) }
+        // Counted without splitting it: making substrings for the part being
+        // dropped is the work the budget exists to avoid. A trailing newline
+        // ends the last line rather than starting another.
+        var newlines = 0
+        for character in rest where character == "\n" { newlines += 1 }
+        return (pieces, rest.hasSuffix("\n") ? newlines : newlines + 1)
+    }
+
     struct Row: Equatable {
         enum Kind: Equatable { case context, change, hunk }
         let kind: Kind
@@ -36,12 +68,13 @@ enum DiffRows {
     /// The unified form: every line in the order Git wrote it, removed lines
     /// carrying only their old number and added lines only their new one.
     /// File headers are left out — the strip above the diff names the file.
-    static func unifiedRows(from diff: String) -> [Row] {
+    static func unified(from diff: String, budget: Int = lineBudget) -> Parsed {
         var rows: [Row] = []
         var oldNext = 0
         var newNext = 0
         var inHunk = false
-        for rawLine in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+        let read = lines(of: diff, budget: budget)
+        for rawLine in read.lines {
             let line = String(rawLine)
             if line.hasPrefix("@@") {
                 if let start = hunkStart(line) {
@@ -76,10 +109,10 @@ enum DiffRows {
                 inHunk = false
             }
         }
-        return rows
+        return Parsed(rows: rows, omittedLines: read.omitted)
     }
 
-    static func rows(from diff: String) -> [Row] {
+    static func sideBySide(from diff: String, budget: Int = lineBudget) -> Parsed {
         var rows: [Row] = []
         var removed: [(Int, String)] = []
         var added: [(Int, String)] = []
@@ -98,7 +131,8 @@ enum DiffRows {
             added.removeAll()
         }
 
-        for rawLine in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+        let read = lines(of: diff, budget: budget)
+        for rawLine in read.lines {
             let line = String(rawLine)
             if line.hasPrefix("@@") {
                 flushChanges()
@@ -138,7 +172,7 @@ enum DiffRows {
             }
         }
         flushChanges()
-        return rows
+        return Parsed(rows: rows, omittedLines: read.omitted)
     }
 
     /// `@@ -12,7 +14,9 @@ func f()` → (12, 14).

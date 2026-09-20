@@ -12,6 +12,8 @@ final class DiffView: FlatView {
     private var diff = ""
     private(set) var mode: DiffHeaderView.Mode = .unified
     private var rows: [DiffRows.Row] = []
+    /// Lines the budget left out of the model, said above the diff.
+    private(set) var omittedLines = 0
     private var changeStarts: [Int] = []
     /// Where the ↑↓ buttons currently are, so stepping continues from there.
     private var currentBlock = -1
@@ -95,16 +97,26 @@ final class DiffView: FlatView {
     }
 
     private func rebuild() {
-        rows = mode == .unified ? DiffRows.unifiedRows(from: diff) : DiffRows.rows(from: diff)
+        let parsed = mode == .unified ? DiffRows.unified(from: diff)
+                                      : DiffRows.sideBySide(from: diff)
+        rows = parsed.rows
+        omittedLines = parsed.omittedLines
         changeStarts = DiffRows.changeBlockStarts(rows)
         currentBlock = -1
         currentRow = nil
-        note.stringValue = Self.note(for: diff)
+        // Only built when there is nothing to draw: the note is one line, and
+        // handing a whole 8 MiB diff to a hidden text field was work for
+        // nobody, on every rebuild.
+        note.stringValue = rows.isEmpty ? Self.note(for: diff) : ""
         note.isHidden = !rows.isEmpty
         scroll.isHidden = rows.isEmpty
         table.reloadData()
         table.layoutSubtreeIfNeeded()
     }
+
+    /// How much of Git's own words the note repeats when it has nothing
+    /// better to say. It is a line under a heading, not a second diff view.
+    static let noteLimit = 400
 
     /// What to say when there are no lines to show.
     static func note(for diff: String) -> String {
@@ -118,7 +130,8 @@ final class DiffView: FlatView {
         if diff.contains("old mode") || diff.contains("new mode") {
             return "Only the file mode changed"
         }
-        return diff.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = diff.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.count <= noteLimit ? text : String(text.prefix(noteLimit)) + "…"
     }
 
     var changeCount: Int { changeStarts.count }
@@ -163,6 +176,7 @@ final class DiffView: FlatView {
     // MARK: - Regression-test surface
 
     var currentRowForTesting: Int? { currentRow }
+    var noteFieldIsEmptyForTesting: Bool { note.stringValue.isEmpty }
     var rowsForTesting: [DiffRows.Row] { rows }
     var noteForTesting: String? { note.isHidden ? nil : note.stringValue }
     /// Row count and scroll offset, so the table's own geometry stays checkable

@@ -252,6 +252,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // Where the repository root is and who commits from it are resolved
         // once per project and then reused; a new project resolves its own.
         GitService.forgetRepositoryInfo()
+        // A batch of diff reads for the project being left stops where it is.
+        openDiffReadToken?.cancel()
+        lastChangedPaths = []
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
         workspaceFileMonitor?.stop()
@@ -334,23 +337,80 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// A flag the main thread raises and a read loop checks between files, so
+    /// a batch started for a project that has since been left stops instead of
+    /// reading the rest of it.
+    private final class ReadToken {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    /// One batch of diff reads in flight per window, and at most one more
+    /// waiting behind it. Saves during a build arrive faster than diffs can be
+    /// read, and a queue of batches keeps every one of their results — and the
+    /// versions they replace — alive at once.
+    private var diffRefreshInFlight = false
+    private var diffRefreshAgain = false
+    private var openDiffReadToken: ReadToken?
+    /// What the last status found changed, for the batch that follows one
+    /// already running.
+    private var lastChangedPaths: Set<String> = []
+    private(set) var diffRefreshBatchesForTesting = 0
+
     /// Working-tree diffs that are open read again after a refresh: the file
     /// moved under them, or was committed or discarded out from under them.
     /// A commit's diff never changes, so those are left alone.
-    private func refreshOpenDiffs(entries: [GitService.Status.Entry], in directory: URL) {
-        let open = diffs.tabs.filter { $0.directory == directory && $0.source == .workingTree }
-        guard !open.isEmpty else { return }
+    ///
+    /// Each result is handed over as it is read rather than collected into a
+    /// batch, so one diff is in hand at a time; the tab being read comes
+    /// first, since that is the one on screen.
+    private func refreshOpenDiffs(changed: Set<String>, in directory: URL) {
+        lastChangedPaths = changed
+        let active = diffs.activeTab?.id
+        let wanted = diffs.tabs
+            .filter { $0.directory == directory && $0.source == .workingTree }
+            .map { (id: $0.id, path: $0.path) }
+            .sorted { ($0.id == active ? 0 : 1) < ($1.id == active ? 0 : 1) }
+        guard !wanted.isEmpty else { return }
+        guard !diffRefreshInFlight else {
+            diffRefreshAgain = true
+            return
+        }
+        diffRefreshInFlight = true
+        diffRefreshBatchesForTesting += 1
+        let token = ReadToken()
+        openDiffReadToken = token
+        let generation = gitRefreshGeneration
         GitService.workQueue.async { [weak self] in
-            let read = open.map { tab -> (String, String) in
-                // No longer listed: nothing left to show for it.
-                guard let entry = entries.first(where: { $0.path == tab.path }) else {
-                    return (tab.id, "")
+            for tab in wanted {
+                guard !token.isCancelled else { break }
+                // Not listed as changed: there is nothing left to show, and
+                // nothing to ask Git about either.
+                let text = changed.contains(tab.path)
+                    ? (GitService.diff(forPath: tab.path, in: directory) ?? "") : ""
+                DispatchQueue.main.async {
+                    guard let self, self.projectURL == directory,
+                          self.gitRefreshGeneration == generation else { return }
+                    self.diffs.update(id: tab.id, diff: text)
                 }
-                return (tab.id, GitService.diff(for: entry, in: directory))
             }
             DispatchQueue.main.async {
-                guard let self, self.projectURL == directory else { return }
-                read.forEach { self.diffs.update(id: $0.0, diff: $0.1) }
+                guard let self else { return }
+                self.diffRefreshInFlight = false
+                guard self.diffRefreshAgain else { return }
+                self.diffRefreshAgain = false
+                guard let current = self.projectURL, !token.isCancelled else { return }
+                self.refreshOpenDiffs(changed: self.lastChangedPaths, in: current)
             }
         }
     }
@@ -411,7 +471,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // not keep the last repository's.
         window?.subtitle = status.isRepo
             ? "\(projectURL.lastPathComponent) — \(status.branch)" : ""
-        refreshOpenDiffs(entries: status.isRepo ? status.entries : [], in: projectURL)
+        refreshOpenDiffs(changed: Set(status.isRepo ? status.entries.map(\.path) : []),
+                         in: projectURL)
         // The row says the same thing the title strip does, and hears it at
         // the same moment.
         let changed = noteSummary(branch: status.isRepo ? status.branch : "",
@@ -771,6 +832,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         workspaceFileMonitor?.stop()
         workspaceFileMonitor = nil
         GitService.forgetRepositoryInfo()
+        openDiffReadToken?.cancel()
+        lastChangedPaths = []
         projectURL = nil
         isRepository = nil
         diffs.hasProject = false

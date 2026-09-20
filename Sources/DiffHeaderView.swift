@@ -67,11 +67,18 @@ final class DiffHeaderView: FlatView {
 
     /// `path` is repository-relative; `changes` is how many separate blocks of
     /// added/removed lines the buffer holds, which decides whether stepping
-    /// through them is possible at all.
-    func configure(path: String, changes: Int) {
+    /// through them is possible at all. `omittedLines` is what the diff's row
+    /// budget left out — said here, because a diff that stops short without
+    /// saying so reads as a diff that ended.
+    func configure(path: String, changes: Int, omittedLines: Int = 0) {
         folder = (path as NSString).deletingLastPathComponent
         name = (path as NSString).lastPathComponent
         summary = changes == 1 ? "1 change" : "\(changes) changes"
+        if omittedLines > 0 {
+            let counted = NumberFormatter.localizedString(
+                from: NSNumber(value: omittedLines), number: .decimal)
+            summary += "  ·  \(counted) more lines not shown"
+        }
         previousButton.isEnabled = changes > 0
         nextButton.isEnabled = changes > 0
         toolTip = path

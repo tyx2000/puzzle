@@ -45,6 +45,7 @@ enum RegressionTests {
         try testCommitNeedsChangesAndAMessage()
         try testStatusMatchesPorcelainV1()
         try testSideBySideDiff()
+        try testOpenDiffRefreshesCoalesce()
         try testDiffTabs()
         try testFoldersRouteToTheirProjectWindow()
         print("Regression tests passed")
@@ -2821,11 +2822,47 @@ enum RegressionTests {
         header.clickPreviousForTesting()
         try expect(view.currentRowForTesting == 7, "stepping back from the first change did not wrap")
 
+        // A diff too long to model stops at the budget and says how much it
+        // left out, rather than ending without a word.
+        var long = "@@ -1,400 +1,400 @@\n"
+        for index in 1...400 { long += "+line \(index)\n" }
+        DiffRows.lineBudget = 50
+        defer { DiffRows.lineBudget = 50_000 }
+        pane.open(.init(directory: directory, path: "big.txt",
+                        source: .workingTree, diff: long))
+        try expect(pane.diffViewForTesting.rowsForTesting.count <= 50,
+                   "the budget modelled \(pane.diffViewForTesting.rowsForTesting.count) rows")
+        try expect(pane.diffViewForTesting.omittedLines == 351,
+                   "the diff left out \(pane.diffViewForTesting.omittedLines) lines, not 351")
+        try expect(pane.headerForTesting.summaryForTesting.contains("351 more lines not shown"),
+                   "the strip does not say what was left out: "
+                     + pane.headerForTesting.summaryForTesting)
+        // A diff inside the budget says nothing of the sort.
+        pane.open(.init(directory: directory, path: "Sources/App.swift",
+                        source: .workingTree, diff: diff))
+        try expect(pane.diffViewForTesting.omittedLines == 0
+                    && !pane.headerForTesting.summaryForTesting.contains("not shown"),
+                   "a whole diff claims to be truncated: "
+                     + pane.headerForTesting.summaryForTesting)
+
+        // The note under an empty diff is one line, and is not built at all
+        // while there are rows to draw.
+        try expect(pane.diffViewForTesting.noteFieldIsEmptyForTesting,
+                   "a drawn diff still filled the note field")
+
         // A diff with no text to show says why instead of drawing nothing.
         pane.open(.init(directory: directory, path: "logo.png", source: .commit("abc123"),
                         diff: "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n"))
         try expect(pane.diffViewForTesting.noteForTesting == "Binary file — no text to compare",
                    "a binary diff shows \(String(describing: pane.diffViewForTesting.noteForTesting))")
+        // Git's own words, when that is all there is, are quoted rather than
+        // reprinted whole.
+        let wordy = String(repeating: "git said something long. ", count: 200)
+        pane.open(.init(directory: directory, path: "odd.txt", source: .workingTree,
+                        diff: wordy))
+        try expect((pane.diffViewForTesting.noteForTesting?.count ?? 0)
+                    <= DiffView.noteLimit + 1,
+                   "the note reprinted \(pane.diffViewForTesting.noteForTesting?.count ?? 0) characters")
         try expect(!header.stepControlsEnabledForTesting,
                    "a diff with no changes left the step controls live")
     }
@@ -3225,7 +3262,7 @@ enum RegressionTests {
          context forty
         -gone forty-one
         """
-        let rows = DiffRows.rows(from: diff)
+        let rows = DiffRows.sideBySide(from: diff).rows
         // Hunk header, context, the paired change block, context, hunk, …
         try expect(rows.first?.kind == .hunk,
                    "the first row is not the hunk header: \(String(describing: rows.first))")
@@ -3362,6 +3399,66 @@ enum RegressionTests {
 
     /// Diff tabs: one per file and source, closing and reopening as a browser's
     /// do, and a project's tabs going with it.
+    /// Saves during a build arrive faster than diffs can be read. One batch
+    /// runs, one waits, and the rest are the same request.
+    private static func testOpenDiffRefreshesCoalesce() throws {
+        let root = try temporaryDirectory("diff-refresh")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: root).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Gift Test"])
+        _ = git(["config", "user.email", "gift@example.invalid"])
+        let file = root.appendingPathComponent("file.txt")
+        try Data("one\n".utf8).write(to: file)
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        try Data("two\n".utf8).write(to: file)
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        try expect(waitUntil { workspace.diffs.hasProject }, "the project never opened")
+        workspace.showDiff(for: GitService.Status.Entry(code: " M", path: "file.txt",
+                                                        originalPath: nil), in: root)
+        try expect(waitUntil { workspace.diffs.tabs.count == 1 }, "the diff never opened")
+        let batchesBefore = workspace.diffRefreshBatchesForTesting
+
+        // Hold the read queue, so every refresh below lands while one batch
+        // is in flight.
+        let held = DispatchSemaphore(value: 0)
+        GitService.workQueue.async { held.wait() }
+        for index in 0..<30 {
+            try Data("edit \(index)\n".utf8).write(to: file)
+            workspace.refreshGit(requireFollowUp: true)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        let started = workspace.diffRefreshBatchesForTesting - batchesBefore
+        try expect(started == 1,
+                   "30 refreshes started \(started) batches of diff reads, not one")
+        held.signal()
+        // What waited behind it is one more batch, not thirty.
+        try expect(waitUntil {
+            workspace.diffRefreshBatchesForTesting - batchesBefore >= 2
+        }, "the refreshes that arrived while reading never ran")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        // A handful — the one that waited, and the watcher's own refreshes
+        // for the same writes — rather than one batch per refresh.
+        let total = workspace.diffRefreshBatchesForTesting - batchesBefore
+        try expect(total <= 8, "the queue kept growing: \(total) batches for 30 refreshes")
+        // And the tab ends up showing the file as it is now.
+        try expect(waitUntil { workspace.diffs.activeTab?.diff.contains("edit 29") == true },
+                   "the diff did not end up current: "
+                     + (workspace.diffs.activeTab?.diff ?? "nil"))
+    }
+
     private static func testDiffTabs() throws {
         let pane = DiffPaneViewController()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),

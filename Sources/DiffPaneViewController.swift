@@ -302,7 +302,8 @@ final class DiffPaneViewController: NSViewController {
             return
         }
         diffView.configure(diff: tab.diff, keepingPosition: keepingPosition)
-        header.configure(path: tab.path, changes: diffView.changeCount)
+        header.configure(path: tab.path, changes: diffView.changeCount,
+                         omittedLines: diffView.omittedLines)
     }
 
     private func toggleMode() {
@@ -310,7 +311,8 @@ final class DiffPaneViewController: NSViewController {
         header.setMode(Self.mode)
         diffView.setMode(Self.mode)
         if let tab = activeTab {
-            header.configure(path: tab.path, changes: diffView.changeCount)
+            header.configure(path: tab.path, changes: diffView.changeCount,
+                             omittedLines: diffView.omittedLines)
         }
     }
 
