@@ -102,6 +102,8 @@ enum RegressionTests {
         try testGitPanelCounters()
         try testSelectedControlsAgree()
         try testHistoryLogDetails()
+        try testScopedHistoryGraphParents()
+        try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
         try testCommitNeedsChangesAndAMessage()
@@ -4763,17 +4765,256 @@ enum RegressionTests {
         try expect(log.last?.parents.isEmpty == true,
                    "the root commit was given a parent: \(log.last?.parents ?? [])")
 
-        // The panel builds one row per commit.
+        // The panel builds one graph row per commit.
         let panel = GitPanelViewController()
-        _ = panel.view
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        window.setContentSize(NSSize(width: 600, height: 420))
+        defer { window.close() }
         panel.setDirectory(root)
         panel.showHistoryForTesting()
-        let deadline = Date().addingTimeInterval(5)
-        while panel.historyRowIsCommitForTesting.count < log.count && Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
         }
-        try expect(panel.historyRowIsCommitForTesting.allSatisfy { $0 },
+        try expect(waitUntil { panel.historyRowIsCommitForTesting.count == log.count }
+                    && panel.historyRowIsCommitForTesting.allSatisfy { $0 },
                    "unexpanded history showed something other than commits")
+        let graph = GitHistoryGraph(commits: log)
+        for row in graph.rows.indices {
+            try expect(panel.commitCellForTesting(row)?.graphRowForTesting == graph.rows[row],
+                       "Git History's graph does not follow the loaded commit order")
+        }
+
+        // Expanded files keep both branches leaving a merge connected to the
+        // next commit, while retaining the source-open action on the right.
+        guard let mergeIndex = log.firstIndex(where: { $0.parents.count == 2 }),
+              let mergeCell = panel.commitCellForTesting(mergeIndex),
+              let mergeGraph = mergeCell.graphRowForTesting else {
+            throw Failure(description: "the merge built no graph cell")
+        }
+        try expect(mergeGraph.bottomLanes.count == 2, "the merge did not split into two lanes")
+        panel.expandCommit(at: mergeIndex)
+        try expect(waitUntil { panel.historyRowIsCommitForTesting.contains(false) },
+                   "the expanded merge did not list its files")
+        let fileCount = panel.historyRowIsCommitForTesting.filter { !$0 }.count
+        for offset in 1...fileCount {
+            guard let fileCell = panel.historyFileCellForTesting(mergeIndex + offset) else {
+                throw Failure(description: "the expanded merge built no file cell")
+            }
+            try expect(fileCell.graphLanesForTesting == mergeGraph.bottomLanes
+                        && fileCell.graphWidthForTesting == mergeCell.graphWidthForTesting,
+                       "expanded files interrupt or shift the merge's graph lanes")
+        }
+        try expect(panel.commitCellForTesting(mergeIndex + fileCount + 1)?
+                    .graphRowForTesting?.topLanes == mergeGraph.bottomLanes,
+                   "the next commit does not reconnect after the expanded file rows")
+        panel.expandCommit(at: mergeIndex)
+
+        // The narrow sidebar scrolls the complete graph and readable metadata
+        // instead of compressing tracks into the commit ID or message.
+        window.setContentSize(NSSize(width: 120, height: 420))
+        panel.view.layoutSubtreeIfNeeded()
+        guard let scroll = panel.view.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let table = scroll.documentView as? NSTableView,
+              let column = table.tableColumns.first,
+              let cell = panel.commitCellForTesting(0) else {
+            throw Failure(description: "the narrow History has no table or graph cell")
+        }
+        try expect(scroll.hasHorizontalScroller
+                    && column.minWidth > scroll.contentView.bounds.width
+                    && column.width >= column.minWidth
+                    && table.bounds.width >= column.minWidth,
+                   "a narrow Git History clipped its graph instead of allowing horizontal scrolling")
+        cell.frame = NSRect(x: 0, y: 0, width: column.minWidth, height: Theme.treeRowHeight())
+        if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+            cell.cacheDisplay(in: cell.bounds, to: rep)
+        }
+        try expect(cell.drawnSubjectRectForTesting.width >= 36
+                    && cell.drawnHashRectForTesting.minX
+                        >= cell.drawnGraphRectForTesting.maxX + GitCommitCell.columnGap - 0.5,
+                   "the minimum table width does not preserve graph and readable message columns")
+        scroll.contentView.scroll(to: NSPoint(x: 50, y: 0))
+        panel.showChangesForTesting()
+        panel.view.layoutSubtreeIfNeeded()
+        try expect(!scroll.hasHorizontalScroller
+                    && column.minWidth <= scroll.contentView.bounds.width
+                    && abs(table.bounds.width - scroll.contentView.bounds.width) <= 0.5
+                    && scroll.contentView.bounds.minX == 0,
+                   "the graph's width or scroll offset leaked into the Changes tab")
+        panel.showHistoryForTesting()
+        panel.showBranchTab()
+        panel.view.layoutSubtreeIfNeeded()
+        try expect(!scroll.hasHorizontalScroller
+                    && abs(table.bounds.width - scroll.contentView.bounds.width) <= 0.5,
+                   "the graph's width leaked into the Branches tab")
+    }
+
+    /// A project opened inside a larger repository still needs a connected
+    /// graph. Hidden sibling-only commits must be skipped in parent links,
+    /// and loading another page must not reinterpret already-visible rows.
+    private static func testScopedHistoryGraphParents() throws {
+        let root = try temporaryDirectory("scoped-graph")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        @discardableResult
+        func git(_ args: [String]) throws -> String {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "graph fixture failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func datedGit(_ args: [String], day: Int) throws {
+            let date = String(format: "2024-01-%02dT12:00:00+0000", day)
+            let result = GitService.runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["GIT_AUTHOR_DATE=\(date)", "GIT_COMMITTER_DATE=\(date)", "git"] + args,
+                in: root)
+            try expect(result.code == 0,
+                       "dated graph fixture failed: \(String(decoding: result.stderr, as: UTF8.self))")
+        }
+        func commit(_ subject: String, file: String, day: Int) throws -> String {
+            try Data("\(subject)\n".utf8).write(to: root.appendingPathComponent(file))
+            try git(["add", "-A"])
+            try datedGit(["commit", "-q", "-m", subject], day: day)
+            return try git(["rev-parse", "HEAD"])
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Graph Test"])
+        try git(["config", "user.email", "graph@example.invalid"])
+        try git(["config", "core.abbrev", "4"])
+        _ = try commit("outside root", file: "outside.txt", day: 1)
+        let base = try commit("project root", file: "project/main.txt", day: 10)
+        try git(["checkout", "-q", "-b", "feature"])
+        _ = try commit("outside feature", file: "outside-feature.txt", day: 1)
+        let feature = try commit("feature one", file: "project/feature.txt", day: 7)
+        let featureTip = try commit("feature two", file: "project/feature.txt", day: 2)
+        try git(["checkout", "-q", "main"])
+        _ = try commit("outside main", file: "outside.txt", day: 3)
+        let main = try commit("main work", file: "project/main.txt", day: 9)
+        try datedGit(["merge", "-q", "--no-ff", "feature", "-m", "merge feature"], day: 4)
+        let merge = try git(["rev-parse", "HEAD"])
+        _ = try commit("outside after merge", file: "outside.txt", day: 5)
+        let tip = try commit("project tip", file: "project/main.txt", day: 6)
+
+        let log = GitService.log(in: project, limit: 100)
+        let expectedParents = [tip: [merge], merge: [main, featureTip],
+                               main: [base], featureTip: [feature], feature: [base], base: []]
+        try expect(Set(log.map(\.graphID)) == Set(expectedParents.keys),
+                   "scoped history lost project work or included sibling-only work: \(log.map(\.subject))")
+        for (index, commit) in log.enumerated() {
+            try expect(commit.fullHash == commit.graphID && commit.shortHash.count < commit.fullHash.count,
+                       "a graph node uses its configurable display abbreviation as identity")
+            try expect(commit.parents == expectedParents[commit.graphID],
+                       "\(commit.subject) does not connect to its visible ancestors: \(commit.parents)")
+            for parent in commit.parents {
+                try expect(log.firstIndex(where: { $0.graphID == parent }).map { $0 > index } == true,
+                           "a timestamp-skewed parent appeared above its child")
+            }
+        }
+        let branchRows = log.enumerated().filter { [feature, featureTip].contains($0.element.graphID) }
+        try expect(branchRows.count == 2 && branchRows[1].offset == branchRows[0].offset + 1,
+                   "topological history interleaved another branch between consecutive feature commits")
+        for limit in [1, 2, 4] {
+            let page = GitService.log(in: project, limit: limit)
+            try expect(page.map(\.graphID) == Array(log.prefix(limit)).map(\.graphID)
+                        && page.map(\.parents) == Array(log.prefix(limit)).map(\.parents),
+                       "loading more commits changed a previous page's graph at limit \(limit)")
+        }
+    }
+
+    private static func testHistoryGraphLayout() throws {
+        func commit(_ id: String, _ parents: [String] = [], refs: String = "") -> GitService.Commit {
+            GitService.Commit(shortHash: id, subject: id, author: "T", absoluteDate: "",
+                              email: "", parents: parents, refs: refs)
+        }
+        let commits = [commit("merge", ["main", "nested"], refs: "HEAD -> main"),
+                       commit("main", ["base"]), commit("nested", ["left", "right"]),
+                       commit("left", ["base"]), commit("right", ["base"]),
+                       commit("base", ["root"]), commit("root")]
+        let graph = GitHistoryGraph(commits: commits)
+        try expect(graph.rows.count == commits.count && graph.laneCount == 3,
+                   "nested merge history has missing nodes or extra lanes")
+        try expect(graph.rows.map(\.nodeLane) == [0, 0, 1, 1, 1, 0, 0],
+                   "nested merge lanes do not split and rejoin in order")
+        try expect(graph.rows[0].isHead && graph.rows.filter(\.isHead).count == 1,
+                   "HEAD decoration is attached to the wrong graph node")
+        try expect(graph.rows.enumerated().filter { $0.element.isMerge }.map(\.offset) == [0, 2],
+                   "merge nodes were confused with ordinary branch commits")
+        try expect(graph.rows[0].colorIndex == graph.rows[1].colorIndex
+                    && graph.rows[0].colorIndex == graph.rows[5].colorIndex,
+                   "the first-parent branch changed color")
+        try expect(Set(graph.rows[2].bottomLanes.map(\.colorIndex)).count == 3,
+                   "concurrent branches do not have distinct colors")
+        try expect(graph.rows.last?.bottomLanes.isEmpty == true,
+                   "lanes continue after every root has been reached")
+
+        for (index, row) in graph.rows.enumerated() {
+            if index > 0 {
+                try expect(row.topLanes == graph.rows[index - 1].bottomLanes,
+                           "a branch jumps at the boundary above commit \(commits[index].shortHash)")
+            }
+            try expect(Set(row.bottomLanes.map(\.targetHash)).count == row.bottomLanes.count,
+                       "a shared ancestor was allocated more than one lane")
+            for parent in commits[index].parents {
+                guard let lane = row.bottomLanes.first(where: { $0.targetHash == parent }) else {
+                    throw Failure(description: "a parent has no outgoing lane")
+                }
+                try expect(row.segments.contains {
+                    $0.fromY == 0.5 && $0.toY == 1
+                        && $0.fromLane == row.nodeLane && $0.toLane == lane.lane
+                }, "a commit has no edge to its parent \(parent)")
+            }
+            for lane in row.topLanes {
+                try expect(row.segments.contains { $0.fromY == 0 && $0.fromLane == lane.lane },
+                           "an incoming branch is not connected to the previous row")
+            }
+        }
+        for limit in 1..<commits.count {
+            let page = GitHistoryGraph(commits: Array(commits.prefix(limit)))
+            try expect(page.rows == Array(graph.rows.prefix(limit)),
+                       "pagination moved or recolored visible history at limit \(limit)")
+        }
+        // A side branch can reach a shared ancestor before the first-parent
+        // chain does. That reservation must not steal the trunk's lane/color.
+        let convergenceCommits = [commit("M", ["P", "docs"]), commit("P", ["Q"]),
+                                  commit("docs", ["B"]), commit("Q", ["B"]),
+                                  commit("B", ["root"]), commit("root")]
+        let convergence = GitHistoryGraph(commits: convergenceCommits)
+        let trunkRows = [0, 1, 3, 4, 5].map { convergence.rows[$0] }
+        try expect(trunkRows.allSatisfy { $0.nodeLane == 0 }
+                    && Set(trunkRows.map(\.colorIndex)).count == 1,
+                   "a side branch's early ancestor reservation displaced or recolored the mainline")
+        try expect(convergence.rows[2].bottomLanes.map(\.targetHash) == ["Q", "B"]
+                    && convergence.rows[3].bottomLanes.map(\.targetHash) == ["B"],
+                   "the side branch did not converge into the surviving mainline")
+        for index in 1..<convergence.rows.count {
+            try expect(convergence.rows[index].topLanes == convergence.rows[index - 1].bottomLanes,
+                       "mainline promotion broke a graph boundary")
+            let prefix = GitHistoryGraph(commits: Array(convergenceCommits.prefix(index)))
+            try expect(prefix.rows == Array(convergence.rows.prefix(index)),
+                       "mainline convergence changed a previous page")
+        }
+        let octopus = GitHistoryGraph(commits: [commit("octopus", ["a", "b", "c", "d"]),
+                                                commit("a", ["root"]), commit("b", ["root"]),
+                                                commit("c", ["root"]), commit("d", ["root"]),
+                                                commit("root")])
+        try expect(octopus.laneCount == 4 && octopus.rows[0].isMerge
+                    && octopus.rows[0].bottomLanes.count == 4
+                    && octopus.rows.last?.bottomLanes.isEmpty == true,
+                   "an octopus merge lost a parent or left a phantom lane")
+        let disconnected = GitHistoryGraph(commits: [commit("tip", ["root"]),
+                                                     commit("independent"), commit("root")])
+        try expect(disconnected.rows[1].nodeLane == 1
+                    && disconnected.rows[1].bottomLanes == disconnected.rows[0].bottomLanes,
+                   "an independent root interrupted another branch")
+        try expect(GitHistoryGraph(commits: []).laneCount == 0
+                    && GitHistoryGraph(commits: []).rows.isEmpty,
+                   "empty history created a graph lane")
     }
 
     /// `status` reads porcelain v2 and reports what v1 did, from one
@@ -5003,10 +5244,14 @@ enum RegressionTests {
         let subjectBox = historyCell.drawnSubjectRectForTesting
         let authorBox = historyCell.drawnAuthorRectForTesting
         let dateBox = historyCell.drawnDateRectForTesting
-        // The id opens the row: no branch column ahead of it. Git records no
-        // branch on a commit, so a label there was a guess shown as a fact.
-        try expect(idBox.width > 0 && idBox.minX == 8,
-                   "the commit id does not open the row: \(idBox)")
+        // The graph opens the row, with a clear gap before the commit ID.
+        try expect(historyCell.graphRowForTesting != nil
+                    && historyCell.graphWidthForTesting > 0
+                    && idBox.width > 0
+                    && idBox.minX == 8 + historyCell.graphWidthForTesting
+                    && abs(idBox.minX - historyCell.drawnGraphRectForTesting.maxX
+                           - GitCommitCell.columnGap) <= 0.5,
+                   "the commit id overlaps or replaces the graph column: \(idBox)")
         try expect(abs(subjectBox.minX - idBox.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(authorBox.minX - subjectBox.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(dateBox.minX - authorBox.maxX - GitCommitCell.columnGap) <= 0.5,
@@ -6978,6 +7223,9 @@ enum RegressionTests {
             throw Failure(description: "Git History did not build a file cell")
         }
         try clickOpen(panelCell)
+        try expect(panelCell.graphWidthForTesting > 0
+                    && panelCell.drawnNameRectForTesting.minX > panelCell.graphWidthForTesting,
+                   "the source-open file row overlaps the History graph")
         try expect(opened == [source, source] && diffs == 1,
                    "Git History open did not route only the current source file")
         panel.openCommitFile(commitIndex: 0, fileIndex: sourceRow - 1)

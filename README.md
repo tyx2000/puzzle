@@ -23,8 +23,13 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   action buttons.
 - **Search panel** — results grouped per file (name + folder) with line numbers
   and the match highlighted; click a file to open it, a line to jump to it.
-- **Git panel** — flat Changes / History tabs, automatically staged changed
+- **Git panel** — flat Changes / Branch / History tabs, automatically staged changed
   files with status codes, branch, full-width commit message editor + commit.
+  History starts with a coloured Git graph: curved ancestry tracks, solid
+  commit dots, hollow merge dots, and an outer ring for HEAD. It uses the same
+  Ayu Dark palette as Gift, keeps the first-parent track's colour, and connects
+  through expanded files and paginated commits. Wide graphs scroll horizontally;
+  expanded files retain their hover-only button for opening the current source.
 - **Settings** — the gear at the top right opens `~/.config/puzzle/settings.json`.
   Editor font:
   `buffer_font_family`, `buffer_font_size`, `buffer_font_weight`,

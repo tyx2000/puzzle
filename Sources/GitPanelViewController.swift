@@ -30,6 +30,10 @@ final class GitPanelViewController: NSViewController {
     private var directory: URL?
     private var entries: [GitService.Status.Entry] = []
     private var history: [GitService.Commit] = []
+    private var historyGraphRows: [String: GitHistoryGraph.Row] = [:]
+    private var historyGraphWidth: CGFloat = 0
+    private var historyMinimumWidth: CGFloat = 0
+    private var normalIntercellSpacing = NSSize.zero
     /// Short hashes not yet on the upstream branch — rendered with an ↑ badge.
     private var unpushed: Set<String> = []
 
@@ -117,6 +121,7 @@ final class GitPanelViewController: NSViewController {
         resetHistoryDepth()
         history.removeAll()
         historyRows.removeAll()
+        clearHistoryGraph()
         unpushed.removeAll()
         branches.removeAll()
         remotes.removeAll()
@@ -138,6 +143,7 @@ final class GitPanelViewController: NSViewController {
         commitFiles.removeAll()
         entries.removeAll()
         history.removeAll()
+        clearHistoryGraph()
         resetHistoryDepth()
         unpushed.removeAll()
         branches.removeAll()
@@ -148,6 +154,13 @@ final class GitPanelViewController: NSViewController {
     private func resetHistoryDepth() {
         historyLimit = Self.historyPageSize
         historyHasMore = true
+    }
+
+    private func clearHistoryGraph() {
+        historyGraphRows.removeAll()
+        historyGraphWidth = 0
+        historyMinimumWidth = 0
+        updateHistoryColumnWidth()
     }
 
     override func loadView() {
@@ -182,7 +195,10 @@ final class GitPanelViewController: NSViewController {
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row"))
         column.resizingMask = .autoresizingMask
+        column.maxWidth = .greatestFiniteMagnitude
         table.addTableColumn(column)
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        normalIntercellSpacing = table.intercellSpacing
         table.headerView = nil
         table.rowSizeStyle = .custom
         // `.automatic` resolves to the inset style, which pads the top of the
@@ -207,6 +223,7 @@ final class GitPanelViewController: NSViewController {
             self, selector: #selector(historyScrolled),
             name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -343,6 +360,11 @@ final class GitPanelViewController: NSViewController {
         self.view = container
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        updateHistoryColumnWidth()
+    }
+
     // MARK: - Data
 
     /// Re-apply the UI font after a settings change.
@@ -361,6 +383,9 @@ final class GitPanelViewController: NSViewController {
         pushControl.invalidateIntrinsicContentSize()
         newBranchButton.font = Theme.uiFont(10.5)
         remoteButton.font = Theme.uiFont(10.5)
+        historyMinimumWidth = GitCommitCell.minimumWidth(for: history,
+                                                        graphWidth: historyGraphWidth)
+        updateHistoryColumnWidth()
         table.reloadData()
         if table.numberOfRows > 0 {
             table.noteHeightOfRows(withIndexesChanged:
@@ -466,12 +491,18 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    private typealias HistoryRead = (log: [GitService.Commit], unpushed: Set<String>)
+    private typealias HistoryRead = (log: [GitService.Commit], unpushed: Set<String>,
+                                    graphRows: [String: GitHistoryGraph.Row], laneCount: Int)
 
     /// The log to `depth` commits, and what of it is not pushed. Runs on the
     /// Git queue.
     private static func readHistory(in directory: URL, depth: Int) -> HistoryRead {
-        (GitService.log(in: directory, limit: depth), GitService.unpushedHashes(in: directory))
+        let log = GitService.log(in: directory, limit: depth)
+        let unpushed = GitService.unpushedHashes(in: directory)
+        let graph = GitHistoryGraph(commits: log)
+        let rows = Dictionary(uniqueKeysWithValues:
+            zip(log, graph.rows).map { ($0.0.graphID, $0.1) })
+        return (log, unpushed, rows, graph.laneCount)
     }
 
     private func applyHistory(_ read: HistoryRead, depth: Int) {
@@ -482,6 +513,11 @@ final class GitPanelViewController: NSViewController {
         history = read.log
         historyHasMore = read.log.count >= depth
         unpushed = read.unpushed
+        historyGraphRows = read.graphRows
+        historyGraphWidth = GitHistoryGraphDrawing.columnWidth(laneCount: read.laneCount)
+        historyMinimumWidth = GitCommitCell.minimumWidth(for: history,
+                                                        graphWidth: historyGraphWidth)
+        updateHistoryColumnWidth()
         rebuildHistoryRows()
         if showingHistory { table.reloadData() }
     }
@@ -618,6 +654,27 @@ final class GitPanelViewController: NSViewController {
         commitButton.isHidden = listOnly
         discardAllButton.isHidden = listOnly
         pushControl.isHidden = listOnly
+        // Graph edges meet at row boundaries. Other tabs retain their original
+        // spacing, and only History can scroll sideways for a wide graph.
+        table.intercellSpacing = showingHistory ? .zero : normalIntercellSpacing
+        table.enclosingScrollView?.hasHorizontalScroller = showingHistory
+        updateHistoryColumnWidth()
+        if !showingHistory, let scroll = table.enclosingScrollView {
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: scroll.contentView.bounds.minY))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
+    private func updateHistoryColumnWidth() {
+        guard isViewLoaded, let column = table.tableColumns.first,
+              let clip = table.enclosingScrollView?.contentView else { return }
+        let minimum = showingHistory ? historyMinimumWidth : 0
+        column.minWidth = minimum
+        let width = max(clip.bounds.width - table.intercellSpacing.width, minimum)
+        if abs(column.width - width) > 0.5 {
+            column.width = width
+            table.sizeLastColumnToFit()
+        }
     }
 
     @objc private func commit() { performCommit(push: false) }
@@ -1332,6 +1389,11 @@ final class GitPanelViewController: NSViewController {
     }
     /// How deep History has read so far.
     var historyLimitForTesting: Int { historyLimit }
+    var historyGraphWidthForTesting: CGFloat { historyGraphWidth }
+    var historyColumnMinimumWidthForTesting: CGFloat { table.tableColumns.first?.minWidth ?? 0 }
+    var horizontalScrollingForTesting: Bool {
+        table.enclosingScrollView?.hasHorizontalScroller ?? false
+    }
     /// Put the end of History in view, the way scrolling to the bottom does.
     func scrollHistoryToEndForTesting() {
         _ = view
@@ -1500,16 +1562,20 @@ extension GitPanelViewController: NSTableViewDelegate {
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitCommitCell) ?? GitCommitCell()
                 cell.identifier = id
-                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash))
+                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
+                               graphRow: historyGraphRows[commit.graphID],
+                               graphWidth: historyGraphWidth)
                 return cell
 
-            case .file(let file, _):
+            case .file(let file, let commit):
                 let id = NSUserInterfaceItemIdentifier("git-history-file-cell")
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitHistoryFileCell) ?? GitHistoryFileCell()
                 cell.identifier = id
                 let directory = self.directory
-                cell.configure(file: file, directory: directory) { [weak self] url in
+                cell.configure(file: file, directory: directory,
+                               graphLanes: historyGraphRows[commit.graphID]?.bottomLanes ?? [],
+                               graphWidth: historyGraphWidth) { [weak self] url in
                     guard let self, self.directory == directory else { return }
                     self.onOpenFile?(url)
                 }

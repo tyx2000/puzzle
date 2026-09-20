@@ -96,6 +96,8 @@ enum Theme {
     static let orange = hex(0xff8f40)
     static let blue = hex(0x39bae6)
     static let purple = hex(0xd2a6ff)
+    /// Shared with Gift's graph: colours identify ancestry tracks, not status.
+    static let gitGraphColors: [NSColor] = [blue, purple, green, yellow, red, orange]
     static let cyan = hex(0x95e6cb)
     static let comment = hex(0x5a6673)
     static let punct = hex(0x8a8983)
