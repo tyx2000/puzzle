@@ -161,8 +161,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// The name Mission Control, the Dock's window list and the Window menu
     /// show for this window: the project on screen.
     private func refreshWindowTitle() {
-        let name = projectURL?.lastPathComponent ?? ""
-        window?.title = name.isEmpty ? "Gift" : name
+        window?.title = Self.windowTitle(forProject: projectURL?.lastPathComponent)
+    }
+
+    /// The project first, because that is what tells two windows apart, then
+    /// the app, because a name on its own in Mission Control says nothing
+    /// about which app it belongs to. Nothing open is just the app.
+    static func windowTitle(forProject name: String?) -> String {
+        guard let name, !name.isEmpty else { return "Gift" }
+        return "\(name) - Gift"
     }
 
     var windowTitleForTesting: String { window?.title ?? "" }

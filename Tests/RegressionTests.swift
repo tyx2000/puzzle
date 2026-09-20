@@ -3619,8 +3619,18 @@ enum RegressionTests {
         }
         // A window is a project, and says so wherever macOS shows window names
         // — Mission Control, the Dock's window list, the Window menu.
-        try expect(outerWindow.windowTitleForTesting == "outer",
-                   "the window is called \(outerWindow.windowTitleForTesting), not its project")
+        try expect(outerWindow.windowTitleForTesting == "outer - Gift",
+                   "the window is called \(outerWindow.windowTitleForTesting), not its "
+                     + "project and the app")
+        try expect(WorkspaceWindowController.windowTitle(forProject: nil) == "Gift"
+                    && WorkspaceWindowController.windowTitle(forProject: "") == "Gift",
+                   "a window with no project is not called after the app")
+        // Collapsing the project leaves the app's own name behind.
+        outerWindow.deactivateProject()
+        try expect(outerWindow.windowTitleForTesting == "Gift",
+                   "a collapsed window is still called "
+                     + outerWindow.windowTitleForTesting)
+        outerWindow.activateProject(outer)
 
         outerWindow.openSelection([outer])
         try expect(app.windowsForTesting.count == 1 && outerWindow.projects.count == 1,
