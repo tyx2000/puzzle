@@ -967,6 +967,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         diffs.releaseInactiveBodies()
     }
 
+    /// ⌘C, when nothing nearer has claimed it — typing in the commit message
+    /// keeps its own copy — puts the diff on screen on the pasteboard. The
+    /// diff's rows are drawn rather than laid out as text, so there is no
+    /// selection for the editing commands to work from.
+    @objc func copy(_ sender: Any?) {
+        guard diffs.copyActiveDiff() else {
+            NSSound.beep()
+            return
+        }
+    }
+
     /// ⌘R: read the project again, as returning to the app does.
     @objc func refreshRepository(_ sender: Any?) {
         refreshExternalGitState()

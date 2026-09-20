@@ -3542,11 +3542,23 @@ enum RegressionTests {
         pane.closeTabs(in: one)
         try expect(pane.tabs.map(\.directory) == [two],
                    "closing a project took other tabs, or left its own")
+        // ⌘C copies the diff being read, wherever the focus is: the rows are
+        // drawn, so the editing commands have no selection to work from. The
+        // window controller answers it, not the view that happens to be first
+        // responder.
+        NSPasteboard.general.clearContents()
+        try expect(pane.copyActiveDiff(), "there was no diff to copy")
+        try expect(NSPasteboard.general.string(forType: .string) == pane.activeTab?.diff,
+                   "⌘C did not copy the diff as Git wrote it")
+        try expect(WorkspaceWindowController.instancesRespond(to: #selector(NSText.copy(_:))),
+                   "the window does not answer ⌘C, so it depends on what is focused")
+
         // Closed tabs cost a path each, not a diff: twenty 8 MiB diffs kept
         // "in case" outweigh reading one back.
         pane.closeAll()
         try expect(pane.tabs.isEmpty && !pane.closeActive(),
                    "tabs survived closing them all")
+        try expect(!pane.copyActiveDiff(), "⌘C copied something with no diff open")
         try expect(pane.heldDiffBytesForTesting == 0 && pane.closedCountForTesting > 0,
                    "closing every tab still holds \(pane.heldDiffBytesForTesting) bytes of diff")
 

@@ -278,6 +278,17 @@ final class DiffPaneViewController: NSViewController {
 
     var activeTab: Tab? { activeIndex.map { tabs[$0] } }
 
+    /// Put the diff on screen on the pasteboard, as Git wrote it: its rows are
+    /// drawn, so there is no text selection to copy from. False when there is
+    /// no diff to copy, or when its body was released and not read back yet.
+    @discardableResult
+    func copyActiveDiff() -> Bool {
+        guard let tab = activeTab, !tab.diff.isEmpty, !tab.needsReread else { return false }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(tab.diff, forType: .string)
+        return true
+    }
+
     private func reload() {
         guard isViewLoaded else { return }
         tabBar.reload(tabs: tabs.map { .init(title: $0.title, path: tooltip(for: $0)) },

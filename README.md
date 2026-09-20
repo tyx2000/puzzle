@@ -32,7 +32,11 @@ else — no editor, no file tree, no search, no settings.
   project in iTerm (a new window) or, without iTerm, Terminal.
 - **Diffs** — read-only, one tab per file (and per commit), unified or side by
   side, with ↑↓ stepping through changes. A working-tree diff follows the file
-  as it changes without losing your place. ⌘C copies the diff as Git wrote it.
+  as it changes without losing your place. ⌘C copies the diff as Git wrote it,
+  whatever has the focus. Very long diffs are modelled up to 50,000 lines and
+  the strip above says how many lines it is not showing. A tab reopened with
+  ⇧⌘T, or shown again after macOS reported memory pressure, is read from Git
+  afresh rather than from a copy kept aside.
 - **Live** — FSEvents watch the working tree and `.git`, so edits, commits and
   checkouts made elsewhere show up on their own; coming back to the app
   re-reads every project.
@@ -74,7 +78,7 @@ first writable directory on your login shell's `PATH`. It never overwrites an
 unrelated command with the same name.
 
 ## Shortcuts
-⌘O open · ⌘N new window · ⌘R refresh · ⌘↩ commit · ⇧⌘↩ push ·
+⌘O open · ⌘N new window · ⌘R refresh · ⌘↩ commit · ⇧⌘↩ push · ⌘C copy diff ·
 ⇧⌘] next tab · ⇧⌘[ previous tab · ⌘W close tab · ⇧⌘T reopen closed tab
 
 ## Layout

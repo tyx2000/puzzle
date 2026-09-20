@@ -164,15 +164,6 @@ final class DiffView: FlatView {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    // MARK: - Copy
-
-    /// ⌘C copies the diff as Git wrote it: the rows are drawn, so there is no
-    /// text selection to copy from.
-    @objc func copy(_ sender: Any?) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(diff, forType: .string)
-    }
-
     // MARK: - Regression-test surface
 
     var currentRowForTesting: Int? { currentRow }
