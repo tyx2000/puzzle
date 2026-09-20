@@ -32,11 +32,6 @@ final class GitPanelViewController: NSViewController {
     private var history: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — rendered with an ↑ badge.
     private var unpushed: Set<String> = []
-    /// The branch each listed commit sits on — the list is everything behind
-    /// HEAD, including work merged in from other branches.
-    private var historyBranches: [String: String] = [:]
-    /// One width for the branch column across the whole list.
-    private var historyBranchColumnWidth: CGFloat = 0
 
     /// `git log --abbrev` and `git rev-list --abbrev-commit` both honour
     /// core.abbrev, but a repo can still hand back different lengths, so match
@@ -471,15 +466,12 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    private typealias HistoryRead = (log: [GitService.Commit], unpushed: Set<String>,
-                                     branches: [String: String])
+    private typealias HistoryRead = (log: [GitService.Commit], unpushed: Set<String>)
 
-    /// The log to `depth` commits, what of it is not pushed, and the branch
-    /// each commit sits on. Runs on the Git queue.
+    /// The log to `depth` commits, and what of it is not pushed. Runs on the
+    /// Git queue.
     private static func readHistory(in directory: URL, depth: Int) -> HistoryRead {
-        let log = GitService.log(in: directory, limit: depth)
-        return (log, GitService.unpushedHashes(in: directory),
-                GitService.branchNames(for: log.map(\.shortHash), in: directory))
+        (GitService.log(in: directory, limit: depth), GitService.unpushedHashes(in: directory))
     }
 
     private func applyHistory(_ read: HistoryRead, depth: Int) {
@@ -490,8 +482,6 @@ final class GitPanelViewController: NSViewController {
         history = read.log
         historyHasMore = read.log.count >= depth
         unpushed = read.unpushed
-        historyBranches = read.branches
-        historyBranchColumnWidth = GitCommitCell.branchColumnWidth(for: read.branches.values)
         rebuildHistoryRows()
         if showingHistory { table.reloadData() }
     }
@@ -963,9 +953,9 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    /// Right-click menu for a row. Replaces the buttons that used to sit at the
-    /// end of each row: they crowded long names, and every row carried them
-    /// whether or not the pointer was anywhere near.
+    /// Right-click menu for a row — branches and history only. A changed file
+    /// carries its own two actions at the end of its row, under the pointer,
+    /// which is where the reader is already looking.
     private func contextMenu(forRow row: Int) -> NSMenu? {
         guard let directory else { return nil }
         let menu = NSMenu()
@@ -1009,28 +999,9 @@ final class GitPanelViewController: NSViewController {
             return menu
         }
 
-        guard row < entries.count else { return nil }
-        let entry = entries[row]
-        let fileURL = directory.appendingPathComponent(entry.path)
-        add(to: menu, title: "Show Changes") { [weak self] in
-            self?.onOpenDiff?(entry, directory)
-        }
-        add(to: menu, title: "Open File") { [weak self] in
-            self?.onOpenFile?(fileURL)
-        }
-        menu.addItem(.separator())
-        add(to: menu, title: "Copy Path") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(entry.path, forType: .string)
-        }
-        add(to: menu, title: "Reveal in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-        }
-        menu.addItem(.separator())
-        add(to: menu, title: "Discard Changes…") { [weak self] in
-            self?.discardChanges(entry, in: directory)
-        }
-        return menu
+        // Changes rows have no menu: what they offer — discard, open — is on
+        // the row itself, at its trailing edge, whenever the pointer is there.
+        return nil
     }
 
     private func add(to menu: NSMenu, title: String, enabled: Bool = true,
@@ -1158,10 +1129,8 @@ final class GitPanelViewController: NSViewController {
         if entry.code.contains("R"), let originalPath = entry.originalPath {
             affected += "\nOriginal path:\n\(directory.appendingPathComponent(originalPath).path)"
         }
-        let consequence = removesFile
-            ? "This file has no committed version. It will be removed from Git and moved to Trash. Puzzle cannot undo the action; recovery is possible only while the item remains in Trash."
-            : "All uncommitted changes to this file, including staged changes, will be replaced with the version in HEAD. Git cannot restore the discarded edits."
-        alert.informativeText = "\(affected)\n\n\(consequence)"
+        alert.informativeText =
+            "\(affected)\n\n\(GitService.discardConsequence(removesFile: removesFile))"
         alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn,
@@ -1288,6 +1257,13 @@ final class GitPanelViewController: NSViewController {
     /// The commit cell a History row builds, to be drawn and measured.
     func commitCellForTesting(_ row: Int) -> GitCommitCell? {
         tableView(table, viewFor: nil, row: row) as? GitCommitCell
+    }
+    /// The cell of a changed file as it stands in the list.
+    func changeCellForTesting(_ row: Int) -> GitChangeCell? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.view(atColumn: 0, row: row, makeIfNecessary: true) as? GitChangeCell
     }
     func applyStatusForTesting(_ status: GitService.Status, in directory: URL) {
         _ = view
@@ -1518,9 +1494,7 @@ extension GitPanelViewController: NSTableViewDelegate {
                 let cell = (tableView.makeView(withIdentifier: id, owner: self)
                             as? GitCommitCell) ?? GitCommitCell()
                 cell.identifier = id
-                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                               branch: historyBranches[commit.shortHash] ?? "",
-                               branchColumnWidth: historyBranchColumnWidth)
+                cell.configure(commit: commit, pending: isUnpushed(commit.shortHash))
                 return cell
 
             case .file(let file, _):
@@ -1540,6 +1514,19 @@ extension GitPanelViewController: NSTableViewDelegate {
         cell.identifier = id
         let entry = entries[row]
         cell.configure(entry: entry)
+        // The two errands a changed file has of its own, at the end of its
+        // row and only under the pointer.
+        cell.isRowHovered = table.hoveredRow == row
+        if let directory {
+            cell.onDiscard = { [weak self] in self?.discardChanges(entry, in: directory) }
+            cell.onOpenFile = { [weak self] in
+                self?.onOpenFile?(directory.appendingPathComponent(entry.path))
+            }
+        } else {
+            // A recycled row must not offer another project's file.
+            cell.onDiscard = nil
+            cell.onOpenFile = nil
+        }
         return cell
     }
 }

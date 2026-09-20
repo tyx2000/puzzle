@@ -79,6 +79,7 @@ enum RegressionTests {
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
         try testProjectCommitLine()
+        try testChangeRowActions()
         try testStripedGitLists()
         try testGitPanelHistoryPages()
         try testBranchMenu()
@@ -4693,17 +4694,10 @@ enum RegressionTests {
         try expect(panel.rowCountForTesting == 1,
                    "a changed status did not reach the table: \(panel.rowCountForTesting)")
 
-        // Row actions are a right-click away, and the row itself is just the
-        // file: no buttons to miss, and none competing with a long name.
-        guard let changesMenu = panel.contextMenuForTesting(row: 0) else {
-            throw Failure(description: "a changed file has no context menu")
-        }
-        let changeTitles = changesMenu.items.map(\.title)
-        for expected in ["Show Changes", "Open File", "Copy Path", "Reveal in Finder",
-                         "Discard Changes…"] {
-            try expect(changeTitles.contains(expected),
-                       "the row menu is missing \(expected): \(changeTitles)")
-        }
+        // What a changed file offers is on the row, under the pointer, not
+        // behind a right-click.
+        try expect(panel.contextMenuForTesting(row: 0) == nil,
+                   "a changed file still answers a right-click")
 
         // Hovering lights the row under the pointer, as in the file tree.
         try expect(panel.hoverForTesting(row: 0),
@@ -4993,8 +4987,8 @@ enum RegressionTests {
         try expect(!commitRow.trailing.isEmpty
                     && commitRow.trailing != "Ada Lovelace",
                    "the time is missing from the right: \(commitRow.trailing)")
-        // Five columns on one line — the branch, the commit's id, the message,
-        // the name and the time — and no bubble: the row says all of it itself.
+        // Four columns on one line — the commit's id, the message, the name
+        // and the time — and no bubble: the row says all of it itself.
         try expect(commitRow.hover.isEmpty,
                    "a history row still carries a tip: \(commitRow.hover)")
         guard let historyCell = panel.commitCellForTesting(0) else {
@@ -5004,59 +4998,29 @@ enum RegressionTests {
         if let rep = historyCell.bitmapImageRepForCachingDisplay(in: historyCell.bounds) {
             historyCell.cacheDisplay(in: historyCell.bounds, to: rep)
         }
-        try expect(historyCell.branchForTesting == "main",
-                   "the row is not labelled with its branch: \(historyCell.branchForTesting)")
-        let branchBox = historyCell.drawnBranchRectForTesting
         let idBox = historyCell.drawnHashRectForTesting
-        try expect(branchBox.width > 0 && idBox.width > 0,
-                   "the branch or the id column was not drawn: \(branchBox) / \(idBox)")
-        // Columns line up down the list: a longer branch name on one row gives
-        // every row's branch column its width, so no row's id or message is
-        // pushed out of line.
-        let narrow = GitCommitCell()
-        let wide = GitCommitCell()
-        let shared = GitCommitCell.branchColumnWidth(for: ["main", "a-much-longer-branch"])
-        for (cell, name) in [(narrow, "main"), (wide, "a-much-longer-branch")] {
-            cell.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
-                           branch: name, branchColumnWidth: shared)
-            cell.frame = NSRect(x: 0, y: 0, width: 520, height: Theme.treeRowHeight())
-            if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
-                cell.cacheDisplay(in: cell.bounds, to: rep)
-            }
-        }
-        try expect(narrow.drawnHashRectForTesting.minX == wide.drawnHashRectForTesting.minX
-                    && narrow.drawnSubjectXForTesting == wide.drawnSubjectXForTesting,
-                   "rows with different branch names do not line up: "
-                     + "\(narrow.drawnHashRectForTesting.minX) vs "
-                     + "\(wide.drawnHashRectForTesting.minX)")
-        // A commit no branch contains keeps the column too, empty — or its id
-        // and message start out of line with every labelled row.
-        let unlabelled = GitCommitCell()
-        unlabelled.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
-                             branch: "", branchColumnWidth: shared)
-        unlabelled.frame = NSRect(x: 0, y: 0, width: 520, height: Theme.treeRowHeight())
-        if let rep = unlabelled.bitmapImageRepForCachingDisplay(in: unlabelled.bounds) {
-            unlabelled.cacheDisplay(in: unlabelled.bounds, to: rep)
-        }
-        try expect(unlabelled.drawnHashRectForTesting.minX == narrow.drawnHashRectForTesting.minX,
-                   "a commit with no branch is out of line with the rest: "
-                     + "\(unlabelled.drawnHashRectForTesting.minX) vs "
-                     + "\(narrow.drawnHashRectForTesting.minX)")
-
-        // Only the columns asked for: a tagged commit that is also another
-        // branch's tip names neither in its row.
+        let subjectBox = historyCell.drawnSubjectRectForTesting
+        let authorBox = historyCell.drawnAuthorRectForTesting
+        let dateBox = historyCell.drawnDateRectForTesting
+        // The id opens the row: no branch column ahead of it. Git records no
+        // branch on a commit, so a label there was a guess shown as a fact.
+        try expect(idBox.width > 0 && idBox.minX == 8,
+                   "the commit id does not open the row: \(idBox)")
+        try expect(abs(subjectBox.minX - idBox.maxX - GitCommitCell.columnGap) <= 0.5
+                    && abs(authorBox.minX - subjectBox.maxX - GitCommitCell.columnGap) <= 0.5
+                    && abs(dateBox.minX - authorBox.maxX - GitCommitCell.columnGap) <= 0.5,
+                   "the id, the message, the name and the time are not a column gap "
+                     + "apart: \(idBox) \(subjectBox) \(authorBox) \(dateBox)")
+        try expect([subjectBox, authorBox, dateBox].allSatisfy {
+                        $0.minY == idBox.minY && $0.height == idBox.height },
+                   "the row's columns are not on one line")
+        // Nor does it name a branch anywhere else, or a tag on the commit.
         _ = GitService.run(["tag", "v1"], in: root)
         let tagged = GitCommitCell()
-        tagged.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false,
-                         branch: "main", branchColumnWidth: shared)
-        try expect(!tagged.accessibilityLabel()!.contains("v1"),
-                   "the row names the commit's tag: "
-                     + "\(String(describing: tagged.accessibilityLabel()))")
-        try expect(abs(idBox.minX - branchBox.maxX - GitCommitCell.columnGap) <= 0.5
-                    && abs(historyCell.drawnSubjectXForTesting - idBox.maxX
-                            - GitCommitCell.columnGap) <= 0.5,
-                   "the branch, the id and the message are not a column gap apart: "
-                     + "\(branchBox) \(idBox) \(historyCell.drawnSubjectXForTesting)")
+        tagged.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false)
+        let spoken = tagged.accessibilityLabel() ?? ""
+        try expect(!spoken.contains("main") && !spoken.contains("v1"),
+                   "the row names a branch or a tag: \(spoken)")
 
         // Clicking the row is what expands it, so its files appear underneath.
         panel.expandCommit(at: 0)
@@ -5986,15 +5950,6 @@ enum RegressionTests {
                    "the refresh held during a drag was never applied: "
                      + "\(panel.rowsForTesting.map(\.titleForTesting))")
 
-        // `name-rev` skips an argument it cannot resolve. Pairing its lines
-        // with the hashes by position then gave every later commit its
-        // neighbour's branch; they are read by the hash each line names.
-        let named = GitService.parseBranchNames(
-            "aaa1111 main~2\nccc3333 topic^2~1\nddd4444 undefined\n",
-            for: ["aaa1111", "bbb2222", "ccc3333", "ddd4444"])
-        try expect(named == ["aaa1111": "main", "ccc3333": "topic"],
-                   "branch names were not read by the hash each line names: \(named)")
-
         // A tinted symbol is made once and kept: every visible tree row draws
         // its chevron on every redraw.
         guard let chevron = Theme.symbol("chevron.down", pointSize: 12) else {
@@ -6276,6 +6231,28 @@ enum RegressionTests {
                     && bar.pushButton.toolTip == GitPanelViewController.pushHint(ahead: 1),
                    "Push does not offer the commit just made: "
                      + "\(bar.pushButton.isEnabled) '\(bar.pushButton.badge)'")
+        // The count made Push wider and the message box narrower while it was
+        // still being typed in. AppKit lays the field editor out again for
+        // that, and it had put the caret at the top of the strip.
+        bar.layoutSubtreeIfNeeded()
+        if bar.field.currentEditor() == nil { window.makeFirstResponder(bar.field) }
+        func caretIsOnTheLine() -> Bool {
+            guard let placed = bar.field.editorLineForTesting else { return false }
+            return abs(placed.editor.minY - placed.line.minY) <= 0.5
+                && abs(placed.editor.height - placed.line.height) <= 0.5
+        }
+        try expect(caretIsOnTheLine(),
+                   "after the commit the caret left the message's line: "
+                     + "\(String(describing: bar.field.editorLineForTesting))")
+        // Dragging the column narrower while typing is the same resize.
+        let typingWidth = window.contentView?.bounds.width ?? 360
+        window.setContentSize(NSSize(width: typingWidth - 40, height: 260))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(caretIsOnTheLine(),
+                   "resizing the column while typing moved the caret off the line: "
+                     + "\(String(describing: bar.field.editorLineForTesting))")
+        window.setContentSize(NSSize(width: typingWidth, height: 260))
+        window.contentView?.layoutSubtreeIfNeeded()
         // ⇧⌘↩ through the real event path, typed into the field. A window
         // off screen is sent no keys at all, so this one is put up; whether
         // it is key or not, the shortcut must arrive.
@@ -6697,6 +6674,188 @@ enum RegressionTests {
                      + "\(panel.rowCountForTesting) rows")
     }
 
+    private static func testChangeRowActions() throws {
+        let root = try temporaryDirectory("change-row-actions")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: root).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Puzzle Test"])
+        _ = git(["config", "user.email", "puzzle@example.invalid"])
+        try Data("one\n".utf8).write(to: root.appendingPathComponent("kept.txt"))
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        try Data("changed\n".utf8).write(to: root.appendingPathComponent("kept.txt"))
+        try Data("new\n".utf8).write(to: root.appendingPathComponent("added.txt"))
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        func status() -> GitService.Status { GitService.status(in: root) }
+
+        let changes = ProjectChangesViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = changes
+        window.setContentSize(NSSize(width: 360, height: 200))
+        defer { window.close() }
+        func show() {
+            let now = status()
+            changes.setEntries(now.entries, in: root, ahead: now.ahead,
+                               hasUpstream: now.hasUpstream)
+        }
+        var changedIn: [URL] = []
+        changes.onChanged = { directory in
+            changedIn.append(directory)
+            show()
+        }
+        var opened: [URL] = []
+        changes.onOpenFile = { opened.append($0) }
+        show()
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(changes.rowCountForTesting == 2,
+                   "the fixture's two changes are not listed: \(changes.rowCountForTesting)")
+        guard let row = changes.cellForTesting(0) else {
+            throw Failure(description: "the first change built no cell")
+        }
+        func draw(_ cell: GitChangeCell) {
+            cell.layoutSubtreeIfNeeded()
+            if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+            }
+        }
+
+        // Nothing on the row until the pointer is on it: two marks against
+        // every name is what the list looked like before they were taken off.
+        draw(row)
+        row.resetCursorRects()
+        try expect(row.actionRectForTesting(.discard) == .zero
+                    && row.actionRectForTesting(.open) == .zero
+                    && row.cursorRectsForTesting.isEmpty,
+                   "a row nobody is pointing at shows its actions")
+        let fullName = row.drawnNameRectForTesting
+
+        changes.setHoveredRowForTesting(0)
+        guard let hovered = changes.cellForTesting(0) else {
+            throw Failure(description: "the hovered row built no cell")
+        }
+        draw(hovered)
+        let discard = hovered.actionRectForTesting(.discard)
+        let open = hovered.actionRectForTesting(.open)
+        try expect(discard.width > 0 && open.width > 0,
+                   "the pointer on the row did not bring its actions: \(discard) \(open)")
+        // Discard first, open after it, both at the trailing edge and clear
+        // of each other.
+        try expect(discard.maxX + GitChangeCell.actionGap == open.minX
+                    && open.maxX + GitChangeCell.actionInset == hovered.bounds.maxX
+                    && abs(discard.midY - hovered.bounds.midY) <= 0.5
+                    && discard.midY == open.midY,
+                   "the actions are not discard then open at the trailing edge: "
+                     + "\(discard) \(open) in \(hovered.bounds)")
+        // The name gives them the room rather than being drawn under them.
+        try expect(discard.minX - hovered.drawnNameRectForTesting.maxX
+                    >= GitChangeCell.actionGap
+                    && hovered.drawnNameRectForTesting.width < fullName.width,
+                   "the name is drawn under the actions, or right against them: "
+                     + "\(hovered.drawnNameRectForTesting) / \(discard)")
+        // Both marks are drawn, so a name no version of macOS knows cannot
+        // leave a button blank.
+        for action in ChangeRowAction.allCases {
+            try expect(Theme.symbol(action.symbolName, pointSize: 11) != nil,
+                       "\(action.label) has no mark: \(action.symbolName)")
+        }
+        try expect(ChangeRowAction.discard.symbolName != ChangeRowAction.open.symbolName,
+                   "the two actions are drawn with the same mark")
+        hovered.resetCursorRects()
+        try expect(hovered.cursorRectsForTesting == [discard, open],
+                   "the actions do not offer the pointing hand: "
+                     + "\(hovered.cursorRectsForTesting)")
+        // One at a time lights up, and only over the action itself.
+        hovered.moveMouseForTesting(to: NSPoint(x: discard.midX, y: discard.midY))
+        try expect(hovered.hoveredActionForTesting == .discard, "the pointer did not light discard")
+        hovered.moveMouseForTesting(to: NSPoint(x: open.midX, y: open.midY))
+        try expect(hovered.hoveredActionForTesting == .open, "the pointer did not light open")
+        hovered.moveMouseForTesting(to: NSPoint(x: 60, y: discard.midY))
+        try expect(hovered.hoveredActionForTesting == nil,
+                   "an action stayed lit with the pointer on the name")
+
+        // Open asks for the file itself, not its diff.
+        var openedDiff = 0
+        changes.onOpenDiff = { _, _ in openedDiff += 1 }
+        try expect(hovered.clickForTesting(at: NSPoint(x: open.midX, y: open.midY)) == .open,
+                   "the open button did not take the click")
+        try expect(opened.map(\.lastPathComponent) == [changes.rowNameForTesting(0) ?? ""]
+                    && opened.first?.path.hasPrefix(root.path) == true,
+                   "open did not ask for the row's own file: \(opened)")
+        try expect(hovered.clickForTesting(at: NSPoint(x: 60, y: discard.midY)) == nil
+                    && opened.count == 1,
+                   "a click on the name was taken by an action")
+        try expect(openedDiff == 0, "the buttons asked for the diff as well")
+
+        // Discard is asked about first, and a no leaves the file alone.
+        var asked: [String] = []
+        changes.confirmDiscard = { entry, _ in
+            asked.append(entry.path)
+            return false
+        }
+        let discardRow = changes.rowNameForTesting(0) ?? ""
+        try expect(hovered.clickForTesting(at: NSPoint(x: discard.midX, y: discard.midY))
+                    == .discard,
+                   "the discard button did not take the click")
+        try expect(asked == [discardRow] && !changes.isBusyForTesting
+                    && status().entries.count == 2,
+                   "a refused discard went ahead anyway: \(asked) \(status().entries.count)")
+
+        // A yes puts the file back the way it was committed.
+        changes.confirmDiscard = { entry, _ in
+            asked.append(entry.path)
+            return true
+        }
+        _ = hovered.clickForTesting(at: NSPoint(x: discard.midX, y: discard.midY))
+        try expect(waitUntil { !changes.isBusyForTesting && status().entries.count == 1 },
+                   "the discard did not go through: \(status().entries.map(\.path))")
+        try expect(!status().entries.contains { $0.path == discardRow },
+                   "the discarded file is still changed: \(status().entries.map(\.path))")
+        try expect(changedIn == [root],
+                   "the discard was not reported for its repository: \(changedIn)")
+
+        // The Git panel's Changes list offers the same two, and no longer
+        // answers a right-click: what the row has to offer is on the row.
+        let panel = GitPanelViewController()
+        let panelWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                                   styleMask: [.titled], backing: .buffered, defer: false)
+        panelWindow.contentViewController = panel
+        panelWindow.setContentSize(NSSize(width: 380, height: 420))
+        defer { panelWindow.close() }
+        var panelOpened: [URL] = []
+        panel.onOpenFile = { panelOpened.append($0) }
+        panel.setDirectory(root)
+        try expect(waitUntil { panel.rowCountForTesting == 1 },
+                   "the panel never listed the change: \(panel.rowCountForTesting)")
+        try expect(panel.contextMenuForTesting(row: 0) == nil,
+                   "a changed file still has a right-click menu")
+        panel.setHoveredRowForTesting(0)
+        guard let panelRow = panel.changeCellForTesting(0) else {
+            throw Failure(description: "the panel's change row built no cell")
+        }
+        draw(panelRow)
+        let panelOpen = panelRow.actionRectForTesting(.open)
+        try expect(panelRow.actionRectForTesting(.discard).width > 0 && panelOpen.width > 0,
+                   "the panel's row does not offer discard and open")
+        _ = panelRow.clickForTesting(at: NSPoint(x: panelOpen.midX, y: panelOpen.midY))
+        try expect(panelOpened.count == 1
+                    && panelOpened.first?.path.hasPrefix(root.path) == true,
+                   "the panel's open button did not ask for the file: \(panelOpened)")
+        // History and Branch rows keep their menus.
+        panel.showHistoryForTesting()
+        try expect(waitUntil { panel.rowCountForTesting >= 1 }, "the history never listed")
+        try expect(panel.contextMenuForTesting(row: 0) != nil,
+                   "a commit row lost its menu as well")
+    }
+
     private static func testBranchMenu() throws {
         func branch(_ name: String, _ author: String, _ date: String,
                     _ stamp: Int64, current: Bool = false,
@@ -7116,8 +7275,7 @@ enum RegressionTests {
         }
 
         // Everything behind HEAD is listed, including commits made on another
-        // branch and merged in — and each row says which branch it sits on,
-        // which the subject alone does not.
+        // branch and merged in.
         _ = GitService.run(["checkout", "-q", "-b", "side"], in: root)
         try Data("side\n".utf8).write(to: root.appendingPathComponent("side.txt"))
         try expect(GitService.commit("Side work", in: root).code == 0,
@@ -7132,73 +7290,45 @@ enum RegressionTests {
             let listed = projectsPanel.history.commitSubjectsForTesting
             return listed.contains("Merge side") && listed.contains("Side work")
         }
-        let labelled = Array(zip(projectsPanel.history.commitSubjectsForTesting,
-                                 projectsPanel.history.branchLabelsForTesting))
-        try expect(labelled.contains { $0.0 == "Side work" && $0.1 == "side" },
-                   "the merged-in commit is not labelled with its own branch: \(labelled)")
-        // Only the checked-out branch contains the merge itself; the commits
-        // behind it are on both, and which name they take is Git's own answer
-        // to "nearest", not something to hold a test to.
-        try expect(labelled.contains { $0.0 == "Merge side" && $0.1 == "trunk" },
-                   "the merge is not labelled with the branch it was made on: \(labelled)")
-        let sideRow = projectsPanel.history.commitSubjectsForTesting
-            .firstIndex(of: "Side work")
-        try expect(sideRow.flatMap { projectsPanel.history.rowBranchForTesting($0) } == "side",
-                   "the row does not draw the branch it is labelled with")
+        // One line a commit, three columns: the message, the name and the
+        // time. No branch — Git records none on a commit, and a label guessed
+        // from the names that reach it now read as a fact — and no id.
         try expect(GitCommitCell.columnGap == 15,
                    "the history columns are \(GitCommitCell.columnGap)pt apart, not 15")
-        // Drawn, not merely carried, and over two lines: the message has the
-        // first to itself, the branch, the name and the time share the second.
-        // One line in a column this narrow lost the message, which is what the
-        // row is read for.
-        guard let sideIndex = sideRow,
+        guard let sideIndex = projectsPanel.history.commitSubjectsForTesting
+                .firstIndex(of: "Side work"),
               let sideCell = projectsPanel.history.rowCellForTesting(sideIndex) else {
             throw Failure(description: "the side commit built no cell")
         }
-        let rowHeight = GitCommitCell.height(for: .twoLine)
-        try expect(rowHeight > Theme.treeRowHeight(),
-                   "a two-line row is no taller than a one-line one")
-        sideCell.frame = NSRect(x: 0, y: 0, width: 320, height: rowHeight)
+        try expect(projectsPanel.history.rowHeightForTesting(sideIndex)
+                    == Theme.treeRowHeight(),
+                   "a commit is not given a single line: "
+                     + "\(projectsPanel.history.rowHeightForTesting(sideIndex))")
+        sideCell.frame = NSRect(x: 0, y: 0, width: 320, height: Theme.treeRowHeight())
         if let rep = sideCell.bitmapImageRepForCachingDisplay(in: sideCell.bounds) {
             sideCell.cacheDisplay(in: sideCell.bounds, to: rep)
         }
-        try expect(sideCell.drawnBranchRectForTesting.width > 0,
-                   "the branch column was not drawn")
-        try expect(sideCell.drawnSubjectRectForTesting.maxY
-                    <= sideCell.drawnBranchRectForTesting.minY,
-                   "the message and its metadata are on the same line: "
-                     + "\(sideCell.drawnSubjectRectForTesting) / "
-                     + "\(sideCell.drawnBranchRectForTesting)")
-        try expect(abs(sideCell.drawnAuthorRectForTesting.minX
-                        - sideCell.drawnBranchRectForTesting.maxX
-                        - GitCommitCell.columnGap) <= 0.5,
-                   "the second line's columns are not a gap apart: "
-                     + "\(sideCell.drawnBranchRectForTesting) then "
-                     + "\(sideCell.drawnAuthorRectForTesting)")
-        try expect(abs(sideCell.drawnDateRectForTesting.minX
-                        - sideCell.drawnAuthorRectForTesting.maxX
-                        - GitCommitCell.columnGap) <= 0.5,
-                   "the name and the time are not a gap apart: "
-                     + "\(sideCell.drawnAuthorRectForTesting) then "
-                     + "\(sideCell.drawnDateRectForTesting)")
-        try expect(projectsPanel.history.rowHeightForTesting(sideIndex) == rowHeight,
-                   "the list does not give a commit its two lines")
-        // The commit's id opens the first line, so a row can be named to Git
-        // without hunting for it.
-        try expect(sideCell.drawnHashRectForTesting.width > 0
-                    && sideCell.drawnHashRectForTesting.maxX
-                        <= sideCell.drawnSubjectRectForTesting.minX,
-                   "the commit id does not come before the message: "
-                     + "\(sideCell.drawnHashRectForTesting) / "
-                     + "\(sideCell.drawnSubjectRectForTesting)")
-        try expect(abs(sideCell.drawnSubjectRectForTesting.minX
-                        - sideCell.drawnHashRectForTesting.maxX
-                        - GitCommitCell.columnGap) <= 0.5,
-                   "the message does not start a column gap past the id")
-        // No bubble following the pointer down the list: two lines carry
+        let message = sideCell.drawnSubjectRectForTesting
+        let name = sideCell.drawnAuthorRectForTesting
+        let time = sideCell.drawnDateRectForTesting
+        try expect(sideCell.drawnHashRectForTesting == .zero && message.minX == 8,
+                   "something comes before the message: id "
+                     + "\(sideCell.drawnHashRectForTesting), message \(message)")
+        try expect(message.width > 0 && name.width > 0 && time.width > 0
+                    && abs(name.minX - message.maxX - GitCommitCell.columnGap) <= 0.5
+                    && abs(time.minX - name.maxX - GitCommitCell.columnGap) <= 0.5,
+                   "the message, the name and the time are not three columns a gap "
+                     + "apart: \(message) \(name) \(time)")
+        try expect([name, time].allSatisfy {
+                        $0.minY == message.minY && $0.height == message.height },
+                   "the row's columns are not on one line")
+        let spoken = sideCell.accessibilityLabel() ?? ""
+        try expect(!spoken.contains("side,") && !spoken.contains("on side"),
+                   "the row still names a branch: \(spoken)")
+        // No bubble following the pointer down the list: the line carries
         // everything the row has to say.
         try expect(sideCell.toolTip == nil,
-                   "a two-line commit row still carries a tip: "
+                   "a commit row still carries a tip: "
                      + "\(String(describing: sideCell.toolTip))")
 
         // A pane is placed by hand and everything inside it by constraints, so

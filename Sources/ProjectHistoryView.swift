@@ -34,9 +34,6 @@ final class ProjectHistoryViewController: NSViewController {
     /// Short hashes not yet on the upstream branch — drawn with an ↑, as in
     /// the Git panel.
     private var unpushed: Set<String> = []
-    /// The branch each commit sits on: the list holds everything behind HEAD,
-    /// including commits made on a branch that was merged in.
-    private var branches: [String: String] = [:]
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
     private var rows: [Row] = []
@@ -115,7 +112,6 @@ final class ProjectHistoryViewController: NSViewController {
         hasMore = true
         commits = []
         unpushed = []
-        branches = [:]
         expanded = []
         files = [:]
         rebuildRows()
@@ -137,7 +133,6 @@ final class ProjectHistoryViewController: NSViewController {
         GitService.workQueue.async { [weak self] in
             let log = GitService.log(in: directory, limit: wanted)
             let pending = GitService.unpushedHashes(in: directory)
-            let named = GitService.branchNames(for: log.map(\.shortHash), in: directory)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
@@ -151,7 +146,6 @@ final class ProjectHistoryViewController: NSViewController {
                 self.commits = log
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
-                self.branches = named
                 // A commit that is no longer listed cannot stay open.
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
@@ -262,13 +256,6 @@ final class ProjectHistoryViewController: NSViewController {
     var fileRowsForTesting: [String] {
         rows.compactMap { if case .file(let f, _) = $0 { return f.path } else { return nil } }
     }
-    /// The branch each commit row is labelled with.
-    var branchLabelsForTesting: [String] {
-        rows.compactMap {
-            guard case .commit(let commit) = $0 else { return nil }
-            return branches[commit.shortHash] ?? ""
-        }
-    }
     /// The subject a row draws, which is what the reader picks it out by.
     func rowSubjectForTesting(_ row: Int) -> String? {
         _ = view
@@ -292,10 +279,6 @@ final class ProjectHistoryViewController: NSViewController {
     func rowHeightForTesting(_ row: Int) -> CGFloat {
         _ = view
         return tableView(table, heightOfRow: row)
-    }
-    /// The branch a row draws before the subject.
-    func rowBranchForTesting(_ row: Int) -> String? {
-        rowCellForTesting(row)?.branchForTesting
     }
     /// A click on a row, through the same path a real one takes.
     func clickRowForTesting(_ row: Int) { act(on: row) }
@@ -323,13 +306,9 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        // A commit reads over two lines here — the column is too narrow to
-        // hold a subject and its metadata on one. Its files stay single, like
-        // every other list in the sidebar.
-        guard rows.indices.contains(row), case .commit = rows[row] else {
-            return Theme.treeRowHeight()
-        }
-        return GitCommitCell.height(for: .twoLine)
+        // One line a row, commits and their files alike: message, name and
+        // time fit the column without the id.
+        Theme.treeRowHeight()
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -354,7 +333,7 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           branch: branches[commit.shortHash] ?? "", layout: .twoLine)
+                           showsID: false)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

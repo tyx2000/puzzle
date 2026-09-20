@@ -11,6 +11,11 @@ import AppKit
 final class ProjectChangesViewController: NSViewController {
     /// A changed file was clicked: show its diff.
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
+    /// The open button on a row: the file itself, not its diff.
+    var onOpenFile: ((URL) -> Void)?
+    /// Asks before a discard, so a test can answer without a sheet. Returns
+    /// whether to go ahead; the default puts the Git panel's own warning up.
+    var confirmDiscard: ((GitService.Status.Entry, Bool) -> Bool)?
     /// A commit or a push ran in `directory`, whether or not it worked:
     /// whatever shows that repository's state has to read it again.
     var onChanged: ((URL) -> Void)?
@@ -207,6 +212,50 @@ final class ProjectChangesViewController: NSViewController {
         }
     }
 
+    /// Put one file back the way it was committed. Confirmed first, then run
+    /// on the queue every other Git command here runs on.
+    private func discard(_ entry: GitService.Status.Entry, in directory: URL) {
+        guard operation == nil else {
+            NSSound.beep()
+            return
+        }
+        let removesFile = GitService.discardRemovesFile(entry, in: directory)
+        let confirm = confirmDiscard ?? { entry, removesFile in
+            Self.discardWarning(for: entry, in: directory, removesFile: removesFile).runModal()
+                == .alertFirstButtonReturn
+        }
+        guard confirm(entry, removesFile) else { return }
+        let id = begin("Discarding changes", in: directory, locksMessage: false)
+        GitService.operationQueue.async { [weak self] in
+            let result = GitService.discard(entry, in: directory)
+            DispatchQueue.main.async {
+                guard let self, self.operation?.id == id else { return }
+                self.finish(id)
+                self.onChanged?(directory)
+                if !result.ok {
+                    self.presentError(title: "Discard changes failed", message: result.message)
+                }
+            }
+        }
+    }
+
+    /// The Git panel's own warning, word for word: the same act, asked about
+    /// the same way wherever it is started from.
+    static func discardWarning(for entry: GitService.Status.Entry, in directory: URL,
+                               removesFile: Bool) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Discard changes to “\(entry.path)”?"
+        var affected = "File:\n\(directory.appendingPathComponent(entry.path).path)"
+        if entry.code.contains("R"), let originalPath = entry.originalPath {
+            affected += "\nOriginal path:\n\(directory.appendingPathComponent(originalPath).path)"
+        }
+        alert.informativeText = "\(affected)\n\n\(GitService.discardConsequence(removesFile: removesFile))"
+        alert.addButton(withTitle: "Discard Changes")
+        alert.addButton(withTitle: "Cancel")
+        return alert
+    }
+
     private func begin(_ label: String, in directory: URL, locksMessage: Bool) -> UUID {
         let id = UUID()
         operation = (id, directory, locksMessage)
@@ -244,6 +293,23 @@ final class ProjectChangesViewController: NSViewController {
         return commitBar
     }
     var isBusyForTesting: Bool { operation != nil }
+    /// The cell of a row as it stands in the list — the one the pointer is
+    /// over, not a fresh copy of it.
+    func cellForTesting(_ row: Int) -> GitChangeCell? {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        guard row >= 0, row < table.numberOfRows else { return nil }
+        return table.view(atColumn: 0, row: row, makeIfNecessary: true) as? GitChangeCell
+    }
+    var hoveredRowForTesting: Int {
+        _ = view
+        return table.hoveredRow
+    }
+    func setHoveredRowForTesting(_ row: Int) {
+        _ = view
+        table.layoutSubtreeIfNeeded()
+        table.setHoveredRowForTesting(row)
+    }
     /// Where the commit line starts, measured from the window's top like the
     /// first row below.
     var commitBarTopInsetInWindowForTesting: CGFloat? {
@@ -300,7 +366,21 @@ extension ProjectChangesViewController: NSTableViewDataSource, NSTableViewDelega
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? GitChangeCell)
             ?? GitChangeCell()
         cell.identifier = id
-        cell.configure(entry: entries[row])
+        let entry = entries[row]
+        cell.configure(entry: entry)
+        // The same two errands the Git panel's list offers, on the same
+        // terms: at the end of the row, and only under the pointer.
+        cell.isRowHovered = table.hoveredRow == row
+        if let directory {
+            cell.onDiscard = { [weak self] in self?.discard(entry, in: directory) }
+            cell.onOpenFile = { [weak self] in
+                self?.onOpenFile?(directory.appendingPathComponent(entry.path))
+            }
+        } else {
+            // A recycled row must not offer another project's file.
+            cell.onDiscard = nil
+            cell.onOpenFile = nil
+        }
         return cell
     }
 }
@@ -470,6 +550,12 @@ final class CommitLineField: NSTextField, NSTextFieldDelegate {
     }
 
     var drawsPlaceholderForTesting: Bool { currentText.isEmpty }
+    /// Where the field editor sits, and the line the text is set on, both in
+    /// the field's coordinates — nil when nobody is typing.
+    var editorLineForTesting: (editor: NSRect, line: NSRect)? {
+        guard let editor = currentEditor(), let cell else { return nil }
+        return (editor.convert(editor.bounds, to: self), cell.titleRect(forBounds: bounds))
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard currentEditor() != nil, let shortcut = CommitShortcut(event) else {
@@ -542,7 +628,18 @@ final class CenteredTextFieldCell: NSTextFieldCell {
     }
 
     override func titleRect(forBounds rect: NSRect) -> NSRect {
-        let natural = super.titleRect(forBounds: rect)
+        centred(super.titleRect(forBounds: rect), in: rect)
+    }
+
+    /// What AppKit lays the field editor out in again when the field changes
+    /// size while it is being typed in — the box narrowing as Push gains its
+    /// count after a commit, or the column being dragged. Left alone, that
+    /// put the caret at the top of the strip, above the text's line.
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        centred(super.drawingRect(forBounds: rect), in: rect)
+    }
+
+    private func centred(_ natural: NSRect, in rect: NSRect) -> NSRect {
         let height = min(natural.height, cellSize(forBounds: rect).height)
         return NSRect(x: natural.minX, y: natural.minY + ((natural.height - height) / 2).rounded(),
                       width: natural.width, height: height)

@@ -8,53 +8,35 @@ import AppKit
 /// panel's state — they are handed what to draw and draw it — and the
 /// controller is easier to read without 500 lines of drawing under it.
 
+/// One commit on one line: its id (in the Git panel), the message, who made
+/// it and when.
+///
+/// No branch. Git does not record which branch a commit was made on — a
+/// branch is only a name pointing at a commit — so any label had to be
+/// guessed from which names can reach it now, and read as a fact it is not.
 final class GitCommitCell: DrawnSidebarCell {
     private var subject = ""
     private var author = ""
     private var date = ""
-    private var branch = ""
     private var commitID = ""
+    private var showsID = true
     private var metaColor = NSColor.clear
     /// Between every column in the row.
     static let columnGap: CGFloat = 15
-    /// How much room the row gets. A narrow column cannot hold a subject, a
-    /// branch, a name and a time on one line without losing the subject, which
-    /// is what the row is read for; given a second line the subject has the
-    /// first to itself.
-    enum Layout { case oneLine, twoLine }
-    private var layout: Layout = .oneLine
-    static func height(for layout: Layout) -> CGFloat {
-        layout == .oneLine ? Theme.treeRowHeight() : Theme.treeRowHeight() + 14
-    }
 
     /// Where the last draw put each column, so the gaps between them can be
     /// measured rather than eyeballed.
-    private(set) var drawnBranchRectForTesting: NSRect = .zero
+    private(set) var drawnHashRectForTesting: NSRect = .zero
     private(set) var drawnSubjectXForTesting: CGFloat = 0
     private(set) var drawnSubjectRectForTesting: NSRect = .zero
     private(set) var drawnAuthorRectForTesting: NSRect = .zero
     private(set) var drawnDateRectForTesting: NSRect = .zero
-    private(set) var drawnHashRectForTesting: NSRect = .zero
 
-    /// The width every row in the list gives its branch, so the id and the
-    /// message start at the same place on each — they are columns, and a
-    /// longer branch name on one row must not push that row's out of line.
-    private var branchColumnWidth: CGFloat?
-
-    /// The width a list of these rows should give the branch column: its
-    /// widest name.
-    static func branchColumnWidth(for names: some Sequence<String>) -> CGFloat {
-        let font = Theme.uiFont(9.5)
-        return names.reduce(0) { widest, name in
-            max(widest, ceil((name as NSString).size(withAttributes: [.font: font]).width) + 2)
-        }
-    }
-
-    func configure(commit: GitService.Commit, pending: Bool, branch: String = "",
-                   layout: Layout = .oneLine, branchColumnWidth: CGFloat? = nil) {
-        self.branch = branch
-        self.branchColumnWidth = branchColumnWidth
-        self.layout = layout
+    /// `showsID` puts the commit's id ahead of the message, which is what
+    /// names it to Git. The Git panel's list has the width for it; the history
+    /// under a project's changes reads message, name and time.
+    func configure(commit: GitService.Commit, pending: Bool, showsID: Bool = true) {
+        self.showsID = showsID
         commitID = commit.shortHash
         subject = commit.subject
         // The name gives way before the timestamp does: a truncated name still
@@ -65,147 +47,47 @@ final class GitCommitCell: DrawnSidebarCell {
         // to be tellable apart at a glance — the arrow rides with the metadata
         // rather than taking room from the subject.
         metaColor = pending ? Theme.cursor : Theme.dimText
-        // No bubble: the row carries the branch, the id, the message, the name
-        // and the time itself, and a tip over every row is then only something
-        // that follows the pointer down the list.
+        // No bubble: the row carries everything it has to say itself, and a
+        // tip over every row is then only something that follows the pointer
+        // down the list.
         toolTip = nil
         exposeToAccessibility("\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
-                                + (branch.isEmpty ? "" : "on \(branch), ")
                                 + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        drawnBranchRectForTesting = .zero
-        drawnAuthorRectForTesting = .zero
-        drawnDateRectForTesting = .zero
         drawnHashRectForTesting = .zero
-        guard layout == .oneLine else {
-            drawTwoLines()
-            return
-        }
         var content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
                              height: bounds.height)
-        // Branch, then the commit's id, each a column of its own ahead of the
-        // message: the list holds commits merged in from other branches, and
-        // the id is what names one to Git.
-        let metaFont = Theme.uiFont(9.5)
-        let baseline = SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11), in: content)
-        /// A column of its own. With a width shared down the list it is kept
-        /// even for a row that has nothing to put in it — a commit no branch
-        /// contains — or that row's later columns start out of line.
-        func leadingColumn(_ text: String, color: NSColor, share: CGFloat,
-                           lineBreak: NSLineBreakMode, width fixed: CGFloat? = nil) -> NSRect? {
-            let reserved = (fixed ?? 0) > 0
-            guard !text.isEmpty || reserved else { return nil }
-            let natural = fixed ?? ceil((text as NSString)
-                                            .size(withAttributes: [.font: metaFont]).width) + 2
-            let width = min(natural, floor(content.width * share))
-            let box = NSRect(x: content.minX, y: content.minY,
-                             width: width, height: content.height)
-            if !text.isEmpty {
-                SidebarCellDrawing.text(text, font: metaFont, color: color,
-                                        baseline: baseline, in: box, lineBreak: lineBreak)
-            }
-            let taken = width + Self.columnGap
-            content = NSRect(x: content.minX + taken, y: content.minY,
-                             width: max(0, content.width - taken), height: content.height)
-            return text.isEmpty ? nil : box
-        }
-        // A quarter at most for the branch: the message is what the row is
-        // read for, and a long branch name must not take the whole line.
-        drawnBranchRectForTesting = leadingColumn(
-            branch, color: Theme.cursor, share: 0.25, lineBreak: .byTruncatingTail,
-            width: branchColumnWidth) ?? .zero
-        drawnHashRectForTesting = leadingColumn(
-            commitID, color: Theme.dimText, share: 0.25, lineBreak: .byClipping) ?? .zero
-        drawnSubjectXForTesting = content.minX
-        drawnSubjectRectForTesting = content
-        SidebarCellDrawing.leadingAndTrailing(
-            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
-            trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
-            trailingPinned: date, in: content, gap: Self.columnGap,
-            // With a branch ahead of it the subject is down to whatever the
-            // other three leave; the name and the date give way first.
-            trailingShare: branch.isEmpty ? 0.6 : 0.5)
-    }
-
-    /// The subject on its own line, and under it the branch, the name and the
-    /// time — each column a gap from the next, the time against the trailing
-    /// edge where a list of them lines up.
-    private func drawTwoLines() {
-        let content = NSRect(x: 8, y: 2, width: max(0, bounds.width - 16),
-                             height: max(0, bounds.height - 4))
-        guard content.width > 0, content.height > 0 else { return }
-        let subjectFont = Theme.uiFont(11)
-        let metaFont = Theme.uiFont(9.5)
-        let top = NSRect(x: content.minX, y: content.minY,
-                         width: content.width, height: content.height / 2)
-        let bottom = NSRect(x: content.minX, y: content.midY,
-                            width: content.width, height: content.height / 2)
-        var message = top
-        // The commit's id first, so a row can be named to Git without hunting
-        // for it: `git show <id>` starts here.
-        if !commitID.isEmpty {
+        if showsID, !commitID.isEmpty {
             let idFont = Theme.uiFont(9.5)
+            // A quarter at most: the message is what the row is read for.
             let idWidth = min(ceil((commitID as NSString)
                                     .size(withAttributes: [.font: idFont]).width) + 2,
-                              floor(top.width / 3))
-            let box = NSRect(x: top.minX, y: top.minY, width: idWidth, height: top.height)
+                              floor(content.width * 0.25))
+            let box = NSRect(x: content.minX, y: content.minY,
+                             width: idWidth, height: content.height)
             drawnHashRectForTesting = box
             SidebarCellDrawing.text(
                 commitID, font: idFont, color: Theme.dimText,
-                baseline: SidebarCellDrawing.centeredBaseline(for: subjectFont, in: top),
+                baseline: SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11), in: content),
                 in: box, lineBreak: .byClipping)
             let taken = idWidth + Self.columnGap
-            message = NSRect(x: top.minX + taken, y: top.minY,
-                             width: max(0, top.width - taken), height: top.height)
+            content = NSRect(x: content.minX + taken, y: content.minY,
+                             width: max(0, content.width - taken), height: content.height)
         }
-        drawnSubjectXForTesting = message.minX
-        drawnSubjectRectForTesting = message
-        SidebarCellDrawing.text(
-            subject, font: subjectFont, color: Theme.foreground,
-            baseline: SidebarCellDrawing.centeredBaseline(for: subjectFont, in: message),
-            in: message, lineBreak: .byTruncatingTail)
-
-        func width(_ string: String) -> CGFloat {
-            // A point of slack: the measured advance rounds a hair under what
-            // is drawn, which clipped the last digit of a timestamp.
-            ceil((string as NSString).size(withAttributes: [.font: metaFont]).width) + 2
-        }
-        let baseline = SidebarCellDrawing.centeredBaseline(for: metaFont, in: bottom)
-        var trailing = bottom.maxX
-        if !date.isEmpty {
-            let box = NSRect(x: max(bottom.minX, trailing - width(date)), y: bottom.minY,
-                             width: min(width(date), bottom.width), height: bottom.height)
-            drawnDateRectForTesting = box
-            SidebarCellDrawing.text(date, font: metaFont, color: metaColor,
-                                    baseline: baseline, in: box,
-                                    lineBreak: .byClipping, alignment: .right)
-            trailing = box.minX
-        }
-        if !author.isEmpty {
-            let room = max(0, trailing - Self.columnGap - bottom.minX)
-            let box = NSRect(x: trailing - Self.columnGap - min(width(author), room),
-                             y: bottom.minY, width: min(width(author), room),
-                             height: bottom.height)
-            drawnAuthorRectForTesting = box
-            SidebarCellDrawing.text(author, font: metaFont, color: metaColor,
-                                    baseline: baseline, in: box,
-                                    lineBreak: .byTruncatingTail, alignment: .right)
-            trailing = box.minX
-        }
-        guard !branch.isEmpty else { return }
-        let box = NSRect(x: bottom.minX, y: bottom.minY,
-                         width: max(0, trailing - Self.columnGap - bottom.minX),
-                         height: bottom.height)
-        drawnBranchRectForTesting = box
-        SidebarCellDrawing.text(branch, font: metaFont, color: Theme.cursor,
-                                baseline: baseline, in: box, lineBreak: .byTruncatingTail)
+        drawnSubjectXForTesting = content.minX
+        let drawn = SidebarCellDrawing.leadingAndTrailing(
+            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
+            trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
+            trailingPinned: date, in: content, gap: Self.columnGap)
+        drawnSubjectRectForTesting = drawn.leading
+        drawnAuthorRectForTesting = drawn.trailing
+        drawnDateRectForTesting = drawn.pinned
     }
 
     var subjectForTesting: String { subject }
-    var branchForTesting: String { branch }
     var metaForTesting: String { "\(author)  ·  \(date)" }
     var toolTipForTesting: String { toolTip ?? "" }
 }
@@ -262,12 +144,93 @@ final class GitChangeCellProbe: NSView {
     var nameForTesting: String { cell.nameForTesting }
 }
 
-final class GitChangeCell: DrawnSidebarCell {
+/// What a changed file's row offers at its trailing edge.
+enum ChangeRowAction: CaseIterable {
+    /// Put the file back the way it was committed.
+    case discard
+    /// Open the file itself, rather than the diff a click on the row shows.
+    case open
+
+    var symbolName: String {
+        switch self {
+        case .discard: return "arrow.uturn.backward"
+        // A page: the file itself, as against the diff a click on the row
+        // shows.
+        case .open: return "doc.text"
+        }
+    }
+    var label: String {
+        switch self {
+        case .discard: return "Discard changes"
+        case .open: return "Open file"
+        }
+    }
+}
+
+/// A cell that is told when the pointer is on its row, so it can show what it
+/// offers only then.
+protocol RowHoverAware: AnyObject {
+    var isRowHovered: Bool { get set }
+}
+
+final class GitChangeCell: DrawnSidebarCell, RowHoverAware {
     private var status = ""
     private var icon: SidebarIcon?
     private var name = ""
     private var folder = ""
     private var statusColor = NSColor.clear
+
+    /// The two actions at the trailing edge. Unset ones are not drawn.
+    var onDiscard: (() -> Void)?
+    var onOpenFile: (() -> Void)?
+
+    /// Both actions appear with the pointer and go with it: a row that showed
+    /// them always would put two marks against every name in the list.
+    var isRowHovered = false {
+        didSet {
+            guard isRowHovered != oldValue else { return }
+            if !isRowHovered { hoveredAction = nil }
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    private var hoveredAction: ChangeRowAction?
+    private var actionTracking: NSTrackingArea?
+
+    /// The hit area of one action, and the mark drawn inside it.
+    static let actionSize: CGFloat = 20
+    static let actionGlyph: CGFloat = 13
+    static let actionGap: CGFloat = 2
+    static let actionInset: CGFloat = 6
+
+    private var shownActions: [ChangeRowAction] {
+        guard isRowHovered else { return [] }
+        return ChangeRowAction.allCases.filter { action in
+            switch action {
+            case .discard: return onDiscard != nil
+            case .open: return onOpenFile != nil
+            }
+        }
+    }
+
+    /// The room the actions take at the trailing edge, nothing when none show.
+    private var actionsWidth: CGFloat {
+        let count = CGFloat(shownActions.count)
+        guard count > 0 else { return 0 }
+        return count * Self.actionSize + (count - 1) * Self.actionGap + Self.actionInset
+    }
+
+    /// Where an action sits, from the trailing edge inwards in the order they
+    /// are listed. `.zero` when it is not being shown.
+    func rect(of action: ChangeRowAction) -> NSRect {
+        let shown = shownActions
+        guard let place = shown.firstIndex(of: action) else { return .zero }
+        let fromEnd = CGFloat(shown.count - 1 - place)
+        let x = bounds.maxX - Self.actionInset - Self.actionSize
+            - fromEnd * (Self.actionSize + Self.actionGap)
+        return NSRect(x: x, y: ((bounds.height - Self.actionSize) / 2).rounded(),
+                      width: Self.actionSize, height: Self.actionSize)
+    }
 
     func configure(entry: GitService.Status.Entry) {
         status = entry.displayCode
@@ -287,16 +250,114 @@ final class GitChangeCell: DrawnSidebarCell {
         SidebarCellDrawing.icon(icon,
                                 in: NSRect(x: 26, y: floor((bounds.height - 13) / 2),
                                            width: 13, height: 13))
-        // The whole row is the name's now that the buttons have moved to the
-        // context menu.
+        // The name has the row to itself until the pointer arrives; then it
+        // gives the actions their room rather than being drawn under them.
+        let nameBox = NSRect(x: 44, y: 0, width: max(0, bounds.width - 52 - actionsWidth),
+                             height: bounds.height)
+        drawnNameRectForTesting = nameBox
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(9.5), secondaryColor: Theme.dimText,
-            in: NSRect(x: 44, y: 0, width: max(0, bounds.width - 52), height: bounds.height),
-            gap: 5, primaryLineBreak: .byTruncatingMiddle)
+            in: nameBox, gap: 5, primaryLineBreak: .byTruncatingMiddle)
+        for action in shownActions { draw(action) }
+    }
+
+    private func draw(_ action: ChangeRowAction) {
+        let box = rect(of: action)
+        let lit = hoveredAction == action
+        if lit {
+            Theme.activeRow.setFill()
+            NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
+        }
+        let glyph = NSRect(x: box.midX - Self.actionGlyph / 2,
+                           y: box.midY - Self.actionGlyph / 2,
+                           width: Self.actionGlyph, height: Self.actionGlyph)
+        SidebarCellDrawing.image(
+            Theme.symbol(action.symbolName, accessibilityDescription: action.label,
+                         pointSize: 11),
+            tint: lit ? Theme.foreground : Theme.dimText, in: glyph)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let actionTracking { removeTrackingArea(actionTracking) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        actionTracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        setHoveredAction(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setHoveredAction(at: nil)
+    }
+
+    private func setHoveredAction(at point: NSPoint?) {
+        let next = point.flatMap { location in
+            shownActions.first { rect(of: $0).contains(location) }
+        }
+        guard next != hoveredAction else { return }
+        hoveredAction = next
+        needsDisplay = true
+    }
+
+    /// What the last `resetCursorRects` claimed, so a test can hold the
+    /// actions to the hand that says they can be clicked.
+    private(set) var cursorRectsForTesting: [NSRect] = []
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        // Only while they are there to be clicked.
+        cursorRectsForTesting = shownActions.map { rect(of: $0) }
+        for box in cursorRectsForTesting {
+            addCursorRect(box, cursor: .pointingHand)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let action = shownActions.first(where: { rect(of: $0).contains(point) }) else {
+            // Anywhere else is the row's own click, which shows the diff.
+            super.mouseDown(with: event)
+            return
+        }
+        perform(action)
+    }
+
+    private func perform(_ action: ChangeRowAction) {
+        performedActionForTesting = action
+        switch action {
+        case .discard: onDiscard?()
+        case .open: onOpenFile?()
+        }
     }
 
     var nameForTesting: String { name }
+    /// The room the name was last given, which the actions take from.
+    private(set) var drawnNameRectForTesting: NSRect = .zero
+    /// Where an action is drawn, and whether it is lit under the pointer.
+    func actionRectForTesting(_ action: ChangeRowAction) -> NSRect { rect(of: action) }
+    var hoveredActionForTesting: ChangeRowAction? { hoveredAction }
+    func moveMouseForTesting(to point: NSPoint?) { setHoveredAction(at: point) }
+    /// A click at a point in the cell, through the mouse-down a real one
+    /// arrives as. Answers with the action it ran, if any.
+    @discardableResult
+    func clickForTesting(at point: NSPoint) -> ChangeRowAction? {
+        performedActionForTesting = nil
+        guard let event = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: convert(point, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1) else { return nil }
+        mouseDown(with: event)
+        return performedActionForTesting
+    }
+    private(set) var performedActionForTesting: ChangeRowAction?
 }
 
 final class GitBranchCell: DrawnSidebarCell {
@@ -603,6 +664,9 @@ final class GitTableView: NSTableView {
         for index in [previous, next] where index >= 0 && index < numberOfRows {
             (rowView(atRow: index, makeIfNecessary: false) as? GitRowView)?
                 .isHovered = index == next
+            // The row lights up, and the cell in it shows what it offers.
+            (view(atColumn: 0, row: index, makeIfNecessary: false) as? RowHoverAware)?
+                .isRowHovered = index == next
         }
     }
 

@@ -377,14 +377,25 @@ enum SidebarCellDrawing {
     /// metadata's share and truncates, and the leading text gets the rest. The
     /// order matters — letting the pair truncate as one string ate the name
     /// whole and left a dangling ellipsis in front of the date.
+    /// Where `leadingAndTrailing` put each of its three texts; `.zero` for one
+    /// it had nothing to draw for.
+    struct LeadingAndTrailingRects {
+        var leading = NSRect.zero
+        var trailing = NSRect.zero
+        var pinned = NSRect.zero
+    }
+
+    @discardableResult
     static func leadingAndTrailing(leading: String, leadingFont: NSFont, leadingColor: NSColor,
                                    trailing: String, trailingFont: NSFont,
                                    trailingColor: NSColor,
                                    trailingPinned: String = "",
                                    in rect: NSRect, gap: CGFloat = 8,
                                    trailingShare: CGFloat = 0.6,
-                                   leadingLineBreak: NSLineBreakMode = .byTruncatingTail) {
-        guard rect.width > 0, rect.height > 0 else { return }
+                                   leadingLineBreak: NSLineBreakMode = .byTruncatingTail)
+        -> LeadingAndTrailingRects {
+        var drawn = LeadingAndTrailingRects()
+        guard rect.width > 0, rect.height > 0 else { return drawn }
         let baseline = centeredBaseline(for: leadingFont, in: rect)
         func width(_ string: String) -> CGFloat {
             // A point of slack: the measured advance rounds a hair under what
@@ -400,6 +411,7 @@ enum SidebarCellDrawing {
                                 width: pinnedWidth, height: rect.height)
             text(trailingPinned, font: trailingFont, color: trailingColor, baseline: baseline,
                  in: pinned, lineBreak: .byClipping, alignment: .right)
+            drawn.pinned = pinned
             metadataX = pinned.minX
         }
         if !trailing.isEmpty {
@@ -413,13 +425,15 @@ enum SidebarCellDrawing {
                               width: nameWidth, height: rect.height)
             text(trailing, font: trailingFont, color: trailingColor, baseline: baseline,
                  in: name, lineBreak: .byTruncatingTail, alignment: .right)
+            drawn.trailing = name
             metadataX = name.minX
         }
         let leadingWidth = max(0, metadataX - gap - rect.minX)
+        drawn.leading = NSRect(x: rect.minX, y: rect.minY,
+                               width: leadingWidth, height: rect.height)
         text(leading, font: leadingFont, color: leadingColor, baseline: baseline,
-             in: NSRect(x: rect.minX, y: rect.minY,
-                        width: leadingWidth, height: rect.height),
-             lineBreak: leadingLineBreak)
+             in: drawn.leading, lineBreak: leadingLineBreak)
+        return drawn
     }
 }
 
