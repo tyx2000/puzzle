@@ -6044,10 +6044,16 @@ enum RegressionTests {
         let box = bar.messageBoxFrameForTesting
         let commitFrame = bar.commitButton.frame
         let pushFrame = bar.pushButton.frame
+        let progressFrame = bar.progressFrameForTesting
         try expect(box.maxX + ProjectCommitBar.gap == commitFrame.minX
                     && commitFrame.maxX + ProjectCommitBar.gap == pushFrame.minX
                     && pushFrame.maxX == bar.bounds.width - ProjectCommitBar.inset,
                    "the line is not message, Commit, Push: \(box) \(commitFrame) \(pushFrame)")
+        try expect(bar.clipsProgressForTesting
+                    && progressFrame.minX == bar.bounds.minX
+                    && progressFrame.maxX == bar.bounds.maxX,
+                   "the shimmer is not clipped to the Changes width: "
+                     + "\(progressFrame) in \(bar.bounds)")
         // The message is the Git panel's box in one line: out to the region's
         // left edge and its full height, set apart by its fill and nothing
         // drawn around it.
@@ -6332,6 +6338,10 @@ enum RegressionTests {
                     && bar.messageBoxFrameForTesting.minX == 0,
                    "a narrow line lays its message box out at "
                      + "\(bar.messageBoxFrameForTesting)")
+        try expect(bar.progressFrameForTesting.maxX == bar.bounds.maxX
+                    && bar.clipsProgressForTesting,
+                   "a narrow Changes region lets the shimmer cross its edge: "
+                     + "\(bar.progressFrameForTesting) in \(bar.bounds)")
 
         // The Git panel's ⇧⌘↩ follows its Push button too: nothing to push,
         // nothing started.

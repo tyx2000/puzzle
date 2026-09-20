@@ -410,6 +410,9 @@ final class ProjectCommitBar: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        // Keep the animated band inside the Changes region even while the
+        // project-column divider is moving and the child is being relaid out.
+        clipsToBounds = true
         box.addSubview(field)
         commitButton.title = "Commit"
         pushButton.title = "Push"
@@ -453,6 +456,8 @@ final class ProjectCommitBar: NSView {
 
     var messageBoxFrameForTesting: NSRect { box.frame }
     var messageBoxForTesting: NSView { box }
+    var progressFrameForTesting: NSRect { progress.frame }
+    var clipsProgressForTesting: Bool { clipsToBounds && progress.clipsToBounds }
 }
 
 /// Where the one-line message sits. It draws nothing: the strip under it is
