@@ -13,6 +13,7 @@ enum RegressionTests {
         try testProcessDrain()
         try testProcessTimeoutsAndIconCache()
         try testScopedStatusAndStaging()
+        try testFileNamesAreNotPatterns()
         try testGitIgnoreRefreshReconciliation()
         try testPushSelection()
         try testGitRepositoryMonitor()
@@ -256,6 +257,78 @@ enum RegressionTests {
             atPath: project.appendingPathComponent(secondRename).path),
                    "rename discard left the renamed path behind")
 
+    }
+
+    /// A file name is a name, not a pattern. Git reads the paths after `--`
+    /// as pathspecs, so a file called `*.txt` matched — and discarded — every
+    /// other `.txt` beside it. `--` only ends option parsing; what stops the
+    /// pattern is GIT_LITERAL_PATHSPECS.
+    private static func testFileNamesAreNotPatterns() throws {
+        let root = try temporaryDirectory("literal-pathspecs")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: root).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Gift Test"])
+        _ = git(["config", "user.email", "gift@example.invalid"])
+        // Names Git would otherwise read as patterns, beside the ordinary
+        // files they would match.
+        let patterns = ["*.txt", "?.txt", "[ab].txt", ":x.txt"]
+        let bystanders = ["important.txt", "a.txt", "b.txt"]
+        for name in patterns + bystanders {
+            try Data("committed\n".utf8).write(to: root.appendingPathComponent(name))
+        }
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        func contents(_ name: String) -> String {
+            (try? String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)) ?? ""
+        }
+        func entry(_ name: String) throws -> GitService.Status.Entry {
+            guard let found = GitService.status(in: root).entries.first(where: { $0.path == name })
+            else { throw Failure(description: "\(name) is not listed as changed") }
+            return found
+        }
+
+        for name in patterns {
+            for edited in patterns + bystanders {
+                try Data("edited \(edited)\n".utf8).write(to: root.appendingPathComponent(edited))
+            }
+            // The diff belongs to the one file, not to everything its name matches.
+            let diff = GitService.diff(for: try entry(name), in: root)
+            let named = diff.split(separator: "\n").filter { $0.hasPrefix("diff --git") }
+            try expect(named.count == 1 && named[0].contains(name),
+                       "the diff for “\(name)” covers \(named.count) files: \(named)")
+
+            let discarded = GitService.discard(try entry(name), in: root)
+            try expect(discarded.ok, "discarding “\(name)” failed: \(discarded.message)")
+            try expect(contents(name) == "committed\n",
+                       "discarding “\(name)” did not restore it")
+            let survivors = (patterns + bystanders).filter { $0 != name }
+            for other in survivors {
+                try expect(contents(other) == "edited \(other)\n",
+                           "discarding “\(name)” also reverted \(other): \(contents(other))")
+            }
+            // And nothing else was taken out of the index on the way.
+            let staged = Set(GitService.status(in: root).entries.map(\.path))
+            try expect(staged == Set(survivors),
+                       "the other files left the change list: \(staged)")
+            _ = git(["checkout", "--", "."])
+        }
+
+        // A new file whose name is a pattern goes to the Trash on its own.
+        let fresh = "*.log"
+        try Data("new\n".utf8).write(to: root.appendingPathComponent(fresh))
+        try Data("other\n".utf8).write(to: root.appendingPathComponent("keep.log"))
+        _ = GitService.stageAll(in: root)
+        let freshEntry = try entry(fresh)
+        try expect(GitService.discardRemovesFile(freshEntry, in: root),
+                   "a never-committed file was not recognised as one")
+        let trashed = GitService.discard(freshEntry, in: root)
+        try expect(trashed.ok, "discarding the new file failed: \(trashed.message)")
+        try expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(fresh).path),
+                   "the new file is still there")
+        try expect(contents("keep.log") == "other\n",
+                   "discarding “\(fresh)” took keep.log with it: \(contents("keep.log"))")
     }
 
     private static func testGitIgnoreRefreshReconciliation() throws {

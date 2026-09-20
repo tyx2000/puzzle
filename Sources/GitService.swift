@@ -206,6 +206,19 @@ enum GitService {
         // housekeeping is worth nothing here and collides with the staging
         // Gift does on every change.
         environment["GIT_OPTIONAL_LOCKS"] = "0"
+        // Every path Gift passes Git comes from Git itself — a status entry, a
+        // commit's file list — and is meant literally. Without this a file
+        // whose name holds `*`, `?`, `[]`, or a leading `:` is read as a
+        // pathspec pattern: discarding one such file also reverted every other
+        // file its name happened to match, losing uncommitted work.
+        //
+        // `check-ignore` is the exception: it refuses the literal magic
+        // outright ("pathspec magic not supported by this command"), so it is
+        // left to read its input as patterns. Nothing it decides can lose
+        // work — it only says which staged additions an ignore rule covers.
+        if !Self.rejectsLiteralPathspecs(arguments) {
+            environment["GIT_LITERAL_PATHSPECS"] = "1"
+        }
         environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
         environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
         process.environment = environment
@@ -288,6 +301,21 @@ enum GitService {
         return ProcessResult(stdout: stdout.data, stderr: stderr.data,
                              code: process.terminationStatus,
                              stdoutTruncated: stdout.truncated)
+    }
+
+    /// Git subcommands that raise rather than accept literal pathspecs.
+    static let literalPathspecRefusers: Set<String> = ["check-ignore"]
+
+    /// The subcommand `arguments` runs, skipping `git` itself and the global
+    /// flags in front of it (`--no-pager`).
+    static func subcommand(of arguments: [String]) -> String? {
+        arguments.dropFirst(arguments.first == "git" ? 1 : 0)
+            .first { !$0.hasPrefix("-") }
+    }
+
+    static func rejectsLiteralPathspecs(_ arguments: [String]) -> Bool {
+        guard let subcommand = subcommand(of: arguments) else { return false }
+        return literalPathspecRefusers.contains(subcommand)
     }
 
     /// One Git read at a time for the work the UI starts on its own — the
