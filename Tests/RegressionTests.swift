@@ -5310,8 +5310,8 @@ enum RegressionTests {
         try expect(!commitRow.trailing.isEmpty
                     && commitRow.trailing != "Ada Lovelace",
                    "the time is missing from the right: \(commitRow.trailing)")
-        // Four columns on one line — the commit's id, the message, the name
-        // and the time — and no bubble: the row says all of it itself.
+        // Refs, then four columns on one line — the commit's id, the message,
+        // the name and the time — and no bubble: the row says all of it itself.
         try expect(commitRow.hover.isEmpty,
                    "a history row still carries a tip: \(commitRow.hover)")
         guard let historyCell = panel.commitCellForTesting(0) else {
@@ -5325,14 +5325,18 @@ enum RegressionTests {
         let subjectBox = historyCell.drawnSubjectRectForTesting
         let authorBox = historyCell.drawnAuthorRectForTesting
         let dateBox = historyCell.drawnDateRectForTesting
-        // The graph opens the row, with a clear gap before the commit ID.
+        // The graph opens the row, then refs pointing at the commit, then the
+        // commit ID. None of those columns overlap.
+        let refBoxes = historyCell.drawnRefRectsForTesting
         try expect(historyCell.graphRowForTesting != nil
                     && historyCell.graphWidthForTesting > 0
+                    && historyCell.refLabelsForTesting == ["main"]
+                    && refBoxes.count == 1
                     && idBox.width > 0
-                    && idBox.minX == 8 + historyCell.graphWidthForTesting
-                    && abs(idBox.minX - historyCell.drawnGraphRectForTesting.maxX
+                    && refBoxes[0].minX == 8 + historyCell.graphWidthForTesting
+                    && abs(idBox.minX - refBoxes[0].maxX
                            - GitCommitCell.columnGap) <= 0.5,
-                   "the commit id overlaps or replaces the graph column: \(idBox)")
+                   "the graph, refs and commit id overlap: \(refBoxes) \(idBox)")
         try expect(abs(subjectBox.minX - idBox.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(authorBox.minX - subjectBox.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(dateBox.minX - authorBox.maxX - GitCommitCell.columnGap) <= 0.5,
@@ -5341,13 +5345,19 @@ enum RegressionTests {
         try expect([subjectBox, authorBox, dateBox].allSatisfy {
                         $0.minY == idBox.minY && $0.height == idBox.height },
                    "the row's columns are not on one line")
-        // Nor does it name a branch anywhere else, or a tag on the commit.
+        // A branch, remote branch and tag that point exactly here are separate
+        // refs, as in Zed. A symbolic remote HEAD alias is omitted.
+        _ = GitService.run(["remote", "add", "origin", root.path], in: root)
+        _ = GitService.run(["update-ref", "refs/remotes/origin/main", "HEAD"], in: root)
+        _ = GitService.run(["symbolic-ref", "refs/remotes/origin/HEAD",
+                            "refs/remotes/origin/main"], in: root)
         _ = GitService.run(["tag", "v1"], in: root)
         let tagged = GitCommitCell()
         tagged.configure(commit: GitService.log(in: root, limit: 1)[0], pending: false)
         let spoken = tagged.accessibilityLabel() ?? ""
-        try expect(!spoken.contains("main") && !spoken.contains("v1"),
-                   "the row names a branch or a tag: \(spoken)")
+        try expect(tagged.refLabelsForTesting == ["main", "origin/main", "v1"]
+                    && spoken.contains("Refs main, origin/main, v1"),
+                   "the row did not expose its exact refs: \(spoken)")
 
         // Clicking the row is what expands it, so its files appear underneath.
         panel.expandCommit(at: 0)
@@ -7775,9 +7785,8 @@ enum RegressionTests {
             let listed = projectsPanel.history.commitSubjectsForTesting
             return listed.contains("Merge side") && listed.contains("Side work")
         }
-        // One line a commit, three columns: the message, the name and the
-        // time. No branch — Git records none on a commit, and a label guessed
-        // from the names that reach it now read as a fact — and no id.
+        // One line a commit: exact refs, then the message, name and time. This
+        // project History intentionally has no graph and no commit id.
         try expect(GitCommitCell.columnGap == 15,
                    "the history columns are \(GitCommitCell.columnGap)pt apart, not 15")
         guard let sideIndex = projectsPanel.history.commitSubjectsForTesting
@@ -7796,9 +7805,17 @@ enum RegressionTests {
         let message = sideCell.drawnSubjectRectForTesting
         let name = sideCell.drawnAuthorRectForTesting
         let time = sideCell.drawnDateRectForTesting
-        try expect(sideCell.drawnHashRectForTesting == .zero && message.minX == 8,
-                   "something comes before the message: id "
-                     + "\(sideCell.drawnHashRectForTesting), message \(message)")
+        let refs = sideCell.drawnRefRectsForTesting
+        try expect(sideCell.graphRowForTesting == nil
+                    && sideCell.graphWidthForTesting == 0
+                    && sideCell.drawnGraphRectForTesting == .zero,
+                   "the project History unexpectedly draws a git graph")
+        try expect(sideCell.refLabelsForTesting == ["side"] && refs.count == 1
+                    && sideCell.drawnHashRectForTesting == .zero
+                    && refs[0].minX == 8
+                    && abs(message.minX - refs[0].maxX - GitCommitCell.columnGap) <= 0.5,
+                   "the project History did not put refs before the message: refs "
+                     + "\(refs), id \(sideCell.drawnHashRectForTesting), message \(message)")
         try expect(message.width > 0 && name.width > 0 && time.width > 0
                     && abs(name.minX - message.maxX - GitCommitCell.columnGap) <= 0.5
                     && abs(time.minX - name.maxX - GitCommitCell.columnGap) <= 0.5,
@@ -7808,8 +7825,8 @@ enum RegressionTests {
                         $0.minY == message.minY && $0.height == message.height },
                    "the row's columns are not on one line")
         let spoken = sideCell.accessibilityLabel() ?? ""
-        try expect(!spoken.contains("side,") && !spoken.contains("on side"),
-                   "the row still names a branch: \(spoken)")
+        try expect(spoken.contains("Refs side"),
+                   "the row does not expose the ref pointing at it: \(spoken)")
         // No bubble following the pointer down the list: the line carries
         // everything the row has to say.
         try expect(sideCell.toolTip == nil,
