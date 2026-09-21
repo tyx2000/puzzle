@@ -42,7 +42,7 @@ final class GitCommitCell: DrawnSidebarCell {
         }
         let textWidth = commits.reduce(CGFloat(60)) { widest, commit in
             let idWidth = width(commit.shortHash)
-            let refsWidth = refLabelsWidth(commit.refDecorations)
+            let refsWidth = GitRefLabelsDrawing.width(commit.refDecorations)
             let metadata = width(commit.absoluteDate) + columnGap
                 + min(30, width(commit.author))
             let body = max(ceil(metadata / 0.6), metadata + columnGap + 60)
@@ -51,19 +51,6 @@ final class GitCommitCell: DrawnSidebarCell {
                                    refsWidth + refsGap + idWidth + columnGap + body))
         }
         return 16 + graphWidth + textWidth
-    }
-
-    private static let refGap: CGFloat = 4
-    private static let refHorizontalPadding: CGFloat = 5
-    private static let refHeight: CGFloat = 16
-
-    private static func refLabelsWidth(_ refs: [GitService.Commit.RefLabel]) -> CGFloat {
-        let font = Theme.uiFont(9)
-        let widths = refs.map {
-            ceil(($0.name as NSString).size(withAttributes: [.font: font]).width)
-                + refHorizontalPadding * 2
-        }
-        return widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * refGap
     }
 
     /// `showsID` puts the commit's id ahead of the message, which is what
@@ -118,42 +105,16 @@ final class GitCommitCell: DrawnSidebarCell {
                              width: max(0, bounds.width - 16 - graphWidth),
                              height: bounds.height)
         if !refDecorations.isEmpty, content.width > 0 {
-            let naturalWidth = Self.refLabelsWidth(refDecorations)
+            let naturalWidth = GitRefLabelsDrawing.width(refDecorations)
             // Refs identify the commit, but on a narrow project sidebar they
             // must not erase the subject. The horizontal Git history can grow
             // to its minimum width and normally renders every label in full.
             let available = min(naturalWidth, floor(content.width * 0.42))
-            var x = content.minX
-            let end = x + available
-            let font = Theme.uiFont(9)
-            for ref in refDecorations where x < end {
-                let natural = ceil((ref.name as NSString)
-                    .size(withAttributes: [.font: font]).width)
-                    + Self.refHorizontalPadding * 2
-                let width = min(natural, end - x)
-                guard width >= Self.refHorizontalPadding * 2 + 4 else { break }
-                let rect = NSRect(x: x, y: floor(content.midY - Self.refHeight / 2),
-                                  width: width, height: Self.refHeight)
-                let color: NSColor
-                switch ref.kind {
-                case .localBranch: color = ref.isCurrent ? Theme.cursor : Theme.blue
-                case .remoteBranch: color = Theme.purple
-                case .tag: color = Theme.yellow
-                case .detachedHead: color = Theme.orange
-                }
-                color.withAlphaComponent(0.14).setFill()
-                let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
-                path.fill()
-                color.withAlphaComponent(0.7).setStroke()
-                path.lineWidth = 1
-                path.stroke()
-                SidebarCellDrawing.text(
-                    ref.name, font: font, color: color,
-                    in: rect.insetBy(dx: Self.refHorizontalPadding, dy: 0),
-                    lineBreak: .byTruncatingMiddle)
-                drawnRefRectsForTesting.append(rect)
-                x = rect.maxX + Self.refGap
-            }
+            drawnRefRectsForTesting = GitRefLabelsDrawing.draw(
+                refDecorations,
+                in: NSRect(x: content.minX, y: content.minY,
+                           width: available, height: content.height),
+                currentColor: Theme.cursor)
             if !drawnRefRectsForTesting.isEmpty {
                 let used = drawnRefRectsForTesting.last!.maxX - content.minX
                 let taken = used + Self.columnGap
