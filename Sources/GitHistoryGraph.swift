@@ -33,18 +33,38 @@ struct GitHistoryGraph: Equatable {
     let rows: [Row]
     let laneCount: Int
 
-    init(commits: [GitService.Commit]) {
+    init(commits: [GitService.Commit], preferredTrunkID suppliedTrunkID: String? = nil) {
         struct PendingLane {
             let targetHash: String
             let colorIndex: Int
         }
 
+        // The default branch owns the long-lived left lane even when a newer
+        // feature tip sorts above it. Git does not record which branch a
+        // commit was originally made on, but the remote HEAD (or the usual
+        // local trunk names) gives us a stable owner for shared ancestry.
+        let inferredTrunkID = commits.first(where: { commit in
+            commit.refs.split(separator: ",").contains { raw in
+                let ref = raw.trimmingCharacters(in: .whitespaces)
+                return ref.hasSuffix("/HEAD") || ref.contains("/HEAD -> ")
+            }
+        })?.graphID ?? commits.first(where: { commit in
+            commit.refs.split(separator: ",").contains { raw in
+                let ref = raw.trimmingCharacters(in: .whitespaces)
+                guard !ref.hasPrefix("tag: ") else { return false }
+                let name = ref.hasPrefix("HEAD -> ") ? String(ref.dropFirst(8)) : ref
+                return ["main", "master", "trunk", "develop"].contains(name)
+            }
+        })?.graphID
+        let preferredTrunkID = suppliedTrunkID ?? inferredTrunkID
+        var waitingForTrunkTip = preferredTrunkID != nil
+
         // Slots are stable while their ancestry is still active. Keeping holes
         // avoids sliding a surviving branch into the column of a sibling that
         // just ended, which made commits from two split branches appear on one
         // line. Holes are reused only for a newly introduced path.
-        var pending: [PendingLane?] = []
-        var nextColorIndex = 0
+        var pending: [PendingLane?] = preferredTrunkID == nil ? [] : [nil]
+        var nextColorIndex = preferredTrunkID == nil ? 0 : 1
         var rows: [Row] = []
         rows.reserveCapacity(commits.count)
         var laneCount = 0
@@ -74,11 +94,17 @@ struct GitHistoryGraph: Equatable {
         for commit in commits {
             let top = pending
             let existingLane = laneIndex(of: commit.graphID, in: top)
-            let nodeLane = existingLane
-                ?? pending.firstIndex(where: { $0 == nil })
-                ?? pending.count
+            let isTrunkTip = commit.graphID == preferredTrunkID
+            let reusableLane = pending.indices.first { index in
+                pending[index] == nil && !(waitingForTrunkTip && index == 0)
+            }
+            let nodeLane = isTrunkTip ? 0 : (existingLane ?? reusableLane ?? pending.count)
             let nodeColor: Int
-            if let existingLane {
+            if isTrunkTip {
+                nodeColor = 0
+                if let existingLane { pending[existingLane] = nil }
+                waitingForTrunkTip = false
+            } else if let existingLane {
                 nodeColor = top[existingLane]!.colorIndex
                 pending[existingLane] = nil
             } else {
@@ -130,7 +156,8 @@ struct GitHistoryGraph: Equatable {
                 guard let lane else { continue }
                 if index == existingLane {
                     segments.append(Segment(fromLane: index, toLane: nodeLane,
-                                            fromY: 0, toY: 0.5, colorIndex: nodeColor))
+                                            fromY: 0, toY: 0.5,
+                                            colorIndex: lane.colorIndex))
                 } else if let bottomIndex = laneIndex(of: lane.targetHash, in: pending) {
                     if index == bottomIndex {
                         segments.append(Segment(fromLane: index, toLane: index,

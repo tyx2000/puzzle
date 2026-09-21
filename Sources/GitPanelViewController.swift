@@ -499,7 +499,8 @@ final class GitPanelViewController: NSViewController {
     private static func readHistory(in directory: URL, depth: Int) -> HistoryRead {
         let log = GitService.log(in: directory, limit: depth)
         let unpushed = GitService.unpushedHashes(in: directory)
-        let graph = GitHistoryGraph(commits: log)
+        let graph = GitHistoryGraph(commits: log,
+                                    preferredTrunkID: GitService.historyGraphTrunk(in: directory))
         let rows = Dictionary(uniqueKeysWithValues:
             zip(log, graph.rows).map { ($0.0.graphID, $0.1) })
         return (log, unpushed, rows, graph.laneCount)
