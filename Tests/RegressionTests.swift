@@ -103,6 +103,7 @@ enum RegressionTests {
         try testSelectedControlsAgree()
         try testHistoryLogDetails()
         try testScopedHistoryGraphParents()
+        try testAllBranchesHistoryGraph()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5020,6 +5021,56 @@ enum RegressionTests {
         try expect(GitHistoryGraph(commits: []).laneCount == 0
                     && GitHistoryGraph(commits: []).rows.isEmpty,
                    "empty history created a graph lane")
+    }
+
+    /// History must seed the graph with every branch tip. Otherwise two
+    /// unmerged branches are loaded one at a time as if each were the only
+    /// branch, and their commits are painted on the same lane.
+    private static func testAllBranchesHistoryGraph() throws {
+        let root = try temporaryDirectory("all-branches-graph")
+        defer { try? FileManager.default.removeItem(at: root) }
+        @discardableResult
+        func git(_ args: [String]) throws -> String {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "branch graph fixture failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commit(_ subject: String, file: String) throws -> String {
+            try Data("\(subject)\n".utf8).write(to: root.appendingPathComponent(file))
+            try git(["add", "-A"])
+            try git(["commit", "-q", "-m", subject])
+            return try git(["rev-parse", "HEAD"])
+        }
+
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Graph Test"])
+        try git(["config", "user.email", "graph@example.invalid"])
+        let base = try commit("base", file: "base.txt")
+        try git(["checkout", "-q", "-b", "feature"])
+        let featureOne = try commit("feature one", file: "feature.txt")
+        let featureTwo = try commit("feature two", file: "feature.txt")
+        try git(["checkout", "-q", "main"])
+        let mainOne = try commit("main one", file: "main.txt")
+        let mainTwo = try commit("main two", file: "main.txt")
+
+        let log = GitService.log(in: root, limit: 40)
+        try expect(Set(log.map(\.graphID)) == Set([base, featureOne, featureTwo,
+                                                   mainOne, mainTwo]),
+                   "History omitted commits reachable only from another branch")
+        let graph = GitHistoryGraph(commits: log)
+        let rows = Dictionary(uniqueKeysWithValues:
+            zip(log, graph.rows).map { ($0.graphID, $1) })
+        guard let featureOneRow = rows[featureOne], let featureTwoRow = rows[featureTwo],
+              let mainOneRow = rows[mainOne], let mainTwoRow = rows[mainTwo] else {
+            throw Failure(description: "branch tips did not receive graph rows")
+        }
+        try expect(featureOneRow.nodeLane == featureTwoRow.nodeLane
+                    && mainOneRow.nodeLane == mainTwoRow.nodeLane,
+                   "commits from one branch did not retain their lane")
+        try expect(featureTwoRow.nodeLane != mainTwoRow.nodeLane,
+                   "two unmerged branches reused the same graph lane")
+        try expect(featureTwoRow.colorIndex != mainTwoRow.colorIndex,
+                   "two unmerged branches reused the same graph color")
     }
 
     /// `status` reads porcelain v2 and reports what v1 did, from one

@@ -1052,6 +1052,11 @@ enum GitService {
         // Topological order keeps children above parents, even with skewed
         // clocks, and groups each branch instead of interleaving its dates.
         let format = "%h%x00%s%x00%an%x00%ad%x00%ae%x00%P%x00%D%x00%H"
+        // `--all` makes History a repository graph instead of a HEAD-only
+        // ancestry list. Without every branch tip in the walk, commits on an
+        // unmerged branch never reserve a lane and branch decorations along
+        // HEAD misleadingly look like they all belong to the same line.
+        //
         // `--full-history` because of the pathspec: with one, Git simplifies
         // the history it walks — a merge that changed nothing under the path
         // relative to its first parent is dropped, and with it every commit
@@ -1060,7 +1065,7 @@ enum GitService {
         // branch that was merged in.
         // `--parents` also enables parent rewriting: commits touching only a
         // sibling project must not leave dangling edges in the visible graph.
-        let result = run(["--no-pager", "log", "-z", "--topo-order", "--full-history",
+        let result = run(["--no-pager", "log", "-z", "--all", "--topo-order", "--full-history",
                           "--parents",
                           "--pretty=format:" + format,
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
