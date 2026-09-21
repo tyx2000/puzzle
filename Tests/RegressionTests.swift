@@ -4939,8 +4939,13 @@ enum RegressionTests {
         let graph = GitHistoryGraph(commits: commits)
         try expect(graph.rows.count == commits.count && graph.laneCount == 3,
                    "nested merge history has missing nodes or extra lanes")
-        try expect(graph.rows.map(\.nodeLane) == [0, 0, 1, 1, 1, 0, 0],
-                   "nested merge lanes do not split and rejoin in order")
+        try expect(graph.rows.map(\.nodeLane) == [0, 0, 1, 1, 2, 0, 0],
+                   "split branches did not keep stable lanes until convergence")
+        try expect(graph.rows[3].nodeLane != graph.rows[4].nodeLane
+                    && graph.rows[4].topLanes.contains {
+                        $0.targetHash == "right" && $0.lane == 2
+                    },
+                   "finishing the left branch moved the right branch into its lane")
         try expect(graph.rows[0].isHead && graph.rows.filter(\.isHead).count == 1,
                    "HEAD decoration is attached to the wrong graph node")
         try expect(graph.rows.enumerated().filter { $0.element.isMerge }.map(\.offset) == [0, 2],
