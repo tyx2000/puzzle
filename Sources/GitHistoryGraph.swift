@@ -39,29 +39,52 @@ struct GitHistoryGraph: Equatable {
             let colorIndex: Int
         }
 
-        var pending: [PendingLane] = []
+        // Slots are stable while their ancestry is still active. Keeping holes
+        // avoids sliding a surviving branch into the column of a sibling that
+        // just ended, which made commits from two split branches appear on one
+        // line. Holes are reused only for a newly introduced path.
+        var pending: [PendingLane?] = []
         var nextColorIndex = 0
         var rows: [Row] = []
         rows.reserveCapacity(commits.count)
         var laneCount = 0
 
-        func snapshot(_ lanes: [PendingLane]) -> [Lane] {
-            lanes.enumerated().map { index, lane in
-                Lane(lane: index, colorIndex: lane.colorIndex, targetHash: lane.targetHash)
+        func snapshot(_ lanes: [PendingLane?]) -> [Lane] {
+            lanes.enumerated().compactMap { index, lane in
+                lane.map {
+                    Lane(lane: index, colorIndex: $0.colorIndex,
+                         targetHash: $0.targetHash)
+                }
             }
+        }
+
+        func laneIndex(of target: String, in lanes: [PendingLane?]) -> Int? {
+            lanes.firstIndex { $0?.targetHash == target }
+        }
+
+        func firstFreeLane(after lane: Int, in lanes: [PendingLane?]) -> Int {
+            guard lane + 1 < lanes.count else { return lanes.count }
+            return ((lane + 1)..<lanes.count).first { lanes[$0] == nil } ?? lanes.count
+        }
+
+        func trimUnusedTrailingLanes() {
+            while let last = pending.last, last == nil { pending.removeLast() }
         }
 
         for commit in commits {
             let top = pending
-            let existingLane = top.firstIndex { $0.targetHash == commit.graphID }
-            let nodeLane = existingLane ?? top.count
+            let existingLane = laneIndex(of: commit.graphID, in: top)
+            let nodeLane = existingLane
+                ?? pending.firstIndex(where: { $0 == nil })
+                ?? pending.count
             let nodeColor: Int
             if let existingLane {
-                nodeColor = top[existingLane].colorIndex
-                pending.remove(at: existingLane)
+                nodeColor = top[existingLane]!.colorIndex
+                pending[existingLane] = nil
             } else {
                 nodeColor = nextColorIndex
                 nextColorIndex += 1
+                if nodeLane == pending.count { pending.append(nil) }
             }
 
             // First parents continue the current branch. When a secondary
@@ -73,17 +96,16 @@ struct GitHistoryGraph: Equatable {
             let parents = commit.parents.filter {
                 !$0.isEmpty && $0 != commit.graphID && seenParents.insert($0).inserted
             }
-            var insertionIndex = min(nodeLane, pending.count)
             for (parentIndex, parent) in parents.enumerated() {
-                if let pendingIndex = pending.firstIndex(where: { $0.targetHash == parent }) {
+                if let pendingIndex = laneIndex(of: parent, in: pending) {
                     if parentIndex == 0,
-                       let topIndex = top.firstIndex(where: { $0.targetHash == parent }),
+                       let topIndex = laneIndex(of: parent, in: top),
                        topIndex > nodeLane {
-                        pending.remove(at: pendingIndex)
-                        let continuationIndex = min(nodeLane, pending.count)
-                        pending.insert(PendingLane(targetHash: parent, colorIndex: nodeColor),
-                                       at: continuationIndex)
-                        insertionIndex = continuationIndex + 1
+                        // The first-parent path owns the current branch's lane;
+                        // the right-hand reservation converges into it.
+                        pending[pendingIndex] = nil
+                        pending[nodeLane] = PendingLane(targetHash: parent,
+                                                        colorIndex: nodeColor)
                     }
                     continue
                 }
@@ -94,27 +116,29 @@ struct GitHistoryGraph: Equatable {
                     colorIndex = nextColorIndex
                     nextColorIndex += 1
                 }
-                pending.insert(PendingLane(targetHash: parent, colorIndex: colorIndex),
-                               at: insertionIndex)
-                insertionIndex += 1
+                let parentLane = parentIndex == 0
+                    ? nodeLane
+                    : firstFreeLane(after: nodeLane, in: pending)
+                if parentLane == pending.count { pending.append(nil) }
+                pending[parentLane] = PendingLane(targetHash: parent,
+                                                  colorIndex: colorIndex)
             }
 
             var segments: [Segment] = []
             segments.reserveCapacity(top.count * 2 + parents.count)
             for (index, lane) in top.enumerated() {
+                guard let lane else { continue }
                 if index == existingLane {
                     segments.append(Segment(fromLane: index, toLane: nodeLane,
                                             fromY: 0, toY: 0.5, colorIndex: nodeColor))
-                } else if let bottomIndex = pending.firstIndex(where: {
-                    $0.targetHash == lane.targetHash
-                }) {
+                } else if let bottomIndex = laneIndex(of: lane.targetHash, in: pending) {
                     if index == bottomIndex {
                         segments.append(Segment(fromLane: index, toLane: index,
                                                 fromY: 0, toY: 1,
                                                 colorIndex: lane.colorIndex))
                     } else {
-                        // Delay compaction until below the commit node, so a
-                        // passing branch never cuts through that node.
+                        // Only a real convergence moves an active path. Keep
+                        // the bend below the node so it never cuts through it.
                         segments.append(Segment(fromLane: index, toLane: index,
                                                 fromY: 0, toY: 0.5,
                                                 colorIndex: lane.colorIndex))
@@ -126,14 +150,17 @@ struct GitHistoryGraph: Equatable {
             }
 
             for (parentIndex, parent) in parents.enumerated() {
-                guard let index = pending.firstIndex(where: { $0.targetHash == parent }) else {
+                guard let index = laneIndex(of: parent, in: pending),
+                      let parentLane = pending[index] else {
                     continue
                 }
                 segments.append(Segment(fromLane: nodeLane, toLane: index,
                                         fromY: 0.5, toY: 1,
                                         colorIndex: parentIndex == 0
-                                            ? nodeColor : pending[index].colorIndex))
+                                            ? nodeColor : parentLane.colorIndex))
             }
+
+            trimUnusedTrailingLanes()
 
             let isHead = commit.refs.split(separator: ",").contains {
                 let ref = $0.trimmingCharacters(in: .whitespaces)
