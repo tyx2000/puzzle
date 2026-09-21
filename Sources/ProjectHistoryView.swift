@@ -145,7 +145,9 @@ final class ProjectHistoryViewController: NSViewController {
         GitService.workQueue.async { [weak self] in
             let log = GitService.log(in: directory, limit: wanted)
             let pending = GitService.unpushedHashes(in: directory)
-            let graph = GitHistoryGraph(commits: log)
+            let graph = GitHistoryGraph(
+                commits: log,
+                preferredTrunkID: GitService.historyGraphTrunk(in: directory))
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false

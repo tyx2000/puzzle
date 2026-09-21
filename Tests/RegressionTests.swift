@@ -3398,6 +3398,29 @@ enum RegressionTests {
             try expect(prefix.rows == Array(convergence.rows.prefix(index)),
                        "mainline convergence changed a previous page")
         }
+        // Even when the trunk has not moved since a feature branch was cut,
+        // the feature owns a side lane and bends into the trunk at its tip.
+        // A purely topological layout would paint all four commits in lane 0.
+        let branchBoundaryCommits = [
+            commit("feature-two", ["feature-one"], refs: "HEAD -> feature"),
+            commit("feature-one", ["main-tip"]),
+            commit("main-tip", ["root"], refs: "main, origin/main, origin/HEAD"),
+            commit("root")
+        ]
+        let branchBoundary = GitHistoryGraph(commits: branchBoundaryCommits,
+                                             preferredTrunkID: "main-tip")
+        try expect(branchBoundary.rows.map(\.nodeLane) == [1, 1, 0, 0]
+                    && branchBoundary.laneCount == 2,
+                   "a feature cut from an unchanged trunk reused the trunk lane")
+        try expect(branchBoundary.rows[0].colorIndex == branchBoundary.rows[1].colorIndex
+                    && branchBoundary.rows[1].colorIndex != branchBoundary.rows[2].colorIndex,
+                   "the feature and trunk did not retain distinct colors at their boundary")
+        for limit in 1..<branchBoundaryCommits.count {
+            let prefix = GitHistoryGraph(commits: Array(branchBoundaryCommits.prefix(limit)),
+                                         preferredTrunkID: "main-tip")
+            try expect(prefix.rows == Array(branchBoundary.rows.prefix(limit)),
+                       "a later trunk tip moved an already-visible feature lane")
+        }
         let octopus = GitHistoryGraph(commits: [commit("octopus", ["a", "b", "c", "d"]),
                                                 commit("a", ["root"]), commit("b", ["root"]),
                                                 commit("c", ["root"]), commit("d", ["root"]),
@@ -3450,7 +3473,9 @@ enum RegressionTests {
         try expect(Set(log.map(\.graphID)) == Set([base, featureOne, featureTwo,
                                                    mainOne, mainTwo]),
                    "History omitted commits reachable only from another branch")
-        let graph = GitHistoryGraph(commits: log)
+        let trunk = GitService.historyGraphTrunk(in: root)
+        try expect(trunk == mainTwo, "the main tip was not selected as the graph trunk")
+        let graph = GitHistoryGraph(commits: log, preferredTrunkID: trunk)
         let rows = Dictionary(uniqueKeysWithValues:
             zip(log, graph.rows).map { ($0.graphID, $1) })
         guard let featureOneRow = rows[featureOne], let featureTwoRow = rows[featureTwo],
@@ -3460,8 +3485,8 @@ enum RegressionTests {
         try expect(featureOneRow.nodeLane == featureTwoRow.nodeLane
                     && mainOneRow.nodeLane == mainTwoRow.nodeLane,
                    "commits from one branch did not retain their lane")
-        try expect(featureTwoRow.nodeLane != mainTwoRow.nodeLane,
-                   "two unmerged branches reused the same graph lane")
+        try expect(mainTwoRow.nodeLane == 0 && featureTwoRow.nodeLane == 1,
+                   "the feature branch did not keep a side lane beside main")
         try expect(featureTwoRow.colorIndex != mainTwoRow.colorIndex,
                    "two unmerged branches reused the same graph color")
     }

@@ -941,6 +941,31 @@ enum GitService {
         return parseLog(result.out, fieldsPerCommit: 8)
     }
 
+    /// Commit whose branch owns the graph's long-lived trunk lane. Resolve it
+    /// independently of the paged log so loading more rows never changes the
+    /// lane assignment of commits already on screen.
+    static func historyGraphTrunk(in directory: URL) -> String? {
+        let result = run(["for-each-ref", "--format=%(objectname)%00%(refname)%00%(symref)",
+                          "refs/heads", "refs/remotes"], in: directory)
+        guard result.code == 0 else { return nil }
+        let records = result.out.split(separator: "\n").compactMap { line -> (String, String, String)? in
+            let fields = line.split(separator: "\0", omittingEmptySubsequences: false)
+            guard fields.count == 3 else { return nil }
+            return (String(fields[0]), String(fields[1]), String(fields[2]))
+        }
+        if let remoteHead = records.first(where: {
+            $0.1.hasPrefix("refs/remotes/") && $0.1.hasSuffix("/HEAD") && !$0.2.isEmpty
+        }) {
+            return remoteHead.0
+        }
+        for name in ["main", "master", "trunk", "develop"] {
+            if let local = records.first(where: { $0.1 == "refs/heads/\(name)" }) {
+                return local.0
+            }
+        }
+        return nil
+    }
+
     /// Splits `-z` log output into commits. `fieldsPerCommit` says whether the
     /// format carried the graph fields.
     private static func parseLog(_ output: String, fieldsPerCommit: Int) -> [Commit] {
