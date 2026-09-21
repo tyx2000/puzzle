@@ -1287,9 +1287,8 @@ enum RegressionTests {
             .firstIndex(of: "Side work")
         try expect(GitCommitCell.columnGap == 10,
                    "the history columns are \(GitCommitCell.columnGap)pt apart, not 10")
-        // One line per commit: commit ID, message, author, time — each a column
-        // of its own, in that order, a gap apart. No branch: Git does not record
-        // which branch a commit was made on, so there is no one name to show.
+        // One line per commit: exact refs, commit ID, message, author and time.
+        // Refs are names pointing at this commit, not a guessed branch owner.
         guard let sideIndex = sideRow,
               let sideCell = projectsPanel.history.rowCellForTesting(sideIndex) else {
             throw Failure(description: "the side commit built no cell")
@@ -1323,16 +1322,23 @@ enum RegressionTests {
         try expect(sideCell.graphWidthForTesting > 0
                     && sideCell.graphRowForTesting != nil,
                    "the history row has no leading graph column")
-        try expect(abs(wideColumns[0].minX - 8 - sideCell.graphWidthForTesting) <= 0.5,
-                   "the commit ID overlaps the graph column: \(wideColumns[0])")
+        let refBoxes = sideCell.drawnRefRectsForTesting
+        try expect(sideCell.refLabelsForTesting == ["side"] && refBoxes.count == 1,
+                   "the exact branch ref is not shown: \(sideCell.refLabelsForTesting)")
+        try expect(abs(refBoxes[0].minX - 8 - sideCell.graphWidthForTesting) <= 0.5,
+                   "the refs overlap the graph column: \(refBoxes)")
         try expect(sideCell.drawnGraphRectForTesting.width > 0
-                    && abs(wideColumns[0].minX - sideCell.drawnGraphRectForTesting.maxX
+                    && abs(refBoxes[0].minX - sideCell.drawnGraphRectForTesting.maxX
                            - GitCommitCell.columnGap) <= 0.5,
-                   "the graph has no clear gap before the commit ID")
+                   "the graph has no clear gap before the refs")
+        try expect(wideColumns[0].minX >= refBoxes[0].maxX + GitCommitCell.columnGap,
+                   "the shared refs column has no clear gap before the commit ID")
         try expect(abs(wideColumns[3].maxX - (640 - 8)) <= 0.5,
                    "the time does not end at the row's edge: \(wideColumns[3])")
         try expect(sideCell.authorForTesting.hasSuffix("Gift Test"),
                    "the author column reads \(sideCell.authorForTesting)")
+        try expect((sideCell.accessibilityLabel() ?? "").contains("Refs side"),
+                   "the ref is missing from accessibility")
         // Every other column keeps its width: whatever the row gains or loses
         // is the message's.
         let narrowColumns = drawn(sideCell, width: 520)
@@ -3243,6 +3249,25 @@ enum RegressionTests {
         }
         try expect(log.first?.refLabels == ["main"],
                    "the branch label was not read from the log: \(log.first?.refs ?? "-")")
+        _ = GitService.run(["remote", "add", "origin", root.path], in: root)
+        _ = GitService.run(["update-ref", "refs/remotes/origin/main", "HEAD"], in: root)
+        _ = GitService.run(["symbolic-ref", "refs/remotes/origin/HEAD",
+                            "refs/remotes/origin/main"], in: root)
+        _ = GitService.run(["tag", "v1"], in: root)
+        let decorated = GitService.log(in: root, limit: 1)[0]
+        try expect(decorated.refLabels == ["main", "origin/main", "v1"],
+                   "local, remote and tag refs were not classified: \(decorated.refs)")
+        let decoratedCell = GitCommitCell()
+        decoratedCell.configure(commit: decorated, pending: false)
+        decoratedCell.frame = NSRect(x: 0, y: 0, width: 640,
+                                     height: GitCommitCell.height)
+        if let rep = decoratedCell.bitmapImageRepForCachingDisplay(in: decoratedCell.bounds) {
+            decoratedCell.cacheDisplay(in: decoratedCell.bounds, to: rep)
+        }
+        try expect(decoratedCell.drawnRefRectsForTesting.count == 3
+                    && (decoratedCell.accessibilityLabel() ?? "")
+                        .contains("Refs main, origin/main, v1"),
+                   "the row did not draw or expose all exact refs")
         try expect(log.last?.parents.isEmpty == true,
                    "the root commit was given a parent: \(log.last?.parents ?? [])")
 

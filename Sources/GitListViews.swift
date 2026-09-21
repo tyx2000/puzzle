@@ -4,13 +4,12 @@ import AppKit
 /// and row subclasses that carry their hover and stripes. None of it touches
 /// a list's state — they are handed what to draw and draw it.
 
-/// One commit on one line: graph, commit ID, message, author, time.
+/// One commit on one line: graph, refs pointing exactly at it, commit ID,
+/// message, author, time.
 /// Every column but the message is as wide as the widest entry down the list,
 /// so each starts at the same place on every row; the message takes whatever
 /// width is left.
 ///
-/// There is no branch column: Git does not record which branch a commit was
-/// made on, and a commit on several branches has no one name to show.
 final class GitCommitCell: DrawnSidebarCell {
     private var subject = ""
     private var author = ""
@@ -20,6 +19,7 @@ final class GitCommitCell: DrawnSidebarCell {
     private var columns: Columns?
     private var graphRow: GitHistoryGraph.Row?
     private var graphWidth: CGFloat = 0
+    private var refDecorations: [GitService.Commit.RefLabel] = []
     /// Between every column in the row.
     static let columnGap: CGFloat = 10
     /// What the message keeps before the author gives way, on a panel dragged
@@ -34,18 +34,21 @@ final class GitCommitCell: DrawnSidebarCell {
     /// The widths a list of these rows shares. Zero for a column with nothing
     /// in it anywhere in the list, which then takes no room and no gap.
     struct Columns: Equatable {
+        var refs: CGFloat = 0
         var commitID: CGFloat = 0
         var author: CGFloat = 0
         var date: CGFloat = 0
 
         /// The widest of each, as drawn.
-        static func measuring(commitIDs: some Sequence<String>,
+        static func measuring(refs: some Sequence<[GitService.Commit.RefLabel]>,
+                              commitIDs: some Sequence<String>,
                               authors: some Sequence<String>,
                               dates: some Sequence<String>) -> Columns {
             func widest(_ strings: some Sequence<String>) -> CGFloat {
                 strings.reduce(0) { max($0, GitCommitCell.width(of: $1)) }
             }
-            return Columns(commitID: widest(commitIDs), author: widest(authors),
+            return Columns(refs: refs.reduce(0) { max($0, GitCommitCell.refsWidth($1)) },
+                           commitID: widest(commitIDs), author: widest(authors),
                            date: widest(dates))
         }
     }
@@ -71,6 +74,20 @@ final class GitCommitCell: DrawnSidebarCell {
     private(set) var drawnAuthorRectForTesting: NSRect = .zero
     private(set) var drawnDateRectForTesting: NSRect = .zero
     private(set) var drawnGraphRectForTesting: NSRect = .zero
+    private(set) var drawnRefRectsForTesting: [NSRect] = []
+
+    private static let refGap: CGFloat = 4
+    private static let refHorizontalPadding: CGFloat = 5
+    private static let refHeight: CGFloat = 16
+    private static var refFont: NSFont { Theme.uiFont(9) }
+
+    static func refsWidth(_ refs: [GitService.Commit.RefLabel]) -> CGFloat {
+        let widths = refs.map {
+            ceil(($0.name as NSString).size(withAttributes: [.font: refFont]).width)
+                + refHorizontalPadding * 2
+        }
+        return widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * refGap
+    }
 
     /// `columns` is the list's; left out, the row measures its own.
     func configure(commit: GitService.Commit, pending: Bool, columns: Columns? = nil,
@@ -78,6 +95,7 @@ final class GitCommitCell: DrawnSidebarCell {
         self.columns = columns
         self.graphRow = graphRow
         self.graphWidth = graphWidth
+        refDecorations = commit.refDecorations
         commitID = commit.shortHash
         subject = commit.subject
         author = Self.authorText(commit, pending: pending)
@@ -89,7 +107,9 @@ final class GitCommitCell: DrawnSidebarCell {
         let graphDescription = graphRow.map {
             "\($0.isHead ? "HEAD, " : "")\($0.isMerge ? "Merge, " : "")"
         } ?? ""
-        exposeToAccessibility(graphDescription
+        let refsDescription = refDecorations.isEmpty
+            ? "" : "Refs \(refDecorations.map(\.name).joined(separator: ", ")), "
+        exposeToAccessibility(graphDescription + refsDescription
                                 + "\(pending ? "Unpushed " : "")commit \(commit.shortHash), "
                                 + "\(commit.subject), \(commit.author), \(commit.absoluteDate)")
         needsDisplay = true
@@ -97,8 +117,10 @@ final class GitCommitCell: DrawnSidebarCell {
 
     /// Each column's rectangle across `content`, message included.
     static func layout(_ columns: Columns, in content: NSRect)
-        -> (commitID: NSRect, subject: NSRect, author: NSRect, date: NSRect) {
-        let fixed = [columns.commitID, columns.author, columns.date].filter { $0 > 0 }
+        -> (refs: NSRect, commitID: NSRect, subject: NSRect,
+            author: NSRect, date: NSRect) {
+        let fixed = [columns.refs, columns.commitID, columns.author, columns.date]
+            .filter { $0 > 0 }
         let gaps = CGFloat(fixed.count) * columnGap
         // Too narrow for every column: the author gives way before the
         // message goes below its minimum.
@@ -109,6 +131,8 @@ final class GitCommitCell: DrawnSidebarCell {
             NSRect(x: x, y: content.minY, width: max(0, width), height: content.height)
         }
         var x = content.minX
+        let refsBox = box(x, columns.refs)
+        if columns.refs > 0 { x += columns.refs + columnGap }
         let idBox = box(x, columns.commitID)
         if columns.commitID > 0 { x += columns.commitID + columnGap }
         var right = content.maxX
@@ -116,7 +140,7 @@ final class GitCommitCell: DrawnSidebarCell {
         if columns.date > 0 { right -= columns.date + columnGap }
         let authorBox = box(right - author, author)
         if author > 0 { right -= author + columnGap }
-        return (idBox, box(x, right - x), authorBox, dateBox)
+        return (refsBox, idBox, box(x, right - x), authorBox, dateBox)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -124,6 +148,7 @@ final class GitCommitCell: DrawnSidebarCell {
         bounds.clip()
         defer { NSGraphicsContext.restoreGraphicsState() }
         drawnGraphRectForTesting = .zero
+        drawnRefRectsForTesting = []
         if let graphRow, graphWidth > 0 {
             let graphRect = NSRect(x: 8, y: 0,
                                    width: graphWidth - GitHistoryGraphDrawing.trailingGap,
@@ -135,8 +160,38 @@ final class GitCommitCell: DrawnSidebarCell {
                              width: max(0, bounds.width - 16 - graphWidth),
                              height: bounds.height)
         let columns = self.columns ?? Columns.measuring(
-            commitIDs: [commitID], authors: [author], dates: [date])
+            refs: [refDecorations], commitIDs: [commitID],
+            authors: [author], dates: [date])
         let boxes = Self.layout(columns, in: content)
+        var x = boxes.refs.minX
+        for ref in refDecorations where x < boxes.refs.maxX {
+            let natural = ceil((ref.name as NSString)
+                .size(withAttributes: [.font: Self.refFont]).width)
+                + Self.refHorizontalPadding * 2
+            let width = min(natural, boxes.refs.maxX - x)
+            guard width >= Self.refHorizontalPadding * 2 + 4 else { break }
+            let rect = NSRect(x: x, y: floor(content.midY - Self.refHeight / 2),
+                              width: width, height: Self.refHeight)
+            let color: NSColor
+            switch ref.kind {
+            case .localBranch: color = ref.isCurrent ? Theme.accent : Theme.blue
+            case .remoteBranch: color = Theme.purple
+            case .tag: color = Theme.yellow
+            case .detachedHead: color = Theme.orange
+            }
+            color.withAlphaComponent(0.14).setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+            path.fill()
+            color.withAlphaComponent(0.7).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            SidebarCellDrawing.text(
+                ref.name, font: Self.refFont, color: color,
+                in: rect.insetBy(dx: Self.refHorizontalPadding, dy: 0),
+                lineBreak: .byTruncatingMiddle)
+            drawnRefRectsForTesting.append(rect)
+            x = rect.maxX + Self.refGap
+        }
         let baseline = SidebarCellDrawing.centeredBaseline(for: Self.subjectFont, in: content)
         func draw(_ text: String, font: NSFont, color: NSColor, in box: NSRect,
                   lineBreak: NSLineBreakMode) -> NSRect {
@@ -162,6 +217,7 @@ final class GitCommitCell: DrawnSidebarCell {
     var toolTipForTesting: String { toolTip ?? "" }
     var graphWidthForTesting: CGFloat { graphWidth }
     var graphRowForTesting: GitHistoryGraph.Row? { graphRow }
+    var refLabelsForTesting: [String] { refDecorations.map(\.name) }
 }
 
 final class GitHistoryFileCell: DrawnSidebarCell {

@@ -87,6 +87,19 @@ enum GitService {
     }
 
     struct Commit {
+        enum RefKind: Equatable {
+            case localBranch
+            case remoteBranch
+            case tag
+            case detachedHead
+        }
+
+        struct RefLabel: Equatable {
+            let name: String
+            let kind: RefKind
+            let isCurrent: Bool
+        }
+
         let shortHash: String
         let subject: String
         let author: String
@@ -106,15 +119,68 @@ enum GitService {
         /// Blame summary shown as the commit record's secondary line.
         var blameSummary: String { "\(author)  ·  \(absoluteDate)" }
 
-        /// Branch and tag names to show as chips. `%D` reads
-        /// "HEAD -> main, origin/main, tag: v1"; the arrow is noise in a chip,
-        /// and a bare "HEAD" says nothing a branch name does not.
-        var refLabels: [String] {
-            refs.split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .map { $0.hasPrefix("HEAD -> ") ? String($0.dropFirst(8)) : $0 }
-                .filter { !$0.isEmpty && $0 != "HEAD" }
+        /// The references that point exactly at this commit. Full ref names
+        /// make a local branch containing `/` distinguishable from a remote
+        /// branch. The symbolic remote HEAD is only an alias for another ref,
+        /// so it is not a useful second label.
+        var refDecorations: [RefLabel] {
+            var labels: [RefLabel] = []
+            var seen = Set<String>()
+            for rawValue in refs.split(separator: ",") {
+                var value = rawValue.trimmingCharacters(in: .whitespaces)
+                guard !value.isEmpty else { continue }
+                var isCurrent = false
+                if value.hasPrefix("HEAD -> ") {
+                    value = String(value.dropFirst(8))
+                    isCurrent = true
+                }
+
+                let label: RefLabel?
+                if value == "HEAD" {
+                    label = RefLabel(name: "HEAD", kind: .detachedHead, isCurrent: true)
+                } else if value.hasPrefix("tag: ") {
+                    let name = String(value.dropFirst(5))
+                        .replacingOccurrences(of: "refs/tags/", with: "")
+                    label = RefLabel(name: name, kind: .tag, isCurrent: false)
+                } else if value.hasPrefix("refs/heads/") {
+                    label = RefLabel(name: String(value.dropFirst(11)),
+                                     kind: .localBranch, isCurrent: isCurrent)
+                } else if value.hasPrefix("refs/remotes/") {
+                    let name = String(value.dropFirst(13))
+                    label = name.hasSuffix("/HEAD") ? nil
+                        : RefLabel(name: name, kind: .remoteBranch, isCurrent: false)
+                } else if value.hasPrefix("refs/tags/") {
+                    label = RefLabel(name: String(value.dropFirst(10)),
+                                     kind: .tag, isCurrent: false)
+                } else {
+                    // Compatibility with commits constructed by tests and old
+                    // cached output. New log output always uses full ref names.
+                    label = RefLabel(name: value, kind: .localBranch, isCurrent: isCurrent)
+                }
+                guard let label, !label.name.isEmpty else { continue }
+                let identity = "\(label.kind):\(label.name)"
+                if seen.insert(identity).inserted { labels.append(label) }
+            }
+            // Git's decoration order can vary with ref creation order. Keep
+            // the UI stable: current/local branches, remote branches, tags,
+            // then a detached HEAD marker.
+            func rank(_ label: RefLabel) -> Int {
+                if label.isCurrent { return 0 }
+                switch label.kind {
+                case .localBranch: return 1
+                case .remoteBranch: return 2
+                case .tag: return 3
+                case .detachedHead: return 4
+                }
+            }
+            return labels.enumerated().sorted {
+                let left = rank($0.element)
+                let right = rank($1.element)
+                return left == right ? $0.offset < $1.offset : left < right
+            }.map(\.element)
         }
+
+        var refLabels: [String] { refDecorations.map(\.name) }
     }
 
     @discardableResult
@@ -933,6 +999,7 @@ enum GitService {
         // `--parents` also enables parent rewriting: commits touching only a
         // sibling project must not leave dangling edges in the visible graph.
         let result = run(["--no-pager", "log", "-z", "--all", "--topo-order", "--full-history",
+                          "--decorate=full",
                           "--parents",
                           "--pretty=format:" + format,
                           "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
