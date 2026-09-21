@@ -1331,8 +1331,9 @@ enum RegressionTests {
                     && abs(refBoxes[0].minX - sideCell.drawnGraphRectForTesting.maxX
                            - GitCommitCell.columnGap) <= 0.5,
                    "the graph has no clear gap before the refs")
-        try expect(wideColumns[0].minX >= refBoxes[0].maxX + GitCommitCell.columnGap,
-                   "the shared refs column has no clear gap before the commit ID")
+        try expect(abs(wideColumns[0].minX - refBoxes[0].maxX
+                       - GitCommitCell.columnGap) <= 0.5,
+                   "the inline refs have no clear gap before the commit ID")
         try expect(abs(wideColumns[3].maxX - (640 - 8)) <= 0.5,
                    "the time does not end at the row's edge: \(wideColumns[3])")
         try expect(sideCell.authorForTesting.hasSuffix("Gift Test"),
@@ -1355,16 +1356,24 @@ enum RegressionTests {
         try expect(sideCell.toolTip == nil,
                    "a commit row still carries a tip: "
                      + "\(String(describing: sideCell.toolTip))")
-        // Every column but the message is as wide as its widest entry down the
-        // list, so each starts at the same place on every row.
-        let starts = (0..<projectsPanel.history.commitSubjectsForTesting.count)
-            .compactMap { index -> [CGFloat]? in
-                guard let cell = projectsPanel.history.rowCellForTesting(index) else { return nil }
-                let columns = drawn(cell, width: 640)
-                return columns.map(\.minX)
+        // Refs are row-local, not a blank fixed-width column. A row without a
+        // ref begins its commit ID immediately after the graph; a decorated
+        // row moves only by the labels it actually draws.
+        var sawUndecoratedRow = false
+        for index in 0..<projectsPanel.history.commitSubjectsForTesting.count {
+            guard let cell = projectsPanel.history.rowCellForTesting(index) else { continue }
+            let boxes = drawn(cell, width: 640)
+            let refs = cell.drawnRefRectsForTesting
+            if let last = refs.last {
+                try expect(abs(boxes[0].minX - last.maxX - GitCommitCell.columnGap) <= 0.5,
+                           "a decorated row reserved more than its inline refs")
+            } else {
+                sawUndecoratedRow = true
+                try expect(abs(boxes[0].minX - 8 - cell.graphWidthForTesting) <= 0.5,
+                           "an undecorated row kept an empty refs column")
             }
-        try expect(Set(starts).count == 1,
-                   "the columns do not start in one place down the list: \(starts)")
+        }
+        try expect(sawUndecoratedRow, "the fixture had no undecorated row to verify")
         // Expanding a merge inserts file rows between its split and the next
         // commit. Both live branches must continue through every inserted row.
         guard let mergeIndex = projectsPanel.history.commitSubjectsForTesting.firstIndex(of: "Merge side"),

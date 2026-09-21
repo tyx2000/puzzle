@@ -165,7 +165,6 @@ final class ProjectHistoryViewController: NSViewController {
                     zip(log, graph.rows).map { ($0.0.graphID, $0.1) })
                 self.graphWidth = GitHistoryGraphDrawing.columnWidth(laneCount: graph.laneCount)
                 self.columns = GitCommitCell.Columns.measuring(
-                    refs: log.map(\.refDecorations),
                     commitIDs: log.map(\.shortHash),
                     authors: log.map {
                         GitCommitCell.authorText($0, pending: self.isUnpushed($0.shortHash))
@@ -212,10 +211,15 @@ final class ProjectHistoryViewController: NSViewController {
         rows = built
         guard isViewLoaded else { return }
         if let column = table.tableColumns.first {
-            let fixedColumns = [columns.refs, columns.commitID,
+            let refsWidth = commits.reduce(CGFloat(0)) {
+                max($0, GitRefLabelsDrawing.width($1.refDecorations))
+            }
+            let fixedColumns = [columns.commitID,
                                 min(columns.author, GitCommitCell.minimumSqueezedWidth),
                                 columns.date].filter { $0 > 0 }
-            column.minWidth = 16 + graphWidth + fixedColumns.reduce(0, +)
+            column.minWidth = 16 + graphWidth + refsWidth
+                + (refsWidth > 0 ? GitCommitCell.columnGap : 0)
+                + fixedColumns.reduce(0, +)
                 + CGFloat(fixedColumns.count) * GitCommitCell.columnGap
                 + GitCommitCell.minimumSubjectWidth
             column.width = max(column.width, column.minWidth)
