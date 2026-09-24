@@ -362,6 +362,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
         refreshWindowTitle(activeFile: nil)
         refreshGit()
+        // Opened or switched to: find out what its remote has now. This
+        // project only, and not again if it was fetched a moment ago.
+        BackgroundFetch.fetchIfDue(url) { [weak self] in
+            guard let self, self.projectURL == url else { return }
+            self.remoteRefsMoved()
+        }
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
             self.refreshExternalGitState()
@@ -636,6 +642,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // the gutter marks for everything it took.
         editor.invalidateBlame()
         editor.refreshGitLineChanges()
+    }
+
+    /// A fetch moved a remote-tracking branch. The lists that draw remote
+    /// branches read again, and so does the ↑ count, which is measured against
+    /// one; the branch checked out and the working tree did not move.
+    private func remoteRefsMoved() {
+        guard let projectURL else { return }
+        sidebar.refreshGitPanelIfLoaded()
+        sidebar.projectsPanel.history.remoteRefsMoved(in: projectURL)
+        refreshGit(requireFollowUp: true)
     }
 
     func refreshGit(requireFollowUp: Bool = false) {
