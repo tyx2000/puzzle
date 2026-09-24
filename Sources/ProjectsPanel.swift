@@ -25,6 +25,23 @@ final class ProjectRowView: NSView {
     /// that project's Git panel, which otherwise costs a second trip to the
     /// Git button at the foot of the sidebar.
     var onSelectBranch: (() -> Void)?
+    /// The Git mark is a button of its own: it pulls this project.
+    var onPull: (() -> Void)? {
+        didSet { refreshAccessibilityActions() }
+    }
+    /// A fetch or a pull is running for this project. The Git mark says so
+    /// with a band of light running down through it — the way the commits
+    /// come, from the remote down.
+    var isSyncing = false {
+        didSet {
+            guard isSyncing != oldValue else { return }
+            syncingChanged()
+        }
+    }
+    /// One sweep of the band down the mark.
+    static let sweepPeriod: TimeInterval = 1.0
+    private var sweepStarted: Date?
+    private var sweepTimer: Timer?
     /// Dragging this row: the panel decides whether the list may be reordered
     /// at all, and tracks where the row is going.
     var onDragBegan: (() -> Bool)?
@@ -51,6 +68,7 @@ final class ProjectRowView: NSView {
     var showsDivider = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
     private var branchIsHovered = false
+    private var pullIsHovered = false
     private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
@@ -107,6 +125,13 @@ final class ProjectRowView: NSView {
     private var branchIconRect: NSRect {
         Self.centred(x: columnDivider + 8, in: bounds)
     }
+    /// What a click on the Git mark lands in: the mark, and a little round
+    /// it — short of the branch name, which is a target of its own. Nothing
+    /// for a folder that is not a repository, which draws no mark.
+    private var pullRect: NSRect {
+        guard !branch.isEmpty, onPull != nil else { return .zero }
+        return branchIconRect.insetBy(dx: -3, dy: -5)
+    }
     private static func centred(x: CGFloat, in bounds: NSRect) -> NSRect {
         NSRect(x: x, y: (bounds.height - iconSize) / 2,
                width: iconSize, height: iconSize)
@@ -141,9 +166,102 @@ final class ProjectRowView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        if !pullRect.isEmpty { addCursorRect(pullRect, cursor: .pointingHand) }
         let branch = branchRect
         guard !branch.isEmpty else { return }
         addCursorRect(branch, cursor: .pointingHand)
+    }
+
+    // MARK: - Syncing
+
+    private var reducesMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private func syncingChanged() {
+        if isSyncing, window != nil, !reducesMotion { startSweep() } else { stopSweep() }
+        if pullIsHovered { toolTip = pullHint }
+        setNeedsDisplay(branchIconRect)
+    }
+
+    private func startSweep() {
+        guard sweepTimer == nil else { return }
+        sweepStarted = Date()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.setNeedsDisplay(self.branchIconRect)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sweepTimer = timer
+    }
+
+    private func stopSweep() {
+        sweepTimer?.invalidate()
+        sweepTimer = nil
+        sweepStarted = nil
+    }
+
+    /// How far down the mark the band is, 0 at the top to 1 past the bottom.
+    private var sweepPhase: CGFloat? {
+        guard let sweepStarted else { return nil }
+        let elapsed = Date().timeIntervalSince(sweepStarted)
+        return CGFloat(elapsed.truncatingRemainder(dividingBy: Self.sweepPeriod)
+                        / Self.sweepPeriod)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A row taken out of the list stops its clock; one put back in picks
+        // up where its project stands.
+        syncingChanged()
+    }
+
+    deinit { sweepTimer?.invalidate() }
+
+    /// The Git mark as it stands: itself, or — while its project syncs —
+    /// dimmed, with a band of light at `phase` of the way down. No band when
+    /// the system asks for less motion: the dimmed mark says it on its own.
+    /// `base` draws the mark; a test hands in a shape of its own.
+    static func gitMark(syncingAt phase: CGFloat?, syncing: Bool,
+                        base: @escaping (NSRect) -> Void = {
+                            SidebarCellDrawing.icon(.material(branchIcon), in: $0)
+                        }) -> NSImage {
+        let size = NSSize(width: iconSize, height: iconSize)
+        return NSImage(size: size, flipped: true) { rect in
+            base(rect)
+            guard syncing, let context = NSGraphicsContext.current else { return true }
+            // Only where the mark is: the rest of the square stays clear.
+            context.compositingOperation = .sourceAtop
+            NSColor.black.withAlphaComponent(0.3).setFill()
+            rect.fill(using: .sourceAtop)
+            guard let phase else { return true }
+            let band = rect.height * 0.8
+            let light = Theme.cursor.blended(withFraction: 0.55, of: .white) ?? Theme.cursor
+            NSGradient(colors: [light.withAlphaComponent(0),
+                                light.withAlphaComponent(0.9),
+                                light.withAlphaComponent(0)])?
+                .draw(in: NSRect(x: 0, y: -band + (rect.height + band) * phase,
+                                 width: rect.width, height: band),
+                      angle: 90)
+            return true
+        }
+    }
+
+    private var pullHint: String {
+        isSyncing ? "Syncing with the remote…" : "Pull from the remote (fast-forward only)"
+    }
+
+    private func refreshAccessibilityActions() {
+        guard onPull != nil else {
+            setAccessibilityCustomActions(nil)
+            return
+        }
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Pull") { [weak self] in
+                self?.onPull?()
+                return true
+            },
+        ])
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -169,7 +287,7 @@ final class ProjectRowView: NSView {
         if !branch.isEmpty {
             Theme.border.setFill()
             NSRect(x: columnDivider, y: 0, width: 1, height: bounds.height).fill()
-            SidebarCellDrawing.icon(.material(Self.branchIcon), in: branchIconRect)
+            Self.gitMark(syncingAt: sweepPhase, syncing: isSyncing).draw(in: branchIconRect)
             SidebarCellDrawing.attributedText(branchLabel(), in: branchColumnRect)
         }
 
@@ -287,24 +405,28 @@ final class ProjectRowView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let onClose = closeRect.insetBy(dx: -4, dy: -4).contains(point)
-        let onBranch = !onClose && branchRect.contains(point)
+        let onPull = !onClose && pullRect.contains(point)
+        let onBranch = !onClose && !onPull && branchRect.contains(point)
         guard !isHovered || onClose != closeIsHovered
-                || onBranch != branchIsHovered else { return }
+                || onBranch != branchIsHovered || onPull != pullIsHovered else { return }
         isHovered = true
         closeIsHovered = onClose
         branchIsHovered = onBranch
+        pullIsHovered = onPull
         // Back to the project's path once the pointer leaves the ✕. The branch
         // says what it does by underlining itself; a bubble over it as well is
-        // one explanation too many.
-        toolTip = onClose ? "Close this project" : path
+        // one explanation too many. The Git mark does not look like a button,
+        // so it says what it does.
+        toolTip = onClose ? "Close this project" : (onPull ? pullHint : path)
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
-        guard isHovered || closeIsHovered || branchIsHovered else { return }
+        guard isHovered || closeIsHovered || branchIsHovered || pullIsHovered else { return }
         isHovered = false
         closeIsHovered = false
         branchIsHovered = false
+        pullIsHovered = false
         toolTip = path
         needsDisplay = true
     }
@@ -370,7 +492,9 @@ final class ProjectRowView: NSView {
         // click either. Selecting then closed every tab of the project being
         // left, for a press the reader had already abandoned.
         guard let released, bounds.contains(released) else { return }
-        if branchRect.contains(start), onSelectBranch != nil {
+        if pullRect.contains(start), onPull != nil {
+            onPull?()
+        } else if branchRect.contains(start), onSelectBranch != nil {
             onSelectBranch?()
         } else {
             onSelect?()
@@ -403,12 +527,19 @@ final class ProjectRowView: NSView {
     }
     var isActiveForTesting: Bool { isActive }
     var closeRectForTesting: NSRect { closeRect }
+    var pullRectForTesting: NSRect { pullRect }
+    var isSyncingForTesting: Bool { isSyncing }
+    /// Whether the band is moving — it is not for a row off screen.
+    var isSweepingForTesting: Bool { sweepTimer != nil }
+    var toolTipForTesting: String? { toolTip }
     var branchRectForTesting: NSRect { branchRect }
     /// Where each column's mark is drawn, and which icon it is.
     var columnIconsForTesting: (name: (String, NSRect), branch: (String, NSRect)) {
         ((Self.nameIcon, nameIconRect), (Self.branchIcon, branchIconRect))
     }
     static var columnIconNamesForTesting: [String] { [nameIcon, branchIcon] }
+    /// The project this row stands for.
+    var projectPath: String { path }
     var pathForTesting: String { path }
     /// The left column's label exactly as it is drawn.
     var nameLabelForTesting: NSAttributedString { nameLabel() }
@@ -734,6 +865,15 @@ final class ProjectsPanelViewController: NSViewController {
     var onClose: ((Int) -> Void)?
     /// The branch name on a row was clicked: show that project's Git panel.
     var onSelectBranch: ((Int) -> Void)?
+    /// The Git mark on a row was clicked: pull that project.
+    var onPull: ((Int) -> Void)?
+    /// The projects, by path, with a fetch or a pull running.
+    private var syncingPaths: Set<String> = []
+
+    func setSyncing(_ paths: Set<String>) {
+        syncingPaths = paths
+        for row in rows { row.isSyncing = paths.contains(row.projectPath) }
+    }
     /// A row was dragged to another place in the list.
     var onReorder: ((Int, Int) -> Void)?
 
@@ -883,6 +1023,7 @@ final class ProjectsPanelViewController: NSViewController {
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
                 row.onSelectBranch = { [weak self] in self?.onSelectBranch?(index) }
+                row.onPull = { [weak self] in self?.onPull?(index) }
                 row.onDragBegan = { [weak self, weak row] in
                     guard let self, let row else { return false }
                     return self.beginRowDrag(row)
@@ -903,6 +1044,7 @@ final class ProjectsPanelViewController: NSViewController {
             // Between rows only: not under the project whose tree follows it,
             // where a line would cut the project off from its own contents.
             rows[index].showsDivider = index > 0
+            rows[index].isSyncing = syncingPaths.contains(project.path)
         }
         activeIndex = active
         // A project with no branch is not a repository: nothing to head the

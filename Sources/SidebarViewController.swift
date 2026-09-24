@@ -18,6 +18,8 @@ final class SidebarViewController: NSViewController {
     /// The branch on a project row was clicked, which goes to its Git panel.
     var onSelectProjectBranchRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
+    /// The Git mark on a project row was clicked: pull that project.
+    var onPullProjectRow: ((Int) -> Void)?
     /// The buttons at the end of the title band: one opens another project,
     /// the one past it opens a terminal on the project showing. The terminal
     /// used to be what clicking the project's name did, where it sat on top of
@@ -124,6 +126,7 @@ final class SidebarViewController: NSViewController {
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
         projectsPanel.onSelectBranch = { [weak self] in self?.onSelectProjectBranchRow?($0) }
+        projectsPanel.onPull = { [weak self] in self?.onPullProjectRow?($0) }
         // The changes column opens a diff the same way the Git panel's list
         // does — it is the same list, beside the tree instead of instead of it.
         projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
@@ -240,6 +243,12 @@ final class SidebarViewController: NSViewController {
                                    changes: Int, path: String)],
                      active: Int?) {
         projectsPanel.configure(projects: projects, active: active)
+    }
+
+    /// The projects, by path, with a fetch or a pull running: their rows'
+    /// Git marks show it.
+    func setSyncingProjects(_ paths: Set<String>) {
+        projectsPanel.setSyncing(paths)
     }
 
     /// What the project on screen has changed, for the column beside its tree,

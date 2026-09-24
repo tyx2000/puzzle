@@ -22,12 +22,15 @@ enum BackgroundFetch {
 
     /// Fetch every remote of `directory`, unless it was fetched a moment ago.
     ///
-    /// `refsMoved` runs on the main thread, and only when the fetch changed a
-    /// remote-tracking branch: a fetch that brought nothing costs no re-read.
-    /// A failure — offline, a remote that wants a password — says nothing; the
-    /// next time the project comes on screen tries again.
+    /// `started` and `finished` run on the main thread, in that order, and
+    /// only for a fetch that actually runs — a folder with no remote shows
+    /// nothing happening, because nothing does. `finished` says whether the
+    /// fetch moved a remote-tracking branch: one that brought nothing costs no
+    /// re-read. A failure — offline, a remote that wants a password — is only
+    /// `false`; the next time the project comes on screen tries again.
     static func fetchIfDue(_ directory: URL, now: Date = Date(),
-                           refsMoved: @escaping () -> Void) {
+                           started: @escaping () -> Void = {},
+                           finished: @escaping (_ refsMoved: Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         if let last = lastStarted[directory], now.timeIntervalSince(last) < minimumInterval {
             return
@@ -40,12 +43,16 @@ enum BackgroundFetch {
                   !remotes.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return
             }
-            DispatchQueue.main.async { fetchedForTesting.append(directory) }
+            DispatchQueue.main.async {
+                fetchedForTesting.append(directory)
+                started()
+            }
+            if delayForTesting > 0 { Thread.sleep(forTimeInterval: delayForTesting) }
             let before = remoteRefs(in: directory)
             let fetched = GitService.run(["fetch", "--all", "--prune", "--quiet"],
                                          in: directory, timeout: timeout)
-            guard fetched.code == 0, remoteRefs(in: directory) != before else { return }
-            DispatchQueue.main.async(execute: refsMoved)
+            let moved = fetched.code == 0 && remoteRefs(in: directory) != before
+            DispatchQueue.main.async { finished(moved) }
         }
     }
 
@@ -57,11 +64,14 @@ enum BackgroundFetch {
 
     // MARK: - Regression-test surface
 
+    /// Holds each fetch back, so a test can act while one is still out.
+    static var delayForTesting: TimeInterval = 0
     /// Every directory a fetch was run in, in order.
     private(set) static var fetchedForTesting: [URL] = []
     /// Forget every fetch, so a test starts as a fresh launch would.
     static func resetForTesting() {
         lastStarted = [:]
         fetchedForTesting = []
+        delayForTesting = 0
     }
 }

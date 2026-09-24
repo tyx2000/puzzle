@@ -125,6 +125,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             if self.projectURL != wanted { self.activateProject(wanted) }
             self.sidebar.showGit()
         }
+        sidebar.onPullProjectRow = { [weak self] index in
+            guard let self, self.projects.indices.contains(index) else { return }
+            self.pullProject(self.projects[index])
+        }
         sidebar.onReorderProjectRows = { [weak self] from, to in
             self?.moveProject(from: from, to: to)
         }
@@ -363,10 +367,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         refreshWindowTitle(activeFile: nil)
         refreshGit()
         // Opened or switched to: find out what its remote has now. This
-        // project only, and not again if it was fetched a moment ago.
-        BackgroundFetch.fetchIfDue(url) { [weak self] in
-            guard let self, self.projectURL == url else { return }
-            self.remoteRefsMoved()
+        // project only, and not again if it was fetched a moment ago — nor
+        // while a pull, which brings the remote down itself, is running.
+        if !pulling.contains(url) {
+            var fetchStarted = Date()
+            BackgroundFetch.fetchIfDue(url, started: { [weak self] in
+                fetchStarted = Date()
+                self?.fetching.insert(url)
+                self?.beginSync(url)
+            }, finished: { [weak self] moved in
+                guard let self else { return }
+                self.fetching.remove(url)
+                // A pull asked for meanwhile goes now, before this fetch lets
+                // go of the mark, so the band runs on without a break.
+                if self.pullAfterFetch.remove(url) != nil { self.startPull(url) }
+                self.endSync(url, startedAt: fetchStarted)
+                if moved, self.projectURL == url { self.remoteRefsMoved() }
+            })
         }
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
@@ -643,6 +660,106 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.invalidateBlame()
         editor.refreshGitLineChanges()
     }
+
+    // MARK: - Syncing with the remote
+
+    /// Projects with a fetch or a pull running, and how many of each.
+    private var syncing: [URL: Int] = [:]
+    private var fetching: Set<URL> = []
+    private var pulling: Set<URL> = []
+    /// Pulls asked for while that project's fetch was still out. The click
+    /// comes straight after switching, which is when that fetch runs; it
+    /// waits for the fetch rather than being turned away, and rather than
+    /// running beside it in the same repository.
+    private var pullAfterFetch: Set<URL> = []
+    /// A sync quicker than this would only flicker on the Git mark: the band
+    /// runs at least this long, so a fetch that found nothing is still seen
+    /// to have happened.
+    static var minimumSyncAnimation: TimeInterval = 0.6
+
+    private func beginSync(_ url: URL) {
+        syncing[url, default: 0] += 1
+        publishSyncing()
+    }
+
+    private func endSync(_ url: URL, startedAt: Date) {
+        let wait = max(0, Self.minimumSyncAnimation - Date().timeIntervalSince(startedAt))
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self else { return }
+            let left = (self.syncing[url] ?? 1) - 1
+            self.syncing[url] = left > 0 ? left : nil
+            self.publishSyncing()
+        }
+    }
+
+    private func publishSyncing() {
+        sidebar.setSyncingProjects(Set(syncing.keys.map(\.path)))
+    }
+
+    /// The Git mark on a project's row: bring the remote's commits into the
+    /// branch — when that is a fast-forward. Anything else, the branch and
+    /// the remote having both moved on or a change in the way, is Git's to
+    /// explain and the user's to settle; nothing is merged behind their back.
+    ///
+    /// On the queue every other command that changes a repository runs on, so
+    /// a pull never lands in the middle of a commit.
+    private func pullProject(_ url: URL) {
+        // Already on its way: once is enough.
+        guard !pulling.contains(url), !pullAfterFetch.contains(url) else {
+            NSSound.beep()
+            return
+        }
+        guard !fetching.contains(url) else {
+            pullAfterFetch.insert(url)
+            return
+        }
+        startPull(url)
+    }
+
+    private func startPull(_ url: URL) {
+        let started = Date()
+        pulling.insert(url)
+        beginSync(url)
+        GitService.operationQueue.async { [weak self] in
+            let result = GitService.pull(in: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pulling.remove(url)
+                self.endSync(url, startedAt: started)
+                if url == self.projectURL {
+                    // Files may have changed under open tabs, HEAD has moved,
+                    // and the remote branches with it.
+                    self.refreshExternalGitState()
+                    self.sidebar.projectsPanel.history.remoteRefsMoved(in: url)
+                } else {
+                    self.refreshProjectSummaries(all: true)
+                }
+                if !result.ok { self.presentPullError(result.message, for: url) }
+            }
+        }
+    }
+
+    /// How a failed pull is reported. A test answers without a sheet.
+    var presentSyncError: ((_ title: String, _ message: String) -> Void)?
+
+    private func presentPullError(_ message: String, for url: URL) {
+        let title = "Couldn't pull “\(url.lastPathComponent)”"
+        if let presentSyncError {
+            presentSyncError(title, message)
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    var syncingForTesting: Set<URL> { Set(syncing.keys) }
 
     /// A fetch moved a remote-tracking branch. The lists that draw remote
     /// branches read again, and so does the ↑ count, which is measured against

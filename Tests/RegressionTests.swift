@@ -83,7 +83,9 @@ enum RegressionTests {
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
         try testProjectCommitLine()
+        try testTimeoutSurvivesAHeldPipe()
         try testBackgroundFetch()
+        try testGitMarkPulls()
         try testChangeRowActions()
         try testHistoryRowOpenActions()
         try testStripedGitLists()
@@ -7462,6 +7464,42 @@ enum RegressionTests {
                    "a stale button opened a file that disappeared")
     }
 
+    private static func testTimeoutSurvivesAHeldPipe() throws {
+        let directory = try temporaryDirectory("held-pipe")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Past its deadline, with a child that ignores TERM and a grandchild
+        // holding stdout open: the call still returns near its deadline, and
+        // says the result may be partial.
+        let timeout: TimeInterval = 0.2
+        var started = Date()
+        let stuck = GitService.runProcess(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "sh -c 'trap \"\" TERM; sleep 5' & wait"],
+            in: directory, timeout: timeout)
+        var elapsed = Date().timeIntervalSince(started)
+        try expect(stuck.code != 0, "a process past its deadline reported success")
+        try expect(elapsed < timeout + GitService.readerGrace + 1,
+                   "the deadline waited \(elapsed)s for a pipe nothing was going to close")
+        let said = String(decoding: stuck.stderr, as: UTF8.self)
+        try expect(said.contains("gave up") && said.contains("holding its output open"),
+                   "the timeout did not say what happened: \(said)")
+
+        // Finished in good time, but something it started in the background —
+        // the maintenance a `git fetch` leaves running — still holds the pipe.
+        // The fetch is done; its answer must not wait for the maintenance.
+        started = Date()
+        let done = GitService.runProcess(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo fetched; (sleep 5) & exit 0"],
+            in: directory, timeout: 60)
+        elapsed = Date().timeIntervalSince(started)
+        try expect(done.code == 0
+                    && String(decoding: done.stdout, as: UTF8.self).contains("fetched"),
+                   "a call that finished lost its answer to the background: \(done.code)")
+        try expect(elapsed < GitService.readerGrace + 1,
+                   "a finished call waited \(elapsed)s on what it left in the background")
+    }
+
     private static func testBackgroundFetch() throws {
         // Two projects, each a clone of a remote of its own, and one with no
         // remote at all.
@@ -7613,6 +7651,274 @@ enum RegressionTests {
         settle()
         try expect(workspace.window?.attachedSheet == nil && NSApp.modalWindow == nil,
                    "a failed fetch put something in front of the user")
+    }
+
+    private static func testGitMarkPulls() throws {
+        // The row: the Git mark is a target of its own, beside the branch.
+        let row = ProjectRowView(frame: NSRect(x: 0, y: 0, width: 420, height: ProjectRowView.height))
+        var pulled = 0, selected = 0, branchSelected = 0
+        row.onPull = { pulled += 1 }
+        row.onSelect = { selected += 1 }
+        row.onSelectBranch = { branchSelected += 1 }
+        row.configure(name: "project", branch: "main", user: "", changes: 0,
+                      path: "/tmp/project", isActive: false)
+        let mark = row.columnIconsForTesting.branch.1
+        let pullBox = row.pullRectForTesting
+        try expect(pullBox.contains(mark) && !pullBox.intersects(row.branchRectForTesting),
+                   "the pull target does not cover the mark, or reaches the branch: "
+                     + "\(pullBox) / \(mark) / \(row.branchRectForTesting)")
+        row.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
+        try expect(pulled == 1 && selected == 0 && branchSelected == 0,
+                   "a click on the Git mark did not pull, or did more: "
+                     + "\(pulled) \(selected) \(branchSelected)")
+        let branchBox = row.branchRectForTesting
+        row.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        row.pressForTesting(at: NSPoint(x: 60, y: branchBox.midY))
+        try expect(pulled == 1 && branchSelected == 1 && selected == 1,
+                   "the branch and the rest of the row lost their own clicks")
+        // It says what it does, and what it is doing.
+        row.hoverForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
+        try expect(row.toolTipForTesting?.hasPrefix("Pull") == true,
+                   "the Git mark does not say it pulls: \(String(describing: row.toolTipForTesting))")
+        // A folder that is not a repository draws no mark, and has no target.
+        let plain = ProjectRowView(frame: row.frame)
+        plain.onPull = { pulled += 1 }
+        plain.onSelect = { selected += 1 }
+        plain.configure(name: "folder", branch: "", user: "", changes: 0,
+                        path: "/tmp/folder", isActive: false)
+        try expect(plain.pullRectForTesting == .zero, "a folder has a pull target")
+        plain.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
+        try expect(pulled == 1 && selected == 2, "a click where no mark is drawn pulled")
+
+        // Syncing: the mark dims and a band runs down it, only while the row
+        // is on screen to be seen.
+        func pixels(_ image: NSImage) -> NSBitmapImageRep? {
+            image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        }
+        func differ(_ a: NSImage, _ b: NSImage, row y: Int) -> Bool {
+            guard let a = pixels(a), let b = pixels(b) else { return false }
+            return (0..<a.pixelsWide).contains { x in
+                guard let p = a.colorAt(x: x, y: y), let q = b.colorAt(x: x, y: y) else { return false }
+                return abs(p.redComponent - q.redComponent) > 0.05
+                    || abs(p.greenComponent - q.greenComponent) > 0.05
+            }
+        }
+        let middle = Int(ProjectRowView.iconSize / 2)
+        // A solid square stands in for the artwork, which the tests do not
+        // load: the sweep only paints where the mark is.
+        let square: (NSRect) -> Void = { rect in
+            NSColor(srgbRed: 0.9, green: 0.29, blue: 0.1, alpha: 1).setFill()
+            rect.fill()
+        }
+        let still = ProjectRowView.gitMark(syncingAt: nil, syncing: false, base: square)
+        let early = ProjectRowView.gitMark(syncingAt: 0.25, syncing: true, base: square)
+        let late = ProjectRowView.gitMark(syncingAt: 0.75, syncing: true, base: square)
+        // And nowhere else: around a shape, the square stays clear.
+        let dot = ProjectRowView.gitMark(syncingAt: 0.5, syncing: true) { rect in
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 4, dy: 4)).fill()
+        }
+        try expect(pixels(dot)?.colorAt(x: 0, y: middle)?.alphaComponent ?? 1 < 0.01,
+                   "the sweep painted outside the mark")
+        try expect(differ(still, early, row: middle),
+                   "a syncing mark is drawn the same as a still one")
+        // The band moves down: early and late differ near the top and the
+        // bottom, where it has been and where it is going.
+        try expect(differ(early, late, row: 3) && differ(early, late, row: middle + 3),
+                   "the band does not move down the mark")
+        let window = NSWindow(contentRect: row.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView?.addSubview(row)
+        row.isSyncing = true
+        try expect(row.isSweepingForTesting, "a syncing row on screen does not sweep")
+        row.hoverForTesting(at: NSPoint(x: mark.midX + 1, y: mark.midY))
+        try expect(row.toolTipForTesting?.hasPrefix("Syncing") == true,
+                   "a syncing mark does not say so: \(String(describing: row.toolTipForTesting))")
+        row.removeFromSuperview()
+        try expect(!row.isSweepingForTesting, "a row taken off screen kept its clock running")
+        window.contentView?.addSubview(row)
+        try expect(row.isSweepingForTesting, "a syncing row put back on screen did not sweep")
+        row.isSyncing = false
+        try expect(!row.isSweepingForTesting, "the sweep outlived the sync")
+
+        // In a window, against real remotes.
+        let scratch = try temporaryDirectory("git-mark-pulls")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        func git(_ args: [String], in directory: URL) -> String {
+            GitService.run(args, in: directory).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func identify(_ directory: URL) {
+            _ = git(["config", "user.name", "Puzzle Test"], in: directory)
+            _ = git(["config", "user.email", "puzzle@example.invalid"], in: directory)
+        }
+        func project(_ name: String) throws -> (remote: URL, clone: URL) {
+            let remote = scratch.appendingPathComponent("\(name).git")
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            _ = git(["init", "-q", "--bare", "-b", "main"], in: remote)
+            let seed = scratch.appendingPathComponent("\(name)-seed")
+            try FileManager.default.createDirectory(at: seed, withIntermediateDirectories: true)
+            _ = git(["init", "-q", "-b", "main"], in: seed)
+            identify(seed)
+            try Data("one\n".utf8).write(to: seed.appendingPathComponent("file.txt"))
+            try expect(GitService.commit("first", in: seed).code == 0, "seed commit failed")
+            _ = git(["remote", "add", "origin", remote.path], in: seed)
+            try expect(GitService.run(["push", "-q", "-u", "origin", "main"], in: seed).code == 0,
+                       "the seed could not push")
+            let clone = scratch.appendingPathComponent(name)
+            try expect(GitService.run(["clone", "-q", remote.path, clone.path], in: scratch).code == 0,
+                       "the project could not be cloned")
+            identify(clone)
+            return (remote, clone.standardizedFileURL.resolvingSymlinksInPath())
+        }
+        func pushFromElsewhere(_ remote: URL, subject: String) throws {
+            let other = scratch.appendingPathComponent("elsewhere-\(UUID().uuidString)")
+            try expect(GitService.run(["clone", "-q", remote.path, other.path], in: scratch).code == 0,
+                       "could not clone elsewhere")
+            identify(other)
+            try Data("\(subject)\n".utf8).write(to: other.appendingPathComponent("file.txt"))
+            try expect(GitService.commit(subject, in: other).code == 0, "could not commit elsewhere")
+            try expect(GitService.run(["push", "-q", "origin", "main"], in: other).code == 0,
+                       "could not push from elsewhere")
+        }
+        func waitUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        let first = try project("first")
+        let second = try project("second")
+        let local = scratch.appendingPathComponent("local-only")
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
+        _ = git(["init", "-q", "-b", "main"], in: local)
+        identify(local)
+        try Data("x\n".utf8).write(to: local.appendingPathComponent("file.txt"))
+        _ = GitService.commit("local", in: local)
+        let localURL = local.standardizedFileURL.resolvingSymlinksInPath()
+
+        BackgroundFetch.resetForTesting()
+        defer { BackgroundFetch.resetForTesting() }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        var errors: [(String, String)] = []
+        workspace.presentSyncError = { errors.append(($0, $1)) }
+        let panel = workspace.sidebar.projectsPanel
+        _ = panel.view
+        func rowOf(_ url: URL) -> ProjectRowView? {
+            panel.rowsForTesting.first { $0.pathForTesting == url.path }
+        }
+        func syncing(_ url: URL) -> Bool { rowOf(url)?.isSyncingForTesting == true }
+        func press(_ url: URL) throws {
+            // The mark is drawn once Git has said which branch the project is
+            // on; until then the row has nothing to press.
+            _ = waitUntil {
+                workspace.window?.contentView?.layoutSubtreeIfNeeded()
+                return rowOf(url)?.pullRectForTesting.isEmpty == false
+            }
+            guard let target = rowOf(url) else {
+                throw Failure(description: "no row for \(url.lastPathComponent)")
+            }
+            let box = target.pullRectForTesting
+            guard !target.bounds.isEmpty, !box.isEmpty else {
+                throw Failure(description: "the row has no pull target to press: "
+                                + "\(target.bounds) \(box)")
+            }
+            target.pressForTesting(at: NSPoint(x: box.midX, y: box.midY))
+        }
+
+        // Opening a project fetches it, and its Git mark shows the fetch for
+        // at least the minimum, however quick the remote was.
+        workspace.openProject(second.clone)
+        try expect(waitUntil { syncing(second.clone) }, "the opening fetch was not shown")
+        let shownAt = Date()
+        try expect(waitUntil { !syncing(second.clone) }, "the fetch never finished")
+        try expect(Date().timeIntervalSince(shownAt)
+                    >= WorkspaceWindowController.minimumSyncAnimation - 0.1,
+                   "the fetch flickered on the mark: "
+                     + "\(Date().timeIntervalSince(shownAt))s")
+        // Nothing to fetch, nothing shown.
+        workspace.openProject(localURL)
+        let quietUntil = Date().addingTimeInterval(0.8)
+        var flickered = false
+        while Date() < quietUntil {
+            flickered = flickered || syncing(localURL)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(!flickered, "a folder with no remote showed a fetch")
+
+        // A click on the mark pulls: the remote's commits come into the
+        // branch, the files with them, and the list shows where HEAD is now.
+        workspace.openProject(first.clone)
+        try expect(waitUntil { !syncing(first.clone) && workspace.projectURL == first.clone },
+                   "the first project did not settle")
+        try pushFromElsewhere(first.remote, subject: "pulled in")
+        try press(first.clone)
+        try expect(syncing(first.clone), "a pull did not show on the mark")
+        try expect(waitUntil { git(["rev-parse", "HEAD"], in: first.clone)
+                                == git(["rev-parse", "main"], in: first.remote) },
+                   "the click did not pull: \(errors)")
+        let pulledText = try String(contentsOf: first.clone.appendingPathComponent("file.txt"),
+                                    encoding: .utf8)
+        try expect(pulledText == "pulled in\n",
+                   "the pulled change did not reach the working tree: \(pulledText)")
+        let history = panel.history
+        try expect(waitUntil { history.commitSubjectsForTesting.first == "pulled in" },
+                   "the history does not show the pulled commit: "
+                     + "\(history.commitSubjectsForTesting)")
+        try expect(waitUntil { !syncing(first.clone) }, "the pull never stopped showing")
+        try expect(errors.isEmpty, "a pull that worked reported an error: \(errors)")
+
+        // Clicked straight after switching, while that switch's fetch is
+        // still out: the pull waits for the fetch and then runs — it is not
+        // turned away — and the mark never goes still in between.
+        workspace.openProject(second.clone)
+        try expect(waitUntil { !syncing(second.clone) && !syncing(first.clone) },
+                   "the switch away did not settle")
+        BackgroundFetch.resetForTesting()
+        BackgroundFetch.delayForTesting = 1
+        try pushFromElsewhere(first.remote, subject: "pulled after the fetch")
+        workspace.openProject(first.clone)
+        try expect(waitUntil { syncing(first.clone) }, "switching back did not fetch")
+        try press(first.clone)
+        var wentStill = false
+        let pulledAfterFetch = waitUntil {
+            wentStill = wentStill || !syncing(first.clone)
+            return git(["rev-parse", "HEAD"], in: first.clone)
+                == git(["rev-parse", "main"], in: first.remote)
+        }
+        BackgroundFetch.delayForTesting = 0
+        try expect(pulledAfterFetch, "a click during the switch's fetch was turned away: \(errors)")
+        try expect(!wentStill, "the mark went still between the fetch and the pull")
+        try expect(waitUntil { !syncing(first.clone) }, "the queued pull never stopped showing")
+
+        // The mark on another project's row pulls that project, and leaves
+        // the one on screen where it is.
+        try pushFromElsewhere(second.remote, subject: "pulled while away")
+        try press(second.clone)
+        try expect(waitUntil { git(["rev-parse", "HEAD"], in: second.clone)
+                                == git(["rev-parse", "main"], in: second.remote) },
+                   "the other project's mark did not pull it")
+        try expect(workspace.projectURL == first.clone,
+                   "pulling another project switched to it")
+        try expect(waitUntil { !syncing(second.clone) }, "the other pull never stopped showing")
+
+        // Both sides moved on: no merge behind the user's back. Git says why,
+        // and the branch stays where it was.
+        try Data("mine\n".utf8).write(to: first.clone.appendingPathComponent("mine.txt"))
+        try expect(GitService.commit("mine", in: first.clone).code == 0, "local commit failed")
+        try pushFromElsewhere(first.remote, subject: "theirs")
+        let mine = git(["rev-parse", "HEAD"], in: first.clone)
+        try press(first.clone)
+        try expect(waitUntil { !errors.isEmpty }, "a pull that cannot fast-forward said nothing")
+        try expect(errors.first?.0.contains(first.clone.lastPathComponent) == true
+                    && !(errors.first?.1.isEmpty ?? true),
+                   "the error does not say which project, or why: \(errors)")
+        try expect(git(["rev-parse", "HEAD"], in: first.clone) == mine,
+                   "a pull that could not fast-forward moved the branch")
+        try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
     }
 
     private static func testBranchMenu() throws {
