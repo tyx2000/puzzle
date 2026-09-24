@@ -442,6 +442,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(.separator())
+        // Through the responder chain to the editor: with anything else
+        // focused, a read-only file, or plain text, the item is unavailable.
+        editMenu.addItem(withTitle: "Toggle Comment",
+                         action: #selector(PuzzleTextView.toggleComment(_:)), keyEquivalent: "/")
+        editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Find in File…",
                          action: #selector(WorkspaceWindowController.findInFile(_:)), keyEquivalent: "f")
         let replaceItem = NSMenuItem(

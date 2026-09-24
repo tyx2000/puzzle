@@ -58,7 +58,7 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 - **Find in file** — native incremental find bar (⌘F).
 - **Find in folder** — project-wide search via ripgrep (built-in fallback).
 - **Git** — branch beside the project name, dirty files marked in the tree,
-  per-line gutter marks with revert, and a git panel (⌘G).
+  per-line gutter marks with revert, and a git panel (⌘3).
 
 ## Build
 ```bash
@@ -94,9 +94,10 @@ overwrites an unrelated command with the same name.
 
 ## Shortcuts
 ⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
-⌘1 files · ⌘2 search · ⌘B toggle sidebar · ⌘G git ·
+⌘1 files · ⌘2 search · ⌘3 git · ⌘B show sidebar ·
 ⇧⌘] next tab · ⇧⌘[ previous tab · ⌘W close tab · ⇧⌘T reopen closed tab ·
-⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line
+⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line ·
+⌘/ toggle comment
 
 ## Layout
 ```

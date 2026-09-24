@@ -1703,6 +1703,51 @@ final class PuzzleTextView: NSTextView {
         return true
     }
 
+    /// ⌘/'s comment for the language on screen. Nil for plain text, and then
+    /// the command is unavailable.
+    var commentSyntax: CommentToggle.Syntax?
+
+    /// Comment the lines the selection touches, or uncomment them — see
+    /// `CommentToggle` for the rule. One edit, so one ⌘Z takes it back.
+    @objc func toggleComment(_ sender: Any?) {
+        guard isEditable, let syntax = commentSyntax else {
+            NSSound.beep()
+            return
+        }
+        let source = string as NSString
+        let selection = selectedRange()
+        let start = min(selection.location, source.length)
+        var end = min(NSMaxRange(selection), source.length)
+        // Whole lines dragged over end at the start of the next one, which
+        // is not part of what was chosen.
+        if end > start, source.character(at: end - 1) == 0x0A { end -= 1 }
+        let block = source.lineRange(for: NSRange(location: start, length: end - start))
+        let original = source.substring(with: block)
+        let edits = CommentToggle.edits(for: original, syntax: syntax)
+        guard !edits.isEmpty else { return }
+        let replacement = CommentToggle.apply(edits, to: original)
+        guard shouldChangeText(in: block, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: block, with: replacement)
+        didChangeText()
+        // The selection keeps to the text it was on, whatever went in or out
+        // in front of it.
+        let isCaret = selection.length == 0
+        let from = block.location
+            + CommentToggle.map(selection.location - block.location, through: edits,
+                                carryingAtPoint: isCaret)
+        let to = isCaret ? from : block.location
+            + CommentToggle.map(NSMaxRange(selection) - block.location, through: edits)
+        setSelectedRange(NSRange(location: from, length: max(0, to - from)))
+        refreshBracketMatches()
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(toggleComment(_:)) {
+            return isEditable && commentSyntax != nil
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
     /// The full leading whitespace of a line, whatever the caret is doing:
     /// measured from the end of the line's text, so a caret sitting inside the
     /// indent does not shorten it.

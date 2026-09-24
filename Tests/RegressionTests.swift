@@ -46,6 +46,8 @@ enum RegressionTests {
         try testMarkdownLiveEditing()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
+        try testCommentToggleRules()
+        try testToggleCommentInTheEditor()
         try testCodeBlockAnalysisAndFolding()
         try testIndexLockContention()
         try testStartPageOpensProjects()
@@ -301,6 +303,112 @@ enum RegressionTests {
                 || $0.deletingLastPathComponent().standardizedFileURL
                     == directory.standardizedFileURL
         }), "workspace FSEvents monitor did not deliver an external file write")
+    }
+
+    private static func testCommentToggleRules() throws {
+        let slashes = CommentToggle.Syntax(prefix: "//", suffix: "")
+        func toggled(_ block: String, _ syntax: CommentToggle.Syntax = slashes) -> String {
+            CommentToggle.apply(CommentToggle.edits(for: block, syntax: syntax), to: block)
+        }
+
+        // At the shallowest indentation, so the block stays aligned; the blank
+        // line in between is left alone.
+        let body = "    let x = 1\n\n        return x\n"
+        let commented = toggled(body)
+        try expect(commented == "    // let x = 1\n\n    //     return x\n",
+                   "commented as \(commented.debugDescription)")
+        try expect(toggled(commented) == body, "toggling twice did not give the lines back")
+
+        // Not all commented: all get one more, so pressing again undoes it.
+        try expect(toggled("// a\nb\n") == "// // a\n// b\n",
+                   "a mixed block was not commented as a whole")
+        try expect(toggled("//a\n") == "a\n", "a comment with no space did not come off")
+
+        // Nothing written on the line: the comment goes in anyway.
+        try expect(toggled("\n") == "// \n", "a blank line was not commented")
+
+        // A language whose only comment wraps has each line wrapped.
+        let css = CommentToggle.Syntax(prefix: "/*", suffix: "*/")
+        let rule = "a {\n  color: red;\n}\n"
+        let wrapped = toggled(rule, css)
+        try expect(wrapped == "/* a { */\n/*   color: red; */\n/* } */\n",
+                   "wrapped as \(wrapped.debugDescription)")
+        try expect(toggled(wrapped, css) == rule, "unwrapping did not give the lines back")
+
+        // Which comment each language gets.
+        func syntax(_ name: String?, _ ext: String) -> String? {
+            CommentToggle.syntax(forLanguage: name, fileExtension: ext).map { $0.prefix }
+        }
+        try expect(syntax("swift", "swift") == "//" && syntax("tsx", "js") == "//",
+                   "C-family languages did not get //")
+        try expect(syntax("python", "py") == "#" && syntax("yaml", "yml") == "#"
+                    && syntax("bash", "sh") == "#", "hash-comment languages did not get #")
+        try expect(syntax("sql", "sql") == "--", "SQL did not get --")
+        try expect(syntax("css", "scss") == "//" && syntax("css", "css") == "/*",
+                   "SCSS and CSS were not told apart")
+        try expect(syntax("markdown", "md") == "<!--" && syntax("html", "html") == "<!--",
+                   "markup did not get <!--")
+        try expect(syntax(nil, "txt") == nil, "plain text was given a comment")
+
+        // The caret stays with the text it was in front of.
+        let line = "    code\n"
+        let edits = CommentToggle.edits(for: line, syntax: slashes)
+        try expect(CommentToggle.map(4, through: edits) == 7,
+                   "a caret at the start of the code did not move past the comment")
+        try expect(CommentToggle.map(6, through: edits) == 9, "a caret in the code did not keep its place")
+        try expect(CommentToggle.map(2, through: edits) == 2, "a caret in the indentation moved")
+        let back = CommentToggle.edits(for: "    // code\n", syntax: slashes)
+        try expect(CommentToggle.map(5, through: back) == 4,
+                   "a caret inside the removed comment did not go to where it was")
+    }
+
+    private static func testToggleCommentInTheEditor() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 300))
+        textView.allowsUndo = true
+        window.contentView?.addSubview(textView)
+        let original = "let a = 1\n    let b = 2\nlet c = 3\n"
+        textView.string = original
+
+        // Unavailable where the file has no comment, or cannot be edited.
+        let item = NSMenuItem(title: "Toggle Comment",
+                              action: #selector(PuzzleTextView.toggleComment(_:)),
+                              keyEquivalent: "/")
+        try expect(!textView.validateUserInterfaceItem(item),
+                   "the command was offered for a file with no comment syntax")
+        textView.commentSyntax = CommentToggle.Syntax(prefix: "//", suffix: "")
+        try expect(textView.validateUserInterfaceItem(item), "the command was not offered for code")
+        textView.isEditable = false
+        try expect(!textView.validateUserInterfaceItem(item), "the command was offered read-only")
+        textView.isEditable = true
+
+        // The first two lines dragged over, ending at the start of the third:
+        // the third is not part of what was chosen.
+        let third = (original as NSString).range(of: "let c").location
+        textView.setSelectedRange(NSRange(location: 0, length: third))
+        textView.toggleComment(nil)
+        try expect(textView.string == "// let a = 1\n//     let b = 2\nlet c = 3\n",
+                   "toggled as \(textView.string.debugDescription)")
+        let newThird = (textView.string as NSString).range(of: "let c").location
+        try expect(textView.selectedRange() == NSRange(location: 0, length: newThird),
+                   "the selection did not cover the same lines: \(textView.selectedRange())")
+
+        // One edit, so one ⌘Z takes it back.
+        textView.undoManager?.undo()
+        try expect(textView.string == original,
+                   "one undo did not give the text back: \(textView.string.debugDescription)")
+
+        // A caret on a line: that line, and the caret keeps its place.
+        let c = (original as NSString).range(of: "c =").location
+        textView.setSelectedRange(NSRange(location: c, length: 0))
+        textView.toggleComment(nil)
+        try expect(textView.string == "let a = 1\n    let b = 2\n// let c = 3\n",
+                   "the caret's line was not the one commented")
+        try expect((textView.string as NSString).substring(
+                        with: NSRange(location: textView.selectedRange().location, length: 1)) == "c",
+                   "the caret did not stay in front of the text it was on")
     }
 
     private static func testBracketMatchingAndDeleteLine() throws {

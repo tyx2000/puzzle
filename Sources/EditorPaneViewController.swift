@@ -1031,6 +1031,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // language at all, a line ending in "(" is just a line ending in "(".
         textView.usesBracketIndent = doc.languageSpec != nil
             && doc.languageSpec?.name != "markdown"
+        textView.commentSyntax = CommentToggle.syntax(forLanguage: doc.languageSpec?.name,
+                                                      fileExtension: url.pathExtension)
         if !lineIsActive { clearInlineBlameRequest() }
         textView.diffBands = doc.diffBands
         textView.diffLineNumbers = doc.diffLineNumbers
