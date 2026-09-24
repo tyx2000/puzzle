@@ -14,6 +14,8 @@ final class SidebarViewController: NSViewController {
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
+    /// The Git mark on a project row was clicked: pull that project.
+    var onPullProjectRow: ((Int) -> Void)?
     /// The buttons at the end of the title band: one opens another project,
     /// the one past it opens a terminal on the project showing.
     private let addProjectButton = NSButton()
@@ -97,6 +99,7 @@ final class SidebarViewController: NSViewController {
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
+        projectsPanel.onPull = { [weak self] in self?.onPullProjectRow?($0) }
         projectsPanel.changes.onOpenDiff = { [weak self] entry, directory in
             self?.onGitDiff?(entry, directory)
         }
@@ -182,6 +185,12 @@ final class SidebarViewController: NSViewController {
                      active: Int?, isRepository: Bool? = nil) {
         projectsPanel.configure(projects: projects, active: active,
                                 isRepository: isRepository)
+    }
+
+    /// The projects, by path, with a fetch or a pull running: their rows'
+    /// Git marks show it.
+    func setSyncingProjects(_ paths: Set<String>) {
+        projectsPanel.setSyncing(paths)
     }
 
     /// What the project on screen has changed, and where that project stands —

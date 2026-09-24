@@ -348,7 +348,10 @@ enum GitService {
         readers.enter()
         DispatchQueue.global(qos: .utility).async {
             while true {
-                let chunk = outPipe.fileHandleForReading.readData(ofLength: 64 * 1024)
+                // Whatever has arrived, not a full 64 KB: a pipe held open by
+                // something Git left behind never fills, and a short message —
+                // a pull's reason for failing — would wait for it forever.
+                let chunk = outPipe.fileHandleForReading.availableData
                 guard !chunk.isEmpty else { break }
                 stdout.append(chunk, limit: stdoutLimit)
             }
@@ -357,7 +360,10 @@ enum GitService {
         readers.enter()
         DispatchQueue.global(qos: .utility).async {
             while true {
-                let chunk = errPipe.fileHandleForReading.readData(ofLength: 64 * 1024)
+                // Whatever has arrived, not a full 64 KB: a pipe held open by
+                // something Git left behind never fills, and a short message —
+                // a pull's reason for failing — would wait for it forever.
+                let chunk = errPipe.fileHandleForReading.availableData
                 guard !chunk.isEmpty else { break }
                 stderr.append(chunk, limit: Self.maxProcessStderrBytes)
             }
@@ -799,6 +805,12 @@ enum GitService {
         return RemoteResult(
             ok: false,
             message: detail.isEmpty ? "\(verb) failed (Git exit code \(result.code))." : detail)
+    }
+
+    /// Bring the upstream's commits into the branch, when that is a
+    /// fast-forward. Anything else is refused by Git, with its reason.
+    static func pull(in directory: URL) -> RemoteResult {
+        remote(["pull", "--ff-only"], in: directory, verb: "Pull")
     }
 
     static func push(in directory: URL) -> RemoteResult {
