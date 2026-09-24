@@ -129,6 +129,14 @@ final class ProjectHistoryViewController: NSViewController {
         rebuildRows()
     }
 
+    /// A fetch moved a remote-tracking branch. The list draws every branch,
+    /// the remote ones included, so it reads again — though neither HEAD nor
+    /// what is unpushed moved, which is all `setSource` watches.
+    func remoteRefsMoved(in directory: URL) {
+        guard directory == self.directory, let state, !state.head.isEmpty else { return }
+        load(directory)
+    }
+
     /// How many times the log has been read, for a test to count them.
     private(set) var loadCountForTesting = 0
 

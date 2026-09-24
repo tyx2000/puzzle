@@ -19,6 +19,7 @@ enum RegressionTests {
         try testPushSelection()
         try testWorkspaceFileMonitorDelivery()
         try testGitRepositoryMonitor()
+        try testBackgroundFetch()
         try testBranchListing()
         try testDockRecentProjectsMenu()
         try testDefaultWindowPlacement()
@@ -56,6 +57,159 @@ enum RegressionTests {
         try testRefreshReadsOnlyTheTabOnScreen()
         try testFoldersRouteToTheirProjectWindow()
         print("Regression tests passed")
+    }
+
+    private static func testBackgroundFetch() throws {
+        // Two projects, each a clone of a remote of its own, and one with no
+        // remote at all.
+        let scratch = try temporaryDirectory("background-fetch")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        func git(_ args: [String], in directory: URL) -> String {
+            GitService.run(args, in: directory).out
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func folder(_ name: String) throws -> URL {
+            let url = scratch.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url.standardizedFileURL.resolvingSymlinksInPath()
+        }
+        func identify(_ directory: URL) {
+            _ = git(["config", "user.name", "Gift Test"], in: directory)
+            _ = git(["config", "user.email", "gift@example.invalid"], in: directory)
+        }
+        /// A bare remote with one commit, and a clone of it to open.
+        func project(_ name: String) throws -> (remote: URL, clone: URL) {
+            let remote = try folder("\(name).git")
+            _ = git(["init", "-q", "--bare", "-b", "main"], in: remote)
+            let seed = try folder("\(name)-seed")
+            _ = git(["init", "-q", "-b", "main"], in: seed)
+            identify(seed)
+            try Data("one\n".utf8).write(to: seed.appendingPathComponent("file.txt"))
+            try expect(GitService.commit("first", in: seed).code == 0, "seed commit failed")
+            _ = git(["remote", "add", "origin", remote.path], in: seed)
+            try expect(GitService.run(["push", "-q", "-u", "origin", "main"], in: seed).code == 0,
+                       "the seed could not push")
+            let clone = scratch.appendingPathComponent(name, isDirectory: true)
+            try expect(GitService.run(["clone", "-q", remote.path, clone.path],
+                                      in: scratch).code == 0,
+                       "the project could not be cloned")
+            identify(clone)
+            return (remote, clone.standardizedFileURL.resolvingSymlinksInPath())
+        }
+        /// Someone else pushes to the remote; the clone does not know yet.
+        func pushFromElsewhere(_ remote: URL, subject: String) throws {
+            let other = scratch.appendingPathComponent("elsewhere-\(UUID().uuidString)")
+            try expect(GitService.run(["clone", "-q", remote.path, other.path],
+                                      in: scratch).code == 0, "could not clone elsewhere")
+            identify(other)
+            try Data("\(subject)\n".utf8).write(to: other.appendingPathComponent("file.txt"))
+            try expect(GitService.commit(subject, in: other).code == 0, "could not commit elsewhere")
+            try expect(GitService.run(["push", "-q", "origin", "main"], in: other).code == 0,
+                       "could not push from elsewhere")
+        }
+        func knows(_ clone: URL, _ remote: URL) -> Bool {
+            git(["rev-parse", "origin/main"], in: clone) == git(["rev-parse", "main"], in: remote)
+        }
+        func waitUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.6)) }
+
+        let first = try project("first")
+        let second = try project("second")
+        let local = try folder("local-only")
+        _ = git(["init", "-q", "-b", "main"], in: local)
+        identify(local)
+        try Data("x\n".utf8).write(to: local.appendingPathComponent("file.txt"))
+        _ = GitService.commit("local", in: local)
+
+        BackgroundFetch.resetForTesting()
+        let savedInterval = BackgroundFetch.minimumInterval
+        defer {
+            BackgroundFetch.minimumInterval = savedInterval
+            BackgroundFetch.resetForTesting()
+        }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+
+        // Opening a project fetches it: a commit pushed from elsewhere while
+        // it was closed is known as soon as it is open.
+        try pushFromElsewhere(second.remote, subject: "pushed before opening")
+        workspace.openProject(second.clone)
+        try expect(waitUntil { knows(second.clone, second.remote) },
+                   "opening a project did not fetch it")
+        try expect(BackgroundFetch.fetchedForTesting == [second.clone],
+                   "the wrong projects were fetched: \(BackgroundFetch.fetchedForTesting)")
+
+        // Switching fetches the project switched to, and that one only.
+        try pushFromElsewhere(first.remote, subject: "pushed to the first")
+        try pushFromElsewhere(second.remote, subject: "pushed to the second")
+        let firstHead = git(["rev-parse", "HEAD"], in: first.clone)
+        workspace.openProject(first.clone)
+        try expect(waitUntil { knows(first.clone, first.remote) },
+                   "switching to a project did not fetch it")
+        settle()
+        try expect(!knows(second.clone, second.remote),
+                   "switching to one project fetched the one left behind too")
+        // Fetched, not pulled: the branch and the files stay where they were.
+        try expect(git(["rev-parse", "HEAD"], in: first.clone) == firstHead
+                    && git(["status", "--porcelain"], in: first.clone).isEmpty,
+                   "the fetch moved the branch or the working tree")
+        // What it brought shows: the history draws every branch, the remote
+        // one included, and reads again when a fetch moves one.
+        let history = workspace.sidebar.projectsPanel.history
+        try expect(waitUntil { history.commitSubjectsForTesting.contains("pushed to the first") },
+                   "the fetched commit never reached the history: "
+                     + "\(history.commitSubjectsForTesting)")
+
+        // Back to a project fetched a moment ago: not again.
+        let fetchesBefore = BackgroundFetch.fetchedForTesting.count
+        workspace.openProject(second.clone)
+        settle()
+        try expect(BackgroundFetch.fetchedForTesting.count == fetchesBefore
+                    && !knows(second.clone, second.remote),
+                   "a project fetched a moment ago was fetched again")
+        // Once the interval has passed, it is.
+        BackgroundFetch.minimumInterval = 0
+        workspace.openProject(first.clone)
+        workspace.openProject(second.clone)
+        try expect(waitUntil { knows(second.clone, second.remote) },
+                   "a project was not fetched once the interval had passed")
+
+        // Commits pushed while the list is already showing. Coming back to
+        // the project fetches them, and neither HEAD nor the ↑ count moves —
+        // so only the fetch itself can have the list read again.
+        settle()
+        try pushFromElsewhere(second.remote, subject: "pushed while open")
+        workspace.openProject(second.clone)
+        try expect(waitUntil { knows(second.clone, second.remote) },
+                   "the project on screen was not fetched again")
+        try expect(waitUntil { history.commitSubjectsForTesting.contains("pushed while open") },
+                   "a fetch that moved a remote branch did not have the history read again: "
+                     + "\(history.commitSubjectsForTesting)")
+
+        // A folder with no remote is left alone.
+        workspace.openProject(local)
+        settle()
+        try expect(!BackgroundFetch.fetchedForTesting.contains(local),
+                   "a project with no remote was fetched")
+
+        // A remote that cannot be reached fails quietly: nothing in the way,
+        // and the project carries on.
+        _ = git(["remote", "set-url", "origin", scratch.appendingPathComponent("gone.git").path],
+                in: first.clone)
+        let before = BackgroundFetch.fetchedForTesting.filter { $0 == first.clone }.count
+        workspace.openProject(first.clone)
+        try expect(waitUntil { BackgroundFetch.fetchedForTesting
+                                .filter { $0 == first.clone }.count > before },
+                   "the unreachable remote was not tried")
+        settle()
+        try expect(workspace.window?.attachedSheet == nil && NSApp.modalWindow == nil,
+                   "a failed fetch put something in front of the user")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool,
