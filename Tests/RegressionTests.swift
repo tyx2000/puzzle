@@ -51,6 +51,7 @@ enum RegressionTests {
         try testStartPageOpensProjects()
         try testMarkdownLinkHover()
         try testSVGPreviewAboveItsSource()
+        try testOversizedPictureIsNotDrawnAsAddedOrDeleted()
         try testRevertGitChange()
         try testDeepSyntaxTreesDoNotOverflow()
         try testReplaceAllPastTheMatchCache()
@@ -9096,6 +9097,47 @@ enum RegressionTests {
     /// An SVG is source and picture at once: the drawing sits above the text
     /// that describes it, and follows the typing. A diff of one shows both
     /// versions instead, and is not typed into at all.
+    /// The working-tree side of a picture diff was read whole, however large,
+    /// while HEAD's side went through the bounded blob read. And a side too
+    /// large to read was treated as absent, which drew an edited picture as
+    /// one that had been added or deleted.
+    private static func testOversizedPictureIsNotDrawnAsAddedOrDeleted() throws {
+        let root = try temporaryDirectory("svg-bounds")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "SVG Test"], in: root)
+        _ = GitService.run(["config", "user.email", "svg@example.invalid"], in: root)
+        let small = #"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>"#
+        let file = root.appendingPathComponent("pic.svg")
+        try Data(small.utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+        _ = GitService.commit("base", in: root)
+
+        // Past the ceiling blobs are read with — a comment pads it out.
+        let huge = small.replacingOccurrences(of: "/>", with: ">")
+            + "<!--" + String(repeating: "x", count: GitService.maxBlobBytes) + "--></svg>"
+        try Data(huge.utf8).write(to: file)
+        try expect(GitService.svgDiffSides(for: "pic.svg", in: root) == nil,
+                   "an oversized working-tree picture was drawn — as a deletion, one side only")
+
+        // The same for a commit that made it that large.
+        _ = GitService.stageAll(in: root)
+        _ = GitService.commit("huge", in: root)
+        let head = GitService.run(["rev-parse", "--short", "HEAD"], in: root)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect(GitService.svgDiffSides(inCommit: head, path: "pic.svg", in: root) == nil,
+                   "a commit's oversized picture was drawn — as an addition, one side only")
+
+        // A picture that really is new still has one side, and that is right.
+        try Data(small.utf8).write(to: root.appendingPathComponent("new.svg"))
+        _ = GitService.stageAll(in: root)
+        guard let added = GitService.svgDiffSides(for: "new.svg", in: root) else {
+            throw Failure(description: "a new picture was not drawn at all")
+        }
+        try expect(added.before == nil && added.after != nil,
+                   "a new picture did not come back as the one side it has")
+    }
+
     private static func testSVGPreviewAboveItsSource() throws {
         let root = try temporaryDirectory("svg-source")
         defer { try? FileManager.default.removeItem(at: root) }

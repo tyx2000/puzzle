@@ -1318,15 +1318,12 @@ enum GitService {
     /// worth two empty panes.
     static func svgDiffSides(for path: String, in directory: URL) -> SVGDiffSides? {
         guard isVectorPath(path) else { return nil }
-        var before: Data?
-        if case .data(let data) = blob(inCommit: "HEAD", path: path, in: directory) {
-            before = data
-        }
-        // The working tree, which is what the "+" side of the diff describes.
-        let file = directory.appendingPathComponent(path)
-        let after = try? Data(contentsOf: file)
-        guard before != nil || after != nil else { return nil }
-        return SVGDiffSides(before: before, after: after)
+        // The working tree is what the "+" side of the diff describes. It is
+        // read under the same ceiling as HEAD's side: the two used to differ,
+        // HEAD's going through the bounded blob read and this one reading the
+        // file whole, however large, before drawing it.
+        return pictureSides(before: blob(inCommit: "HEAD", path: path, in: directory),
+                            after: workingTreeFile(directory.appendingPathComponent(path)))
     }
 
     /// The same two versions for a file as one commit left it: the parent's
@@ -1338,16 +1335,42 @@ enum GitService {
     static func svgDiffSides(inCommit commit: String, path: String,
                              in directory: URL) -> SVGDiffSides? {
         guard isVectorPath(path) else { return nil }
-        var before: Data?
-        if case .data(let data) = blob(inCommit: commit + "^", path: path, in: directory) {
-            before = data
+        return pictureSides(before: blob(inCommit: commit + "^", path: path, in: directory),
+                            after: blob(inCommit: commit, path: path, in: directory))
+    }
+
+    /// Two versions of a picture, or nil when there is nothing honest to draw.
+    ///
+    /// A side too large to read is not the same as a side that is absent, and
+    /// treating it as one presented an edited file as added or deleted — one
+    /// picture where there should have been two. When either side is too
+    /// large there are no pictures at all; the text diff below them says what
+    /// it left out.
+    private static func pictureSides(before: BlobResult, after: BlobResult) -> SVGDiffSides? {
+        func data(_ result: BlobResult) -> Data?? {
+            switch result {
+            case .data(let data): return .some(data)
+            case .unavailable: return .some(nil)
+            case .tooLarge: return nil
+            }
         }
-        var after: Data?
-        if case .data(let data) = blob(inCommit: commit, path: path, in: directory) {
-            after = data
-        }
-        guard before != nil || after != nil else { return nil }
+        guard let before = data(before), let after = data(after),
+              before != nil || after != nil else { return nil }
         return SVGDiffSides(before: before, after: after)
+    }
+
+    /// A working-tree file, read with the ceiling a blob is read with. Only a
+    /// regular file is read: this is on the way to drawing it.
+    private static func workingTreeFile(_ url: URL) -> BlobResult {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true, let size = values.fileSize else {
+            return .unavailable("not a regular file")
+        }
+        guard size <= maxBlobBytes else { return .tooLarge(size) }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return .unavailable("unreadable")
+        }
+        return .data(data)
     }
 
     private static func isVectorPath(_ path: String) -> Bool {
