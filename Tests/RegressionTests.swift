@@ -52,6 +52,7 @@ enum RegressionTests {
         try testMarkdownLinkHover()
         try testSVGPreviewAboveItsSource()
         try testOversizedPictureIsNotDrawnAsAddedOrDeleted()
+        try testClosedProjectLeavesNoSummary()
         try testRevertGitChange()
         try testDeepSyntaxTreesDoNotOverflow()
         try testReplaceAllPastTheMatchCache()
@@ -9101,6 +9102,36 @@ enum RegressionTests {
     /// while HEAD's side went through the bounded blob read. And a side too
     /// large to read was treated as absent, which drew an edited picture as
     /// one that had been added or deleted.
+    /// A closed project's summary stayed behind — and the sweep reads only
+    /// projects with no summary, so the same folder added back later showed
+    /// the branch and count it had when it was closed. A sweep still out when
+    /// the project closed must not put it back either.
+    private static func testClosedProjectLeavesNoSummary() throws {
+        let first = try temporaryDirectory("summary-first")
+        let second = try temporaryDirectory("summary-second")
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(first)
+        workspace.openProject(second)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        workspace.applySummaryForTesting(branch: "old", changes: 5, for: first)
+        try expect(workspace.hasSummaryForTesting(for: first),
+                   "the fixture summary was not recorded")
+        workspace.closeProject(first)
+        try expect(!workspace.hasSummaryForTesting(for: first),
+                   "a closed project's summary was kept")
+
+        // A sweep that read it before it closed, arriving after.
+        workspace.applySummaryForTesting(branch: "late", changes: 9, for: first)
+        try expect(!workspace.hasSummaryForTesting(for: first),
+                   "a late sweep put a closed project's summary back")
+    }
+
     private static func testOversizedPictureIsNotDrawnAsAddedOrDeleted() throws {
         let root = try temporaryDirectory("svg-bounds")
         defer { try? FileManager.default.removeItem(at: root) }

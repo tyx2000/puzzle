@@ -1088,6 +1088,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         guard let index = projects.firstIndex(of: resolved) else { return }
         let wasShowing = projectURL == resolved
         projects.remove(at: index)
+        // A summary outliving its project was also a wrong one: the sweep reads
+        // only projects with none, so the same folder added back later showed
+        // the branch and count it had when it was closed.
+        projectSummaries[resolved] = nil
         guard wasShowing else {
             refreshProjectTabs()
             return
@@ -1197,9 +1201,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         var changed = false
         // The project on screen may have been opened while the sweep was
         // reading it; its own refresh is newer than this snapshot and must not
-        // be replaced by it.
+        // be replaced by it. One closed while the sweep was out has no row to
+        // describe, and its summary must not come back with the result.
         for (url, summary) in found
-        where url != projectURL && projectSummaries[url] != summary {
+        where url != projectURL && projects.contains(url) && projectSummaries[url] != summary {
             projectSummaries[url] = summary
             changed = true
         }
@@ -1210,6 +1215,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func applySummaryForTesting(branch: String, changes: Int, for url: URL) {
         applySummaries([(url.standardizedFileURL.resolvingSymlinksInPath(),
                          ProjectSummary(branch: branch, user: "", changes: changes))])
+    }
+    func hasSummaryForTesting(for url: URL) -> Bool {
+        projectSummaries[url.standardizedFileURL.resolvingSymlinksInPath()] != nil
     }
     /// How many sweeps over the other projects have started.
     private(set) var summarySweepCountForTesting = 0
