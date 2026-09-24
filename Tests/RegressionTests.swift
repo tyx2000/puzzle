@@ -52,6 +52,8 @@ enum RegressionTests {
         try testSideBySideDiff()
         try testOpenDiffRefreshesCoalesce()
         try testDiffTabs()
+        try testTabBodiesStayWithinBudget()
+        try testRefreshReadsOnlyTheTabOnScreen()
         try testFoldersRouteToTheirProjectWindow()
         print("Regression tests passed")
     }
@@ -3893,6 +3895,103 @@ enum RegressionTests {
         // And the tab ends up showing the file as it is now.
         try expect(waitUntil { workspace.diffs.activeTab?.diff.contains("edit 29") == true },
                    "the diff did not end up current: "
+                     + (workspace.diffs.activeTab?.diff ?? "nil"))
+    }
+
+    /// Open tabs were never capped and each kept its whole diff, so a history
+    /// browsed file by file kept every diff it had shown. A commit's diff is
+    /// never refreshed, so nothing else would ever let those bodies go.
+    private static func testTabBodiesStayWithinBudget() throws {
+        let budget = DiffPaneViewController.bodyByteBudget
+        defer { DiffPaneViewController.bodyByteBudget = budget }
+        DiffPaneViewController.bodyByteBudget = 1_000
+
+        let pane = DiffPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        let directory = URL(fileURLWithPath: "/tmp/budget")
+        // About 400 bytes each: three of them are over the budget.
+        let body = "@@ -1 +1 @@\n" + String(repeating: "-old line\n+new line\n", count: 20)
+        func tab(_ path: String) -> DiffPaneViewController.Tab {
+            .init(directory: directory, path: path, source: .commit("abc1234"), diff: body)
+        }
+        var readAgain: [String] = []
+        pane.onReadAgain = { _, path, _ in
+            readAgain.append(path)
+            pane.open(tab(path))
+        }
+        for name in ["1.txt", "2.txt", "3.txt", "4.txt", "5.txt"] { pane.open(tab(name)) }
+
+        try expect(pane.tabs.count == 5, "the budget closed a tab")
+        try expect(pane.heldDiffBytesForTesting <= DiffPaneViewController.bodyByteBudget,
+                   "five tabs hold \(pane.heldDiffBytesForTesting) bytes against a 1,000 budget")
+        try expect(pane.activeTab?.path == "5.txt" && pane.activeTab?.diff.isEmpty == false,
+                   "the tab on screen lost its body")
+        try expect(pane.tabs[0].diff.isEmpty && pane.tabs[0].needsReread,
+                   "the tab shown longest ago kept its body")
+        try expect(readAgain.isEmpty, "keeping the budget read a diff back")
+
+        // Shown again, it is read again, and something older goes instead.
+        pane.select(0)
+        try expect(readAgain == ["1.txt"], "the released tab was not read again: \(readAgain)")
+        try expect(pane.activeTab?.path == "1.txt" && pane.activeTab?.diff == body,
+                   "the released tab came back without its diff")
+        try expect(pane.heldDiffBytesForTesting <= DiffPaneViewController.bodyByteBudget,
+                   "reading one back broke the budget: \(pane.heldDiffBytesForTesting)")
+    }
+
+    /// Every refresh used to read every open working-tree tab: a `git diff` per
+    /// tab on every save, and each body that memory pressure had released put
+    /// straight back. Now only the tab on screen is read; the rest are read
+    /// when shown — and must then show the file as it is.
+    private static func testRefreshReadsOnlyTheTabOnScreen() throws {
+        let root = try temporaryDirectory("refresh-on-screen")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) { _ = GitService.run(args, in: root) }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "Gift Test"])
+        git(["config", "user.email", "gift@example.invalid"])
+        let a = root.appendingPathComponent("a.txt")
+        let b = root.appendingPathComponent("b.txt")
+        try Data("a\n".utf8).write(to: a)
+        try Data("b\n".utf8).write(to: b)
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        try Data("a first edit\n".utf8).write(to: a)
+        try Data("b first edit\n".utf8).write(to: b)
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        try expect(waitUntil { workspace.diffs.hasProject }, "the project never opened")
+        workspace.showDiff(forPath: "a.txt", in: root)
+        try expect(waitUntil { workspace.diffs.tabs.count == 1 }, "a.txt never opened")
+        workspace.showDiff(forPath: "b.txt", in: root)
+        try expect(waitUntil { workspace.diffs.activeTab?.path == "b.txt" }, "b.txt never opened")
+
+        try Data("a second edit\n".utf8).write(to: a)
+        try Data("b second edit\n".utf8).write(to: b)
+        workspace.refreshGit(requireFollowUp: true)
+        try expect(waitUntil { workspace.diffs.activeTab?.diff.contains("b second edit") == true },
+                   "the tab on screen was not read again")
+        guard let background = workspace.diffs.tabs.first(where: { $0.path == "a.txt" }) else {
+            throw Failure(description: "a.txt's tab went away")
+        }
+        try expect(background.diff.isEmpty && background.needsReread,
+                   "the tab in the background was read on refresh instead of when shown")
+
+        // Shown, it is read — and it shows the file as it is now.
+        workspace.diffs.select(0)
+        try expect(waitUntil { workspace.diffs.activeTab?.diff.contains("a second edit") == true },
+                   "the background tab, shown, did not show the file as it is: "
                      + (workspace.diffs.activeTab?.diff ?? "nil"))
     }
 

@@ -75,6 +75,16 @@ final class DiffPaneViewController: NSViewController {
     /// What ⇧⌘T brings back, newest last.
     private var closed: [ClosedTab] = []
     private static let closedLimit = 20
+
+    /// Diff text the open tabs may hold between them. A tab kept its whole diff
+    /// — up to 8 MiB — for as long as it was open, and tabs were never capped:
+    /// a history browsed file by file kept every diff it had shown. Past this,
+    /// the tabs shown longest ago give their bodies up and are read again when
+    /// shown. The tab on screen always keeps its own. The same budget main's
+    /// document store holds its buffers to.
+    static var bodyByteBudget = 24 * 1024 * 1024
+    /// Tab ids, least recently shown first.
+    private var shownOrder: [String] = []
     /// The layout sticks for the session, so switching files does not switch
     /// back.
     private static var mode: DiffHeaderView.Mode = .unified
@@ -183,6 +193,45 @@ final class DiffPaneViewController: NSViewController {
     private func readAgainIfNeeded() {
         guard let tab = activeTab, tab.needsReread else { return }
         onReadAgain?(tab.directory, tab.path, tab.source)
+    }
+
+    private func noteShown(_ id: String) {
+        let open = Set(tabs.map(\.id))
+        shownOrder.removeAll { $0 == id || !open.contains($0) }
+        shownOrder.append(id)
+    }
+
+    /// Drop the bodies of the tabs shown longest ago until what the tabs hold
+    /// is within the budget. Tabs that were never shown count as the oldest.
+    private func enforceBodyBudget() {
+        var held = tabs.reduce(0) { $0 + $1.diff.utf8.count }
+        guard held > Self.bodyByteBudget else { return }
+        let activeID = activeTab?.id
+        let shown = Set(shownOrder)
+        let oldestFirst = tabs.map(\.id).filter { !shown.contains($0) } + shownOrder
+        for id in oldestFirst where id != activeID {
+            guard held > Self.bodyByteBudget else { break }
+            guard let index = tabs.firstIndex(where: { $0.id == id }),
+                  !tabs[index].diff.isEmpty else { continue }
+            held -= tabs[index].diff.utf8.count
+            tabs[index].diff = ""
+            tabs[index].needsReread = true
+        }
+    }
+
+    /// A refresh found the working tree may have moved. The tab on screen is
+    /// read again by the caller; every other working-tree tab in `directory`
+    /// gives up its body and is read when it is next shown.
+    ///
+    /// Reading them all on every refresh cost a `git diff` per open tab on
+    /// every save, and it put back every body that memory pressure had just
+    /// released — within seconds, in a session where files are changing.
+    func markWorkingTreeTabsStale(in directory: URL, except activeID: String?) {
+        for index in tabs.indices where tabs[index].directory == directory
+            && tabs[index].source == .workingTree && tabs[index].id != activeID {
+            tabs[index].diff = ""
+            tabs[index].needsReread = true
+        }
     }
 
     /// Let go of every diff not being read. The tabs stay; each is read again
@@ -312,6 +361,8 @@ final class DiffPaneViewController: NSViewController {
             diffView.configure(diff: "")
             return
         }
+        noteShown(tab.id)
+        enforceBodyBudget()
         diffView.configure(diff: tab.diff, keepingPosition: keepingPosition)
         header.configure(path: tab.path, changes: diffView.changeCount,
                          omittedLines: diffView.omittedLines)

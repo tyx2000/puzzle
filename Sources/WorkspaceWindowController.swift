@@ -374,20 +374,21 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var lastChangedPaths: Set<String> = []
     private(set) var diffRefreshBatchesForTesting = 0
 
-    /// Working-tree diffs that are open read again after a refresh: the file
-    /// moved under them, or was committed or discarded out from under them.
-    /// A commit's diff never changes, so those are left alone.
-    ///
-    /// Each result is handed over as it is read rather than collected into a
-    /// batch, so one diff is in hand at a time; the tab being read comes
-    /// first, since that is the one on screen.
+    /// The working-tree diff on screen read again after a refresh: the file
+    /// moved under it, or was committed or discarded out from under it. The
+    /// other working-tree tabs are marked and read when shown; a commit's diff
+    /// never changes, so those are left alone.
     private func refreshOpenDiffs(changed: Set<String>, in directory: URL) {
         lastChangedPaths = changed
-        let active = diffs.activeTab?.id
-        let wanted = diffs.tabs
+        // Only the tab on screen is read now. The others give up their bodies
+        // and are read when they are next shown — reading every open tab here
+        // cost a `git diff` per tab on every save, and put back each body that
+        // memory pressure had released.
+        let active = diffs.activeTab
+        diffs.markWorkingTreeTabsStale(in: directory, except: active?.id)
+        let wanted = [active].compactMap { $0 }
             .filter { $0.directory == directory && $0.source == .workingTree }
             .map { (id: $0.id, path: $0.path) }
-            .sorted { ($0.id == active ? 0 : 1) < ($1.id == active ? 0 : 1) }
         guard !wanted.isEmpty else { return }
         guard !diffRefreshInFlight else {
             diffRefreshAgain = true
