@@ -7831,14 +7831,26 @@ enum RegressionTests {
 
         // Opening a project fetches it, and its Git mark shows the fetch for
         // at least the minimum, however quick the remote was.
+        //
+        // Timed from the window's own record of the sync, not from the row:
+        // the row of a project just opened is rebuilt once its branch is
+        // known, and may be new partway through. The row on screen has to
+        // agree with the record the whole way.
+        func recorded(_ url: URL) -> Bool { workspace.syncingForTesting.contains(url) }
         workspace.openProject(second.clone)
-        try expect(waitUntil { syncing(second.clone) }, "the opening fetch was not shown")
+        try expect(waitUntil { recorded(second.clone) }, "the opening fetch was not shown")
         let shownAt = Date()
-        try expect(waitUntil { !syncing(second.clone) }, "the fetch never finished")
+        var rowDisagreed = false
+        try expect(waitUntil {
+                        if recorded(second.clone) != syncing(second.clone) { rowDisagreed = true }
+                        return !recorded(second.clone)
+                   }, "the fetch never finished")
         try expect(Date().timeIntervalSince(shownAt)
                     >= WorkspaceWindowController.minimumSyncAnimation - 0.1,
                    "the fetch flickered on the mark: "
                      + "\(Date().timeIntervalSince(shownAt))s")
+        try expect(!rowDisagreed && !syncing(second.clone),
+                   "the row's mark did not follow the sync it stands for")
         // Nothing to fetch, nothing shown.
         workspace.openProject(localURL)
         let quietUntil = Date().addingTimeInterval(0.8)
