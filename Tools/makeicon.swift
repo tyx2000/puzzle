@@ -28,11 +28,9 @@ func drawIcon(size: CGFloat) -> NSImage {
     NSColor.clear.setFill()
     full.fill()
 
-    // macOS icon shape: the artwork is inset from the canvas and its corners are
-    // rounded. Everything inside the mask is the original picture, untouched —
-    // scaled to fill so a square source keeps its framing.
-    let inset = size * 0.055
-    let badge = full.insetBy(dx: inset, dy: inset)
+    // Fill the icon canvas; an extra transparent inset makes the Dock icon
+    // visibly smaller than neighbouring apps. Keep the rounded-square mask.
+    let badge = full
     let mask = NSBezierPath(roundedRect: badge,
                             xRadius: size * 0.225, yRadius: size * 0.225)
     NSGraphicsContext.saveGraphicsState()
