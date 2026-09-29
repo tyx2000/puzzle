@@ -2,9 +2,10 @@ import AppKit
 
 /// The current branch's commits, under the changes of the same project.
 ///
-/// The Git panel's History tab shows the same list; this is that list in the
-/// column the branch heads, in the same form — one line per commit, its files
-/// underneath when it is opened.
+/// One line per commit, its files underneath when it is opened — the rows the
+/// Git panel's History tab draws. That tab is the whole repository, every
+/// branch on its graph; this is only the branch checked out: HEAD and what is
+/// behind it, merged-in work included.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -119,9 +120,10 @@ final class ProjectHistoryViewController: NSViewController {
         rebuildRows()
     }
 
-    /// A fetch moved a remote-tracking branch. The list draws every branch,
-    /// the remote ones included, so it reads again — though neither HEAD nor
-    /// what is unpushed moved, which is all `setSource` watches.
+    /// A fetch moved a remote-tracking branch. The rows carry the branch
+    /// labels of the commits they show, the remote ones included, so it reads
+    /// again — though neither HEAD nor what is unpushed moved, which is all
+    /// `setSource` watches.
     func remoteRefsMoved(in directory: URL) {
         guard directory == self.directory, let state, !state.head.isEmpty else { return }
         load(directory)
@@ -141,7 +143,7 @@ final class ProjectHistoryViewController: NSViewController {
         // the number.
         let wanted = limit
         GitService.workQueue.async { [weak self] in
-            let log = GitService.log(in: directory, limit: wanted)
+            let log = GitService.log(in: directory, limit: wanted, allBranches: false)
             let pending = GitService.unpushedHashes(in: directory)
             DispatchQueue.main.async {
                 guard let self else { return }

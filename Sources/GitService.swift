@@ -1149,8 +1149,11 @@ enum GitService {
                          summary: summary, isUncommitted: uncommitted)
     }
 
-    /// Recent commits for the History tab.
-    static func log(in directory: URL, limit: Int = 40) -> [Commit] {
+    /// Recent commits: every branch for the Git panel's History graph, or
+    /// with `allBranches` false only the current branch's — HEAD and what is
+    /// behind it — for the history under a project's changes.
+    static func log(in directory: URL, limit: Int = 40,
+                    allBranches: Bool = true) -> [Commit] {
         // NUL is the one byte commit metadata cannot contain, so neither an
         // unusual subject nor an author name can shift these fields.
         //
@@ -1161,7 +1164,9 @@ enum GitService {
         // `--all` makes History a repository graph instead of a HEAD-only
         // ancestry list. Without every branch tip in the walk, commits on an
         // unmerged branch never reserve a lane and branch decorations along
-        // HEAD misleadingly look like they all belong to the same line.
+        // HEAD misleadingly look like they all belong to the same line. The
+        // project's own history draws no graph and is the branch's list, so
+        // it leaves `--all` out and Git walks from HEAD.
         //
         // `--full-history` because of the pathspec: with one, Git simplifies
         // the history it walks — a merge that changed nothing under the path
@@ -1171,12 +1176,13 @@ enum GitService {
         // branch that was merged in.
         // `--parents` also enables parent rewriting: commits touching only a
         // sibling project must not leave dangling edges in the visible graph.
-        let result = run(["--no-pager", "log", "-z", "--all", "--topo-order", "--full-history",
-                          "--decorate=full",
-                          "--parents",
-                          "--pretty=format:" + format,
-                          "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
-                          "--", "."], in: directory)
+        let result = run(["--no-pager", "log", "-z"] + (allBranches ? ["--all"] : [])
+                            + ["--topo-order", "--full-history",
+                               "--decorate=full",
+                               "--parents",
+                               "--pretty=format:" + format,
+                               "--date=format:%Y-%m-%d %H:%M", "-n", "\(limit)",
+                               "--", "."], in: directory)
         guard result.code == 0 else { return [] }
         return parseLog(result.out, fieldsPerCommit: 8)
     }

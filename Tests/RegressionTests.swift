@@ -111,6 +111,7 @@ enum RegressionTests {
         try testHistoryLogDetails()
         try testScopedHistoryGraphParents()
         try testAllBranchesHistoryGraph()
+        try testProjectHistoryIsTheCurrentBranch()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5211,6 +5212,72 @@ enum RegressionTests {
                    "two unmerged branches reused the same graph color")
     }
 
+    /// The history under a project's changes is the branch checked out, not
+    /// the repository: another branch's unmerged commits stay in the Git
+    /// panel's graph and out of it, switching branches switches the list, and
+    /// work merged into the branch is part of it.
+    private static func testProjectHistoryIsTheCurrentBranch() throws {
+        let root = try temporaryDirectory("project-history-branch")
+        defer { try? FileManager.default.removeItem(at: root) }
+        @discardableResult
+        func git(_ args: [String]) throws -> String {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "branch history fixture failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commit(_ subject: String, file: String) throws {
+            try Data("\(subject)\n".utf8).write(to: root.appendingPathComponent(file))
+            try git(["add", "-A"])
+            try git(["commit", "-q", "-m", subject])
+        }
+
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Branch Test"])
+        try git(["config", "user.email", "branch@example.invalid"])
+        try commit("base", file: "base.txt")
+        try git(["checkout", "-q", "-b", "feature"])
+        try commit("feature one", file: "feature.txt")
+        try commit("feature two", file: "feature.txt")
+        try git(["checkout", "-q", "main"])
+        try commit("main one", file: "main.txt")
+
+        let everything = Set(GitService.log(in: root, limit: 40).map(\.subject))
+        try expect(everything == ["base", "feature one", "feature two", "main one"],
+                   "the Git panel's history lost a branch: \(everything)")
+        let branch = GitService.log(in: root, limit: 40, allBranches: false).map(\.subject)
+        try expect(branch == ["main one", "base"],
+                   "the current branch's log is not HEAD's: \(branch)")
+
+        let history = ProjectHistoryViewController()
+        history.setSource(directory: root,
+                          state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        try expect(history.commitSubjectsForTesting == ["main one", "base"],
+                   "the project's history shows another branch: "
+                     + "\(history.commitSubjectsForTesting)")
+
+        // Checking out the other branch moves HEAD, and the list follows it.
+        try git(["checkout", "-q", "feature"])
+        history.setSource(directory: root,
+                          state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        try expect(history.commitSubjectsForTesting == ["feature two", "feature one", "base"],
+                   "the project's history did not follow the checkout: "
+                     + "\(history.commitSubjectsForTesting)")
+
+        // Merged in, the branch's work is the current branch's history too.
+        try git(["checkout", "-q", "main"])
+        try git(["merge", "-q", "--no-ff", "-m", "merge feature", "feature"])
+        history.setSource(directory: root,
+                          state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        let merged = history.commitSubjectsForTesting
+        try expect(merged.first == "merge feature"
+                    && Set(merged) == ["merge feature", "main one", "feature two",
+                                       "feature one", "base"],
+                   "merged-in commits are missing from the branch's history: \(merged)")
+    }
+
     /// `status` reads porcelain v2 and reports what v1 did, from one
     /// subprocess instead of seven.
     /// Branch and History rows are one line: the thing itself on the left, who
@@ -7600,11 +7667,15 @@ enum RegressionTests {
         try expect(git(["rev-parse", "HEAD"], in: first.clone) == firstHead
                     && git(["status", "--porcelain"], in: first.clone).isEmpty,
                    "the fetch moved the branch or the working tree")
-        // What it brought shows: the history draws every branch, the remote
-        // one included, and reads again when a fetch moves one.
+        // The history is the branch checked out, so what the fetch brought —
+        // on the remote branch, not pulled — stays out of it. It still reads
+        // again: the remote branch's label leaves the commit at the top.
         let history = workspace.sidebar.projectsPanel.history
-        try expect(waitUntil { history.commitSubjectsForTesting.contains("pushed to the first") },
-                   "the fetched commit never reached the history: "
+        func headLabels() -> [String] { history.rowCellForTesting(0)?.refLabelsForTesting ?? [] }
+        try expect(waitUntil { headLabels().contains("main") && !headLabels().contains("origin/main") },
+                   "the fetch did not have the history read again: \(headLabels())")
+        try expect(!history.commitSubjectsForTesting.contains("pushed to the first"),
+                   "a fetched commit is in the branch's history before it is pulled: "
                      + "\(history.commitSubjectsForTesting)")
 
         // Back to a project fetched a moment ago: not again.
@@ -7621,17 +7692,24 @@ enum RegressionTests {
         try expect(waitUntil { knows(second.clone, second.remote) },
                    "a project was not fetched once the interval had passed")
 
-        // Commits pushed while the list is already showing. Coming back to
-        // the project fetches them, and neither HEAD nor the ↑ count moves —
-        // so only the fetch itself can have the list read again.
+        // Commits pushed while the list is already showing. The branch is
+        // brought level with its remote first, so the remote's label sits on
+        // the commit at the top. Coming back to the project fetches them, and
+        // neither HEAD nor the ↑ count moves — so only the fetch itself can
+        // have the list read again and take that label off.
+        _ = git(["merge", "-q", "--ff-only", "origin/main"], in: second.clone)
+        try expect(waitUntil { headLabels().contains("origin/main") },
+                   "the branch level with its remote does not carry its label: \(headLabels())")
         settle()
         try pushFromElsewhere(second.remote, subject: "pushed while open")
         workspace.openProject(second.clone)
         try expect(waitUntil { knows(second.clone, second.remote) },
                    "the project on screen was not fetched again")
-        try expect(waitUntil { history.commitSubjectsForTesting.contains("pushed while open") },
+        try expect(waitUntil { !headLabels().contains("origin/main") },
                    "a fetch that moved a remote branch did not have the history read again: "
-                     + "\(history.commitSubjectsForTesting)")
+                     + "\(headLabels())")
+        try expect(!history.commitSubjectsForTesting.contains("pushed while open"),
+                   "a fetched commit is in the branch's history before it is pulled")
 
         // A folder with no remote is left alone.
         workspace.openProject(local)
