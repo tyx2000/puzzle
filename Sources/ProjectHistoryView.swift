@@ -6,6 +6,11 @@ import AppKit
 /// Git panel's History tab draws. That tab is the whole repository, every
 /// branch on its graph; this is only the branch checked out: HEAD and what is
 /// behind it, merged-in work included.
+///
+/// What is behind it includes the branch it was started from. Where that
+/// branch can be told (`GitService.branchBase`), a rule naming it sits above
+/// the first of its commits, and its commits are drawn a step back — the
+/// branch's own work is what reads.
 final class ProjectHistoryViewController: NSViewController {
     /// A file inside a commit was clicked: show that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -16,6 +21,8 @@ final class ProjectHistoryViewController: NSViewController {
     private enum Row {
         case commit(GitService.Commit)
         case file(GitService.CommitFile, commit: GitService.Commit)
+        /// The rule above the first commit the branch was started on.
+        case base(String)
     }
 
     private let table = GitTableView()
@@ -39,6 +46,10 @@ final class ProjectHistoryViewController: NSViewController {
     private var unpushed: Set<String> = []
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
+    /// The branch this one was started from, when it can be told.
+    private var baseName: String?
+    /// Full IDs of the listed commits that came with that branch.
+    private var inherited: Set<String> = []
     private var rows: [Row] = []
     private var loading = false
     /// Something moved while a read was already running. The reply in flight
@@ -117,6 +128,8 @@ final class ProjectHistoryViewController: NSViewController {
         unpushed = []
         expanded = []
         files = [:]
+        baseName = nil
+        inherited = []
         rebuildRows()
     }
 
@@ -145,6 +158,11 @@ final class ProjectHistoryViewController: NSViewController {
         GitService.workQueue.async { [weak self] in
             let log = GitService.log(in: directory, limit: wanted, allBranches: false)
             let pending = GitService.unpushedHashes(in: directory)
+            let base = GitService.branchBase(in: directory)
+            // Only what is listed is kept, not every commit the branch has.
+            let inherited = base.map { base in
+                Set(log.map(\.graphID).filter { !base.ownCommits.contains($0) })
+            } ?? []
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
@@ -158,6 +176,8 @@ final class ProjectHistoryViewController: NSViewController {
                 self.commits = log
                 self.hasMore = log.count >= wanted
                 self.unpushed = pending
+                self.baseName = base?.name
+                self.inherited = inherited
                 // A commit that is no longer listed cannot stay open.
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
@@ -189,7 +209,15 @@ final class ProjectHistoryViewController: NSViewController {
 
     private func rebuildRows() {
         var built: [Row] = []
+        var ruled = false
         for commit in commits {
+            // Topological order puts the branch's own commits first, but a
+            // merge from the base can bring its commits up among them: the
+            // rule goes above the first, and each one is drawn back on its own.
+            if !ruled, let baseName, inherited.contains(commit.graphID) {
+                built.append(.base(baseName))
+                ruled = true
+            }
             built.append(.commit(commit))
             guard expanded.contains(commit.shortHash) else { continue }
             for file in files[commit.shortHash] ?? [] {
@@ -216,6 +244,8 @@ final class ProjectHistoryViewController: NSViewController {
             toggle(commit, in: directory)
         case .file(let file, let commit):
             onOpenCommitDiff?(commit, file, directory)
+        case .base:
+            break
         }
     }
 
@@ -265,6 +295,30 @@ final class ProjectHistoryViewController: NSViewController {
             return commit.subject
         }
     }
+    /// The branch named on the rule, and the commits drawn back under it.
+    var baseNameForTesting: String? {
+        rows.lazy.compactMap { if case .base(let name) = $0 { return name } else { return nil } }
+            .first
+    }
+    var inheritedSubjectsForTesting: [String] {
+        rows.compactMap {
+            guard case .commit(let commit) = $0, inherited.contains(commit.graphID) else {
+                return nil
+            }
+            return commit.subject
+        }
+    }
+    /// Every row as the reader meets it: a commit's subject, a file's path,
+    /// or the rule as `— base`.
+    var rowOutlineForTesting: [String] {
+        rows.map {
+            switch $0 {
+            case .commit(let commit): return commit.subject
+            case .file(let file, _): return file.path
+            case .base(let name): return "— \(name)"
+            }
+        }
+    }
     var fileRowsForTesting: [String] {
         rows.compactMap { if case .file(let f, _) = $0 { return f.path } else { return nil } }
     }
@@ -277,6 +331,10 @@ final class ProjectHistoryViewController: NSViewController {
     func rowCellForTesting(_ row: Int) -> GitCommitCell? {
         _ = view
         return tableView(table, viewFor: nil, row: row) as? GitCommitCell
+    }
+    func baseCellForTesting(_ row: Int) -> GitBranchBaseCell? {
+        _ = view
+        return tableView(table, viewFor: nil, row: row) as? GitBranchBaseCell
     }
     func fileCellForTesting(_ row: Int) -> GitHistoryFileCell? {
         _ = view
@@ -335,9 +393,14 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
             ?? GitRowView()
         view.identifier = id
         // A recycled row must not bring the pointer, or the stripe, of the
-        // place it was last used.
+        // place it was last used — nor, from the rule, its inertness.
         view.isHovered = table.hoveredRow == row
         view.isStriped = row % 2 == 1
+        if rows.indices.contains(row), case .base = rows[row] {
+            view.isInert = true
+        } else {
+            view.isInert = false
+        }
         return view
     }
 
@@ -351,7 +414,14 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           showsID: false)
+                           showsID: false, inherited: inherited.contains(commit.graphID))
+            return cell
+        case .base(let name):
+            let id = NSUserInterfaceItemIdentifier("project-history-base")
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? GitBranchBaseCell)
+                ?? GitBranchBaseCell()
+            cell.identifier = id
+            cell.configure(base: name)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

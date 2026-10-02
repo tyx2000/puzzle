@@ -112,6 +112,7 @@ enum RegressionTests {
         try testScopedHistoryGraphParents()
         try testAllBranchesHistoryGraph()
         try testProjectHistoryIsTheCurrentBranch()
+        try testProjectHistoryMarksTheBranchBase()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5216,6 +5217,150 @@ enum RegressionTests {
     /// the repository: another branch's unmerged commits stay in the Git
     /// panel's graph and out of it, switching branches switches the list, and
     /// work merged into the branch is part of it.
+    /// A branch's history includes the branch it was started from. The
+    /// project's history names that branch on a rule above the first of its
+    /// commits and draws them back; the branch's own commits read first.
+    private static func testProjectHistoryMarksTheBranchBase() throws {
+        let root = try temporaryDirectory("project-history-base")
+        let remote = try temporaryDirectory("project-history-base-remote")
+        defer {
+            for url in [root, remote] { try? FileManager.default.removeItem(at: url) }
+        }
+        // Every step a minute after the last, so creation records are in the
+        // order the branches were made.
+        var clock = 1_700_000_000
+        @discardableResult
+        func git(_ args: [String]) throws -> String {
+            clock += 60
+            let date = "@\(clock) +0000"
+            let result = GitService.runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["GIT_AUTHOR_DATE=\(date)", "GIT_COMMITTER_DATE=\(date)", "git"] + args,
+                in: root)
+            try expect(result.code == 0, "branch base fixture failed: \(args): "
+                         + String(decoding: result.stderr, as: UTF8.self))
+            return String(decoding: result.stdout, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commit(_ subject: String) throws {
+            try Data("\(subject)\n".utf8).write(to: root.appendingPathComponent("\(subject).txt"))
+            try git(["add", "-A"])
+            try git(["commit", "-q", "-m", subject])
+        }
+        func base() -> String? { GitService.branchBase(in: root)?.name }
+
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Base Test"])
+        try git(["config", "user.email", "base@example.invalid"])
+        try commit("m1")
+        try commit("m2")
+        // `checkout -b` with no start writes "Created from HEAD": nothing
+        // named, so every base below is worked out.
+        try git(["checkout", "-q", "-b", "b"])
+        try commit("b1")
+        try commit("b2")
+        // A sibling started from b at the same commit, before a.
+        try git(["checkout", "-q", "-b", "x"])
+        try commit("x1")
+        try git(["checkout", "-q", "b"])
+        try git(["checkout", "-q", "-b", "a"])
+        try commit("a1")
+        try commit("a2")
+
+        // On a: a's own commits, the rule naming b, then b's commits — main's
+        // included, which came with b — drawn back.
+        let history = ProjectHistoryViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = history
+        window.setContentSize(NSSize(width: 380, height: 420))
+        defer { window.close() }
+        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        try expect(history.rowOutlineForTesting == ["a2", "a1", "— b", "b2", "b1", "m2", "m1"],
+                   "the base is not marked where a's own commits end: "
+                     + "\(history.rowOutlineForTesting)")
+        try expect(history.inheritedSubjectsForTesting == ["b2", "b1", "m2", "m1"],
+                   "the wrong commits are drawn back: \(history.inheritedSubjectsForTesting)")
+        try expect(history.rowCellForTesting(0)?.isInheritedForTesting == false
+                    && history.rowCellForTesting(3)?.isInheritedForTesting == true,
+                   "own and inherited commits are drawn alike")
+        try expect(history.baseCellForTesting(2)?.labelForTesting == "Branched from b",
+                   "the rule does not name the base: "
+                     + "\(String(describing: history.baseCellForTesting(2)?.labelForTesting))")
+        try expect(history.rowViewForTesting(2)?.isInert == true
+                    && history.rowViewForTesting(3)?.isInert == false,
+                   "the rule takes the pointer, or a commit does not")
+        history.clickRowForTesting(2)
+        try expect(history.rowCountForTesting == 7, "clicking the rule did something")
+
+        // Merging x in brings it nearer than b — but it meets a off a's own
+        // line, through the merge: merged in, not started from.
+        try git(["merge", "-q", "--no-ff", "-m", "merge x", "x"])
+        try expect(base() == "b", "a branch merged in became the base: \(String(describing: base()))")
+        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        let merged = history.rowOutlineForTesting
+        try expect(history.inheritedSubjectsForTesting == ["b2", "b1", "m2", "m1"]
+                    && merged.firstIndex(of: "— b") == merged.firstIndex(of: "b2").map { $0 - 1 }
+                    && Set(merged.prefix(4)) == ["merge x", "x1", "a2", "a1"],
+                   "the merged branch's commits are not a's own: \(merged)")
+
+        // A branch started later from a, with work of its own, is nearer
+        // still — and younger than a, so not where a came from.
+        try git(["branch", "later", "HEAD~1"])
+        try git(["checkout", "-q", "later"])
+        try commit("later1")
+        try git(["checkout", "-q", "a"])
+        try expect(base() == "b", "a younger branch became the base: \(String(describing: base()))")
+
+        // b moving on does not move where a came off it.
+        try git(["checkout", "-q", "b"])
+        try commit("b3")
+        try git(["checkout", "-q", "a"])
+        try expect(base() == "b", "b moving on lost the base: \(String(describing: base()))")
+
+        // a's own copy on a remote, behind it, is a itself, not a base.
+        _ = GitService.run(["init", "-q", "--bare"], in: remote)
+        try git(["remote", "add", "origin", remote.path])
+        try git(["push", "-q", "-u", "origin", "a"])
+        try commit("a3")
+        try expect(base() == "b", "the branch's own remote copy became the base: "
+                     + "\(String(describing: base()))")
+
+        // A branch with nothing of its own yet came wholly from the older one.
+        try git(["checkout", "-q", "-b", "fresh"])
+        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        try expect(history.baseNameForTesting == "a"
+                    && history.rowOutlineForTesting.first == "— a"
+                    && history.inheritedSubjectsForTesting.count
+                        == history.commitSubjectsForTesting.count,
+                   "a new branch is not shown as all its base's: \(history.rowOutlineForTesting)")
+        // Back on a, the newer branch holding all of it is not its base.
+        try git(["checkout", "-q", "a"])
+        try expect(base() == "b", "a branch started from a became its base: "
+                     + "\(String(describing: base()))")
+
+        // Named at creation, the base is the one named — even with a nearer
+        // branch about: an older one moved up to the new branch's commit.
+        try git(["checkout", "-q", "-b", "named", "main"])
+        try commit("n1")
+        try git(["branch", "-f", "later", "HEAD"])
+        try expect(base() == "main", "the base named at creation was not used: "
+                     + "\(String(describing: base()))")
+
+        // The default branch is the trunk, and a detached HEAD no branch.
+        try git(["checkout", "-q", "main"])
+        try expect(base() == nil, "the default branch has a base: \(String(describing: base()))")
+        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.settleForTesting()
+        try expect(history.baseNameForTesting == nil && history.inheritedSubjectsForTesting.isEmpty,
+                   "the default branch's history has a rule: \(history.rowOutlineForTesting)")
+        try git(["checkout", "-q", "--detach", "a"])
+        try expect(base() == nil, "a detached HEAD has a base: \(String(describing: base()))")
+    }
+
     private static func testProjectHistoryIsTheCurrentBranch() throws {
         let root = try temporaryDirectory("project-history-branch")
         defer { try? FileManager.default.removeItem(at: root) }

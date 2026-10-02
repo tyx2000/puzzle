@@ -17,6 +17,7 @@ final class GitCommitCell: DrawnSidebarCell {
     private var commitID = ""
     private var showsID = true
     private var metaColor = NSColor.clear
+    private var subjectColor = Theme.foreground
     private var graphRow: GitHistoryGraph.Row?
     private var graphWidth: CGFloat = 0
     private var refDecorations: [GitService.Commit.RefLabel] = []
@@ -56,8 +57,11 @@ final class GitCommitCell: DrawnSidebarCell {
     /// `showsID` puts the commit's id ahead of the message, which is what
     /// names it to Git. The Git panel's list has the width for it; the history
     /// under a project's changes reads message, name and time.
+    /// `inherited` is a commit the branch was started on rather than one of
+    /// its own: drawn a step back, so the branch's own work reads first.
     func configure(commit: GitService.Commit, pending: Bool, showsID: Bool = true,
-                   graphRow: GitHistoryGraph.Row? = nil, graphWidth: CGFloat = 0) {
+                   graphRow: GitHistoryGraph.Row? = nil, graphWidth: CGFloat = 0,
+                   inherited: Bool = false) {
         self.showsID = showsID
         self.graphRow = graphRow
         self.graphWidth = graphWidth
@@ -71,7 +75,8 @@ final class GitCommitCell: DrawnSidebarCell {
         // Unpushed commits are the reason Push is enabled, so they still have
         // to be tellable apart at a glance — the arrow rides with the metadata
         // rather than taking room from the subject.
-        metaColor = pending ? Theme.cursor : Theme.dimText
+        metaColor = pending ? Theme.cursor : (inherited ? Theme.gutter : Theme.dimText)
+        subjectColor = inherited ? Theme.dimText : Theme.foreground
         // No bubble: the row carries everything it has to say itself, and a
         // tip over every row is then only something that follows the pointer
         // down the list.
@@ -141,7 +146,7 @@ final class GitCommitCell: DrawnSidebarCell {
         }
         drawnSubjectXForTesting = content.minX
         let drawn = SidebarCellDrawing.leadingAndTrailing(
-            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: Theme.foreground,
+            leading: subject, leadingFont: Theme.uiFont(11), leadingColor: subjectColor,
             trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
             trailingPinned: date, in: content, gap: Self.columnGap)
         drawnSubjectRectForTesting = drawn.leading
@@ -155,6 +160,44 @@ final class GitCommitCell: DrawnSidebarCell {
     var graphWidthForTesting: CGFloat { graphWidth }
     var graphRowForTesting: GitHistoryGraph.Row? { graphRow }
     var refLabelsForTesting: [String] { refDecorations.map(\.name) }
+    var isInheritedForTesting: Bool { subjectColor == Theme.dimText }
+}
+
+/// Where the history under a project's changes stops being the branch's own:
+/// a rule, named for the branch it was started from, above the first of that
+/// branch's commits.
+final class GitBranchBaseCell: DrawnSidebarCell {
+    private var label = ""
+    private(set) var drawnRuleRectForTesting: NSRect = .zero
+
+    func configure(base name: String) {
+        label = "Branched from \(name)"
+        exposeToAccessibility(label)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let font = Theme.uiFont(9.5)
+        let content = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16),
+                             height: bounds.height)
+        // The name gives way before the rule disappears entirely.
+        let textWidth = min(ceil((label as NSString).size(withAttributes: [.font: font]).width) + 2,
+                            floor(content.width * 0.7))
+        let box = NSRect(x: content.minX, y: 0, width: textWidth, height: bounds.height)
+        SidebarCellDrawing.text(label, font: font, color: Theme.dimText,
+                                baseline: SidebarCellDrawing.centeredBaseline(for: Theme.uiFont(11),
+                                                                              in: content),
+                                in: box)
+        let ruleX = box.maxX + 8
+        drawnRuleRectForTesting = .zero
+        guard ruleX < content.maxX else { return }
+        let rule = NSRect(x: ruleX, y: floor(bounds.midY), width: content.maxX - ruleX, height: 1)
+        Theme.lineHighlight.setFill()
+        rule.fill()
+        drawnRuleRectForTesting = rule
+    }
+
+    var labelForTesting: String { label }
 }
 
 final class GitHistoryFileCell: GitFileActionCell {
@@ -822,9 +865,19 @@ final class GitRowView: NSTableRowView {
         }
     }
 
+    /// A row that is not a thing to point at — a rule between rows — takes
+    /// neither the pointer's light nor a stripe, whatever the list says.
+    var isInert = false {
+        didSet {
+            guard isInert != oldValue else { return }
+            needsDisplay = true
+        }
+    }
+
     override func drawBackground(in dirtyRect: NSRect) {
-        (isStriped ? Theme.stripedRow : Theme.panelBackground).setFill()
+        (isStriped && !isInert ? Theme.stripedRow : Theme.panelBackground).setFill()
         bounds.fill()
+        guard !isInert else { return }
         if isActiveFile {
             Theme.activeRow.setFill()
             bounds.fill()
