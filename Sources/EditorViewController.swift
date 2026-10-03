@@ -17,7 +17,10 @@ final class EditorViewController: NSViewController {
     var onOpenChecked: (([URL]) -> Void)?
 
     private var pane: EditorPaneViewController!
-    private let welcome = WelcomeView()
+    /// Made when it is shown and let go when it is not: a window with a
+    /// project never shows it, yet kept a page of rows that it rebuilt on
+    /// every change to the recent projects.
+    private var welcome: WelcomeView?
     /// A project open and no file: a few faint shortcuts where the text goes.
     let emptyHints = EmptyEditorHintView()
     /// Settings opens a file, so it belongs with the editor's actions rather
@@ -46,11 +49,6 @@ final class EditorViewController: NSViewController {
         pane.view.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(pane.view)
 
-        welcome.translatesAutoresizingMaskIntoConstraints = false
-        welcome.onOpenFolder = { [weak self] in self?.onOpenFolder?() }
-        welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
-        welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
-        container.addSubview(welcome)
         emptyHints.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(emptyHints)
 
@@ -75,10 +73,6 @@ final class EditorViewController: NSViewController {
             pane.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             pane.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             pane.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            welcome.topAnchor.constraint(equalTo: container.topAnchor),
-            welcome.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            welcome.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            welcome.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             emptyHints.topAnchor.constraint(equalTo: container.topAnchor),
             emptyHints.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             emptyHints.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -167,13 +161,57 @@ final class EditorViewController: NSViewController {
         pane?.releaseTransientMemory()
     }
 
+    private var hasOpenFiles: Bool { !(pane?.openURLs.isEmpty ?? true) }
+    /// The start page is for a window with no project and nothing open.
+    private var wantsWelcome: Bool { !hasOpenFiles && !hasProject }
+
     private func updatePlaceholder() {
-        let hasOpenFiles = !(pane?.openURLs.isEmpty ?? true)
-        welcome.isHidden = hasOpenFiles || hasProject
+        let hasOpenFiles = self.hasOpenFiles
+        updateWelcome()
         emptyHints.isHidden = hasOpenFiles || !hasProject
         // The pane (and its blank text view) must not cover the welcome screen.
         pane?.view.isHidden = !hasOpenFiles
     }
+
+    private var welcomePending = false
+
+    private func updateWelcome() {
+        guard wantsWelcome else {
+            welcome?.removeFromSuperview()
+            welcome = nil
+            return
+        }
+        guard welcome == nil, isViewLoaded, !welcomePending else { return }
+        // A window opened for a project — `pz`, Finder, a launch argument — is
+        // handed it straight after it is made. Waiting one turn means such a
+        // window never builds a page only to drop it.
+        welcomePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.welcomePending = false
+            self.makeWelcomeIfStillWanted()
+        }
+    }
+
+    private func makeWelcomeIfStillWanted() {
+        guard welcome == nil, wantsWelcome else { return }
+        let welcome = WelcomeView()
+        welcome.translatesAutoresizingMaskIntoConstraints = false
+        welcome.onOpenFolder = { [weak self] in self?.onOpenFolder?() }
+        welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
+        welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
+        // Over the pane, under the hints and the settings gear.
+        view.addSubview(welcome, positioned: .below, relativeTo: emptyHints)
+        NSLayoutConstraint.activate([
+            welcome.topAnchor.constraint(equalTo: view.topAnchor),
+            welcome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            welcome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            welcome.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        self.welcome = welcome
+    }
+
+    var welcomeShownForTesting: Bool { welcome?.superview != nil }
 
     func stepTab(by offset: Int) { pane?.stepTab(by: offset) }
     /// Every tab, as a project switch requires.
@@ -251,7 +289,7 @@ final class EditorViewController: NSViewController {
     /// Re-apply font / line-height settings.
     func refreshDisplay() {
         pane?.refreshDisplay()
-        welcome.refreshFonts()
+        welcome?.refreshFonts()
     }
 }
 

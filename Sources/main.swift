@@ -1,5 +1,6 @@
 import AppKit
 
+TreeSitterAllocator.install()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

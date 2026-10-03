@@ -12,6 +12,8 @@ enum RegressionTests {
     }
 
     static func main() throws {
+        // As the app does, so every test that parses runs on it.
+        TreeSitterAllocator.install()
         _ = NSApplication.shared
         try testProcessDrain()
         try testReviewFixes()
@@ -117,6 +119,7 @@ enum RegressionTests {
         try testIgnoredFilesAreDimmed()
         try testEmptyEditorHints()
         try testFlatSurfacesHoldNoBitmap()
+        try testTreeSitterLargeBlocksAreUnmapped()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5326,11 +5329,79 @@ enum RegressionTests {
                    "modifiers are written \(EmptyEditorHintView.shortcut(of: replace) ?? "nil")")
         try expect(hints.hitTest(NSPoint(x: 1, y: 1)) == nil, "the hints take clicks")
 
+        /// The start page is made a turn after it is asked for.
+        func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
         let editor = EditorViewController()
         _ = editor.view
+        settle()
         try expect(editor.emptyHints.isHidden, "the hints show with no project")
+        try expect(editor.welcomeShownForTesting, "no start page with no project")
         editor.hasProject = true
         try expect(!editor.emptyHints.isHidden, "a project with no file shows no hints")
+        // A window with a project never shows the start page, so it keeps none.
+        try expect(!editor.welcomeShownForTesting, "a window with a project kept the start page")
+        editor.hasProject = false
+        settle()
+        try expect(editor.welcomeShownForTesting, "the start page did not come back")
+        // A window handed its project as it is made never builds one at all.
+        let opened = EditorViewController()
+        _ = opened.view
+        opened.hasProject = true
+        settle()
+        try expect(!opened.welcomeShownForTesting, "a window opened for a project built a start page")
+    }
+
+    /// Compiling a highlight query takes a transient block of megabytes.
+    /// Freed through malloc it stayed cached against the footprint; mapped,
+    /// it is returned when tree-sitter frees it.
+    private static func testTreeSitterLargeBlocksAreUnmapped() throws {
+        let threshold = TreeSitterAllocator.mappedThreshold
+        let mappedBefore = TreeSitterAllocator.mappedEverForTesting
+        // The query the app bundles for Swift, read where the build takes it from.
+        let queryFile = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("vendor/tree-sitter-swift/queries/highlights.scm")
+        let swift = LanguageDefinition(name: "swift", language: tree_sitter_swift()!,
+            querySources: [try String(contentsOf: queryFile, encoding: .utf8)],
+            extensions: ["swift"], display: "Swift")
+        guard let highlighter = SyntaxHighlighter(definition: swift), highlighter.isUsable else {
+            throw Failure(description: "no Swift highlighter")
+        }
+        try expect(TreeSitterAllocator.mappedEverForTesting > mappedBefore,
+                   "the Swift query was compiled without a mapped block")
+        try expect(TreeSitterAllocator.mappedCountForTesting == 0,
+                   "\(TreeSitterAllocator.mappedCountForTesting) mapped blocks outlived the query")
+
+        // Growing and shrinking across the threshold keeps the contents.
+        func fill(_ pointer: UnsafeMutableRawPointer, _ count: Int) {
+            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<count { bytes[i] = UInt8(truncatingIfNeeded: i &* 31) }
+        }
+        func holds(_ pointer: UnsafeMutableRawPointer, _ count: Int) -> Bool {
+            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
+            return (0..<count).allSatisfy { bytes[$0] == UInt8(truncatingIfNeeded: $0 &* 31) }
+        }
+        guard let small = TreeSitterAllocator.allocateForTesting(4096) else {
+            throw Failure(description: "no small block")
+        }
+        fill(small, 4096)
+        guard let grown = TreeSitterAllocator.reallocateForTesting(small, threshold * 2) else {
+            throw Failure(description: "no grown block")
+        }
+        try expect(holds(grown, 4096) && TreeSitterAllocator.mappedCountForTesting == 1,
+                   "a block grown past the threshold lost its contents or was not mapped")
+        fill(grown, threshold * 2)
+        guard let larger = TreeSitterAllocator.reallocateForTesting(grown, threshold * 3) else {
+            throw Failure(description: "no larger block")
+        }
+        try expect(holds(larger, threshold * 2) && TreeSitterAllocator.mappedCountForTesting == 1,
+                   "a mapped block grown again lost its contents or leaked a mapping")
+        guard let shrunk = TreeSitterAllocator.reallocateForTesting(larger, 100) else {
+            throw Failure(description: "no shrunk block")
+        }
+        try expect(holds(shrunk, 100) && TreeSitterAllocator.mappedCountForTesting == 0,
+                   "a block shrunk under the threshold lost its contents or kept its mapping")
+        TreeSitterAllocator.free(shrunk)
     }
 
     /// A flat colour is shown as the layer's background, not drawn: drawn,

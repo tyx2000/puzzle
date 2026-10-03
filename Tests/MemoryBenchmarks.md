@@ -50,10 +50,14 @@ display scale move every row, so compare builds only on the same machine.
 | --- | ---: | ---: |
 | Welcome page | 56 MB | 35 MB |
 | Project open, no file | 89 MB | 49 MB |
-| Project and six files | 142 MB | 105 MB |
+| Project and six files, all as launch arguments¹ | 142 MB | 105 MB |
 | Project, Git history (`--history 0`) | 91 MB | 60 MB |
 | Project search (`--search FlatView`) | 77 MB | 51 MB |
 | Three windows (`--windows 3`) | 156 MB | 72 MB |
+
+¹ A file named on the command line can bring its own folder in as a project too,
+so this row has more than one project open. The table below opens the files
+inside the project that is already open, which is how they are normally opened.
 
 At `66405d1` the largest category in `footprint` was CoreAnimation: 25–86 MB of
 bitmaps that hold one flat colour each. Any view that overrides `draw(_:)` gets
@@ -70,3 +74,31 @@ Swapping AppKit for another toolkit does not help. A minimal window with one
 The same window takes 128 MB in egui (wgpu), 182 MB in WKWebView with its helper
 processes, and 321 MB in Fyne. GPU and web toolkits keep several window-sized
 drawables in flight, and the language runtime is not what costs memory.
+
+### Start page and tree-sitter
+
+These are medians of three runs. Each run opens the project, then opens the files
+inside it once it has loaded. Both builds were measured with the same working tree.
+
+| Scenario | `ef10f66` | This change |
+| --- | ---: | ---: |
+| Project open, no file | 49.6 MB | 41.8 MB |
+| Project, then six files | 97.8 MB | 86.6 MB |
+| Project, then one 600 KB Swift file | 83.1 MB | 75.9 MB |
+
+- **Start page.** Every window built a start page, and a window opened for a
+  project dropped it straight away. The page is now made one turn after it is
+  asked for, and only if it is still wanted, so a window opened with `pz`, from
+  Finder or with a launch argument never builds one. A window that has a
+  project lets its start page go. Live malloc fell by only 3 MB, but the build
+  and the drop cost 8 MB of footprint.
+- **Tree-sitter.** Compiling a highlight query (`ts_query_new`) allocates a
+  transient block of about 5 MB. Once freed, malloc kept it in its cache of
+  large blocks, which still counts against the footprint.
+  `malloc_zone_pressure_relief` returned nothing. `TreeSitterAllocator` now
+  maps any tree-sitter block of 1 MB or more directly and unmaps it when
+  tree-sitter frees it.
+
+Opening a file still costs 17–19 MB of drawable surface for the text area and
+the gutter. A minimal `NSTextView` window pays the same. About 10 MB of the
+malloc heap is free space in partly used pages, which no API returns.

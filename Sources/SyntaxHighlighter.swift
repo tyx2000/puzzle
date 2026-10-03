@@ -259,7 +259,7 @@ final class SyntaxHighlighter {
 
     var treeDescriptionForTesting: String? {
         guard let previousTree, let string = ts_node_string(ts_tree_root_node(previousTree)) else { return nil }
-        defer { free(string) }
+        defer { TreeSitterAllocator.free(string) }
         return String(cString: string)
     }
 
