@@ -1915,13 +1915,10 @@ enum RegressionTests {
                    "first file-tree row did not start at the file-tab boundary: "
                     + String(describing: actualTop))
 
-        // A window with nothing open draws no regions: no frames, no Git
-        // column. They were three empty outlines on the start page.
+        // A window with nothing open has no Git column.
         let emptyColumns = workspace.sidebar.projectsPanel.columnsForTesting
-        try expect(emptyColumns.firstBorder == nil && !emptyColumns.showsSecond,
-                   "an empty window still frames the regions of a project: "
-                     + "border \(String(describing: emptyColumns.firstBorder)), "
-                     + "second column \(emptyColumns.showsSecond)")
+        try expect(!emptyColumns.showsSecond,
+                   "an empty window still shows a project's Git column")
     }
 
     private static func testDocumentStoreProtectsNewBuffer() throws {
@@ -4000,11 +3997,9 @@ enum RegressionTests {
                      + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
         try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
                    "a project is still marked as showing after collapsing")
-        // Under a list of collapsed projects the space is left blank — no
-        // outline framing an empty tree.
-        try expect(panel.columnsForTesting.firstBorder == nil
-                    && !panel.columnsForTesting.showsSecond,
-                   "collapsed projects leave an empty frame under their rows")
+        // Under a list of collapsed projects the space is left blank.
+        try expect(!panel.columnsForTesting.showsSecond,
+                   "collapsed projects leave a Git column under their rows")
         rows[0].clickForTesting()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
                    "the collapsed project could not be opened again")
@@ -6734,34 +6729,27 @@ enum RegressionTests {
                    "a scroll on the band did not reach the list under it just once: "
                      + "\(left.received)")
 
-        // A press on a pane's border lands on the splitter — there is no
-        // subview there — but only a press on the band moves the line.
-        splitter.firstBorder = Theme.red
+        // Only a press on the band moves the line.
         splitter.layout()
         let fraction = splitter.fraction
         try expect(!splitter.pressForTesting(at: NSPoint(x: 0.5, y: 150),
                                             draggingTo: NSPoint(x: 120, y: 150)),
-                   "a press on a pane's border took hold of the divider")
-        try expect(splitter.fraction == fraction, "a press on a border moved the divider")
+                   "a press off the band took hold of the divider")
+        try expect(splitter.fraction == fraction, "a press off the band moved the divider")
         try expect(splitter.pressForTesting(at: NSPoint(x: splitter.divider, y: 150),
                                            draggingTo: NSPoint(x: 260, y: 150)),
                    "a press on the divider did not take hold of it")
         try expect(abs(splitter.divider - 260) <= 1,
                    "dragging the divider did not move it: \(splitter.divider)")
 
-        // A bordered pane that has not been given any room yet gets an empty
-        // frame, not the null rect: that one's origin is infinite, and every
-        // constraint inside the pane was asked for an infinite constant.
+        // A pane that has not been given any room yet gets an empty frame
+        // where the splitter is, not the null rect, whose origin is infinite.
         let unsized = ProjectColumnsView(frame: .zero)
         let unsizedPane = NSView()
         unsized.first = unsizedPane
         unsized.addSubview(unsizedPane)
-        unsized.firstBorder = Theme.red
         unsized.layout()
-        // AppKit clamps the null rect's infinite origin to a huge finite one,
-        // so the check is that the pane sits where the splitter is.
-        try expect(unsizedPane.frame.origin.x <= ProjectColumnsView.borderWidth
-                    && unsizedPane.frame.origin.y <= ProjectColumnsView.borderWidth
+        try expect(unsizedPane.frame.origin.x <= 0 && unsizedPane.frame.origin.y <= 0
                     && unsizedPane.frame.width >= 0 && unsizedPane.frame.height >= 0,
                    "a pane with no room was given a null frame: \(unsizedPane.frame)")
 
@@ -8616,31 +8604,18 @@ enum RegressionTests {
                      + "\(workspace.sidebar.fileTree.view.frame) / "
                      + "\(projectsPanel.gitColumnForTesting.frame)")
 
-        // A 2pt border inside each of the three regions, one hue each: the
-        // tree, what has changed, and what has been committed. Drawn inside,
-        // so a region's own content is inset by the width rather than running
-        // under its edge.
-        try expect(sameColor(columns.firstBorder,
-                             ProjectColumnsView.regionBorder(Theme.red))
-                    && sameColor(projectsPanel.gitColumnForTesting.firstBorder,
-                                 ProjectColumnsView.regionBorder(Theme.orange))
-                    && sameColor(projectsPanel.gitColumnForTesting.secondBorder,
-                                 ProjectColumnsView.regionBorder(Theme.purple)),
-                   "the three regions do not carry red, orange and purple")
-        try expect(ProjectColumnsView.borderWidth == 1,
-                   "the region borders are \(ProjectColumnsView.borderWidth)pt, not 1")
-        // Taken down from the hue itself: three saturated frames are the
-        // loudest thing in a panel whose palette is two steps off black.
-        try expect(ProjectColumnsView.regionBorder(Theme.red).alphaComponent < 0.6,
-                   "the region borders are drawn at full strength")
+        // No frames inside the regions: the line between them, the one that
+        // drags, is the only edge drawn, and each region runs to its edges.
         let treeFrame = workspace.sidebar.fileTree.view.frame
-        try expect(treeFrame.minX == ProjectColumnsView.borderWidth
-                    && treeFrame.minY == ProjectColumnsView.borderWidth,
-                   "the tree is not inset inside its own border: \(treeFrame)")
-        try expect(treeFrame.maxX == columns.firstPaneRect.maxX
-                    - ProjectColumnsView.borderWidth,
-                   "the tree runs under its own border: \(treeFrame) in "
+        try expect(treeFrame == columns.firstPaneRect,
+                   "the tree does not fill its column: \(treeFrame) in "
                      + "\(columns.firstPaneRect)")
+        let splitColumn = projectsPanel.gitColumnForTesting
+        try expect(projectsPanel.changes.view.frame == splitColumn.firstPaneRect
+                    && projectsPanel.history.view.frame == splitColumn.secondPaneRect,
+                   "the changes and the history do not fill their halves: "
+                     + "\(projectsPanel.changes.view.frame) / "
+                     + "\(projectsPanel.history.view.frame)")
 
         // The right column lists what the project has changed, and a click on
         // one asks for that file's diff — the same errand the Git panel's own

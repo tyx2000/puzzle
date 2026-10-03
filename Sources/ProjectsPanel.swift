@@ -605,17 +605,6 @@ final class ProjectColumnsView: FlatView {
     }
     var onFractionChanged: ((CGFloat) -> Void)?
 
-    /// A border drawn inside a pane, in the colour that says which region it
-    /// is. The pane's content is inset by the width, so the border sits inside
-    /// the region rather than over its first row.
-    var firstBorder: NSColor? { didSet { needsLayout = true; needsDisplay = true } }
-    var secondBorder: NSColor? { didSet { needsLayout = true; needsDisplay = true } }
-    static let borderWidth: CGFloat = 1
-    /// The hues are the panel's own, taken right down: at full strength three
-    /// saturated frames are the loudest thing in a sidebar whose whole palette
-    /// is two steps off black.
-    static func regionBorder(_ hue: NSColor) -> NSColor { hue.withAlphaComponent(0.4) }
-
     /// Neither pane may be squeezed away. A column needs this much to say a
     /// name; a list stacked on another needs only a couple of rows.
     static let minimumColumn: CGFloat = 90
@@ -650,8 +639,8 @@ final class ProjectColumnsView: FlatView {
     }
 
     /// Whether a point (in this view's own coordinates) is on the band that
-    /// moves the line. Everything else that lands on this view — the 1pt
-    /// borders the panes are inset from — is not the line's to act on.
+    /// moves the line. Anything else that lands on this view is not the
+    /// line's to act on.
     private func isOnGrabBand(_ point: NSPoint) -> Bool {
         showsSecond && bounds.contains(point)
             && abs(position(of: point) - divider) <= Self.grabRadius
@@ -723,10 +712,8 @@ final class ProjectColumnsView: FlatView {
         if !tracked { super.mouseDown(with: event) }
     }
 
-    /// The press, from the button going down to its release. A press on a
-    /// pane's border lands on this view too, having no subview of its own to
-    /// land on; only a press on the band moves the line. Returns whether it
-    /// did.
+    /// The press, from the button going down to its release. Only a press on
+    /// the band moves the line. Returns whether it did.
     @discardableResult
     func trackDivider(from start: NSPoint, nextEvent: () -> NSEvent?) -> Bool {
         guard isOnGrabBand(start) else { return false }
@@ -768,7 +755,8 @@ final class ProjectColumnsView: FlatView {
         onFractionChanged?(next)
     }
 
-    /// The room each pane is given, before its own border is taken out of it.
+    /// The room each pane is given. The panes run to their edges: the line
+    /// between them is the only thing drawn there.
     var firstPaneRect: NSRect {
         switch axis {
         case .horizontal:
@@ -791,18 +779,6 @@ final class ProjectColumnsView: FlatView {
         }
     }
 
-    /// The pane less its border, never less than nothing. `insetBy` on a pane
-    /// smaller than its two borders — a column that has not been given any
-    /// room yet — returns the null rect, whose origin is infinite, and every
-    /// constraint inside the pane then asked for an infinite constant.
-    private func content(of pane: NSRect, bordered: Bool) -> NSRect {
-        guard bordered else { return pane }
-        let inset = Self.borderWidth
-        return NSRect(x: pane.minX + inset, y: pane.minY + inset,
-                      width: max(0, pane.width - inset * 2),
-                      height: max(0, pane.height - inset * 2))
-    }
-
     /// A pane is positioned by hand, and everything inside it by constraints.
     /// Handing it a new frame only marks its own subtree as needing layout, so
     /// a scroll view inside it keeps the size it had until some later pass —
@@ -811,10 +787,10 @@ final class ProjectColumnsView: FlatView {
     override func layout() {
         super.layout()
         second?.isHidden = !showsSecond
-        first?.frame = content(of: firstPaneRect, bordered: firstBorder != nil)
+        first?.frame = firstPaneRect
         first?.layoutSubtreeIfNeeded()
         guard showsSecond else { return }
-        second?.frame = content(of: secondPaneRect, bordered: secondBorder != nil)
+        second?.frame = secondPaneRect
         second?.layoutSubtreeIfNeeded()
     }
 
@@ -828,25 +804,13 @@ final class ProjectColumnsView: FlatView {
         window?.invalidateCursorRects(for: self)
     }
 
+    /// The line the panes are dragged apart by — the one edge drawn between
+    /// them. The regions carry no frames of their own.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        draw(border: firstBorder, around: firstPaneRect)
         guard showsSecond else { return }
-        draw(border: secondBorder, around: secondPaneRect)
-        // Two coloured borders meeting already separate the panes; a grey line
-        // between them is a third edge saying the same thing.
-        guard firstBorder == nil, secondBorder == nil else { return }
         Theme.border.setFill()
         dividerRect(radius: 0).fill()
-    }
-
-    private func draw(border: NSColor?, around pane: NSRect) {
-        guard let border, pane.width > 0, pane.height > 0 else { return }
-        border.setStroke()
-        let path = NSBezierPath(rect: pane.insetBy(dx: Self.borderWidth / 2,
-                                                   dy: Self.borderWidth / 2))
-        path.lineWidth = Self.borderWidth
-        path.stroke()
     }
 }
 
@@ -944,11 +908,6 @@ final class ProjectsPanelViewController: NSViewController {
         gitColumn.addSubview(history.view)
         columns.first = fileTree.view
         columns.second = gitColumn
-        // One hue per region, drawn inside it: the tree, what has changed, and
-        // what has been committed. The tree's own frame waits for a project
-        // to be opened — see `showRegions`.
-        gitColumn.firstBorder = ProjectColumnsView.regionBorder(Theme.orange)
-        gitColumn.secondBorder = ProjectColumnsView.regionBorder(Theme.purple)
         dividerFraction = Self.storedDividerFraction(dividerDefaults)
         columns.fraction = dividerFraction
         columns.onFractionChanged = { [weak self] fraction in
@@ -983,17 +942,13 @@ final class ProjectsPanelViewController: NSViewController {
         layOut(active: nil)
     }
 
-    /// The three regions, and the frames that name them, belong to a project
-    /// that is open. With none open they were three empty outlines on the
-    /// start page — or one, under a list of collapsed projects — framing
-    /// nothing. The columns stay in the stack, since they are what takes up
-    /// the height the rows leave, but draw no frame and no second column.
+    /// The Git column belongs to an open project that is a repository. The
+    /// columns stay in the stack with none open, since they are what takes
+    /// up the height the rows leave, but show no second column.
     ///
     /// `forRepository` is nil for no open project, and otherwise whether the
     /// open one is a repository — which is what decides the Git column.
     private func showRegions(forRepository isRepository: Bool?) {
-        columns.firstBorder = isRepository == nil
-            ? nil : ProjectColumnsView.regionBorder(Theme.red)
         columns.showsSecond = isRepository == true
     }
 
