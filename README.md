@@ -30,6 +30,10 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   Ayu Dark palette as Gift, keeps the first-parent track's colour, and connects
   through expanded files and paginated commits. Wide graphs scroll horizontally;
   expanded files retain their hover-only button for opening the current source.
+- **Project history** — under a project's changes, the commits of the branch
+  checked out. The branch it was started from is named on a rule above that
+  branch's commits, which are drawn a step back; a click on the rule folds them
+  away. The branch's copy on its remote is labelled with the remote's name.
 - **Settings** — the gear at the top right opens `~/.config/puzzle/settings.json`.
   Editor font:
   `buffer_font_family`, `buffer_font_size`, `buffer_font_weight`,
@@ -41,7 +45,8 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   height, with code, line numbers and inline blame vertically centered; no gutter separator, and hover-only gutter-arrow
   code folding that preserves source line numbers. Matching `()`, `[]` and `{}`
   are marked with red wave underlines at the insertion point.
-- **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers.
+- **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers, and
+  whatever Git ignores drawn dimmed.
 - **Dock menu** — right-click the running app icon to open one of the ten most
   recently used valid project folders in a new Puzzle window.
 - **Editor** — `NSTextView` (TextKit 1), multi-file tabs, undo, and ⌘S. Buffers
@@ -59,6 +64,8 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
 - **Find in folder** — project-wide search via ripgrep (built-in fallback).
 - **Git** — branch beside the project name, dirty files marked in the tree,
   per-line gutter marks with revert, and a git panel (⌘3).
+- **Empty editor** — with a project open and no file, a few shortcuts sit
+  where the text goes, read from the menu so they always match it.
 
 ## Build
 ```bash
@@ -93,11 +100,16 @@ command in the first writable directory on your login shell's `PATH`. It never
 overwrites an unrelated command with the same name.
 
 ## Shortcuts
-⌘O open folder · ⌘S save · ⌘F find in file · ⇧⌘F find in folder ·
+⌘N new window · ⌘O open folder · ⌘P quick open · ⌘S save · ⌘, settings ·
+⌘F find in file · ⌥⌘F find and replace · ⇧⌘F find in folder · ⌘L go to line ·
 ⌘1 files · ⌘2 search · ⌘3 git · ⌘B show sidebar ·
-⇧⌘] next tab · ⇧⌘[ previous tab · ⌘W close tab · ⇧⌘T reopen closed tab ·
+⇧⌘] next tab · ⇧⌘[ previous tab · ⌘W close tab · ⇧⌘W close window ·
+⇧⌘T reopen closed tab ·
 ⌥⌘[ fold/unfold current block · ⌥⌘] unfold all · ⇧⌫ delete current line ·
 ⌘/ toggle comment
+
+In the Git lists (changes and history), ↑↓ move through the rows and ↩ does
+what a click does: opens a diff, or opens and closes a commit.
 
 ## Layout
 ```

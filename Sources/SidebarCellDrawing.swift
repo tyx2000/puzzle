@@ -254,18 +254,20 @@ enum SidebarCellDrawing {
         return result
     }
 
-    static func icon(_ icon: SidebarIcon?, in rect: NSRect) {
+    /// `opacity` below 1 fades the icon — an ignored file's, with its name.
+    static func icon(_ icon: SidebarIcon?, in rect: NSRect, opacity: CGFloat = 1) {
         switch icon {
         case .material(let name):
-            image(FileIcons.image(named: name, dark: true), tint: nil, in: rect)
+            image(FileIcons.image(named: name, dark: true), tint: nil, in: rect, opacity: opacity)
         case .symbol(let symbol, let tint):
-            image(symbol, tint: tint, in: rect)
+            image(symbol, tint: tint, in: rect, opacity: opacity)
         case nil:
             break
         }
     }
 
-    static func image(_ image: NSImage?, tint: NSColor?, in rect: NSRect) {
+    static func image(_ image: NSImage?, tint: NSColor?, in rect: NSRect,
+                      opacity: CGFloat = 1) {
         guard let image, rect.width > 0, rect.height > 0 else { return }
         // SF Symbols have different intrinsic aspect ratios (a chevron is much
         // narrower than a folder). Match NSImageView's proportional scaling;
@@ -284,8 +286,10 @@ enum SidebarCellDrawing {
         // own starts from transparency, where the glyph is the only opaque
         // thing there is.
         let painted = tint.map { tinted(image, $0, size: fitted.size) } ?? image
+        // The fraction is the image's own alpha: `draw` sets it on the
+        // context, so a fade applied to the context beforehand is lost.
         painted.draw(in: fitted, from: .zero, operation: .sourceOver,
-                     fraction: 1, respectFlipped: true, hints: nil)
+                     fraction: opacity, respectFlipped: true, hints: nil)
         NSGraphicsContext.restoreGraphicsState()
     }
 

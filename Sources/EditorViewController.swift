@@ -18,6 +18,8 @@ final class EditorViewController: NSViewController {
 
     private var pane: EditorPaneViewController!
     private let welcome = WelcomeView()
+    /// A project open and no file: a few faint shortcuts where the text goes.
+    let emptyHints = EmptyEditorHintView()
     /// Settings opens a file, so it belongs with the editor's actions rather
     /// than with the panel switcher. It sits over the tab strip's reserved
     /// right edge — in the container, not in the strip, so an empty window
@@ -49,6 +51,8 @@ final class EditorViewController: NSViewController {
         welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
         welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
         container.addSubview(welcome)
+        emptyHints.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(emptyHints)
 
         settingsButton.image = NSImage(systemSymbolName: "gearshape",
                                        accessibilityDescription: "Settings")?
@@ -75,6 +79,10 @@ final class EditorViewController: NSViewController {
             welcome.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             welcome.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             welcome.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            emptyHints.topAnchor.constraint(equalTo: container.topAnchor),
+            emptyHints.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            emptyHints.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            emptyHints.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             settingsButton.trailingAnchor.constraint(equalTo: container.trailingAnchor,
                                                      constant: -10),
             settingsButtonTop,
@@ -162,6 +170,7 @@ final class EditorViewController: NSViewController {
     private func updatePlaceholder() {
         let hasOpenFiles = !(pane?.openURLs.isEmpty ?? true)
         welcome.isHidden = hasOpenFiles || hasProject
+        emptyHints.isHidden = hasOpenFiles || !hasProject
         // The pane (and its blank text view) must not cover the welcome screen.
         pane?.view.isHidden = !hasOpenFiles
     }
@@ -243,5 +252,91 @@ final class EditorViewController: NSViewController {
     func refreshDisplay() {
         pane?.refreshDisplay()
         welcome.refreshFonts()
+    }
+}
+
+/// What the editor area says with a project open and no file in it: a few
+/// shortcuts, faint and centred, the way Zed's empty pane lists them. Text,
+/// not buttons — the keys are the point.
+///
+/// Each shortcut is read from the menu item it belongs to, so the hint cannot
+/// drift from what the key does.
+final class EmptyEditorHintView: NSView {
+    /// The menu items listed, by title, in order.
+    static let titles = ["Quick Open…", "Find in Folder…", "Show Git",
+                         "Reopen Closed Tab", "Open…"]
+    /// Where the shortcuts are read from; the application's menu unless a
+    /// test hands it one.
+    var shortcutSource: NSMenu?
+
+    override var isFlipped: Bool { true }
+    /// Drawn over the editor area, never in the way of a click.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Each listed item that has a key, as its title and the key.
+    var lines: [(title: String, keys: String)] {
+        let source = shortcutSource ?? NSApp.mainMenu
+        return Self.titles.compactMap { title in
+            guard let item = Self.item(titled: title, in: source),
+                  let keys = Self.shortcut(of: item) else { return nil }
+            return (title.hasSuffix("…") ? String(title.dropLast()) : title, keys)
+        }
+    }
+
+    private static func item(titled title: String, in menu: NSMenu?) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if item.title == title { return item }
+            if let found = self.item(titled: title, in: item.submenu) { return found }
+        }
+        return nil
+    }
+
+    /// `⇧⌘F`, in the order the menu bar writes modifiers.
+    static func shortcut(of item: NSMenuItem) -> String? {
+        let key = item.keyEquivalent
+        guard !key.isEmpty else { return nil }
+        var modifiers = item.keyEquivalentModifierMask
+        // An upper-case key equivalent carries the shift with it.
+        if key != key.lowercased() { modifiers.insert(.shift) }
+        var glyphs = ""
+        if modifiers.contains(.control) { glyphs += "⌃" }
+        if modifiers.contains(.option) { glyphs += "⌥" }
+        if modifiers.contains(.shift) { glyphs += "⇧" }
+        if modifiers.contains(.command) { glyphs += "⌘" }
+        return glyphs + key.uppercased()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let lines = self.lines
+        guard !lines.isEmpty else { return }
+        let font = Theme.uiFont(12)
+        let rowHeight: CGFloat = 28
+        func width(_ text: String) -> CGFloat {
+            ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2
+        }
+        let titleWidth = lines.map { width($0.title) }.max() ?? 0
+        let keysWidth = lines.map { width($0.keys) }.max() ?? 0
+        let gap: CGFloat = 40
+        let blockWidth = min(titleWidth + gap + keysWidth, bounds.width - 32)
+        guard blockWidth > 0 else { return }
+        let origin = NSPoint(x: floor(bounds.midX - blockWidth / 2),
+                             y: floor(bounds.midY - CGFloat(lines.count) * rowHeight / 2))
+        for (index, line) in lines.enumerated() {
+            let row = NSRect(x: origin.x, y: origin.y + CGFloat(index) * rowHeight,
+                             width: blockWidth, height: rowHeight)
+            SidebarCellDrawing.text(line.title, font: font, color: Theme.dimText,
+                                    in: NSRect(x: row.minX, y: row.minY,
+                                               width: max(0, row.width - keysWidth - gap / 2),
+                                               height: row.height))
+            SidebarCellDrawing.text(line.keys, font: font, color: Theme.gutterActive,
+                                    in: NSRect(x: row.maxX - keysWidth, y: row.minY,
+                                               width: keysWidth, height: row.height),
+                                    alignment: .right)
+        }
     }
 }

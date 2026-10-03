@@ -113,6 +113,9 @@ enum RegressionTests {
         try testAllBranchesHistoryGraph()
         try testProjectHistoryIsTheCurrentBranch()
         try testProjectHistoryMarksTheBranchBase()
+        try testRefPillText()
+        try testIgnoredFilesAreDimmed()
+        try testEmptyEditorHints()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5220,6 +5223,120 @@ enum RegressionTests {
     /// A branch's history includes the branch it was started from. The
     /// project's history names that branch on a rule above the first of its
     /// commits and draws them back; the branch's own commits read first.
+    /// A pill names its ref in full — but the checked-out branch's copy on a
+    /// remote is just the remote.
+    private static func testRefPillText() throws {
+        typealias Label = GitService.Commit.RefLabel
+        let remote = Label(name: "origin/feature/font-seo", kind: .remoteBranch, isCurrent: false)
+        let local = Label(name: "feature/font-seo", kind: .localBranch, isCurrent: true)
+        try expect(GitRefLabelsDrawing.text(for: remote, currentBranch: "feature/font-seo")
+                    == "origin",
+                   "the current branch's remote copy is spelled out")
+        try expect(GitRefLabelsDrawing.text(for: remote, currentBranch: "feature/other")
+                    == "origin/feature/font-seo"
+                    && GitRefLabelsDrawing.text(for: remote, currentBranch: nil)
+                    == "origin/feature/font-seo",
+                   "another branch's remote copy lost its name")
+        try expect(GitRefLabelsDrawing.text(for: local, currentBranch: "feature/font-seo")
+                    == "feature/font-seo",
+                   "the local branch itself was shortened")
+        try expect(GitRefLabelsDrawing.width([remote], currentBranch: "feature/font-seo")
+                    < GitRefLabelsDrawing.width([remote]),
+                   "the short pill is measured at its long width")
+    }
+
+    /// What Git ignores is drawn dimmed in the tree — the folder ignored
+    /// whole, and everything in it — and nothing else is.
+    private static func testIgnoredFilesAreDimmed() throws {
+        let root = try temporaryDirectory("tree-ignored")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = FileManager.default
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        try Data("node_modules/\n*.log\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        let package = root.appendingPathComponent("node_modules/pkg", isDirectory: true)
+        try manager.createDirectory(at: package, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: package.appendingPathComponent("index.js"))
+        let sub = root.appendingPathComponent("sub", isDirectory: true)
+        try manager.createDirectory(at: sub, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: sub.appendingPathComponent("trace.log"))
+        try Data("x".utf8).write(to: sub.appendingPathComponent("app.js"))
+        try Data("x".utf8).write(to: root.appendingPathComponent("debug.log"))
+        try Data("x".utf8).write(to: root.appendingPathComponent("notes.txt"))
+
+        let ignored = GitService.ignoredPaths(in: root)
+        try expect(ignored == ["node_modules", "debug.log", "sub/trace.log"],
+                   "Git's ignored paths read wrong: \(ignored.sorted())")
+        // A project inside the repository hears paths relative to itself.
+        try expect(GitService.ignoredPaths(in: sub) == ["trace.log"],
+                   "a nested project's ignored paths are not its own: "
+                     + "\(GitService.ignoredPaths(in: sub).sorted())")
+        let plain = try temporaryDirectory("tree-ignored-plain")
+        defer { try? FileManager.default.removeItem(at: plain) }
+        try expect(GitService.ignoredPaths(in: plain).isEmpty,
+                   "a folder that is no repository has ignored paths")
+
+        let tree = FileTreeViewController()
+        _ = tree.view
+        tree.setRoot(root)
+        tree.setStatus(modified: [], untracked: [], ignored: ignored)
+        func row(_ name: String) -> Int? {
+            (0..<tree.rowCountForTesting).first {
+                tree.nodeForTesting(at: $0)?.url.lastPathComponent == name
+            }
+        }
+        guard let modules = row("node_modules"), let log = row("debug.log"),
+              let notes = row("notes.txt"), let subRow = row("sub") else {
+            throw Failure(description: "the tree is missing a fixture row")
+        }
+        try expect(tree.isIgnoredForTesting(at: modules) && tree.isIgnoredForTesting(at: log)
+                    && !tree.isIgnoredForTesting(at: notes)
+                    && !tree.isIgnoredForTesting(at: subRow),
+                   "the wrong rows read as ignored")
+        try expect(sameColor(tree.titleColorForTesting(at: modules), Theme.dimText)
+                    && sameColor(tree.titleColorForTesting(at: notes), Theme.foreground),
+                   "ignored and kept files are drawn alike")
+        tree.expandRowForTesting(modules)
+        guard let inside = row("pkg") else { throw Failure(description: "node_modules did not open") }
+        try expect(tree.isIgnoredForTesting(at: inside),
+                   "a folder inside an ignored one is not drawn as ignored")
+        // A change's colour still wins over the dimming.
+        tree.setStatus(modified: [], untracked: ["debug.log"], ignored: ignored)
+        try expect(sameColor(tree.titleColorForTesting(at: row("debug.log") ?? -1), Theme.green),
+                   "the dimming hid a change's colour")
+    }
+
+    /// With a project open and no file, the editor area lists a few
+    /// shortcuts, each read from its menu item.
+    private static func testEmptyEditorHints() throws {
+        let menu = NSMenu()
+        let file = NSMenu()
+        let fileItem = NSMenuItem()
+        fileItem.submenu = file
+        menu.addItem(fileItem)
+        file.addItem(withTitle: "Open…", action: nil, keyEquivalent: "o")
+        file.addItem(withTitle: "Quick Open…", action: nil, keyEquivalent: "p")
+        file.addItem(withTitle: "Reopen Closed Tab", action: nil, keyEquivalent: "T")
+        file.addItem(withTitle: "Find in Folder…", action: nil, keyEquivalent: "F")
+        // "Show Git" is missing: its line is left out rather than guessed.
+        let hints = EmptyEditorHintView()
+        hints.shortcutSource = menu
+        let lines = hints.lines.map { "\($0.title) \($0.keys)" }
+        try expect(lines == ["Quick Open ⌘P", "Find in Folder ⇧⌘F",
+                             "Reopen Closed Tab ⇧⌘T", "Open ⌘O"],
+                   "the hints read \(lines)")
+        let replace = NSMenuItem(title: "Find and Replace…", action: nil, keyEquivalent: "f")
+        replace.keyEquivalentModifierMask = [.command, .option]
+        try expect(EmptyEditorHintView.shortcut(of: replace) == "⌥⌘F",
+                   "modifiers are written \(EmptyEditorHintView.shortcut(of: replace) ?? "nil")")
+        try expect(hints.hitTest(NSPoint(x: 1, y: 1)) == nil, "the hints take clicks")
+
+        let editor = EditorViewController()
+        _ = editor.view
+        try expect(editor.emptyHints.isHidden, "the hints show with no project")
+        editor.hasProject = true
+        try expect(!editor.emptyHints.isHidden, "a project with no file shows no hints")
+    }
+
     private static func testProjectHistoryMarksTheBranchBase() throws {
         let root = try temporaryDirectory("project-history-base")
         let remote = try temporaryDirectory("project-history-base-remote")
@@ -5248,6 +5365,18 @@ enum RegressionTests {
             try git(["commit", "-q", "-m", subject])
         }
         func base() -> String? { GitService.branchBase(in: root)?.name }
+        func source() throws -> ProjectHistoryViewController.State {
+            .init(head: try git(["rev-parse", "HEAD"]),
+                  branch: (try? git(["symbolic-ref", "--short", "HEAD"])) ?? "")
+        }
+        func waitFor(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        defer { ProjectHistoryViewController.unfoldAllForTesting() }
 
         try git(["init", "-q", "-b", "main"])
         try git(["config", "user.name", "Base Test"])
@@ -5275,7 +5404,7 @@ enum RegressionTests {
         window.contentViewController = history
         window.setContentSize(NSSize(width: 380, height: 420))
         defer { window.close() }
-        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.setSource(directory: root, state: try source())
         history.settleForTesting()
         try expect(history.rowOutlineForTesting == ["a2", "a1", "— b", "b2", "b1", "m2", "m1"],
                    "the base is not marked where a's own commits end: "
@@ -5288,17 +5417,73 @@ enum RegressionTests {
         try expect(history.baseCellForTesting(2)?.labelForTesting == "Branched from b",
                    "the rule does not name the base: "
                      + "\(String(describing: history.baseCellForTesting(2)?.labelForTesting))")
-        try expect(history.rowViewForTesting(2)?.isInert == true
-                    && history.rowViewForTesting(3)?.isInert == false,
-                   "the rule takes the pointer, or a commit does not")
+        try expect(history.rowViewForTesting(2)?.isStriped == false
+                    && history.rowViewForTesting(3)?.isStriped == true,
+                   "the rule is striped like a row read across, or a commit is not")
+
+        // A click on the rule folds b's commits away under it; another
+        // brings them back.
         history.clickRowForTesting(2)
-        try expect(history.rowCountForTesting == 7, "clicking the rule did something")
+        try expect(history.isBaseFoldedForTesting
+                    && history.rowOutlineForTesting == ["a2", "a1", "— b"]
+                    && history.baseCellForTesting(2)?.isFoldedForTesting == true,
+                   "the rule did not fold the base away: \(history.rowOutlineForTesting)")
+        history.clickRowForTesting(2)
+        try expect(!history.isBaseFoldedForTesting
+                    && history.rowOutlineForTesting.count == 7
+                    && history.baseCellForTesting(2)?.isFoldedForTesting == false,
+                   "the base did not come back: \(history.rowOutlineForTesting)")
+
+        // The keys: ↓ lights the next row and keeps it through a layout, ↩
+        // does to it what a click does, ↑ goes back.
+        history.pressKeyForTesting(125)
+        history.pressKeyForTesting(125)
+        try expect(history.litRowForTesting == 1, "↓↓ lit row \(history.litRowForTesting)")
+        history.refreshHoverForTesting()
+        try expect(history.litRowForTesting == 1,
+                   "a layout took the keys' row back to the pointer: \(history.litRowForTesting)")
+        history.pressKeyForTesting(36)
+        try expect(waitFor { history.rowOutlineForTesting.contains("a1.txt") },
+                   "↩ did not open the commit: \(history.rowOutlineForTesting)")
+        history.pressKeyForTesting(36)
+        try expect(waitFor { history.rowOutlineForTesting.count == 7 },
+                   "↩ again did not close it: \(history.rowOutlineForTesting)")
+        history.pressKeyForTesting(126)
+        try expect(history.litRowForTesting == 0, "↑ lit row \(history.litRowForTesting)")
+        // ↩ on the rule folds, as a click does.
+        history.pressKeyForTesting(125)
+        history.pressKeyForTesting(125)
+        history.pressKeyForTesting(36)
+        try expect(history.isBaseFoldedForTesting, "↩ on the rule did not fold the base")
+        history.clickRowForTesting(2)
+
+        // Folded, the list stops reading pages that would only be folded too.
+        do {
+            ProjectHistoryViewController.pageSize = 3
+            defer { ProjectHistoryViewController.pageSize = 200 }
+            let paged = ProjectHistoryViewController()
+            _ = paged.view
+            paged.view.frame = NSRect(x: 0, y: 0, width: 300, height: 60)
+            paged.view.layoutSubtreeIfNeeded()
+            paged.setSource(directory: root, state: try source())
+            paged.settleForTesting()
+            try expect(paged.rowOutlineForTesting == ["a2", "a1", "— b", "b2"],
+                       "the first page is not a's commits and the rule: "
+                         + "\(paged.rowOutlineForTesting)")
+            paged.clickRowForTesting(2)
+            paged.scrollToEndForTesting()
+            try expect(paged.limitForTesting == 3, "a folded list read another page")
+            paged.clickRowForTesting(2)
+            paged.scrollToEndForTesting()
+            paged.settleForTesting()
+            try expect(paged.limitForTesting > 3, "unfolded, the list did not read on")
+        }
 
         // Merging x in brings it nearer than b — but it meets a off a's own
         // line, through the merge: merged in, not started from.
         try git(["merge", "-q", "--no-ff", "-m", "merge x", "x"])
         try expect(base() == "b", "a branch merged in became the base: \(String(describing: base()))")
-        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.setSource(directory: root, state: try source())
         history.settleForTesting()
         let merged = history.rowOutlineForTesting
         try expect(history.inheritedSubjectsForTesting == ["b2", "b1", "m2", "m1"]
@@ -5327,10 +5512,21 @@ enum RegressionTests {
         try commit("a3")
         try expect(base() == "b", "the branch's own remote copy became the base: "
                      + "\(String(describing: base()))")
+        // And its pill says only the remote: which branch it copies goes
+        // without saying.
+        history.setSource(directory: root, state: try source())
+        history.settleForTesting()
+        let pushedRow = (0..<history.rowCountForTesting).first {
+            history.rowCellForTesting($0)?.refLabelsForTesting.contains("origin/a") == true
+        }
+        try expect(pushedRow.flatMap { history.rowCellForTesting($0)?.refTextsForTesting }
+                    == ["origin"],
+                   "the branch's remote copy is not drawn as its remote: "
+                     + "\(String(describing: pushedRow.flatMap { history.rowCellForTesting($0)?.refTextsForTesting }))")
 
         // A branch with nothing of its own yet came wholly from the older one.
         try git(["checkout", "-q", "-b", "fresh"])
-        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.setSource(directory: root, state: try source())
         history.settleForTesting()
         try expect(history.baseNameForTesting == "a"
                     && history.rowOutlineForTesting.first == "— a"
@@ -5353,7 +5549,7 @@ enum RegressionTests {
         // The default branch is the trunk, and a detached HEAD no branch.
         try git(["checkout", "-q", "main"])
         try expect(base() == nil, "the default branch has a base: \(String(describing: base()))")
-        history.setSource(directory: root, state: .init(head: try git(["rev-parse", "HEAD"])))
+        history.setSource(directory: root, state: try source())
         history.settleForTesting()
         try expect(history.baseNameForTesting == nil && history.inheritedSubjectsForTesting.isEmpty,
                    "the default branch's history has a rule: \(history.rowOutlineForTesting)")

@@ -45,6 +45,8 @@ final class GitPanelViewController: NSViewController {
     }
     private var showingHistory = false
     private var showingBranches = false
+    /// The branch checked out — its copy on a remote is drawn as the remote.
+    private var currentBranch = ""
     /// False once everything local is on the remote, which is when Push has
     /// nothing left to do.
     private var pushIsPossible: Bool { aheadCount > 0 || !hasUpstream }
@@ -116,6 +118,7 @@ final class GitPanelViewController: NSViewController {
 
     func setDirectory(_ url: URL?) {
         directory = url
+        currentBranch = ""
         entries.removeAll()
         // Another repository's depth is not this one's.
         resetHistoryDepth()
@@ -211,6 +214,7 @@ final class GitPanelViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.onActivateRow = { [weak self] row in self?.activate(row: row) }
         table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         table.usesAlternatingRowBackgroundColors = false
 
@@ -586,6 +590,7 @@ final class GitPanelViewController: NSViewController {
     /// Changes clears immediately even if that push later fails.
     private func applyStatus(_ status: GitService.Status, in directory: URL) {
         entries = status.entries
+        currentBranch = status.isRepo ? status.branch : ""
         var label = "\(directory.lastPathComponent) / \(status.branch)"
         // Who the next commit will be authored by, straight from git config.
         if !status.userName.isEmpty { label += " / \(status.userName)" }
@@ -863,8 +868,10 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    @objc private func rowClicked() {
-        let row = table.clickedRow
+    @objc private func rowClicked() { activate(row: table.clickedRow) }
+
+    /// A click on a row, or Return on the row the keys lit.
+    private func activate(row: Int) {
         guard row >= 0, let directory else { return }
 
         if showingBranches {
@@ -1565,7 +1572,7 @@ extension GitPanelViewController: NSTableViewDelegate {
                 cell.identifier = id
                 cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
                                graphRow: historyGraphRows[commit.graphID],
-                               graphWidth: historyGraphWidth)
+                               graphWidth: historyGraphWidth, currentBranch: currentBranch)
                 return cell
 
             case .file(let file, let commit):

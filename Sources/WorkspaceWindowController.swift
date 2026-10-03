@@ -794,6 +794,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         gitSummaryQueue.async { [weak self] in
             let status = GitService.status(in: projectURL)
             let split = GitService.trackedAndUntracked(in: status)
+            let ignored = status.isRepo ? GitService.ignoredPaths(in: projectURL) : []
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.gitSummaryRefreshInFlight = false
@@ -801,13 +802,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 if self.projectURL == projectURL,
                    self.gitRefreshGeneration == generation {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
-                                                    untracked: split.untracked)
+                                                    untracked: split.untracked,
+                                                    ignored: ignored)
                     self.currentBranchName = status.isRepo ? status.branch : nil
                     self.sidebar.setChanges(
                         status.isRepo ? status.entries : [], in: projectURL,
                         state: status.isRepo
                             ? .init(head: status.head, ahead: status.ahead,
-                                    hasUpstream: status.hasUpstream)
+                                    hasUpstream: status.hasUpstream, branch: status.branch)
                             : .init())
                     self.sidebar.setProjectTitle(
                         project: projectURL.lastPathComponent,

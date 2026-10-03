@@ -39,6 +39,9 @@ final class ProjectHistoryViewController: NSViewController {
         var head = ""
         var ahead = 0
         var hasUpstream = false
+        /// The branch checked out. A new branch at the same commit has a
+        /// different base, and its copy on a remote is drawn as the remote.
+        var branch = ""
     }
     private var commits: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — drawn with an ↑, as in
@@ -50,6 +53,16 @@ final class ProjectHistoryViewController: NSViewController {
     private var baseName: String?
     /// Full IDs of the listed commits that came with that branch.
     private var inherited: Set<String> = []
+    /// Branches whose base's commits are folded away under the rule, by
+    /// project and branch: a choice about that branch's list, kept while
+    /// Puzzle runs, in every window.
+    private static var foldedBranches: Set<String> = []
+    private var foldKey: String? {
+        guard let directory, let branch = state?.branch, !branch.isEmpty else { return nil }
+        return directory.path + "\n" + branch
+    }
+    /// The base's commits are folded away under the rule.
+    private var isBaseFolded: Bool { foldKey.map(Self.foldedBranches.contains) ?? false }
     private var rows: [Row] = []
     private var loading = false
     /// Something moved while a read was already running. The reply in flight
@@ -73,6 +86,7 @@ final class ProjectHistoryViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.onActivateRow = { [weak self] row in self?.act(on: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("commit"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -199,7 +213,9 @@ final class ProjectHistoryViewController: NSViewController {
     /// rather than appended: one `git log` for the deeper list is simpler than
     /// stitching pages together, and it cannot disagree with itself.
     @objc private func scrolled() {
-        guard hasMore, !loading, let directory,
+        // Folded, the list ends at the rule: what a deeper page would bring
+        // is the base's, and would only be folded away too.
+        guard hasMore, !loading, let directory, !(isBaseFolded && !inherited.isEmpty),
               let clip = table.enclosingScrollView?.contentView else { return }
         let remaining = table.bounds.height - clip.bounds.maxY
         guard remaining < clip.bounds.height else { return }
@@ -210,14 +226,18 @@ final class ProjectHistoryViewController: NSViewController {
     private func rebuildRows() {
         var built: [Row] = []
         var ruled = false
+        let folded = isBaseFolded
         for commit in commits {
             // Topological order puts the branch's own commits first, but a
             // merge from the base can bring its commits up among them: the
-            // rule goes above the first, and each one is drawn back on its own.
-            if !ruled, let baseName, inherited.contains(commit.graphID) {
+            // rule goes above the first, and each one is drawn back on its own
+            // — or, folded, left out on its own.
+            let isInherited = baseName != nil && inherited.contains(commit.graphID)
+            if isInherited, !ruled, let baseName {
                 built.append(.base(baseName))
                 ruled = true
             }
+            if isInherited && folded { continue }
             built.append(.commit(commit))
             guard expanded.contains(commit.shortHash) else { continue }
             for file in files[commit.shortHash] ?? [] {
@@ -245,8 +265,17 @@ final class ProjectHistoryViewController: NSViewController {
         case .file(let file, let commit):
             onOpenCommitDiff?(commit, file, directory)
         case .base:
-            break
+            toggleBaseFold()
         }
+    }
+
+    /// The rule folds the base's commits away, and brings them back.
+    private func toggleBaseFold() {
+        guard let foldKey else { return }
+        if Self.foldedBranches.remove(foldKey) == nil { Self.foldedBranches.insert(foldKey) }
+        rebuildRows()
+        // Unfolded at the end of what is read, the next page may be due.
+        if !isBaseFolded { scrolled() }
     }
 
     private func toggle(_ commit: GitService.Commit, in directory: URL) {
@@ -300,6 +329,12 @@ final class ProjectHistoryViewController: NSViewController {
         rows.lazy.compactMap { if case .base(let name) = $0 { return name } else { return nil } }
             .first
     }
+    var isBaseFoldedForTesting: Bool { isBaseFolded }
+    /// A key pressed in the list, and the row the keys have lit.
+    func pressKeyForTesting(_ keyCode: UInt16) { table.pressKeyForTesting(keyCode) }
+    var litRowForTesting: Int { table.hoveredRow }
+    func refreshHoverForTesting() { table.refreshHoverState() }
+    static func unfoldAllForTesting() { foldedBranches.removeAll() }
     var inheritedSubjectsForTesting: [String] {
         rows.compactMap {
             guard case .commit(let commit) = $0, inherited.contains(commit.graphID) else {
@@ -394,12 +429,13 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
         view.identifier = id
         // A recycled row must not bring the pointer, or the stripe, of the
         // place it was last used — nor, from the rule, its inertness.
+        // The rule is not read across as a row; it lights under the pointer
+        // like one, since a click folds the base.
         view.isHovered = table.hoveredRow == row
-        view.isStriped = row % 2 == 1
         if rows.indices.contains(row), case .base = rows[row] {
-            view.isInert = true
+            view.isStriped = false
         } else {
-            view.isInert = false
+            view.isStriped = row % 2 == 1
         }
         return view
     }
@@ -414,14 +450,15 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
                 ?? GitCommitCell()
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
-                           showsID: false, inherited: inherited.contains(commit.graphID))
+                           showsID: false, inherited: inherited.contains(commit.graphID),
+                           currentBranch: state?.branch)
             return cell
         case .base(let name):
             let id = NSUserInterfaceItemIdentifier("project-history-base")
             let cell = (tableView.makeView(withIdentifier: id, owner: self) as? GitBranchBaseCell)
                 ?? GitBranchBaseCell()
             cell.identifier = id
-            cell.configure(base: name)
+            cell.configure(base: name, folded: isBaseFolded)
             return cell
         case .file(let file, _):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

@@ -66,6 +66,7 @@ final class ProjectChangesViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.onActivateRow = { [weak self] row in self?.activate(row: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("change"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -139,9 +140,12 @@ final class ProjectChangesViewController: NSViewController {
         field.stringValue = new.flatMap { drafts[$0] } ?? ""
     }
 
-    @objc private func rowClicked() {
-        guard let directory, entries.indices.contains(table.clickedRow) else { return }
-        onOpenDiff?(entries[table.clickedRow], directory)
+    @objc private func rowClicked() { activate(row: table.clickedRow) }
+
+    /// A click on a row, or Return on the row the keys lit.
+    private func activate(row: Int) {
+        guard let directory, entries.indices.contains(row) else { return }
+        onOpenDiff?(entries[row], directory)
     }
 
     func refreshFonts() {

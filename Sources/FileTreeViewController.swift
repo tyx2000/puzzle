@@ -142,6 +142,9 @@ final class FileTreeViewController: NSViewController {
     /// something under it differs — git reports files, never their folders.
     private var dirtyDirectories: Set<String> = []
     private var untrackedDirectories: Set<String> = []
+    /// What Git ignores — files, and folders ignored whole. Drawn dimmed, as
+    /// Zed does: there, but not part of the project's work.
+    private var ignoredPaths: Set<String> = []
     /// The file open in the active editor pane — gets a persistent background.
     private var activeURL: URL?
     private var pendingEdit: PendingTreeEdit?
@@ -404,9 +407,11 @@ final class FileTreeViewController: NSViewController {
         }
     }
 
-    func setStatus(modified: Set<String>, untracked: Set<String>) {
+    func setStatus(modified: Set<String>, untracked: Set<String>,
+                   ignored: Set<String> = []) {
         dirtyPaths = modified
         untrackedPaths = untracked
+        ignoredPaths = ignored
         dirtyDirectories = Self.ancestors(of: modified)
         untrackedDirectories = Self.ancestors(of: untracked)
         guard pendingEdit == nil else {
@@ -444,6 +449,32 @@ final class FileTreeViewController: NSViewController {
         if untrackedPaths.contains(path) { return Theme.green }
         if dirtyPaths.contains(path) { return Theme.yellow }
         return nil
+    }
+
+    /// Ignored itself, or inside a folder that is.
+    private func isIgnored(_ node: FileNode) -> Bool {
+        guard !ignoredPaths.isEmpty, let path = relativePath(for: node) else { return false }
+        if ignoredPaths.contains(path) { return true }
+        var prefix = Substring(path)
+        while let slash = prefix.lastIndex(of: "/") {
+            prefix = prefix[..<slash]
+            if ignoredPaths.contains(String(prefix)) { return true }
+        }
+        return false
+    }
+
+    /// A change's colour first; otherwise ignored files read dimmed.
+    private func titleColor(for node: FileNode) -> NSColor {
+        statusColor(for: node) ?? (isIgnored(node) ? Theme.dimText : Theme.foreground)
+    }
+
+    func isIgnoredForTesting(at row: Int) -> Bool {
+        guard let node = outlineView.item(atRow: row) as? FileNode else { return false }
+        return isIgnored(node)
+    }
+    func titleColorForTesting(at row: Int) -> NSColor? {
+        guard let node = outlineView.item(atRow: row) as? FileNode else { return nil }
+        return titleColor(for: node)
     }
 
     /// Expand ancestors and select the row for `url` (keeps the tree in sync
@@ -1037,10 +1068,9 @@ extension FileTreeViewController: NSOutlineViewDelegate {
         let disclosure = node.isDirectory
             ? Theme.symbol(expanded ? "chevron.down" : "chevron.right", pointSize: 9)
             : nil
-        let titleColor = statusColor(for: node) ?? Theme.foreground
         cell.configure(title: node.name, disclosure: disclosure,
                        icon: icon,
-                       titleColor: titleColor)
+                       titleColor: titleColor(for: node), dimmed: isIgnored(node))
         return cell
     }
 
@@ -1104,15 +1134,18 @@ private final class FileTreeCell: DrawnSidebarCell {
     private var disclosure: NSImage?
     private var icon: SidebarIcon?
     private var titleColor = NSColor.clear
+    /// Ignored by Git: the icon is drawn faded with the name.
+    private var dimmed = false
     var titleColorForTesting: NSColor { titleColor }
 
     func configure(title: String, disclosure: NSImage?,
                    icon: SidebarIcon?,
-                   titleColor: NSColor) {
+                   titleColor: NSColor, dimmed: Bool = false) {
         self.title = title
         self.disclosure = disclosure
         self.icon = icon
         self.titleColor = titleColor
+        self.dimmed = dimmed
         toolTip = title
         exposeToAccessibility(title)
         needsDisplay = true
@@ -1130,7 +1163,8 @@ private final class FileTreeCell: DrawnSidebarCell {
                                 in: FileTreeRowLayout.centeredRect(
                                     x: FileTreeRowLayout.iconX,
                                     size: FileTreeRowLayout.iconSize,
-                                    in: bounds))
+                                    in: bounds),
+                                opacity: dimmed ? 0.45 : 1)
         SidebarCellDrawing.text(title, font: font, color: titleColor,
                                 baseline: baseline,
                                 in: NSRect(x: FileTreeRowLayout.titleX, y: 0,

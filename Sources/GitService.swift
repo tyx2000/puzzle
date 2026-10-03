@@ -1477,6 +1477,18 @@ enum GitService {
     /// itself distinguishes them: new files read differently from edited ones.
     /// Split an existing snapshot rather than running `git status` again — the
     /// window needs both this and the snapshot itself on every refresh.
+    /// What Git ignores under the project, relative to it. A directory whose
+    /// contents are all ignored is one entry — `node_modules`, not everything
+    /// in it — and Git does not walk into it to say so.
+    static func ignoredPaths(in directory: URL) -> Set<String> {
+        let result = run(["ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+                          "--directory", "--", "."], in: directory)
+        guard result.code == 0 else { return [] }
+        return Set(result.out.split(separator: "\0").map { entry in
+            entry.hasSuffix("/") ? String(entry.dropLast()) : String(entry)
+        })
+    }
+
     static func trackedAndUntracked(in s: Status) -> (modified: Set<String>,
                                                       untracked: Set<String>) {
         var modified: Set<String> = []

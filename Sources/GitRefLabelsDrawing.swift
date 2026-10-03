@@ -9,22 +9,35 @@ enum GitRefLabelsDrawing {
     static let height: CGFloat = 16
     static var font: NSFont { Theme.uiFont(9) }
 
-    static func width(_ refs: [GitService.Commit.RefLabel]) -> CGFloat {
+    /// What a pill says. The checked-out branch's copy on a remote says only
+    /// the remote — `origin`, not `origin/feature/font-seo`, which a narrow
+    /// row cut to `origi…nt-seo`. Which branch it is a copy of goes without
+    /// saying: the one the reader is on.
+    static func text(for ref: GitService.Commit.RefLabel, currentBranch: String?) -> String {
+        guard ref.kind == .remoteBranch, let currentBranch, !currentBranch.isEmpty,
+              let slash = ref.name.firstIndex(of: "/"),
+              ref.name[ref.name.index(after: slash)...] == currentBranch else { return ref.name }
+        return String(ref.name[..<slash])
+    }
+
+    static func width(_ refs: [GitService.Commit.RefLabel],
+                      currentBranch: String? = nil) -> CGFloat {
         let widths = refs.map {
-            ceil(($0.name as NSString).size(withAttributes: [.font: font]).width)
-                + horizontalPadding * 2
+            ceil((text(for: $0, currentBranch: currentBranch) as NSString)
+                .size(withAttributes: [.font: font]).width) + horizontalPadding * 2
         }
         return widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * gap
     }
 
     @discardableResult
     static func draw(_ refs: [GitService.Commit.RefLabel], in rect: NSRect,
-                     currentColor: NSColor) -> [NSRect] {
+                     currentColor: NSColor, currentBranch: String? = nil) -> [NSRect] {
         guard !refs.isEmpty, rect.width > 0 else { return [] }
         var drawn: [NSRect] = []
         var x = rect.minX
         for ref in refs where x < rect.maxX {
-            let natural = ceil((ref.name as NSString)
+            let label = text(for: ref, currentBranch: currentBranch)
+            let natural = ceil((label as NSString)
                 .size(withAttributes: [.font: font]).width) + horizontalPadding * 2
             let width = min(natural, rect.maxX - x)
             guard width >= horizontalPadding * 2 + 4 else { break }
@@ -44,7 +57,7 @@ enum GitRefLabelsDrawing {
             path.lineWidth = 1
             path.stroke()
             SidebarCellDrawing.text(
-                ref.name, font: font, color: color,
+                label, font: font, color: color,
                 in: pill.insetBy(dx: horizontalPadding, dy: 0),
                 lineBreak: .byTruncatingMiddle)
             drawn.append(pill)
