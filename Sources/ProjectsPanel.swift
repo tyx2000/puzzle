@@ -777,6 +777,54 @@ final class ProjectColumnsView: FlatView {
                       height: max(0, pane.height - inset * 2))
     }
 
+    /// The line between the panes and the regions' borders, as views of their
+    /// own: drawn by the splitter, a few points of line cost a bitmap the size
+    /// of the whole panel.
+    private let line = EdgeView()
+    private let firstEdge = EdgeView()
+    private let secondEdge = EdgeView()
+
+    /// A line or a region's frame: a layer's colour or border, never a
+    /// bitmap, and never in the way of a click.
+    private final class EdgeView: FlatView {
+        var borderColor: NSColor? { didSet { needsDisplay = true } }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override var wantsUpdateLayer: Bool { true }
+
+        override func updateLayer() {
+            super.updateLayer()
+            layer?.borderColor = borderColor?.cgColor
+            layer?.borderWidth = borderColor == nil ? 0 : ProjectColumnsView.borderWidth
+        }
+
+        /// Off screen — a snapshot — the frame is drawn as it always was.
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            guard let borderColor else { return }
+            let inset = ProjectColumnsView.borderWidth / 2
+            let path = NSBezierPath(rect: bounds.insetBy(dx: inset, dy: inset))
+            path.lineWidth = ProjectColumnsView.borderWidth
+            borderColor.setStroke()
+            path.stroke()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        line.fillColor = Theme.border
+        for edge in [line, firstEdge, secondEdge] { addSubview(edge) }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func place(_ edge: EdgeView, border: NSColor?, around pane: NSRect, shown: Bool) {
+        edge.isHidden = !shown || border == nil || pane.width <= 0 || pane.height <= 0
+        edge.frame = pane
+        edge.borderColor = border
+    }
+
     /// A pane is positioned by hand, and everything inside it by constraints.
     /// Handing it a new frame only marks its own subtree as needing layout, so
     /// a scroll view inside it keeps the size it had until some later pass —
@@ -784,6 +832,12 @@ final class ProjectColumnsView: FlatView {
     /// amount, or not at all. Settle each pane before leaving.
     override func layout() {
         super.layout()
+        // Two coloured borders meeting already separate the panes; a grey line
+        // between them is a third edge saying the same thing.
+        line.isHidden = !showsSecond || firstBorder != nil || secondBorder != nil
+        line.frame = dividerRect(radius: 0)
+        place(firstEdge, border: firstBorder, around: firstPaneRect, shown: true)
+        place(secondEdge, border: secondBorder, around: secondPaneRect, shown: showsSecond)
         second?.isHidden = !showsSecond
         first?.frame = content(of: firstPaneRect, bordered: firstBorder != nil)
         first?.layoutSubtreeIfNeeded()
@@ -800,27 +854,6 @@ final class ProjectColumnsView: FlatView {
         needsLayout = true
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        draw(border: firstBorder, around: firstPaneRect)
-        guard showsSecond else { return }
-        draw(border: secondBorder, around: secondPaneRect)
-        // Two coloured borders meeting already separate the panes; a grey line
-        // between them is a third edge saying the same thing.
-        guard firstBorder == nil, secondBorder == nil else { return }
-        Theme.border.setFill()
-        dividerRect(radius: 0).fill()
-    }
-
-    private func draw(border: NSColor?, around pane: NSRect) {
-        guard let border, pane.width > 0, pane.height > 0 else { return }
-        border.setStroke()
-        let path = NSBezierPath(rect: pane.insetBy(dx: Self.borderWidth / 2,
-                                                   dy: Self.borderWidth / 2))
-        path.lineWidth = Self.borderWidth
-        path.stroke()
     }
 }
 

@@ -40,6 +40,7 @@ enum RegressionTests {
         try testMaterialFileIcons()
         try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
+        try testFlatSurfacesHoldNoBitmap()
         try testDiffHeaderStepsThroughChanges()
         try testThemeIsReadyBeforeAnyView()
         try testChangesContextMenu()
@@ -1159,7 +1160,9 @@ enum RegressionTests {
         let panel = workspace.sidebar.projectsPanel
         try expect(!panel.gitListsVisibleForTesting && !panel.notRepositoryVisibleForTesting,
                    "an empty window still shows a project's lists")
-        // And the diff side is the start page, not a hint about diffs.
+        // And the diff side is the start page, not a hint about diffs. It is
+        // made a turn after it is asked for.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         try expect(workspace.diffs.welcomeVisibleForTesting
                     && !workspace.diffs.hintVisibleForTesting,
                    "an empty window does not show the start page")
@@ -3332,6 +3335,126 @@ enum RegressionTests {
 
     /// One palette, fixed: nothing follows the system appearance and no setting
     /// selects anything else, so the tokens can be asserted outright.
+    /// A flat colour is shown as the layer's background, and a region's frame
+    /// as the layer's border, not drawn: drawn, every panel ground and list row
+    /// held a bitmap the size of itself, and together they were most of the
+    /// app's memory.
+    private static func testFlatSurfacesHoldNoBitmap() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        host.wantsLayer = true
+        window.contentView = host
+        /// The view's layer once it has been brought up to date. Off screen,
+        /// AppKit makes a view's layer only at the next commit.
+        func shown(_ view: NSView) -> CALayer? {
+            if view.layer == nil { CATransaction.flush() }
+            view.needsDisplay = true
+            view.displayIfNeeded()
+            return view.layer
+        }
+        func colour(_ cgColor: CGColor?) -> NSColor? { cgColor.flatMap { NSColor(cgColor: $0) } }
+
+        // A plain fill, and a subclass that only adds behaviour, keep no bitmap.
+        final class Behaviour: FlatView {
+            override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        }
+        for plain in [FlatView(frame: host.bounds), Behaviour(frame: host.bounds)] {
+            plain.fillColor = Theme.stripedRow
+            host.addSubview(plain)
+            defer { plain.removeFromSuperview() }
+            try expect(plain.wantsUpdateLayer, "\(type(of: plain)) still draws its fill")
+            try expect(sameColor(colour(shown(plain)?.backgroundColor), Theme.stripedRow),
+                       "\(type(of: plain)) does not show its fill colour")
+            try expect(plain.layer?.contents == nil, "\(type(of: plain)) holds a bitmap")
+        }
+        // An edge, or a subclass's own drawing, still has to be drawn.
+        let edged = FlatView(frame: host.bounds)
+        edged.bottomBorder = true
+        try expect(!edged.wantsUpdateLayer, "a view with an edge lost its drawing")
+        final class Drawing: FlatView {
+            override func draw(_ dirtyRect: NSRect) { super.draw(dirtyRect) }
+        }
+        try expect(!Drawing().wantsUpdateLayer, "a subclass that draws lost its drawing")
+
+        // A Git row shows its state as one colour, selection included.
+        let row = GitRowView(frame: NSRect(x: 0, y: 0, width: 600, height: 22))
+        host.addSubview(row)
+        defer { row.removeFromSuperview() }
+        func ground() -> NSColor? { colour(shown(row)?.backgroundColor) }
+        try expect(sameColor(ground(), Theme.panelBackground), "a plain Git row")
+        row.isStriped = true
+        try expect(sameColor(ground(), Theme.stripedRow), "a striped Git row")
+        row.selectionHighlightStyle = .regular
+        row.isSelected = true
+        try expect(sameColor(ground(), Theme.hover), "a selected Git row")
+        row.selectionHighlightStyle = .none
+        try expect(sameColor(ground(), Theme.stripedRow),
+                   "a Git row in a list that shows no selection showed it")
+        row.isHovered = true
+        try expect(sameColor(ground(), Theme.hover), "a hovered Git row")
+        row.isActiveFile = true
+        try expect(sameColor(ground(), Theme.activeRow), "the active file's Git row")
+        try expect(row.layer?.contents == nil, "a Git row holds a bitmap")
+
+        // The splitter: a grey line between bare panes, and a coloured frame,
+        // as a layer border, round each region that has one.
+        let splitter = ProjectColumnsView(frame: host.bounds)
+        let left = NSView(), right = NSView()
+        splitter.first = left
+        splitter.second = right
+        splitter.addSubview(left)
+        splitter.addSubview(right)
+        host.addSubview(splitter)
+        defer { splitter.removeFromSuperview() }
+        splitter.layout()
+        try expect(splitter.wantsUpdateLayer, "the splitter still draws its edges itself")
+        func edges() -> [NSView] {
+            splitter.subviews.filter { $0 !== left && $0 !== right && !$0.isHidden }
+        }
+        let bare = edges()
+        try expect(bare.count == 1 && bare[0].frame.width == 1
+                    && bare[0].frame.minX == splitter.divider
+                    && sameColor(colour(shown(bare[0])?.backgroundColor), Theme.border),
+                   "the line is not between the panes: \(bare.map(\.frame))")
+        let firstColour = ProjectColumnsView.regionBorder(Theme.orange)
+        let secondColour = ProjectColumnsView.regionBorder(Theme.purple)
+        splitter.firstBorder = firstColour
+        splitter.secondBorder = secondColour
+        splitter.layout()
+        let framed = edges()
+        try expect(framed.count == 2
+                    && framed[0].frame == splitter.firstPaneRect
+                    && framed[1].frame == splitter.secondPaneRect,
+                   "the regions are not framed where they are: \(framed.map(\.frame))")
+        for (edge, expected) in zip(framed, [firstColour, secondColour]) {
+            let layer = shown(edge)
+            try expect(sameColor(colour(layer?.borderColor), expected)
+                        && layer?.borderWidth == ProjectColumnsView.borderWidth
+                        && layer?.contents == nil,
+                       "a region's frame is not a layer border in its colour")
+        }
+        splitter.showsSecond = false
+        splitter.layout()
+        try expect(edges().count == 1, "the second region's frame stayed with it gone")
+
+        // The start page is made a turn after it is asked for, and a pane
+        // handed its project as it is made never builds one.
+        func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        let empty = DiffPaneViewController()
+        _ = empty.view
+        settle()
+        try expect(empty.welcomeVisibleForTesting, "no start page with no project")
+        empty.hasProject = true
+        try expect(!empty.welcomeVisibleForTesting, "a pane with a project kept the start page")
+        let opened = DiffPaneViewController()
+        _ = opened.view
+        opened.hasProject = true
+        settle()
+        try expect(!opened.welcomeVisibleForTesting, "a pane opened for a project built a start page")
+    }
+
     private static func testAyuDarkTheme() throws {
         // A colour is one value, not an appearance-dependent one: views cache
         // what they are built with, and a dynamic colour would resolve against
@@ -4694,6 +4817,7 @@ enum RegressionTests {
         // Clicking the project already showing folds it away: the lists go,
         // the start page comes back, and the row stays for coming back to.
         rows[0].clickForTesting()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         try expect(host.projectURL == nil && host.projects.count == 2,
                    "re-clicking the open project did not collapse it")
         try expect(!host.diffs.hasProject && host.diffs.tabs.isEmpty

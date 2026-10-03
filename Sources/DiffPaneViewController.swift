@@ -66,7 +66,10 @@ final class DiffPaneViewController: NSViewController {
     private let tabBar = DiffTabBar()
     private let header = DiffHeaderView()
     private let diffView = DiffView()
-    private let welcome = WelcomeView()
+    /// Made when it is shown and let go when it is not: a window with a
+    /// project never shows it, yet kept a page of rows that it rebuilt on
+    /// every change to the recent projects.
+    private var welcome: WelcomeView?
     private let hint = NSTextField(labelWithString: "Select a change or a commit's file to see its diff")
     private var tabHeight: NSLayoutConstraint!
 
@@ -93,7 +96,7 @@ final class DiffPaneViewController: NSViewController {
         let container = FlatView()
         container.fillColor = Theme.diffBackground
 
-        for subview in [tabBar, header, diffView, welcome, hint] as [NSView] {
+        for subview in [tabBar, header, diffView, hint] as [NSView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(subview)
         }
@@ -106,10 +109,6 @@ final class DiffPaneViewController: NSViewController {
         header.onToggleMode = { [weak self] in self?.toggleMode() }
         header.setMode(Self.mode)
         diffView.setMode(Self.mode)
-
-        welcome.onOpenFolder = { [weak self] in self?.onOpenFolder?() }
-        welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
-        welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
 
         hint.font = Theme.uiFont(12)
         hint.textColor = Theme.dimText
@@ -129,10 +128,6 @@ final class DiffPaneViewController: NSViewController {
             diffView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             diffView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             diffView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            welcome.topAnchor.constraint(equalTo: container.topAnchor),
-            welcome.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            welcome.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            welcome.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             hint.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             hint.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             hint.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -40),
@@ -381,8 +376,48 @@ final class DiffPaneViewController: NSViewController {
     private func updatePlaceholder() {
         let hasTabs = !tabs.isEmpty
         for view in [tabBar, header, diffView] as [NSView] { view.isHidden = !hasTabs }
-        welcome.isHidden = hasTabs || hasProject
+        updateWelcome()
         hint.isHidden = hasTabs || !hasProject
+    }
+
+    /// The start page is for a window with no project and no diff open.
+    private var wantsWelcome: Bool { tabs.isEmpty && !hasProject }
+    private var welcomePending = false
+
+    private func updateWelcome() {
+        guard wantsWelcome else {
+            welcome?.removeFromSuperview()
+            welcome = nil
+            return
+        }
+        guard welcome == nil, isViewLoaded, !welcomePending else { return }
+        // A window opened for a project — `gift`, Finder, a launch argument —
+        // is handed it straight after it is made. Waiting one turn means such
+        // a window never builds a page only to drop it.
+        welcomePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.welcomePending = false
+            self.makeWelcomeIfStillWanted()
+        }
+    }
+
+    private func makeWelcomeIfStillWanted() {
+        guard welcome == nil, wantsWelcome else { return }
+        let welcome = WelcomeView()
+        welcome.translatesAutoresizingMaskIntoConstraints = false
+        welcome.onOpenFolder = { [weak self] in self?.onOpenFolder?() }
+        welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
+        welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
+        // Over the diff, under the hint.
+        view.addSubview(welcome, positioned: .below, relativeTo: hint)
+        NSLayoutConstraint.activate([
+            welcome.topAnchor.constraint(equalTo: view.topAnchor),
+            welcome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            welcome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            welcome.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        self.welcome = welcome
     }
 
     // MARK: - Regression-test surface
@@ -394,7 +429,7 @@ final class DiffPaneViewController: NSViewController {
     var heldDiffBytesForTesting: Int { tabs.reduce(0) { $0 + $1.diff.utf8.count } }
     var closedCountForTesting: Int { closed.count }
     var tabRowHeightForTesting: CGFloat { _ = view; return tabBar.rowHeight }
-    var welcomeVisibleForTesting: Bool { _ = view; return !welcome.isHidden }
+    var welcomeVisibleForTesting: Bool { _ = view; return welcome?.superview != nil }
     var hintVisibleForTesting: Bool { _ = view; return !hint.isHidden }
     func toggleModeForTesting() { toggleMode() }
 }

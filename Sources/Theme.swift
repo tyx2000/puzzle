@@ -124,13 +124,35 @@ enum Theme {
     }
 }
 
-/// A flat background view. Drawn rather than layer-backed so a fill is one
-/// paint in the theme's own colour, with no layer tree to keep in step.
+/// A flat background view: one colour, and optionally a 1pt edge.
+///
+/// A plain fill is the layer's background colour, not a drawing. Drawn, it
+/// cost a bitmap the size of the view — a whole window, for the views that are
+/// their window's ground — to hold one colour the layer shows for nothing.
+/// A view with an edge, or a subclass that draws something of its own, still
+/// draws; `draw(_:)` also stays the way the view is rendered off screen.
 class FlatView: NSView {
     var fillColor: NSColor = .clear { didSet { needsDisplay = true } }
     var bottomBorder = false
     var topBorder = false
     var rightBorder = false
+
+    override var wantsUpdateLayer: Bool {
+        !(bottomBorder || topBorder || rightBorder) && !Self.drawsItself(type(of: self))
+    }
+
+    override func updateLayer() {
+        layer?.backgroundColor = fillColor.cgColor
+    }
+
+    /// Whether a subclass draws over the fill. The runtime is asked rather
+    /// than each subclass trusted to say so, so a new one that overrides
+    /// `draw(_:)` cannot lose its drawing to the layer colour.
+    private static func drawsItself(_ type: FlatView.Type) -> Bool {
+        let selector = #selector(NSView.draw(_:))
+        return class_getMethodImplementation(type, selector)
+            != class_getMethodImplementation(FlatView.self, selector)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         fillColor.setFill()
@@ -145,4 +167,32 @@ class FlatView: NSView {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
+}
+
+/// A list row that is one flat colour in every state it has. The colour is the
+/// layer's background, like `FlatView`'s, so a row costs no bitmap of its own;
+/// only what its cell draws does. A list holds one row view per visible row,
+/// each as wide as the list, so drawn they added up to megabytes of one colour.
+class FlatRowView: NSTableRowView {
+    /// The colour the row shows now, selection and hover included.
+    var ground: NSColor { Theme.panelBackground }
+
+    override var isSelected: Bool {
+        didSet { if isSelected != oldValue { needsDisplay = true } }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = ground.cgColor
+    }
+
+    /// The row as it renders off screen — a snapshot, a drag image.
+    override func drawBackground(in dirtyRect: NSRect) {
+        ground.setFill()
+        bounds.fill()
+    }
+
+    /// Selection is part of `ground`.
+    override func drawSelection(in dirtyRect: NSRect) {}
 }
