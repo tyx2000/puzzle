@@ -248,6 +248,13 @@ private final class RecentRowView: FlatView {
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         tracking = area
+        // An area laid under a pointer already resting on it reports nothing
+        // until the pointer leaves, so a page made under the pointer — it is
+        // made a turn after the window — read as not hovered. Ask instead.
+        if let window, window.isKeyWindow {
+            let inside = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+            if inside != hovering { hovering = inside }
+        }
     }
     override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
