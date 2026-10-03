@@ -932,7 +932,7 @@ final class GitTableView: NSTableView {
     }
 }
 
-final class GitRowView: NSTableRowView {
+final class GitRowView: FlatRowView {
     var isActiveFile = false
     var isHovered = false {
         didSet {
@@ -950,22 +950,10 @@ final class GitRowView: NSTableRowView {
         }
     }
 
-    override func drawBackground(in dirtyRect: NSRect) {
-        (isStriped ? Theme.stripedRow : Theme.panelBackground).setFill()
-        bounds.fill()
-        if isActiveFile {
-            Theme.activeRow.setFill()
-            bounds.fill()
-        } else if isHovered {
-            Theme.hover.setFill()
-            bounds.fill()
-        }
-    }
-
-    override func drawSelection(in dirtyRect: NSRect) {
-        guard !isActiveFile, selectionHighlightStyle != .none else { return }
-        Theme.hover.setFill()
-        bounds.fill()
+    override var ground: NSColor {
+        if isActiveFile { return Theme.activeRow }
+        if isHovered || (isSelected && selectionHighlightStyle != .none) { return Theme.hover }
+        return isStriped ? Theme.stripedRow : Theme.panelBackground
     }
 
     override var isEmphasized: Bool {

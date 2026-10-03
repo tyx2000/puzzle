@@ -116,6 +116,7 @@ enum RegressionTests {
         try testRefPillText()
         try testIgnoredFilesAreDimmed()
         try testEmptyEditorHints()
+        try testFlatSurfacesHoldNoBitmap()
         try testHistoryGraphLayout()
         try testCommitIdentityFollowsGitConfig()
         try testSearchFieldClearAndAlignment()
@@ -5330,6 +5331,137 @@ enum RegressionTests {
         try expect(editor.emptyHints.isHidden, "the hints show with no project")
         editor.hasProject = true
         try expect(!editor.emptyHints.isHidden, "a project with no file shows no hints")
+    }
+
+    /// A flat colour is shown as the layer's background, not drawn: drawn,
+    /// every panel ground and list row held a bitmap the size of itself, and
+    /// together they were the largest part of the app's memory.
+    private static func testFlatSurfacesHoldNoBitmap() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        host.wantsLayer = true
+        window.contentView = host
+        /// The colour the view's layer shows once it has been brought up to date.
+        /// Off screen, AppKit makes a view's layer only at the next commit.
+        func shown(_ view: NSView) -> NSColor? {
+            if view.layer == nil { CATransaction.flush() }
+            view.needsDisplay = true
+            view.displayIfNeeded()
+            return view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
+        }
+
+        // A plain fill, and a subclass that only adds behaviour, keep no bitmap.
+        final class Behaviour: FlatView {
+            override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        }
+        for plain in [FlatView(frame: host.bounds), Behaviour(frame: host.bounds)] {
+            plain.fillColor = Theme.stripedRow
+            host.addSubview(plain)
+            defer { plain.removeFromSuperview() }
+            try expect(plain.wantsUpdateLayer, "\(type(of: plain)) still draws its fill")
+            try expect(sameColor(shown(plain), Theme.stripedRow),
+                       "\(type(of: plain)) does not show its fill colour")
+            try expect(plain.layer?.contents == nil, "\(type(of: plain)) holds a bitmap")
+        }
+        // An edge, or a subclass's own drawing, still has to be drawn.
+        let edged = FlatView(frame: host.bounds)
+        edged.bottomBorder = true
+        try expect(!edged.wantsUpdateLayer, "a view with an edge lost its drawing")
+        final class Drawing: FlatView {
+            override func draw(_ dirtyRect: NSRect) { super.draw(dirtyRect) }
+        }
+        try expect(!Drawing().wantsUpdateLayer, "a subclass that draws lost its drawing")
+
+        // Each row shows its state as one colour, selection included.
+        let git = GitRowView(frame: NSRect(x: 0, y: 0, width: 600, height: 22))
+        let tree = TreeRowView(frame: git.frame)
+        let search = SearchRowView(frame: git.frame)
+        for row in [git, tree, search] as [NSView] { host.addSubview(row) }
+        defer { for row in [git, tree, search] as [NSView] { row.removeFromSuperview() } }
+        try expect(sameColor(shown(git), Theme.panelBackground), "a plain Git row")
+        git.isStriped = true
+        try expect(sameColor(shown(git), Theme.stripedRow), "a striped Git row")
+        git.selectionHighlightStyle = .regular
+        git.isSelected = true
+        try expect(sameColor(shown(git), Theme.hover), "a selected Git row")
+        git.selectionHighlightStyle = .none
+        try expect(sameColor(shown(git), Theme.stripedRow),
+                   "a Git row in a list that shows no selection showed it")
+        git.isHovered = true
+        try expect(sameColor(shown(git), Theme.hover), "a hovered Git row")
+        git.isActiveFile = true
+        try expect(sameColor(shown(git), Theme.activeRow), "the active file's Git row")
+        try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
+        try expect(sameColor(shown(tree), Theme.panelBackground), "a plain tree row")
+        tree.isHovered = true
+        try expect(sameColor(shown(tree), Theme.hover), "a hovered tree row")
+        tree.isActiveFile = true
+        try expect(sameColor(shown(tree), Theme.activeRow), "the active file's tree row")
+        search.selectionHighlightStyle = .regular
+        try expect(sameColor(shown(search), Theme.panelBackground), "a plain search row")
+        search.isSelected = true
+        try expect(sameColor(shown(search), Theme.activeRow), "a selected search row")
+
+        // The splitter's line sits in the gap between the panes, and goes with
+        // the second pane.
+        let splitter = ProjectColumnsView(frame: host.bounds)
+        let left = NSView(), right = NSView()
+        splitter.first = left
+        splitter.second = right
+        splitter.addSubview(left)
+        splitter.addSubview(right)
+        host.addSubview(splitter)
+        defer { splitter.removeFromSuperview() }
+        splitter.layout()
+        try expect(splitter.wantsUpdateLayer, "the splitter still draws its line itself")
+        /// A pixel as `view` renders, read the same way for every colour
+        /// compared: rendered off screen, a colour comes back in another space.
+        func rendered(_ view: NSView, at point: NSPoint) throws -> NSColor? {
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Failure(description: "\(type(of: view)) could not be drawn")
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+            return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))
+        }
+        let swatch = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+        swatch.fillColor = Theme.border
+        host.addSubview(swatch)
+        let border = try rendered(swatch, at: NSPoint(x: 2, y: 2))
+        swatch.removeFromSuperview()
+        let gap = NSPoint(x: splitter.divider + 0.5, y: 200)
+        let line = try rendered(splitter, at: gap)
+        try expect(sameColor(line, border),
+                   "the line is not between the panes: \(String(describing: line))")
+        splitter.showsSecond = false
+        splitter.layout()
+        let gone = try rendered(splitter, at: gap)
+        try expect(gone != nil && !sameColor(gone, border),
+                   "the line stayed with the second pane gone")
+
+        // The hints are drawn by a view their own size, centred.
+        let menu = NSMenu()
+        let file = NSMenu()
+        let fileItem = NSMenuItem()
+        fileItem.submenu = file
+        menu.addItem(fileItem)
+        file.addItem(withTitle: "Open…", action: nil, keyEquivalent: "o")
+        file.addItem(withTitle: "Quick Open…", action: nil, keyEquivalent: "p")
+        let hints = EmptyEditorHintView(frame: host.bounds)
+        hints.shortcutSource = menu
+        host.addSubview(hints)
+        defer { hints.removeFromSuperview() }
+        hints.layoutSubtreeIfNeeded()
+        guard let block = hints.subviews.first else {
+            throw Failure(description: "the hints have nothing to draw them")
+        }
+        try expect(block.frame.height == 2 * 28 && block.frame.width < hints.bounds.width / 2,
+                   "the hints are not drawn at their own size: \(block.frame)")
+        try expect(abs(block.frame.midX - hints.bounds.midX) <= 1
+                    && abs(block.frame.midY - hints.bounds.midY) <= 1,
+                   "the hints are not centred: \(block.frame)")
     }
 
     private static func testProjectHistoryMarksTheBranchBase() throws {

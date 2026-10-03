@@ -37,3 +37,36 @@ the resolution needed by the viewport. The benchmark does not start playback.
 `RegressionTests.swift` separately checks Unicode/newline/deletion edits against
 fresh parses, unchanged-text reuse, different-buffer isolation, image resolution
 changes on resize, preview deallocation and PDF reading-position restoration.
+
+## Whole application
+
+The editor-pane workloads above leave out the window around them. For the whole
+app, launch a release build (`./build.sh release`) with `open -n` and read
+`footprint <pid>` once it has settled (6–10 s). These numbers are from a 5K
+display at 2× with the default window (1706 × 1353 points). Window size and
+display scale move every row, so compare builds only on the same machine.
+
+| Scenario | `66405d1` | Flat layers |
+| --- | ---: | ---: |
+| Welcome page | 56 MB | 35 MB |
+| Project open, no file | 89 MB | 49 MB |
+| Project and six files | 142 MB | 105 MB |
+| Project, Git history (`--history 0`) | 91 MB | 60 MB |
+| Project search (`--search FlatView`) | 77 MB | 51 MB |
+| Three windows (`--windows 3`) | 156 MB | 72 MB |
+
+At `66405d1` the largest category in `footprint` was CoreAnimation: 25–86 MB of
+bitmaps that hold one flat colour each. Any view that overrides `draw(_:)` gets
+a backing store the size of itself, and flat grounds (`FlatView`), list rows,
+the projects splitter and the empty-editor hints were all drawn. They now show
+their colour as `layer.backgroundColor`. The splitter's line is its own 1-point
+view, and the hints are drawn by a view only as big as the text.
+`testFlatSurfacesHoldNoBitmap` keeps it that way. Screenshots of the welcome
+page, a file, Markdown, an image, the Git panel, Git history and a history diff
+match the earlier build pixel for pixel.
+
+Swapping AppKit for another toolkit does not help. A minimal window with one
+`NSTextView` measures 39 MB from Swift, Objective-C and Rust (`objc2`) alike.
+The same window takes 128 MB in egui (wgpu), 182 MB in WKWebView with its helper
+processes, and 321 MB in Fyne. GPU and web toolkits keep several window-sized
+drawables in flight, and the language runtime is not what costs memory.

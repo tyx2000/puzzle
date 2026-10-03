@@ -1333,26 +1333,17 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
 }
 
 /// Tree row with a persistent background for the file open in the active pane.
-final class TreeRowView: NSTableRowView {
+final class TreeRowView: FlatRowView {
     var isActiveFile = false
     var isHovered = false {
         didSet { if isHovered != oldValue { needsDisplay = true } }
     }
 
-    override func drawBackground(in dirtyRect: NSRect) {
-        Theme.panelBackground.setFill()
-        bounds.fill()
-        if isActiveFile {
-            Theme.activeRow.setFill()
-            bounds.fill()
-        } else if isHovered {
-            Theme.hover.setFill()
-            bounds.fill()
-        }
-    }
-
     // Selection is conveyed by active-file/hover state; keep rows flat.
-    override func drawSelection(in dirtyRect: NSRect) {}
+    override var ground: NSColor {
+        if isActiveFile { return Theme.activeRow }
+        return isHovered ? Theme.hover : Theme.panelBackground
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

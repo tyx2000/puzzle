@@ -779,6 +779,23 @@ final class ProjectColumnsView: FlatView {
         }
     }
 
+    /// The line the panes are dragged apart by — the one edge drawn between
+    /// them; the regions carry no frames of their own. A view of its own: drawn
+    /// by the splitter, one point of line cost a bitmap the size of the panel.
+    private let line = DividerLine()
+
+    private final class DividerLine: FlatView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        line.fillColor = Theme.border
+        addSubview(line)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
     /// A pane is positioned by hand, and everything inside it by constraints.
     /// Handing it a new frame only marks its own subtree as needing layout, so
     /// a scroll view inside it keeps the size it had until some later pass —
@@ -786,6 +803,8 @@ final class ProjectColumnsView: FlatView {
     /// amount, or not at all. Settle each pane before leaving.
     override func layout() {
         super.layout()
+        line.isHidden = !showsSecond
+        line.frame = dividerRect(radius: 0)
         second?.isHidden = !showsSecond
         first?.frame = firstPaneRect
         first?.layoutSubtreeIfNeeded()
@@ -802,15 +821,6 @@ final class ProjectColumnsView: FlatView {
         needsLayout = true
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
-    }
-
-    /// The line the panes are dragged apart by — the one edge drawn between
-    /// them. The regions carry no frames of their own.
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard showsSecond else { return }
-        Theme.border.setFill()
-        dividerRect(radius: 0).fill()
     }
 }
 

@@ -273,6 +273,17 @@ final class EmptyEditorHintView: NSView {
     /// Drawn over the editor area, never in the way of a click.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// The lines are drawn by a view just their size, centred in this one.
+    /// Drawn here, they cost a bitmap the size of the whole editor area.
+    private let block = HintBlockView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(block)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
     /// Each listed item that has a key, as its title and the key.
     var lines: [(title: String, keys: String)] {
         let source = shortcutSource ?? NSApp.mainMenu
@@ -306,14 +317,26 @@ final class EmptyEditorHintView: NSView {
         return glyphs + key.uppercased()
     }
 
+    // The menu is read again whenever the hints are placed: on coming into a
+    // window, on being shown, and on every change of size.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        needsDisplay = true
+        needsLayout = true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        needsLayout = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
         let lines = self.lines
-        guard !lines.isEmpty else { return }
         let font = Theme.uiFont(12)
         let rowHeight: CGFloat = 28
         func width(_ text: String) -> CGFloat {
@@ -323,12 +346,44 @@ final class EmptyEditorHintView: NSView {
         let keysWidth = lines.map { width($0.keys) }.max() ?? 0
         let gap: CGFloat = 40
         let blockWidth = min(titleWidth + gap + keysWidth, bounds.width - 32)
-        guard blockWidth > 0 else { return }
-        let origin = NSPoint(x: floor(bounds.midX - blockWidth / 2),
-                             y: floor(bounds.midY - CGFloat(lines.count) * rowHeight / 2))
+        guard !lines.isEmpty, blockWidth > 0 else {
+            block.frame = .zero
+            return
+        }
+        let height = CGFloat(lines.count) * rowHeight
+        block.frame = NSRect(x: floor(bounds.midX - blockWidth / 2),
+                             y: floor(bounds.midY - height / 2),
+                             width: blockWidth, height: height)
+        block.set(lines: lines, font: font, rowHeight: rowHeight,
+                  keysWidth: keysWidth, gap: gap)
+    }
+}
+
+/// The shortcut lines themselves, set out by `EmptyEditorHintView`.
+private final class HintBlockView: NSView {
+    private var lines: [(title: String, keys: String)] = []
+    private var font = Theme.uiFont(12)
+    private var rowHeight: CGFloat = 28
+    private var keysWidth: CGFloat = 0
+    private var gap: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func set(lines: [(title: String, keys: String)], font: NSFont, rowHeight: CGFloat,
+             keysWidth: CGFloat, gap: CGFloat) {
+        self.lines = lines
+        self.font = font
+        self.rowHeight = rowHeight
+        self.keysWidth = keysWidth
+        self.gap = gap
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
         for (index, line) in lines.enumerated() {
-            let row = NSRect(x: origin.x, y: origin.y + CGFloat(index) * rowHeight,
-                             width: blockWidth, height: rowHeight)
+            let row = NSRect(x: 0, y: CGFloat(index) * rowHeight,
+                             width: bounds.width, height: rowHeight)
             SidebarCellDrawing.text(line.title, font: font, color: Theme.dimText,
                                     in: NSRect(x: row.minX, y: row.minY,
                                                width: max(0, row.width - keysWidth - gap / 2),

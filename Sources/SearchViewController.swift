@@ -823,16 +823,9 @@ struct SearchHitCellProbe {
 
 /// Search-result row: flat background, selection uses the same subtle tint as
 /// the active file in the tree instead of the system blue highlight.
-final class SearchRowView: NSTableRowView {
-    override func drawBackground(in dirtyRect: NSRect) {
-        Theme.panelBackground.setFill()
-        bounds.fill()
-    }
-
-    override func drawSelection(in dirtyRect: NSRect) {
-        guard selectionHighlightStyle != .none else { return }
-        Theme.activeRow.setFill()
-        bounds.fill()
+final class SearchRowView: FlatRowView {
+    override var ground: NSColor {
+        isSelected && selectionHighlightStyle != .none ? Theme.activeRow : Theme.panelBackground
     }
 
     override var isEmphasized: Bool {
