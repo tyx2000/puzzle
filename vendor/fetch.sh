@@ -50,4 +50,16 @@ if [ ! -d tree-sitter-sql ]; then
   mv .sql-dl tree-sitter-sql
 fi
 
+# Scintilla (the Windows build's editing component), pinned and checked.
+if [ ! -d scintilla ]; then
+  echo "==> scintilla 5.5.7"
+  mkdir -p .scintilla-dl
+  curl -sL -o .scintilla-dl/scintilla.tgz https://www.scintilla.org/scintilla557.tgz
+  echo "b37e1a239ff8c77cebd72db6ce25264b35cbecbbffad60f9ce7e838f5195a21e  .scintilla-dl/scintilla.tgz" \
+    | shasum -a 256 -c - >/dev/null
+  tar -xzf .scintilla-dl/scintilla.tgz -C .scintilla-dl
+  mv .scintilla-dl/scintilla scintilla
+  rm -rf .scintilla-dl
+fi
+
 echo "done"

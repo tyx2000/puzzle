@@ -26,3 +26,10 @@ xcuserdata/
 /vendor/material-icon-theme/
 /vendor/.swift-dl/
 /vendor/.sql-dl/
+/vendor/scintilla/
+/vendor/.scintilla-dl/
+
+# Windows build products
+/windows/.obj/
+/windows/build/
+/windows/dist/
