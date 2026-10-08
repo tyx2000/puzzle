@@ -26,3 +26,8 @@ xcuserdata/
 /vendor/material-icon-theme/
 /vendor/.swift-dl/
 /vendor/.sql-dl/
+
+# Windows port build products
+/windows/.obj/
+/windows/build/
+/windows/dist/
