@@ -16,6 +16,7 @@ xcuserdata/
 
 # Gift build products and compiler caches
 /.obj/
+/build.noindex/
 /build/
 
 # Local Codex workspace configuration

@@ -3,12 +3,12 @@
 #
 #   ./Tools/install.sh
 #
-# Copies build/Gift.app to /Applications (falling back to ~/Applications if
+# Copies build.noindex/Gift.app to /Applications (falling back to ~/Applications if
 # that isn't writable) and installs `gift` into a directory that is on PATH.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="$ROOT/build/Gift.app"
+BUILD="$ROOT/build.noindex/Gift.app"
 
 if [ ! -d "$BUILD" ]; then
   echo "install: $BUILD not found — run ./build.sh release first" >&2

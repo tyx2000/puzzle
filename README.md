@@ -68,16 +68,19 @@ targets macOS 13+.
 ```
 `install.sh` falls back to `~/Applications` when `/Applications` is not
 writable, and puts `gift` in the first writable directory on your login shell's
-PATH. Installing is optional — the app also runs straight out of `build/`.
+PATH. Installing is optional — the app also runs straight out of
+`build.noindex/`. The suffix keeps Spotlight out of that folder, so a build is
+not listed as a second Gift beside the installed one (Settings → General →
+Storage → Applications).
 
 ## Run
 ```bash
-open build/Gift.app                              # pick a repository on launch
-open build/Gift.app --args /path/to/repo         # open a repository
+open build.noindex/Gift.app                      # pick a repository on launch
+open build.noindex/Gift.app --args /path/to/repo # open a repository
 gift                                             # open the current directory
 ```
 Ad-hoc signed (not notarized). If Gatekeeper blocks it, right-click → Open, or
-`xattr -dr com.apple.quarantine build/Gift.app`.
+`xattr -dr com.apple.quarantine build.noindex/Gift.app`.
 
 On first launch, Gift installs or refreshes the bundled `gift` command in the
 first writable directory on your login shell's `PATH`. It never overwrites an
