@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/build/Puzzle.app"
+# `.noindex` keeps Spotlight out of the build folder: indexed, every build was
+# a second Puzzle beside the installed one in Storage's list of applications.
+APP="$ROOT/build.noindex/Puzzle.app"
 ICON_BASENAME="Puzzle-AppIcon"
 SDK="$(xcrun --show-sdk-path)"
 V="$ROOT/vendor"

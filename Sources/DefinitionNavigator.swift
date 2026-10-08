@@ -259,7 +259,8 @@ enum DefinitionNavigator {
         while let url = enumerator.nextObject() as? URL, result.count < 20_000 {
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
             if values?.isDirectory == true {
-                if skippedDirectories.contains(url.lastPathComponent) {
+                if skippedDirectories.contains(url.lastPathComponent)
+                    || url.lastPathComponent.hasSuffix(".noindex") {
                     enumerator.skipDescendants()
                 }
                 continue

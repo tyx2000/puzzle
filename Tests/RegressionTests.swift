@@ -532,9 +532,18 @@ enum RegressionTests {
         try FileManager.default.createDirectory(at: ignored, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: nested.appendingPathComponent("App.swift"))
         try Data("x".utf8).write(to: ignored.appendingPathComponent("index.js"))
+        // A folder that asks not to be indexed — Puzzle's own build output
+        // is one — is skipped the way Spotlight skips it.
+        let unindexed = directory.appendingPathComponent("build.noindex/Puzzle.app/Contents")
+        try FileManager.default.createDirectory(at: unindexed, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: unindexed.appendingPathComponent("Info.plist"))
         let index = QuickOpen.index(in: directory)
         try expect(index == ["Sources/App.swift"],
                    "the index picked up ignored directories: \(index)")
+        try expect(QuickOpen.skipsDirectory(named: "build.noindex")
+                    && QuickOpen.skipsDirectory(named: "node_modules")
+                    && !QuickOpen.skipsDirectory(named: "Sources"),
+                   "the skip rule is not the set plus .noindex")
 
         // Go to Line parsing.
         try expect(QuickOpen.lineTarget("42")?.line == 42

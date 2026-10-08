@@ -576,7 +576,8 @@ final class SearchViewController: NSViewController {
                     finished = true
                     return
                 }
-                if skipDirs.contains(url.lastPathComponent) {
+                if skipDirs.contains(url.lastPathComponent)
+                    || url.lastPathComponent.hasSuffix(".noindex") {
                     e.skipDescendants()
                     return
                 }

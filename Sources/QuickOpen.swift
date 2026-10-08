@@ -7,6 +7,13 @@ enum QuickOpen {
     static let skipDirectories: Set<String> = [
         ".git", "node_modules", ".build", "build", "DerivedData", ".svn", "Pods", ".obj",
     ]
+
+    /// A folder named for skipping, or one whose name asks not to be indexed:
+    /// `.noindex` is macOS's word for it — Puzzle's own build goes to
+    /// `build.noindex` — and Puzzle's indexes take it the way Spotlight does.
+    static func skipsDirectory(named name: String) -> Bool {
+        skipDirectories.contains(name) || name.hasSuffix(".noindex")
+    }
     static let maxFiles = 20_000
     static let maxResults = 50
 
@@ -31,7 +38,7 @@ enum QuickOpen {
                     done = true
                     return
                 }
-                if skipDirectories.contains(url.lastPathComponent) {
+                if skipsDirectory(named: url.lastPathComponent) {
                     walker.skipDescendants()
                     return
                 }
