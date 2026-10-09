@@ -312,9 +312,18 @@ std::optional<std::string> readFile(const std::wstring& path, size_t limit) {
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return std::nullopt;
     LARGE_INTEGER size{};
-    GetFileSizeEx(h, &size);
-    size_t wanted = (size_t)std::min<long long>(size.QuadPart, (long long)limit);
-    std::string data(wanted, '\0');
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0) size.QuadPart = 0;
+    // Unsigned on both sides: the default limit is SIZE_MAX, which as a
+    // signed number is -1 and made every unlimited read ask for 2^64 bytes.
+    size_t wanted = (size_t)std::min<unsigned long long>((unsigned long long)size.QuadPart,
+                                                         (unsigned long long)limit);
+    std::string data;
+    try {
+        data.assign(wanted, '\0');
+    } catch (const std::exception&) {
+        CloseHandle(h);
+        return std::nullopt;
+    }
     size_t got = 0;
     while (got < wanted) {
         DWORD chunk = 0;

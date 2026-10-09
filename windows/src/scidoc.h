@@ -14,6 +14,9 @@ using Handle = void*;
 
 /// A new, empty document holding one reference.
 Handle create();
+/// What SCI_SETDOCPOINTER takes: the document as its IDocumentEditable
+/// base, which does not sit at the start of the object.
+void* editable(Handle doc);
 void retain(Handle doc);
 void release(Handle doc);
 

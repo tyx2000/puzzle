@@ -50,7 +50,7 @@ struct MediaPreviewView::Player : public IMFPMediaPlayerCallback {
     }
 };
 
-static LRESULT CALLBACK videoProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+static LRESULT CALLBACK videoProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
     auto* player = reinterpret_cast<IMFPMediaPlayer*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (message) {
     case WM_PAINT: {

@@ -206,7 +206,7 @@ void EditorView::create() {
     call(SCI_INDICSETFORE, Styles::kStrikeIndicator, rgb(Theme::foreground));
 
     if (!blank_) blank_ = SciDoc::create();
-    if (!doc_) call(SCI_SETDOCPOINTER, 0, (sptr_t)blank_);
+    if (!doc_) call(SCI_SETDOCPOINTER, 0, (sptr_t)SciDoc::editable(blank_));
     refreshDisplay();
     setEditable(editable_);
     setShowsCurrentLineBand(showsCurrentLineBand_);
@@ -260,7 +260,7 @@ void EditorView::attach(Document* doc) {
     hiddenLines_.clear();
     d_->imageAnnotations.clear();
     d_->imageSpaceWidth = -1;
-    call(SCI_SETDOCPOINTER, 0, (sptr_t)(doc ? doc->handle() : blank_));
+    call(SCI_SETDOCPOINTER, 0, (sptr_t)SciDoc::editable(doc ? doc->handle() : blank_));
     // Each view keeps its own copy of the style table and its line height.
     applyStyles(true);
     applyLineHeight();
@@ -1492,7 +1492,7 @@ void EditorView::drawOverlay(Graphics& g, float s) {
 // ── Messages ───────────────────────────────────────────────────────────────
 
 LRESULT CALLBACK EditorView::subclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
-                                          DWORD_PTR data) {
+                                          DWORD_PTR data) noexcept {
     auto* view = reinterpret_cast<EditorView*>(data);
     bool handled = false;
     LRESULT result = view->handle(message, wParam, lParam, &handled);

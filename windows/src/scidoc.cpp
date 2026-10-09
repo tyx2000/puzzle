@@ -50,6 +50,10 @@ Handle create() {
     return doc;
 }
 
+void* editable(Handle doc) {
+    return doc ? static_cast<Scintilla::IDocumentEditable*>(D(doc)) : nullptr;
+}
+
 void retain(Handle doc) {
     if (doc) D(doc)->AddRef();
 }

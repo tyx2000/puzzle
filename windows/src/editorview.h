@@ -142,7 +142,7 @@ private:
     friend struct Impl;
 
     void create();
-    static LRESULT CALLBACK subclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    static LRESULT CALLBACK subclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR) noexcept;
     LRESULT handle(UINT message, WPARAM wParam, LPARAM lParam, bool* handled);
     void paint();
     void drawOverlay(Graphics& g, float scale);

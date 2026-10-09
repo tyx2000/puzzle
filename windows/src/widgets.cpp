@@ -537,7 +537,7 @@ void TextField::controlCommand(WORD code) {
 }
 
 LRESULT CALLBACK TextField::editProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
-                                     UINT_PTR, DWORD_PTR data) {
+                                     UINT_PTR, DWORD_PTR data) noexcept {
     auto* field = reinterpret_cast<TextField*>(data);
     switch (message) {
     case WM_KEYDOWN: {

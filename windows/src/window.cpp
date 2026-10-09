@@ -565,7 +565,10 @@ bool WindowHost::preTranslateKey(const MSG& message) {
 
 // ── Messages ───────────────────────────────────────────────────────────────
 
-LRESULT CALLBACK WindowHost::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+// noexcept: an exception escaping into user32 is lost and takes the process
+// with it unrecorded; this way it ends in std::terminate, which ExceptionLog
+// writes down.
+LRESULT CALLBACK WindowHost::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
     WindowHost* host = fromHwnd(hwnd);
     if (!host) return DefWindowProcW(hwnd, message, wParam, lParam);
     return host->handleMessage(message, wParam, lParam);

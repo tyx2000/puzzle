@@ -20,7 +20,8 @@ struct TimerEntry {
 std::unordered_map<UINT_PTR, TimerEntry> gTimers;
 UINT_PTR gNextTimer = 1000;
 
-LRESULT CALLBACK dispatchProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+// noexcept, like WindowHost::windowProc: a failure in posted work is recorded.
+LRESULT CALLBACK dispatchProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
     LRESULT result = 0;
     if (handleMessage(hwnd, message, wParam, lParam, &result)) return result;
     return DefWindowProcW(hwnd, message, wParam, lParam);

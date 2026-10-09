@@ -46,5 +46,5 @@ private:
     bool quitting_ = false;
     bool active_ = false;
     HWND ipcWindow_ = nullptr;
-    friend LRESULT CALLBACK appWindowProc(HWND, UINT, WPARAM, LPARAM);
+    friend LRESULT CALLBACK appWindowProc(HWND, UINT, WPARAM, LPARAM) noexcept;
 };

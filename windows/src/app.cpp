@@ -44,7 +44,7 @@ std::wstring absolute(const std::wstring& path) {
 
 }  // namespace
 
-LRESULT CALLBACK appWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK appWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
     if (message == WM_COPYDATA) {
         auto* data = reinterpret_cast<COPYDATASTRUCT*>(lParam);
         if (data && data->dwData == kForwardedArguments) {
