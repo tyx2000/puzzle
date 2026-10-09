@@ -182,7 +182,7 @@ public:
     HWND editHandle() const { return edit_; }
 
 private:
-    static LRESULT CALLBACK editProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    static LRESULT CALLBACK editProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR) noexcept;
     void createEdit();
     void makeFont();
     HWND edit_ = nullptr;

@@ -109,7 +109,7 @@ protected:
     virtual bool handleShortcut(const KeyEvent&) { return false; }
 
 private:
-    static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept;
     void paint();
     void drawView(View* view, Graphics& g, const Rect& dirty);
     void updateNatives(View* view);
