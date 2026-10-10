@@ -38,6 +38,7 @@ enum RegressionTests {
         try testUndisplayableFilesCentreTheirMessage()
         try testTabMenuClosesEveryTab()
         try testStartingErrandsAreOnTheMenuBar()
+        try testStartingErrandsAreTitleBandButtons()
         try testStartPageHasTheWindowToItself()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
@@ -1807,21 +1808,72 @@ enum RegressionTests {
                    "a project name squeezed its path out of the row: \(pathWidths)")
     }
 
+    private static func testStartingErrandsAreTitleBandButtons() throws {
+        let directory = try temporaryDirectory("title-band")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1000, height: 640))
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+
+        let buttons = workspace.sidebar.titleButtonsForTesting
+        try expect(buttons.compactMap { ($0 as? TitleLetterButton)?.letterForTesting }
+                    == ["O", "R", "T"],
+                   "the title band does not carry O, R, T")
+        for button in buttons {
+            try expect(button.toolTip?.isEmpty == false,
+                       "a title-band button says nothing about what it does")
+        }
+
+        // A terminal needs a directory, so T is dead until a project is open.
+        try expect(buttons[2].isEnabled == false,
+                   "T is live with no project to open a shell in")
+        workspace.openSelection([project])
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(buttons[2].isEnabled, "T stayed dead after a project opened")
+
+        // The hover background is what makes a letter read as a target.
+        guard let open = buttons.first as? TitleLetterButton else {
+            throw Failure(description: "O is not a title-band button")
+        }
+        try expect(!open.isHoveredForTesting, "a button starts out hovered")
+        open.setHoveredForTesting(true)
+        try expect(open.isHoveredForTesting, "the button does not track hover")
+
+        // They sit at the end of the band, in order, inside it.
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let frames = buttons.map { $0.convert($0.bounds, to: workspace.sidebar.view) }
+        try expect(frames[0].maxX <= frames[1].minX + 1
+                    && frames[1].maxX <= frames[2].minX + 1,
+                   "the buttons are out of order: \(frames.map(\.minX))")
+        try expect(frames[2].maxX <= workspace.sidebar.view.bounds.maxX,
+                   "T hangs off the end of the band: \(frames[2])")
+
+        var opened = 0
+        workspace.sidebar.onOpenProject = { opened += 1 }
+        buttons[0].performClick(nil)
+        try expect(opened == 1, "O did nothing")
+    }
+
     private static func testStartingErrandsAreOnTheMenuBar() throws {
         let delegate = AppDelegate()
         let mainMenu = delegate.buildMainMenuForTesting()
         let titles = mainMenu.items.map { $0.submenu?.title ?? $0.title }
-        // What the bar actually draws: the application menu, which macOS takes
-        // from whatever is first whatever its title says, then the three.
+        // Nothing is on the bar but the application menu, which macOS renders
+        // from whichever menu is first whatever its title says and cannot be
+        // taken off.
         let onBar = mainMenu.items.filter { !$0.isHidden }
             .map { $0.submenu?.title ?? $0.title }
-        try expect(Array(onBar.dropFirst()) == ["Open", "Recent", "Terminal"],
-                   "the bar carries more than the three errands: \(onBar)")
+        try expect(onBar.count == 1,
+                   "something other than the application menu is on the bar: \(onBar)")
 
-        // File, Edit, View and Window are hidden rather than deleted, because
-        // a key equivalent is dispatched by walking the main menu: delete the
-        // Edit menu and ⌘C stops working in a text editor.
-        for title in ["File", "Edit", "View", "Window"] {
+        // Every menu is hidden rather than deleted, because a key equivalent is
+        // dispatched by walking the main menu: delete the Edit menu and ⌘C
+        // stops working in a text editor.
+        for title in ["File", "Edit", "View", "Window", "Open", "Recent", "Terminal"] {
             guard let item = mainMenu.items.first(where: { $0.submenu?.title == title })
             else { throw Failure(description: "\(title) was deleted, not hidden") }
             try expect(item.isHidden, "\(title) is still on the bar")

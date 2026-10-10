@@ -534,18 +534,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowMenuItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
-        // Only Open, Recent and Terminal are on the bar. File, Edit, View and
-        // Window stay in the menu but are taken off it.
+        // Nothing is on the bar but the application menu. Opening a project,
+        // the recents and a terminal are three buttons at the end of the
+        // sidebar's title band instead, where a single click can do the thing
+        // — which is the one arrangement the menu bar refuses, since a
+        // top-level item with no submenu is never drawn.
         //
-        // Hidden, not deleted, because a key equivalent is dispatched by
-        // walking the main menu: delete the Edit menu and ⌘C, ⌘V, ⌘X, ⌘A and
-        // ⌘Z stop working in a text editor. Measured — a hidden top-level menu
-        // still answers its shortcuts, an absent one does not.
+        // Hidden, not deleted. A key equivalent is dispatched by walking the
+        // main menu, so deleting the Edit menu takes ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z
+        // with it, in a text editor. Measured: a hidden top-level menu still
+        // answers its shortcuts, an absent one does not.
         //
-        // The first menu cannot be taken off either: macOS renders whatever is
-        // first as the application menu, under the process name, whatever its
-        // own title says. That slot is why Quit is in it.
-        for item in [fileMenuItem, editMenuItem, viewMenuItem, windowMenuItem] {
+        // The application menu cannot be taken off at all. macOS renders
+        // whichever menu is first under the process name whatever its own
+        // title says, and that slot is where Quit lives.
+        for item in [fileMenuItem, editMenuItem, viewMenuItem, windowMenuItem,
+                     openMenuItem, recentMenuItem, terminalMenuItem] {
             item.isHidden = true
         }
 
@@ -558,9 +562,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Open Recent
 
+    /// A recents menu for the sidebar's R button, built the same way the
+    /// menu-bar one is so the two can never drift apart.
+    func makeRecentProjectsMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.font = Theme.uiFont(11)
+        populateRecents(menu)
+        return menu
+    }
+
     /// Rebuild just before the submenu is shown.
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === recentMenu else { return }
+        populateRecents(menu)
+    }
+
+    private func populateRecents(_ menu: NSMenu) {
         menu.removeAllItems()
         let recents = recentProjects.urls
         if recents.isEmpty {

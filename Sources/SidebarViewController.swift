@@ -39,6 +39,19 @@ final class SidebarViewController: NSViewController {
     /// repository — the project on screen, or one the user has since left.
     var onProjectGitChanged: ((URL) -> Void)?
 
+    /// The three errands that start a session, at the end of the title band:
+    /// open a project, go back to a recent one, get a shell in this one. They
+    /// were on the menu bar, where macOS would not let them act on one click —
+    /// a top-level item with no submenu is never drawn at all.
+    private let openButton = TitleLetterButton(letter: "O")
+    private let recentButton = TitleLetterButton(letter: "R")
+    private let terminalButton = TitleLetterButton(letter: "T")
+    var onOpenProject: (() -> Void)?
+    /// Carries the button's rect in this view's coordinates, so the window can
+    /// drop the recents menu directly under it.
+    var onShowRecent: ((NSRect) -> Void)?
+    var onOpenTerminal: (() -> Void)?
+
     private let containerView = NSView()
     /// The 1pt line under the traffic-light band — the same boundary the
     /// activity bar draws at the bottom of the panel.
@@ -60,6 +73,19 @@ final class SidebarViewController: NSViewController {
         root.addSubview(containerView)
         root.addSubview(activityBar)
         root.addSubview(projectTitle)
+        for (button, action) in [(openButton, #selector(openProjectAction)),
+                                 (recentButton, #selector(showRecentAction)),
+                                 (terminalButton, #selector(openTerminalAction))] {
+            button.target = self
+            button.action = action
+            button.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(button)
+        }
+        openButton.toolTip = "Open a project"
+        recentButton.toolTip = "Recent projects"
+        terminalButton.toolTip = "Open this project in a terminal"
+        // Nothing to open a shell in until a project is showing.
+        terminalButton.isEnabled = false
         root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
@@ -77,11 +103,23 @@ final class SidebarViewController: NSViewController {
             // traffic lights' centre line.
             projectTitle.topAnchor.constraint(equalTo: root.topAnchor),
             projectTitle.bottomAnchor.constraint(equalTo: containerView.topAnchor),
-            // Nothing sits at the end of the band any more — opening a
-            // project and opening a terminal are on the menu bar — so the
-            // name has the whole strip and truncates against its edge.
+            // The name truncates against the buttons rather than pushing them
+            // off the end of the band.
             projectTitle.trailingAnchor.constraint(
-                lessThanOrEqualTo: root.trailingAnchor, constant: -8),
+                lessThanOrEqualTo: openButton.leadingAnchor, constant: -6),
+            openButton.trailingAnchor.constraint(equalTo: recentButton.leadingAnchor),
+            recentButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor),
+            terminalButton.trailingAnchor.constraint(
+                equalTo: root.trailingAnchor, constant: -6),
+            openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            openButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            recentButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            recentButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            recentButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            terminalButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            terminalButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -139,6 +177,19 @@ final class SidebarViewController: NSViewController {
     func setProjectTitle(project: String, branch: String) {
         projectTitle.configure(project: project, branch: branch)
     }
+
+    /// A terminal needs a directory to open in.
+    func setHasProject(_ hasProject: Bool) {
+        terminalButton.isEnabled = hasProject
+    }
+
+    @objc private func openProjectAction() { onOpenProject?() }
+    @objc private func openTerminalAction() { onOpenTerminal?() }
+    @objc private func showRecentAction() {
+        onShowRecent?(recentButton.convert(recentButton.bounds, to: view))
+    }
+
+    var titleButtonsForTesting: [NSButton] { [openButton, recentButton, terminalButton] }
 
     var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
     /// The Git panel, if it has been built.
@@ -306,4 +357,83 @@ final class SidebarViewController: NSViewController {
         ensureGit().openCommitFile(commitIndex: commitIndex, fileIndex: fileIndex)
     }
 
+}
+
+/// A single-letter button for the title band: O, R, T.
+///
+/// A letter rather than a glyph because these three are not obviously
+/// pictureable — "open a project", "recent projects" and "open a terminal" all
+/// reach for the same folder-ish and window-ish symbols, and the pair of icons
+/// that used to sit here said so little that the same two errands ended up on
+/// the menu bar instead. The hover background is what tells you the letter is a
+/// target; without it a letter in a title band reads as a label.
+final class TitleLetterButton: NSButton {
+    static let side: CGFloat = 22
+
+    private let letter: String
+    private var isHovered = false
+    private var hoverTracking: NSTrackingArea?
+
+    init(letter: String) {
+        self.letter = letter
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
+        isBordered = false
+        bezelStyle = .regularSquare
+        title = ""
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(letter)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isEnabled: Bool { didSet { needsDisplay = true } }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered, isEnabled {
+            Theme.hover.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        }
+        let colour: NSColor = !isEnabled ? Theme.gutter
+            : (isHovered ? Theme.foreground : Theme.dimText)
+        let font = Theme.uiFont(11.5)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: colour]
+        let text = letter as NSString
+        let size = text.size(withAttributes: attributes)
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
+                              y: (bounds.height - size.height) / 2),
+                  withAttributes: attributes)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    var isHoveredForTesting: Bool { isHovered }
+    func setHoveredForTesting(_ hovered: Bool) {
+        isHovered = hovered
+        needsDisplay = true
+    }
+    var letterForTesting: String { letter }
 }

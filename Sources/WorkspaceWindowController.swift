@@ -195,6 +195,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.projectTitle.onBranchClick = { [weak self] rect in
             self?.showBranchMenu(from: rect)
         }
+        sidebar.onOpenProject = { [weak self] in self?.openFolder(nil) }
+        sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
+        sidebar.onShowRecent = { [weak self] rect in self?.showRecentProjectsMenu(from: rect) }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onWelcomeVisibilityChanged = { [weak self] showing in
             self?.root.setSidebarHidden(showing)
@@ -382,6 +385,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setDirectory(url)
         // Show the name straight away; the branch follows the Git refresh.
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
+        sidebar.setHasProject(true)
         refreshWindowTitle(activeFile: nil)
         refreshGit()
         // Opened or switched to: find out what its remote has now. This
@@ -870,6 +874,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
     /// ask it for a new one by script, and keep the plain open as the fallback
     /// (no iTerm, or automation not permitted).
+    /// Drop the recents under the R button, the way the branch menu hangs
+    /// under the branch name.
+    private func showRecentProjectsMenu(from rect: NSRect) {
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        let menu = delegate.makeRecentProjectsMenu()
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: rect.minX, y: rect.maxY),
+                   in: sidebar.view)
+    }
+
     @objc func openProjectInTerminal(_ sender: Any?) {
         guard let projectURL else { return }
         Self.openTerminal(at: projectURL)
@@ -1334,6 +1348,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.clearChanges(for: nil)
         sidebar.setDirectory(nil)
         sidebar.setProjectTitle(project: "", branch: "")
+        sidebar.setHasProject(false)
         // Bumping the generation discards a refresh that is already in flight,
         // which would otherwise arrive and speak for a project that is no
         // longer on screen.
