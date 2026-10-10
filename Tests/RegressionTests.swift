@@ -35,6 +35,9 @@ enum RegressionTests {
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
         try testContainerImageFormats()
+        try testUndisplayableFilesCentreTheirMessage()
+        try testTabMenuClosesEveryTab()
+        try testOpenRecentSitsBesideFile()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1662,6 +1665,92 @@ enum RegressionTests {
                    "ripgrep was not told to skip build output: \(flags)")
         try expect(flags.last == "." && flags[flags.count - 2] == "needle",
                    "the query and path are no longer the last arguments: \(flags)")
+    }
+
+    private static func testUndisplayableFilesCentreTheirMessage() throws {
+        let directory = try temporaryDirectory("placeholder")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let binaryURL = directory.appendingPathComponent("blob.bin")
+        try Data([0x00, 0x01, 0x02, 0x00, 0xFF]).write(to: binaryURL)
+        let binary = Document(url: binaryURL)
+        try expect(binary.isUnsupported && binary.isPlaceholder,
+                   "a binary file is not on the placeholder path")
+
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        pane.open(url: binaryURL)
+        pane.view.layoutSubtreeIfNeeded()
+        guard let placeholder = pane.placeholderForTesting else {
+            throw Failure(description: "an unsupported file did not get a placeholder view")
+        }
+        try expect(!placeholder.isHidden, "the placeholder was built but left hidden")
+        try expect(pane.textIsHiddenForTesting,
+                   "the text view still showed the message alongside the placeholder")
+        try expect(placeholder.headingForTesting == "Unsupported file type",
+                   "the placeholder took the wrong heading: \(placeholder.headingForTesting)")
+        try expect(placeholder.bodyForTesting.contains("isn't text"),
+                   "the placeholder dropped the explanation")
+
+        // Centred on both axes, which is the whole point of the view.
+        placeholder.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        placeholder.layoutSubtreeIfNeeded()
+        let content = placeholder.contentFrameForTesting
+        let dx = abs(content.midX - placeholder.bounds.midX)
+        let dy = abs(content.midY - placeholder.bounds.midY)
+        try expect(dx < 1 && dy < 1,
+                   "the message is not centred: off by \(dx) x \(dy)")
+
+        // A bounded preview of a minified file is the file, not a message, so
+        // it has to stay in the text view where it can be read and scrolled.
+        // Not .json: a minified JSON is pretty-printed on the way in, which
+        // takes it off the bounded-preview path entirely.
+        let minifiedURL = directory.appendingPathComponent("bundle.js")
+        let long = "{\"k\":\"" + String(repeating: "x", count: 300_000) + "\"}"
+        try Data(long.utf8).write(to: minifiedURL)
+        let minified = Document(url: minifiedURL)
+        try expect(minified.isMinifiedPreview && !minified.isPlaceholder,
+                   "a bounded minified preview was replaced by a placeholder")
+    }
+
+    private static func testTabMenuClosesEveryTab() throws {
+        let directory = try temporaryDirectory("close-all")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        for name in ["one.swift", "two.swift", "three.swift"] {
+            let url = directory.appendingPathComponent(name)
+            try Data("let value = 1\n".utf8).write(to: url)
+            pane.open(url: url)
+        }
+        try expect(pane.openURLs.count == 3, "the tabs did not open")
+
+        let titles = TabPillView.contextMenuTitlesForTesting(canCloseOthers: true,
+                                                             canCloseRight: true)
+        try expect(titles.contains("Close All"),
+                   "the tab menu offers no Close All: \(titles)")
+
+        pane.closeAllTabs()
+        try expect(pane.openURLs.isEmpty,
+                   "Close All left \(pane.openURLs.count) tabs open")
+    }
+
+    private static func testOpenRecentSitsBesideFile() throws {
+        let delegate = AppDelegate()
+        let mainMenu = delegate.buildMainMenuForTesting()
+        let titles = mainMenu.items.map { $0.submenu?.title ?? $0.title }
+        guard let file = titles.firstIndex(of: "File") else {
+            throw Failure(description: "no File menu: \(titles)")
+        }
+        guard let recent = titles.firstIndex(of: "Open Recent") else {
+            throw Failure(description: "Open Recent is not a menu of its own: \(titles)")
+        }
+        try expect(recent == file + 1,
+                   "Open Recent is not next to File: \(titles)")
+        // It must have left the File menu rather than being in both places.
+        let fileItems = mainMenu.items[file].submenu?.items.map(\.title) ?? []
+        try expect(!fileItems.contains("Open Recent"),
+                   "Open Recent is still inside File as well: \(fileItems)")
     }
 
     private static func testContainerImageFormats() throws {

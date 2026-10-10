@@ -7,6 +7,7 @@ final class EditorTabBar: NSView {
     var onClose: ((Int) -> Void)?
     var onCloseOthers: ((Int) -> Void)?
     var onCloseRight: ((Int) -> Void)?
+    var onCloseAll: (() -> Void)?
 
 
     var paneActive = true { didSet { needsDisplay = true } }
@@ -83,6 +84,7 @@ final class EditorTabBar: NSView {
             pill.onClose = { [weak self] in self?.onClose?(index) }
             pill.onCloseOthers = { [weak self] in self?.onCloseOthers?(index) }
             pill.onCloseRight = { [weak self] in self?.onCloseRight?(index) }
+            pill.onCloseAll = { [weak self] in self?.onCloseAll?() }
             // Nothing to close: only tab open / already the last tab.
             pill.canCloseOthers = tabs.count > 1
             pill.canCloseRight = index < tabs.count - 1
@@ -132,6 +134,7 @@ final class TabPillView: NSView {
     var onClose: (() -> Void)?
     var onCloseOthers: (() -> Void)?
     var onCloseRight: (() -> Void)?
+    var onCloseAll: (() -> Void)?
 
     /// Drive the context menu's enabled state — set by the tab bar on reload.
     var canCloseOthers = false
@@ -211,18 +214,35 @@ final class TabPillView: NSView {
                                 action: #selector(closeOthersAction), keyEquivalent: "")
         let right = NSMenuItem(title: "Close Tabs to the Right",
                                action: #selector(closeRightAction), keyEquivalent: "")
+        // Always available: the tab that was right-clicked is itself one to
+        // close, so there is never nothing for this to do.
+        let all = NSMenuItem(title: "Close All",
+                             action: #selector(closeAllAction), keyEquivalent: "")
         others.isEnabled = canCloseOthers
         right.isEnabled = canCloseRight
 
         let menu = NSMenu()
         // Without this AppKit re-derives enablement and ignores isEnabled above.
         menu.autoenablesItems = false
-        for item in [close, others, right] { item.target = self }
-        menu.items = [close, .separator(), others, right]
+        for item in [close, others, right, all] { item.target = self }
+        menu.items = [close, .separator(), others, right, all]
         return menu
     }
 
     @objc private func closeAction() { onClose?() }
     @objc private func closeOthersAction() { onCloseOthers?() }
     @objc private func closeRightAction() { onCloseRight?() }
+    @objc private func closeAllAction() { onCloseAll?() }
+
+    static func contextMenuTitlesForTesting(canCloseOthers: Bool,
+                                            canCloseRight: Bool) -> [String] {
+        let pill = TabPillView()
+        pill.canCloseOthers = canCloseOthers
+        pill.canCloseRight = canCloseRight
+        let event = NSEvent.mouseEvent(
+            with: .rightMouseDown, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1)!
+        return pill.menu(for: event)?.items.map(\.title) ?? []
+    }
 }

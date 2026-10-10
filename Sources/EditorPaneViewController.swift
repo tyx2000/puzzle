@@ -114,6 +114,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var mediaPreview: MediaPreviewView?
     /// Shown instead of the text view when the active document is an EPUB.
     private var epubReader: EPUBReaderView?
+    /// Shown instead of the text view when the buffer is only an explanation.
+    private var placeholder: PlaceholderView?
     private var pdfPreview: PDFPreviewView?
     private var pdfThumbnailsVisible = true
     private var epubContentsVisible = true
@@ -218,6 +220,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         tabBar.onClose = { [weak self] in self?.close(index: $0) }
         tabBar.onCloseOthers = { [weak self] in self?.closeOtherTabs(around: $0) }
         tabBar.onCloseRight = { [weak self] in self?.closeTabsToTheRight(of: $0) }
+        tabBar.onCloseAll = { [weak self] in self?.closeAllTabs() }
         container.addSubview(tabBar)
         container.addSubview(scrollView)
         findBar.translatesAutoresizingMaskIntoConstraints = false
@@ -606,6 +609,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         (gitChangePopover?.contentViewController as? GitChangePopoverController)?
             .contentForTesting
     }
+    var placeholderForTesting: PlaceholderView? { placeholder }
+    var textIsHiddenForTesting: Bool { scrollView.isHidden }
     var editorBackgroundForTesting: NSColor { textView.backgroundColor }
     var diffHeaderForTesting: DiffHeaderView { diffHeader }
     var verticalScrollerForTesting: NSScroller? { scrollView.verticalScroller }
@@ -773,6 +778,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         ])
         imagePreview = preview
         return preview
+    }
+
+    private func ensurePlaceholder() -> PlaceholderView {
+        if let placeholder { return placeholder }
+        let view = PlaceholderView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isHidden = true
+        self.view.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+        ])
+        placeholder = view
+        return view
     }
 
     private func ensureMediaPreview() -> MediaPreviewView {
@@ -1100,6 +1121,18 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             releaseImagePreview()
             releaseMediaPreview()
             epubReader?.isHidden = false
+            scrollView.isHidden = true
+            showDiffHeader(for: nil)
+        } else if doc.isPlaceholder {
+            fileHistoryView?.isHidden = true
+            releaseImagePreview()
+            releaseMediaPreview()
+            releaseEPUBReader()
+            releasePDFPreview()
+            releaseSVGPreview()
+            let placeholder = ensurePlaceholder()
+            placeholder.show(message: doc.text)
+            placeholder.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else {
@@ -1447,6 +1480,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         imagePreview = nil
     }
 
+    private func releasePlaceholder() {
+        placeholder?.clear()
+        placeholder?.isHidden = true
+        placeholder?.removeFromSuperview()
+        placeholder = nil
+    }
+
     private func releaseMediaPreview() {
         mediaPreview?.clear()
         mediaPreview?.isHidden = true
@@ -1471,6 +1511,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func hidePreviews() {
+        releasePlaceholder()
         releasePDFPreview()
         releaseImagePreview()
         releaseMediaPreview()
@@ -1481,6 +1522,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Release view-owned payloads that are not currently visible. Documents
     /// themselves are handled separately by `DocumentStore`.
     func releaseTransientMemory() {
+        if placeholder?.isHidden != false { releasePlaceholder() }
         if svgPreview?.isHidden != false { releaseSVGPreview() }
         if imagePreview?.isHidden != false { releaseImagePreview() }
         if mediaPreview?.isHidden != false { releaseMediaPreview() }
@@ -1510,6 +1552,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         mediaPreview?.refreshFonts()
         pdfPreview?.refreshFonts()
         epubReader?.refreshFonts()
+        placeholder?.refreshFonts()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         reloadTabs()

@@ -386,6 +386,14 @@ final class Document {
     static let minifiedPreviewLength = 200_000
     /// True when only a prefix is on screen.
     private(set) var isMinifiedPreview = false
+
+    /// True when the buffer is an explanation instead of the file: a binary, a
+    /// file too large to lay out, one that would not read, an EPS with nothing
+    /// drawable inside it. These get a centred message rather than the text
+    /// view, which would number the explanation from line 1 and put a caret in
+    /// it. A minified preview is deliberately excluded — that buffer really is
+    /// the file, just bounded.
+    var isPlaceholder: Bool { isUnsupported && !isMinifiedPreview }
     /// True when the buffer holds a re-indented copy of the file rather than
     /// its bytes. The gutter's Git baseline is put through the same formatter,
     /// or every line of a minified file would be marked as changed.

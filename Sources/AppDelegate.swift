@@ -381,6 +381,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Menu
 
     private func setupMenu() {
+        NSApp.mainMenu = buildMainMenu()
+    }
+
+    /// Assembled separately from being installed so the arrangement can be
+    /// checked without taking over the running application's menu bar.
+    private func buildMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -402,11 +408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Open…",
                          action: #selector(WorkspaceWindowController.openFolder(_:)), keyEquivalent: "o")
-        // Open Recent uses the same project-window matching as Open.
-        let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
-        recentMenu.delegate = self
-        recentItem.submenu = recentMenu
-        fileMenu.addItem(recentItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Quick Open…",
                          action: #selector(WorkspaceWindowController.quickOpen(_:)),
@@ -430,6 +431,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.reopenClosedTab(_:)),
                          keyEquivalent: "T")
         fileMenuItem.submenu = fileMenu
+
+        // Open Recent is a menu of its own rather than a submenu under File.
+        // Not where macOS usually puts it, and deliberately so: reopening a
+        // project is the single most common thing done from this menu bar, and
+        // one click beats two. It uses the same project-window matching as
+        // Open, and fills itself from the delegate when it is pulled down.
+        let recentMenuItem = NSMenuItem()
+        mainMenu.addItem(recentMenuItem)
+        recentMenu.delegate = self
+        recentMenuItem.submenu = recentMenu
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
@@ -501,8 +512,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowMenuItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
-        NSApp.mainMenu = mainMenu
+        return mainMenu
     }
+
+    func buildMainMenuForTesting() -> NSMenu { buildMainMenu() }
 
     // MARK: - App actions
 
