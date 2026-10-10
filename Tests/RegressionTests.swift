@@ -42,6 +42,7 @@ enum RegressionTests {
         try testStartPageHasTheWindowToItself()
         try testCollapsingTheLastProjectKeepsThePanel()
         try testReplacedContentSettlesIn()
+        try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1738,6 +1739,35 @@ enum RegressionTests {
         pane.closeAllTabs()
         try expect(pane.openURLs.isEmpty,
                    "Close All left \(pane.openURLs.count) tabs open")
+    }
+
+    private static func testOnlyTheProjectRowsAnimate() throws {
+        // The lists under a project tab must take their place in one step. They
+        // are laid out by hand inside ProjectColumnsView, so they cannot
+        // interpolate with an animating parent — they jump between whole
+        // positions and leave what they painted at the last one behind.
+        let columns = ProjectColumnsView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let first = NSView(frame: .zero)
+        let second = NSView(frame: .zero)
+        first.wantsLayer = true
+        second.wantsLayer = true
+        columns.wantsLayer = true
+        columns.first = first
+        columns.second = second
+        columns.addSubview(first)
+        columns.addSubview(second)
+        columns.layoutSubtreeIfNeeded()
+
+        for (name, view) in [("the columns view", columns as NSView),
+                             ("its first pane", first), ("its second pane", second)] {
+            guard let actions = view.layer?.actions else {
+                throw Failure(description: "\(name) has no layer to refuse animations on")
+            }
+            for key in ["bounds", "position"] {
+                try expect(actions[key] is NSNull,
+                           "\(name) still animates \(key), which is what leaves a trail")
+            }
+        }
     }
 
     private static func testReplacedContentSettlesIn() throws {

@@ -801,8 +801,34 @@ final class ProjectColumnsView: FlatView {
     /// a scroll view inside it keeps the size it had until some later pass —
     /// and a list whose clip view is still the old size scrolls by the wrong
     /// amount, or not at all. Settle each pane before leaving.
+    /// Geometry keys a layer animates implicitly, which this view and its
+    /// panes all refuse.
+    ///
+    /// The panes are placed by hand in `layout()` below, so they cannot
+    /// interpolate along with a parent whose layer is being animated: the
+    /// parent would slide smoothly while the lists inside jump between whole
+    /// positions, and whatever they painted at the old one stays on screen.
+    /// Refusing the actions makes this whole block take its final place in one
+    /// step, while the project rows around it still slide.
+    private static let geometryKeys = ["bounds", "position", "frame",
+                                       "bounds.size", "bounds.origin"]
+
+    /// Set on the layer rather than through `action(for:forKey:)`: that is
+    /// `CALayerDelegate`'s, already answered by NSView, and not open to being
+    /// overridden from Swift.
+    private func refuseAnimations(on view: NSView?) {
+        guard let layer = view?.layer else { return }
+        var actions = layer.actions ?? [:]
+        for key in Self.geometryKeys where actions[key] == nil { actions[key] = NSNull() }
+        layer.actions = actions
+    }
+
     override func layout() {
         super.layout()
+        refuseAnimations(on: self)
+        refuseAnimations(on: first)
+        refuseAnimations(on: second)
+        refuseAnimations(on: line)
         line.isHidden = !showsSecond
         line.frame = dividerRect(radius: 0)
         second?.isHidden = !showsSecond
@@ -1062,6 +1088,10 @@ final class ProjectsPanelViewController: NSViewController {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Self.switchDuration
             context.allowsImplicitAnimation = true
+            // Only the project rows travel. The file tree and the two Git
+            // lists below them veto animation on their own geometry — see
+            // ProjectColumnsView — so they appear and disappear at once
+            // instead of being resized a frame at a time.
             stack.layoutSubtreeIfNeeded()
         }
     }
