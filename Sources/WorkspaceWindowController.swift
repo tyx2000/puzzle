@@ -1493,3 +1493,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         root.preserveSidebarWidth()
     }
 }
+
+extension WorkspaceWindowController: NSMenuItemValidation {
+    /// The Terminal menu asks before it draws itself. With no project open
+    /// there is no directory to open a shell in, so the item greys out instead
+    /// of being clickable and doing nothing.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(openProjectInTerminal(_:)) else { return true }
+        return projectURL != nil
+    }
+}

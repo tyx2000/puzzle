@@ -405,6 +405,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "New Window",
+                         action: #selector(newWindow(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Quick Open…",
                          action: #selector(WorkspaceWindowController.quickOpen(_:)),
                          keyEquivalent: "p")
@@ -444,8 +446,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openMenu.addItem(withTitle: "Open Project…",
                          action: #selector(WorkspaceWindowController.openFolder(_:)),
                          keyEquivalent: "o")
-        openMenu.addItem(withTitle: "New Window",
-                         action: #selector(newWindow(_:)), keyEquivalent: "n")
         openMenuItem.submenu = openMenu
 
         // Filled by the delegate when it is pulled down, and using the same
@@ -533,6 +533,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowMenu.addItem(.separator())
         windowMenuItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
+
+        // Only Open, Recent and Terminal are on the bar. File, Edit, View and
+        // Window stay in the menu but are taken off it.
+        //
+        // Hidden, not deleted, because a key equivalent is dispatched by
+        // walking the main menu: delete the Edit menu and ⌘C, ⌘V, ⌘X, ⌘A and
+        // ⌘Z stop working in a text editor. Measured — a hidden top-level menu
+        // still answers its shortcuts, an absent one does not.
+        //
+        // The first menu cannot be taken off either: macOS renders whatever is
+        // first as the application menu, under the process name, whatever its
+        // own title says. That slot is why Quit is in it.
+        for item in [fileMenuItem, editMenuItem, viewMenuItem, windowMenuItem] {
+            item.isHidden = true
+        }
 
         return mainMenu
     }

@@ -1811,12 +1811,31 @@ enum RegressionTests {
         let delegate = AppDelegate()
         let mainMenu = delegate.buildMainMenuForTesting()
         let titles = mainMenu.items.map { $0.submenu?.title ?? $0.title }
+        // What the bar actually draws: the application menu, which macOS takes
+        // from whatever is first whatever its title says, then the three.
+        let onBar = mainMenu.items.filter { !$0.isHidden }
+            .map { $0.submenu?.title ?? $0.title }
+        try expect(Array(onBar.dropFirst()) == ["Open", "Recent", "Terminal"],
+                   "the bar carries more than the three errands: \(onBar)")
+
+        // File, Edit, View and Window are hidden rather than deleted, because
+        // a key equivalent is dispatched by walking the main menu: delete the
+        // Edit menu and ⌘C stops working in a text editor.
+        for title in ["File", "Edit", "View", "Window"] {
+            guard let item = mainMenu.items.first(where: { $0.submenu?.title == title })
+            else { throw Failure(description: "\(title) was deleted, not hidden") }
+            try expect(item.isHidden, "\(title) is still on the bar")
+        }
+        guard let edit = mainMenu.items.first(where: { $0.submenu?.title == "Edit" })?.submenu
+        else { throw Failure(description: "no Edit menu at all") }
+        for shortcut in ["c", "v", "x", "a", "z"] {
+            try expect(edit.items.contains { $0.keyEquivalent == shortcut },
+                       "⌘\(shortcut.uppercased()) has no menu item left to dispatch it")
+        }
+
         guard let file = titles.firstIndex(of: "File") else {
             throw Failure(description: "no File menu: \(titles)")
         }
-        try expect(Array(titles.dropFirst(file + 1).prefix(3))
-                    == ["Open", "Recent", "Terminal"],
-                   "the three starting errands are not on the bar after File: \(titles)")
 
         // A top-level item with no submenu is dropped from the menu bar
         // entirely, so each of these has to carry one or it simply will not
@@ -1837,12 +1856,16 @@ enum RegressionTests {
         try expect(items(of: "Terminal").contains("Open Project in Terminal"),
                    "Terminal cannot open a terminal: \(items(of: "Terminal"))")
 
-        // They must have left File rather than being in both places.
+        // Open and Recent must have left File rather than being in both
+        // places. New Window stays there on purpose: it is off the bar, but
+        // the item has to exist somewhere or ⌘N has nothing to dispatch it.
         let fileItems = mainMenu.items[file].submenu?.items.map(\.title) ?? []
-        for stale in ["Open…", "Open Recent", "New Window"] {
+        for stale in ["Open…", "Open Project…", "Open Recent"] {
             try expect(!fileItems.contains(stale),
                        "\(stale) is still inside File as well: \(fileItems)")
         }
+        try expect(fileItems.contains("New Window"),
+                   "New Window has no item left, so ⌘N does nothing: \(fileItems)")
     }
 
     private static func testContainerImageFormats() throws {
