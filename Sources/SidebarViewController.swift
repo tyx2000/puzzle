@@ -43,10 +43,15 @@ final class SidebarViewController: NSViewController {
     /// open a project, go back to a recent one, get a shell in this one. They
     /// were on the menu bar, where macOS would not let them act on one click —
     /// a top-level item with no submenu is never drawn at all.
-    private let openButton = TitleLetterButton(letter: "O")
-    private let recentButton = TitleLetterButton(letter: "R")
-    private let terminalButton = TitleLetterButton(letter: "T")
+    private let openButton = TitleLetterButton(letter: "O", word: "Open")
+    private let recentButton = TitleLetterButton(letter: "R", word: "Recent")
+    private let terminalButton = TitleLetterButton(letter: "T", word: "Terminal")
+    private let windowButton = TitleLetterButton(letter: "W", word: "Window")
+    private var titleButtons: [TitleLetterButton] {
+        [openButton, recentButton, terminalButton, windowButton]
+    }
     var onOpenProject: (() -> Void)?
+    var onNewWindow: (() -> Void)?
     /// Carries the button's rect in this view's coordinates, so the window can
     /// drop the recents menu directly under it.
     var onShowRecent: ((NSRect) -> Void)?
@@ -75,15 +80,15 @@ final class SidebarViewController: NSViewController {
         root.addSubview(projectTitle)
         for (button, action) in [(openButton, #selector(openProjectAction)),
                                  (recentButton, #selector(showRecentAction)),
-                                 (terminalButton, #selector(openTerminalAction))] {
+                                 (terminalButton, #selector(openTerminalAction)),
+                                 (windowButton, #selector(newWindowAction))] {
             button.target = self
             button.action = action
-            button.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(button)
         }
-        openButton.toolTip = "Open a project"
-        recentButton.toolTip = "Recent projects"
-        terminalButton.toolTip = "Open this project in a terminal"
+        // No tooltips: hovering already spells the letter out, and a tooltip
+        // would arrive a second later on top of the word it duplicates. The
+        // accessibility label carries the name for VoiceOver instead.
         // Nothing to open a shell in until a project is showing.
         terminalButton.isEnabled = false
         root.addSubview(titleSeparator)
@@ -109,17 +114,17 @@ final class SidebarViewController: NSViewController {
                 lessThanOrEqualTo: openButton.leadingAnchor, constant: -6),
             openButton.trailingAnchor.constraint(equalTo: recentButton.leadingAnchor),
             recentButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor),
-            terminalButton.trailingAnchor.constraint(
+            terminalButton.trailingAnchor.constraint(equalTo: windowButton.leadingAnchor),
+            windowButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -6),
             openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            openButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             recentButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            recentButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             recentButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            terminalButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             terminalButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            windowButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            windowButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -184,12 +189,13 @@ final class SidebarViewController: NSViewController {
     }
 
     @objc private func openProjectAction() { onOpenProject?() }
+    @objc private func newWindowAction() { onNewWindow?() }
     @objc private func openTerminalAction() { onOpenTerminal?() }
     @objc private func showRecentAction() {
         onShowRecent?(recentButton.convert(recentButton.bounds, to: view))
     }
 
-    var titleButtonsForTesting: [NSButton] { [openButton, recentButton, terminalButton] }
+    var titleButtonsForTesting: [TitleLetterButton] { titleButtons }
 
     var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
     /// The Git panel, if it has been built.
@@ -268,6 +274,7 @@ final class SidebarViewController: NSViewController {
         titleSeparator.fillColor = Theme.border
         activityBar.refreshAppearance()
         projectTitle.refreshAppearance()
+        titleButtons.forEach { $0.refreshFonts() }
         fileTree.refreshAppearance()
         searchController?.refreshFonts()
         gitController?.refreshFonts()
@@ -359,33 +366,71 @@ final class SidebarViewController: NSViewController {
 
 }
 
-/// A single-letter button for the title band: O, R, T.
+/// A single-letter button for the title band that unrolls into its word on
+/// hover: O → Open, R → Recent, T → Terminal, W → Window.
 ///
-/// A letter rather than a glyph because these three are not obviously
-/// pictureable — "open a project", "recent projects" and "open a terminal" all
-/// reach for the same folder-ish and window-ish symbols, and the pair of icons
-/// that used to sit here said so little that the same two errands ended up on
-/// the menu bar instead. The hover background is what tells you the letter is a
-/// target; without it a letter in a title band reads as a label.
+/// Letters rather than glyphs because these four are not obviously pictureable
+/// — opening a project, the recents, a terminal and a new window all reach for
+/// the same folder-ish and window-ish symbols, and the unlabelled pair that
+/// used to sit here said so little that the errands were moved to the menu bar
+/// instead. A letter says even less on its own, so hovering spells it out.
+///
+/// The button owns its width constraint, because that constant is what the
+/// animation drives. Which text is drawn follows the width it has right now
+/// rather than the hover flag, so the word reveals as the button opens and is
+/// still whole while it closes, instead of snapping at either end.
 final class TitleLetterButton: NSButton {
     static let side: CGFloat = 22
+    /// Breathing room either side of the spelled-out word.
+    private static let wordPadding: CGFloat = 9
+    private static let unrollDuration: TimeInterval = 0.16
 
     private let letter: String
+    private let word: String
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
+    private var widthConstraint: NSLayoutConstraint!
 
-    init(letter: String) {
+    init(letter: String, word: String) {
         self.letter = letter
+        self.word = word
         super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
         isBordered = false
         bezelStyle = .regularSquare
         title = ""
         setAccessibilityRole(.button)
-        setAccessibilityLabel(letter)
+        setAccessibilityLabel(word)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthConstraint = widthAnchor.constraint(equalToConstant: Self.side)
+        widthConstraint.isActive = true
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override var isEnabled: Bool { didSet { needsDisplay = true } }
+
+    /// Width the button opens to, measured in the font it draws with.
+    private var expandedWidth: CGFloat {
+        (word as NSString).size(withAttributes: [.font: font()]).width.rounded(.up)
+            + Self.wordPadding * 2
+    }
+
+    private func font() -> NSFont { Theme.uiFont(11.5) }
+
+    private func setUnrolled(_ unrolled: Bool) {
+        let target = unrolled ? expandedWidth : Self.side
+        guard abs(widthConstraint.constant - target) > 0.5 else { return }
+        // The constant is set directly rather than through `animator()`, and
+        // the layout pass inside the group is what animates it. The animator
+        // proxy does not write the model value straight away, which leaves the
+        // constraint reading as its old width until the animation has run.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.unrollDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.allowsImplicitAnimation = true
+            widthConstraint.constant = target
+            superview?.layoutSubtreeIfNeeded()
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -401,11 +446,20 @@ final class TitleLetterButton: NSButton {
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
         isHovered = true
+        setUnrolled(true)
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
+        setUnrolled(false)
+        needsDisplay = true
+    }
+
+    /// The frame changes every frame of the unroll, and a view is not redrawn
+    /// for that on its own.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
         needsDisplay = true
     }
 
@@ -416,9 +470,12 @@ final class TitleLetterButton: NSButton {
         }
         let colour: NSColor = !isEnabled ? Theme.gutter
             : (isHovered ? Theme.foreground : Theme.dimText)
-        let font = Theme.uiFont(11.5)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: colour]
-        let text = letter as NSString
+        let attributes: [NSAttributedString.Key: Any] = [.font: font(),
+                                                         .foregroundColor: colour]
+        // Past halfway open the word is what is drawn, clipped by the bounds
+        // until there is room for all of it.
+        let open = bounds.width > (Self.side + expandedWidth) / 2
+        let text = (open ? word : letter) as NSString
         let size = text.size(withAttributes: attributes)
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
                               y: (bounds.height - size.height) / 2),
@@ -430,10 +487,20 @@ final class TitleLetterButton: NSButton {
         needsDisplay = true
     }
 
+    /// Settings can change the UI font, which changes how wide the word is.
+    func refreshFonts() {
+        if isHovered { widthConstraint.constant = expandedWidth }
+        needsDisplay = true
+    }
+
     var isHoveredForTesting: Bool { isHovered }
     func setHoveredForTesting(_ hovered: Bool) {
         isHovered = hovered
+        setUnrolled(hovered)
         needsDisplay = true
     }
     var letterForTesting: String { letter }
+    var wordForTesting: String { word }
+    var widthForTesting: CGFloat { widthConstraint.constant }
+    var expandedWidthForTesting: CGFloat { expandedWidth }
 }

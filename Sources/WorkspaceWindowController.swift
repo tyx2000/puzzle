@@ -196,6 +196,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.showBranchMenu(from: rect)
         }
         sidebar.onOpenProject = { [weak self] in self?.openFolder(nil) }
+        sidebar.onNewWindow = { (NSApp.delegate as? AppDelegate)?.newWindow(nil) }
         sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
         sidebar.onShowRecent = { [weak self] rect in self?.showRecentProjectsMenu(from: rect) }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }

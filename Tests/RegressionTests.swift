@@ -1820,12 +1820,18 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
 
         let buttons = workspace.sidebar.titleButtonsForTesting
-        try expect(buttons.compactMap { ($0 as? TitleLetterButton)?.letterForTesting }
-                    == ["O", "R", "T"],
-                   "the title band does not carry O, R, T")
+        try expect(buttons.map(\.letterForTesting) == ["O", "R", "T", "W"],
+                   "the title band does not carry O, R, T, W")
+        try expect(buttons.map(\.wordForTesting)
+                    == ["Open", "Recent", "Terminal", "Window"],
+                   "a letter unrolls into the wrong word: \(buttons.map(\.wordForTesting))")
         for button in buttons {
-            try expect(button.toolTip?.isEmpty == false,
-                       "a title-band button says nothing about what it does")
+            // Hovering spells the letter out, so a tooltip would land on top of
+            // the word a moment later saying the same thing.
+            try expect(button.toolTip == nil,
+                       "a title-band button still has a tooltip")
+            try expect(button.accessibilityLabel()?.isEmpty == false,
+                       "a title-band button has no name for VoiceOver")
         }
 
         // A terminal needs a directory, so T is dead until a project is open.
@@ -1835,13 +1841,28 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(buttons[2].isEnabled, "T stayed dead after a project opened")
 
-        // The hover background is what makes a letter read as a target.
-        guard let open = buttons.first as? TitleLetterButton else {
-            throw Failure(description: "O is not a title-band button")
-        }
+        // The hover background is what makes a letter read as a target, and
+        // hovering unrolls the letter into its word.
+        let open = buttons[0]
         try expect(!open.isHoveredForTesting, "a button starts out hovered")
+        try expect(abs(open.widthForTesting - TitleLetterButton.side) < 0.5,
+                   "a button does not start at letter width: \(open.widthForTesting)")
+        try expect(open.expandedWidthForTesting > TitleLetterButton.side + 10,
+                   "the unrolled width leaves no room for the word: "
+                    + "\(open.expandedWidthForTesting)")
         open.setHoveredForTesting(true)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(open.isHoveredForTesting, "the button does not track hover")
+        try expect(abs(open.widthForTesting - open.expandedWidthForTesting) < 0.5,
+                   "hovering did not unroll the button: \(open.widthForTesting)")
+        open.setHoveredForTesting(false)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(abs(open.widthForTesting - TitleLetterButton.side) < 0.5,
+                   "the button did not roll back up: \(open.widthForTesting)")
+
+        // A disabled button must not unroll — it would offer to do something
+        // it will not do.
+        try expect(buttons[2].isEnabled, "T should be live with a project open")
 
         // They sit at the end of the band, in order, inside it.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()

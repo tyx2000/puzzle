@@ -303,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// ⌘N — an empty window: the welcome screen with recent projects and an
     /// Open Folder button. Nothing is assumed about which project it is for.
-    @objc private func newWindow(_ sender: Any?) {
+    @objc func newWindow(_ sender: Any?) {
         _ = makeWindow()
     }
 
