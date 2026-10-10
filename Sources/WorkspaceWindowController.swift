@@ -200,8 +200,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
         sidebar.onShowRecent = { [weak self] rect in self?.showRecentProjectsMenu(from: rect) }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
-        editor.onWelcomeVisibilityChanged = { [weak self] showing in
-            self?.root.setSidebarHidden(showing)
+        editor.onWelcomeVisibilityChanged = { [weak self] _ in
+            self?.updateSidebarVisibility()
         }
         editor.onOpenSettings = { [weak self] in self?.openSettings() }
         editor.onOpenRecent = { [weak self] url in self?.openSelection([url]) }
@@ -342,6 +342,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func openProject(_ url: URL) {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
         if !projects.contains(resolved) { projects.append(resolved) }
+        updateSidebarVisibility()
         activateProject(resolved)
     }
 
@@ -885,6 +886,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                    in: sidebar.view)
     }
 
+    /// The panel goes away only for a window that holds no projects at all —
+    /// a brand new one, or the last project closed.
+    ///
+    /// Not merely "no project expanded". Clicking the project on show collapses
+    /// it and brings the start page back, and the window still holds it: the
+    /// Projects list in that panel is where it is clicked open again. Hiding
+    /// the panel there strands a window with one project in it, with no way
+    /// back to the project it still has.
+    private func updateSidebarVisibility() {
+        root.setSidebarHidden(editor.showsWelcome && projects.isEmpty)
+    }
+
     @objc func openProjectInTerminal(_ sender: Any?) {
         guard let projectURL else { return }
         Self.openTerminal(at: projectURL)
@@ -1298,6 +1311,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // not close keeps the project, and its row, where they are.
         if wasShowing, !editor.closeAllTabs() { return }
         projects.remove(at: index)
+        defer { updateSidebarVisibility() }
         // A summary outliving its project was also a wrong one: the sweep reads
         // only projects with none, so the same folder added back later showed
         // the branch and count it had when it was closed.

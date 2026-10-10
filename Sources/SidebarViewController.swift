@@ -112,19 +112,26 @@ final class SidebarViewController: NSViewController {
             // off the end of the band.
             projectTitle.trailingAnchor.constraint(
                 lessThanOrEqualTo: openButton.leadingAnchor, constant: -6),
-            openButton.trailingAnchor.constraint(equalTo: recentButton.leadingAnchor),
-            recentButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor),
-            terminalButton.trailingAnchor.constraint(equalTo: windowButton.leadingAnchor),
+            openButton.trailingAnchor.constraint(equalTo: recentButton.leadingAnchor,
+                                                 constant: -TitleLetterButton.gap),
+            recentButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor,
+                                                   constant: -TitleLetterButton.gap),
+            terminalButton.trailingAnchor.constraint(equalTo: windowButton.leadingAnchor,
+                                                     constant: -TitleLetterButton.gap),
             windowButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -6),
             openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            openButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             recentButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             recentButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            recentButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             terminalButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            terminalButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             windowButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             windowButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            windowButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -366,71 +373,40 @@ final class SidebarViewController: NSViewController {
 
 }
 
-/// A single-letter button for the title band that unrolls into its word on
-/// hover: O → Open, R → Recent, T → Terminal, W → Window.
+/// A single-letter button for the title band: O, R, T, W.
 ///
 /// Letters rather than glyphs because these four are not obviously pictureable
 /// — opening a project, the recents, a terminal and a new window all reach for
-/// the same folder-ish and window-ish symbols, and the unlabelled pair that
-/// used to sit here said so little that the errands were moved to the menu bar
-/// instead. A letter says even less on its own, so hovering spells it out.
-///
-/// The button owns its width constraint, because that constant is what the
-/// animation drives. Which text is drawn follows the width it has right now
-/// rather than the hover flag, so the word reveals as the button opens and is
-/// still whole while it closes, instead of snapping at either end.
+/// the same folder-ish and window-ish symbols. The hover background is what
+/// makes a letter read as a target rather than a label, so it is drawn a good
+/// deal larger than the glyph needs.
 final class TitleLetterButton: NSButton {
-    static let side: CGFloat = 22
-    /// Breathing room either side of the spelled-out word.
-    private static let wordPadding: CGFloat = 9
-    private static let unrollDuration: TimeInterval = 0.16
+    /// The hit area, which is deliberately wider than the letter: a 22pt box
+    /// around an 11pt character was a poke rather than a button.
+    static let side: CGFloat = 26
+    /// Gap between neighbours, so four of them read as four targets instead of
+    /// one strip of letters.
+    static let gap: CGFloat = 3
 
     private let letter: String
-    private let word: String
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
-    private var widthConstraint: NSLayoutConstraint!
 
     init(letter: String, word: String) {
         self.letter = letter
-        self.word = word
         super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
         isBordered = false
         bezelStyle = .regularSquare
         title = ""
         setAccessibilityRole(.button)
+        // No tooltip: the name lives here, for VoiceOver, and nothing pops up
+        // over the band a second after the pointer arrives.
         setAccessibilityLabel(word)
         translatesAutoresizingMaskIntoConstraints = false
-        widthConstraint = widthAnchor.constraint(equalToConstant: Self.side)
-        widthConstraint.isActive = true
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override var isEnabled: Bool { didSet { needsDisplay = true } }
-
-    /// Width the button opens to, measured in the font it draws with.
-    private var expandedWidth: CGFloat {
-        (word as NSString).size(withAttributes: [.font: font()]).width.rounded(.up)
-            + Self.wordPadding * 2
-    }
-
-    private func font() -> NSFont { Theme.uiFont(11.5) }
-
-    private func setUnrolled(_ unrolled: Bool) {
-        let target = unrolled ? expandedWidth : Self.side
-        guard abs(widthConstraint.constant - target) > 0.5 else { return }
-        // The constant is set directly rather than through `animator()`, and
-        // the layout pass inside the group is what animates it. The animator
-        // proxy does not write the model value straight away, which leaves the
-        // constraint reading as its old width until the animation has run.
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.unrollDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            context.allowsImplicitAnimation = true
-            widthConstraint.constant = target
-            superview?.layoutSubtreeIfNeeded()
-        }
-    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -446,20 +422,11 @@ final class TitleLetterButton: NSButton {
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
         isHovered = true
-        setUnrolled(true)
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
-        setUnrolled(false)
-        needsDisplay = true
-    }
-
-    /// The frame changes every frame of the unroll, and a view is not redrawn
-    /// for that on its own.
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
         needsDisplay = true
     }
 
@@ -470,12 +437,9 @@ final class TitleLetterButton: NSButton {
         }
         let colour: NSColor = !isEnabled ? Theme.gutter
             : (isHovered ? Theme.foreground : Theme.dimText)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font(),
+        let attributes: [NSAttributedString.Key: Any] = [.font: Theme.uiFont(11.5),
                                                          .foregroundColor: colour]
-        // Past halfway open the word is what is drawn, clipped by the bounds
-        // until there is room for all of it.
-        let open = bounds.width > (Self.side + expandedWidth) / 2
-        let text = (open ? word : letter) as NSString
+        let text = letter as NSString
         let size = text.size(withAttributes: attributes)
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
                               y: (bounds.height - size.height) / 2),
@@ -487,20 +451,13 @@ final class TitleLetterButton: NSButton {
         needsDisplay = true
     }
 
-    /// Settings can change the UI font, which changes how wide the word is.
-    func refreshFonts() {
-        if isHovered { widthConstraint.constant = expandedWidth }
-        needsDisplay = true
-    }
+    func refreshFonts() { needsDisplay = true }
 
     var isHoveredForTesting: Bool { isHovered }
     func setHoveredForTesting(_ hovered: Bool) {
         isHovered = hovered
-        setUnrolled(hovered)
         needsDisplay = true
     }
     var letterForTesting: String { letter }
-    var wordForTesting: String { word }
-    var widthForTesting: CGFloat { widthConstraint.constant }
-    var expandedWidthForTesting: CGFloat { expandedWidth }
+    var wordForTesting: String { accessibilityLabel() ?? "" }
 }

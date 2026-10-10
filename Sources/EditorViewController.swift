@@ -180,6 +180,8 @@ final class EditorViewController: NSViewController {
     private var hasOpenFiles: Bool { !(pane?.openURLs.isEmpty ?? true) }
     /// The start page is for a window with no project and nothing open.
     private var wantsWelcome: Bool { !hasOpenFiles && !hasProject }
+    /// Whether the start page is the thing on screen.
+    var showsWelcome: Bool { wantsWelcome }
 
     private func updatePlaceholder() {
         let hasOpenFiles = self.hasOpenFiles

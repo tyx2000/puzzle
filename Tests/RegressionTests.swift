@@ -40,6 +40,7 @@ enum RegressionTests {
         try testStartingErrandsAreOnTheMenuBar()
         try testStartingErrandsAreTitleBandButtons()
         try testStartPageHasTheWindowToItself()
+        try testCollapsingTheLastProjectKeepsThePanel()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1738,6 +1739,41 @@ enum RegressionTests {
                    "Close All left \(pane.openURLs.count) tabs open")
     }
 
+    private static func testCollapsingTheLastProjectKeepsThePanel() throws {
+        let directory = try temporaryDirectory("collapse-last")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("only", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1000, height: 640))
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        workspace.openSelection([project])
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(!workspace.rootForTesting.sidebarIsHiddenForTesting,
+                   "the panel is away with a project open")
+
+        // Clicking the project on show collapses it: the tree folds and the
+        // start page returns. The window still holds the project, and the
+        // Projects list in that panel is the only way back to it — so the
+        // panel has to stay.
+        workspace.deactivateProject()
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(workspace.projects == [project.resolvingSymlinksInPath()],
+                   "collapsing dropped the project from the window: \(workspace.projects)")
+        try expect(!workspace.rootForTesting.sidebarIsHiddenForTesting,
+                   "collapsing the only project took the panel away with it")
+
+        // A window that holds nothing at all is the case the panel goes away
+        // for, and only that one.
+        let empty = WorkspaceWindowController()
+        defer { empty.window?.close() }
+        empty.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(empty.projects.isEmpty && empty.rootForTesting.sidebarIsHiddenForTesting,
+                   "a window holding no projects still shows an empty panel")
+    }
+
     private static func testStartPageHasTheWindowToItself() throws {
         let directory = try temporaryDirectory("start-page")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1841,28 +1877,26 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(buttons[2].isEnabled, "T stayed dead after a project opened")
 
-        // The hover background is what makes a letter read as a target, and
-        // hovering unrolls the letter into its word.
+        // The hover background is what makes a letter read as a target.
         let open = buttons[0]
         try expect(!open.isHoveredForTesting, "a button starts out hovered")
-        try expect(abs(open.widthForTesting - TitleLetterButton.side) < 0.5,
-                   "a button does not start at letter width: \(open.widthForTesting)")
-        try expect(open.expandedWidthForTesting > TitleLetterButton.side + 10,
-                   "the unrolled width leaves no room for the word: "
-                    + "\(open.expandedWidthForTesting)")
         open.setHoveredForTesting(true)
-        workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(open.isHoveredForTesting, "the button does not track hover")
-        try expect(abs(open.widthForTesting - open.expandedWidthForTesting) < 0.5,
-                   "hovering did not unroll the button: \(open.widthForTesting)")
         open.setHoveredForTesting(false)
-        workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        try expect(abs(open.widthForTesting - TitleLetterButton.side) < 0.5,
-                   "the button did not roll back up: \(open.widthForTesting)")
+        try expect(!open.isHoveredForTesting, "the button stayed hovered")
 
-        // A disabled button must not unroll — it would offer to do something
-        // it will not do.
-        try expect(buttons[2].isEnabled, "T should be live with a project open")
+        // The hit area is bigger than the glyph, and the four do not run
+        // together into one strip of letters.
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let boxes = buttons.map { $0.convert($0.bounds, to: workspace.sidebar.view) }
+        for box in boxes {
+            try expect(box.width >= 24 && box.height >= 24,
+                       "a title-band button is too small to hit: \(box.size)")
+        }
+        for (left, right) in zip(boxes, boxes.dropFirst()) {
+            try expect(right.minX - left.maxX >= 2,
+                       "two buttons are touching: \(left.maxX) then \(right.minX)")
+        }
 
         // They sit at the end of the band, in order, inside it.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
