@@ -225,7 +225,9 @@ final class TabPillView: NSView {
         // Without this AppKit re-derives enablement and ignores isEnabled above.
         menu.autoenablesItems = false
         for item in [close, others, right, all] { item.target = self }
-        menu.items = [close, .separator(), others, right, all]
+        // Close All leads the batch group: it is the one that always applies,
+        // and the two below it narrow from there.
+        menu.items = [close, .separator(), all, others, right]
         return menu
     }
 

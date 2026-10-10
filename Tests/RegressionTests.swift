@@ -1727,8 +1727,9 @@ enum RegressionTests {
 
         let titles = TabPillView.contextMenuTitlesForTesting(canCloseOthers: true,
                                                              canCloseRight: true)
-        try expect(titles.contains("Close All"),
-                   "the tab menu offers no Close All: \(titles)")
+        try expect(titles == ["Close", "", "Close All", "Close Others",
+                              "Close Tabs to the Right"],
+                   "the tab menu is not in the expected order: \(titles)")
 
         pane.closeAllTabs()
         try expect(pane.openURLs.isEmpty,
