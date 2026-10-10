@@ -249,6 +249,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.image</string>
+                <!-- PSD and AI already conform to public.image. EPS does not —
+                     it conforms only to public.data — so Finder would never
+                     offer Puzzle for one without naming the type outright. -->
+                <string>com.adobe.encapsulated-postscript</string>
             </array>
         </dict>
         <!-- Audio and video play in an AVKit player, so Viewer as well.

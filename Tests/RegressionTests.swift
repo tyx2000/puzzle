@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import AVFoundation
 import PDFKit
@@ -33,6 +34,7 @@ enum RegressionTests {
         try testDefinitionNavigation()
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
+        try testContainerImageFormats()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1660,6 +1662,187 @@ enum RegressionTests {
                    "ripgrep was not told to skip build output: \(flags)")
         try expect(flags.last == "." && flags[flags.count - 2] == "needle",
                    "the query and path are no longer the last arguments: \(flags)")
+    }
+
+    private static func testContainerImageFormats() throws {
+        let directory = try temporaryDirectory("container-images")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // A Photoshop file decodes straight through ImageIO, which reads the
+        // flattened composite. Smallest valid PSD: header, three empty length
+        // fields, then one uncompressed plane per channel.
+        var psd = Data("8BPS".utf8)
+        psd.append(contentsOf: [0x00, 0x01])
+        psd.append(contentsOf: [UInt8](repeating: 0, count: 6))
+        func big16(_ value: Int) -> [UInt8] { [UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)] }
+        func big32(_ value: Int) -> [UInt8] {
+            [UInt8(value >> 24 & 0xFF), UInt8(value >> 16 & 0xFF),
+             UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
+        }
+        let width = 8, height = 4
+        psd.append(contentsOf: big16(3))                       // channels
+        psd.append(contentsOf: big32(height) + big32(width))
+        psd.append(contentsOf: big16(8) + big16(3))            // 8 bits, RGB
+        psd.append(contentsOf: big32(0) + big32(0) + big32(0)) // no extra sections
+        psd.append(contentsOf: big16(0))                       // raw, not RLE
+        psd.append(contentsOf: [UInt8](repeating: 0x80, count: width * height * 3))
+        let psdURL = directory.appendingPathComponent("layers.psd")
+        try psd.write(to: psdURL)
+        let psdDocument = Document(url: psdURL)
+        try expect(psdDocument.isImage && !psdDocument.isUnsupported,
+                   "a PSD did not open as a picture")
+        try expect(psdDocument.previewImage?.pixelSize == NSSize(width: width, height: height),
+                   "a PSD reported the wrong dimensions")
+        try expect(psdDocument.previewImage?.decode(maximum: 64) != nil,
+                   "a PSD produced no bitmap")
+
+        // EPS is PostScript, which macOS cannot render at all. What is drawn is
+        // the TIFF preview the DOS EPS binary container carries beside it.
+        let tiff = NSImage(size: NSSize(width: width, height: height))
+        tiff.lockFocus()
+        NSColor.red.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        tiff.unlockFocus()
+        guard let tiffData = tiff.tiffRepresentation else {
+            throw Failure(description: "could not build a TIFF preview for the EPS test")
+        }
+        let postScript = Data("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 8 4\nshowpage\n".utf8)
+        let headerLength = 30
+        var eps = Data([0xC5, 0xD0, 0xD3, 0xC6])
+        func little32(_ value: Int) -> [UInt8] {
+            [UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF),
+             UInt8(value >> 16 & 0xFF), UInt8(value >> 24 & 0xFF)]
+        }
+        eps.append(contentsOf: little32(headerLength) + little32(postScript.count))
+        eps.append(contentsOf: little32(0) + little32(0))      // no WMF section
+        eps.append(contentsOf: little32(headerLength + postScript.count)
+                    + little32(tiffData.count))
+        eps.append(contentsOf: [0xFF, 0xFF])                   // checksum: unused
+        eps.append(postScript)
+        eps.append(tiffData)
+        let epsURL = directory.appendingPathComponent("logo.eps")
+        try eps.write(to: epsURL)
+        let epsDocument = Document(url: epsURL)
+        try expect(epsDocument.isImage && epsDocument.isReadOnly,
+                   "an EPS with an embedded preview did not open as a picture")
+        try expect(epsDocument.previewImage?.decode(maximum: 64) != nil,
+                   "the EPS preview did not decode")
+
+        // Illustrator writes .ai in the same container, and also as a plain
+        // PDF when "PDF compatible" is on. Both have to land on a picture.
+        let aiURL = directory.appendingPathComponent("artwork.ai")
+        try eps.write(to: aiURL)
+        try expect(Document(url: aiURL).isImage,
+                   "an EPS-wrapped .ai did not open as a picture")
+
+        // The other shape of .ai: a plain PDF, which is what Illustrator writes
+        // with "Create PDF Compatible File" on. A PDF reports no pixel size, so
+        // this only works if the vector path picks it up from the page box.
+        let pdfData = NSMutableData()
+        var mediaBox = CGRect(x: 0, y: 0, width: 120, height: 60)
+        guard let consumer = CGDataConsumer(data: pdfData),
+              let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw Failure(description: "could not build a PDF-backed .ai sample")
+        }
+        pdfContext.beginPDFPage(nil)
+        pdfContext.setFillColor(CGColor(red: 0.1, green: 0.4, blue: 0.9, alpha: 1))
+        pdfContext.fill(CGRect(x: 10, y: 10, width: 100, height: 40))
+        pdfContext.endPDFPage()
+        pdfContext.closePDF()
+        let vectorURL = directory.appendingPathComponent("vector.ai")
+        try (pdfData as Data).write(to: vectorURL)
+        let vector = Document(url: vectorURL)
+        try expect(vector.isImage, "a PDF-backed .ai did not open as a picture")
+        try expect(vector.previewImage?.pixelSize == NSSize(width: 120, height: 60),
+                   "a PDF-backed .ai took its size from somewhere other than the page box")
+        // Vector art has no native resolution: asking for more pixels has to
+        // give more pixels, not an upscale of a fixed raster.
+        let small = vector.previewImage?.decode(maximum: 64)
+        let large = vector.previewImage?.decode(maximum: 512)
+        try expect(small != nil && large != nil, "a PDF-backed .ai produced no bitmap")
+        let smallPixels = (small?.representations.first?.pixelsWide) ?? 0
+        let largePixels = (large?.representations.first?.pixelsWide) ?? 0
+        try expect(largePixels > smallPixels,
+                   "a vector .ai rasterised at a fixed size instead of re-rendering "
+                    + "(\(smallPixels) then \(largePixels))")
+
+        // An EPS that is only PostScript cannot be drawn by anything on this
+        // machine. It must say why, not claim the file is unreadable rubbish.
+        let bareURL = directory.appendingPathComponent("bare.eps")
+        try postScript.write(to: bareURL)
+        let bare = Document(url: bareURL)
+        try expect(!bare.isImage && bare.isUnsupported && bare.isReadOnly,
+                   "a preview-less EPS was treated as displayable")
+        try expect(bare.text.contains("No preview in this file")
+                    && bare.text.contains("PostScript"),
+                   "a preview-less EPS gave the generic binary message: \(bare.text)")
+
+        // A container whose header points past the end of the file — the shape
+        // a truncated download takes — must not be sliced on those numbers.
+        var truncated = eps.prefix(headerLength + postScript.count)
+        truncated.replaceSubrange(
+            truncated.startIndex + 24..<truncated.startIndex + 28,
+            with: little32(1 << 30))
+        let truncatedURL = directory.appendingPathComponent("cut.eps")
+        try Data(truncated).write(to: truncatedURL)
+        try expect(!Document(url: truncatedURL).isImage,
+                   "a preview range past the end of the file was trusted")
+
+        // The formats that already worked keep working. These get a realistic
+        // size: HEVC, which HEIC wraps, cannot encode an 8x4 image at all.
+        let sampleSize = NSSize(width: 64, height: 64)
+        for name in ["still.gif", "scan.tiff", "photo.heic"] {
+            let url = directory.appendingPathComponent(name)
+            guard let data = sampleImageData(
+                for: (name as NSString).pathExtension, size: sampleSize) else {
+                throw Failure(description: "could not encode a \(name) sample")
+            }
+            try data.write(to: url)
+            try expect(Document(url: url).isImage, "\(name) stopped opening as a picture")
+        }
+    }
+
+    /// Re-encode a solid colour into whichever container the caller names.
+    private static func sampleImageData(for pathExtension: String, size: NSSize) -> Data? {
+        let type: NSBitmapImageRep.FileType
+        switch pathExtension.lowercased() {
+        case "gif": type = .gif
+        case "tiff", "tif": type = .tiff
+        case "heic":
+            // AppKit cannot write HEIC; ImageIO can.
+            guard let rep = solidRepresentation(size: size), let cg = rep.cgImage else {
+                return nil
+            }
+            let output = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                output, "public.heic" as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(destination, cg, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            return output as Data
+        default: return nil
+        }
+        return solidRepresentation(size: size)?.representation(using: type, properties: [:])
+    }
+
+    /// Pixels are written straight into the bitmap rather than drawn. Drawing
+    /// would need a graphics context and a colour, and a dynamic system colour
+    /// cannot resolve without an appearance to resolve it against — which a
+    /// test process that never opens a window does not have.
+    private static func solidRepresentation(size: NSSize) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+            bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+            let pixels = rep.bitmapData else { return nil }
+        for row in 0..<rep.pixelsHigh {
+            for column in 0..<rep.pixelsWide {
+                let offset = row * rep.bytesPerRow + column * 3
+                pixels[offset] = 0x20
+                pixels[offset + 1] = UInt8(truncatingIfNeeded: column * 24)
+                pixels[offset + 2] = 0xC0
+            }
+        }
+        return rep
     }
 
     private static func testReadOnlyAndEncodingProtection() throws {

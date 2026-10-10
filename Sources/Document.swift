@@ -68,9 +68,15 @@ final class Document {
     var isPreviewOnly: Bool { isImage || isMedia || isEPUB || isPDF }
 
     /// Image formats AppKit can decode and we're happy to preview.
+    ///
+    /// PSD decodes straight through ImageIO, which reads the flattened
+    /// composite every Photoshop file carries. EPS and AI cannot be rendered at
+    /// all on a modern Mac — see `EPSContainer` — so they are shown through the
+    /// bitmap preview their container embeds, which is also what Finder draws.
     static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff",
         "heic", "heif", "webp", "ico", "icns",
+        "psd", "eps", "ai",
     ]
     /// SVG is a picture *and* its own source. It opens as text, with the
     /// picture drawn above it, so it is deliberately not an image extension.
@@ -287,7 +293,7 @@ final class Document {
             }
             isUnsupported = true
             storage = NSTextStorage(
-                string: Self.unsupportedMessage(for: url, byteCount: data.count))
+                string: Self.undisplayableImageMessage(for: url, data: data))
             storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                                   range: NSRange(location: 0, length: storage.length))
             return
@@ -426,6 +432,28 @@ final class Document {
     /// it's what git and grep use, and no valid source file contains one.
     private static func looksBinary(_ data: Data) -> Bool {
         data.prefix(8192).contains(0)
+    }
+
+    /// Why a file with a picture's extension is not on screen. An EPS that
+    /// carries no preview is the one case with a real explanation — the file is
+    /// not damaged and the editor is not refusing it; there is simply nothing
+    /// on this operating system that can draw PostScript any more.
+    private static func undisplayableImageMessage(for url: URL, data: Data) -> String {
+        guard EPSContainer.isEPS(data) else {
+            return unsupportedMessage(for: url, byteCount: data.count)
+        }
+        let size = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+        return """
+        No preview in this file
+
+        \(url.lastPathComponent)
+        \(size)
+
+        This file holds PostScript with no embedded bitmap preview. macOS no
+        longer renders PostScript, so neither Puzzle nor Preview nor Quick Look
+        can show it. Re-saving it from the drawing program with a preview
+        included — or as PDF — will open here.
+        """
     }
 
     private static func unsupportedMessage(for url: URL, byteCount: Int) -> String {
