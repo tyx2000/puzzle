@@ -661,6 +661,10 @@ final class GitPanelViewController: NSViewController {
         showingHistory = segmented.selectedSegment == 2
         updateTabLayout()
         table.reloadData()
+        // Changes, Branch and History hold unrelated rows, so the tab switch
+        // replaces the list outright. Only here: the refreshes that rebuild
+        // this same table on their own are deliberately left instant.
+        table.enclosingScrollView?.settleIn()
     }
 
     private func updateTabLayout() {

@@ -41,6 +41,7 @@ enum RegressionTests {
         try testStartingErrandsAreTitleBandButtons()
         try testStartPageHasTheWindowToItself()
         try testCollapsingTheLastProjectKeepsThePanel()
+        try testReplacedContentSettlesIn()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1739,6 +1740,28 @@ enum RegressionTests {
                    "Close All left \(pane.openURLs.count) tabs open")
     }
 
+    private static func testReplacedContentSettlesIn() throws {
+        // Off screen there is no run loop to finish an animation, so the fade
+        // must not start — a list left at a third of its opacity, waiting
+        // forever, is worse than no transition at all.
+        let offscreen = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        offscreen.settleIn()
+        try expect(offscreen.alphaValue == 1,
+                   "an offscreen view was left half-faded: \(offscreen.alphaValue)")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let onscreen = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        window.contentView?.addSubview(onscreen)
+        window.makeKeyAndOrderFront(nil)
+        onscreen.settleIn()
+        try expect(onscreen.alphaValue < 1, "the fade did not start")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        try expect(onscreen.alphaValue == 1,
+                   "the fade did not finish: \(onscreen.alphaValue)")
+    }
+
     private static func testCollapsingTheLastProjectKeepsThePanel() throws {
         let directory = try temporaryDirectory("collapse-last")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1772,6 +1795,24 @@ enum RegressionTests {
         empty.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(empty.projects.isEmpty && empty.rootForTesting.sidebarIsHiddenForTesting,
                    "a window holding no projects still shows an empty panel")
+
+        // The panel slides by its own width, not through the split item's
+        // animator: that one grows and shrinks the *window* to hold the
+        // editor's width steady, so opening a project would move the window.
+        guard let window = empty.window else {
+            throw Failure(description: "the window went away")
+        }
+        let before = window.frame
+        empty.rootForTesting.setSidebarHidden(false)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        empty.rootForTesting.setSidebarHidden(true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        try expect(abs(window.frame.width - before.width) < 1
+                    && abs(window.frame.height - before.height) < 1,
+                   "showing and hiding the panel moved the window: "
+                    + "\(window.frame) was \(before)")
+        try expect(empty.rootForTesting.sidebarIsHiddenForTesting,
+                   "the panel did not end up hidden")
     }
 
     private static func testStartPageHasTheWindowToItself() throws {

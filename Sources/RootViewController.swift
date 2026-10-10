@@ -27,6 +27,11 @@ final class RootViewController: NSViewController {
     /// divider updates its constant, so the divider still works.
     private var sidebarWidthConstraint: NSLayoutConstraint!
     private var sidebarItem: NSSplitViewItem!
+    /// What the panel has been asked to be, which the animator reaches a
+    /// moment later.
+    private var sidebarHidden = false
+    /// How long the panel takes to slide away or back.
+    private static let slideDuration: TimeInterval = 0.18
     private let dividerHandle = SplitDividerHandleView()
     private var dividerDragStartWidth: CGFloat = 400
 
@@ -168,13 +173,40 @@ final class RootViewController: NSViewController {
     /// rectangle beside a short column of text. Hidden, the page has the whole
     /// window and sits in the middle of it.
     func setSidebarHidden(_ hidden: Bool) {
-        guard sidebarItem.isCollapsed != hidden else { return }
-        sidebarItem.isCollapsed = hidden
+        guard sidebarHidden != hidden else { return }
+        sidebarHidden = hidden
         // The handle is drawn over the split view rather than by it, so it has
         // to go as well — otherwise a draggable divider is left at the window's
         // left edge with nothing behind it.
         dividerHandle.isHidden = hidden
+
+        // Slid, by animating the width this controller already owns, rather
+        // than through `sidebarItem.animator().isCollapsed`. That one grows and
+        // shrinks the *window* to keep the editor's width — measured — and a
+        // window that resizes itself when a file is opened is the behaviour a
+        // test here exists to prevent.
+        let target = hidden ? 0 : max(lastSidebarWidth, minimumSidebarWidth)
+        if !hidden {
+            // Room to slide back into: the item has to be out of its collapsed
+            // state, and at zero width, before the animation starts.
+            sidebarItem.isCollapsed = false
+            sidebarWidthConstraint.constant = 0
+            view.layoutSubtreeIfNeeded()
+        }
+        // The floor would otherwise refuse every width on the way to zero.
+        sidebarItem.minimumThickness = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.slideDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.allowsImplicitAnimation = true
+            self.sidebarWidthConstraint.constant = target
+            self.view.layoutSubtreeIfNeeded()
+        } completionHandler: { [weak self] in
+            guard let self, self.sidebarHidden == hidden else { return }
+            self.sidebarItem.minimumThickness = self.minimumSidebarWidth
+            self.sidebarItem.isCollapsed = hidden
+        }
     }
 
-    var sidebarIsHiddenForTesting: Bool { sidebarItem.isCollapsed }
+    var sidebarIsHiddenForTesting: Bool { sidebarHidden }
 }

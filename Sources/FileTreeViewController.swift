@@ -217,6 +217,9 @@ final class FileTreeViewController: NSViewController {
         if let root {
             outlineView.expandItem(root)
         }
+        // A whole different project's files: settle them in rather than
+        // blinking one tree out and another in.
+        outlineView.enclosingScrollView?.settleIn()
     }
 
     /// Refresh from disk, keeping expansion where possible.
@@ -570,14 +573,24 @@ final class FileTreeViewController: NSViewController {
         return rel
     }
 
+    /// Toggle a folder with the disclosure animated.
+    ///
+    /// Only from a click. The `expandItem` calls elsewhere in this file are
+    /// part of rebuilding the tree — restoring what was open after a reload,
+    /// revealing a file someone asked for — and animating those would mean
+    /// watching a tree unfold itself on every refresh.
+    private func toggleDirectory(_ node: FileNode) {
+        if outlineView.isItemExpanded(node) {
+            outlineView.animator().collapseItem(node)
+        } else {
+            outlineView.animator().expandItem(node)
+        }
+    }
+
     @objc private func handleDoubleClick() {
         guard let node = outlineView.item(atRow: outlineView.clickedRow) as? FileNode else { return }
         if node.isDirectory {
-            if outlineView.isItemExpanded(node) {
-                outlineView.collapseItem(node)
-            } else {
-                outlineView.expandItem(node)
-            }
+            toggleDirectory(node)
         } else {
             onOpenFile?(node.url)
         }
@@ -587,11 +600,7 @@ final class FileTreeViewController: NSViewController {
         guard let node = outlineView.item(atRow: outlineView.clickedRow) as? FileNode else { return }
         if node.isDirectory {
             // Single click toggles a directory (and repaints its icon).
-            if outlineView.isItemExpanded(node) {
-                outlineView.collapseItem(node)
-            } else {
-                outlineView.expandItem(node)
-            }
+            toggleDirectory(node)
         } else {
             onOpenFile?(node.url)
         }

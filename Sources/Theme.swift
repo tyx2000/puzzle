@@ -288,3 +288,29 @@ class FlatRowView: NSTableRowView {
     /// Selection is part of `ground`.
     override func drawSelection(in dirtyRect: NSRect) {}
 }
+
+extension NSView {
+    /// Settle replaced content in instead of swapping it in one frame.
+    ///
+    /// For a list that has just been rebuilt wholesale — a different project's
+    /// files, a different tab of the Git panel — where `reloadData` otherwise
+    /// reads as a blink. Only ever for a change the reader asked for: content
+    /// that arrives on its own, from a Git refresh or the file-system watcher,
+    /// is left alone, because an animation there pulls the eye to something
+    /// nobody touched.
+    ///
+    /// A view with no window is not animated at all, so an offscreen rebuild
+    /// does not leave itself half-faded waiting for a run loop that never comes.
+    func settleIn(from startAlpha: CGFloat = 0.3, duration: TimeInterval = 0.14) {
+        guard window != nil else {
+            alphaValue = 1
+            return
+        }
+        alphaValue = startAlpha
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = 1
+        }
+    }
+}

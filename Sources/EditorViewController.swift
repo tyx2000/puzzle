@@ -195,15 +195,42 @@ final class EditorViewController: NSViewController {
         }
         emptyHints.isHidden = hasOpenFiles || !hasProject
         // The pane (and its blank text view) must not cover the welcome screen.
-        pane?.view.isHidden = !hasOpenFiles
+        if let pane, pane.view.isHidden == hasOpenFiles {
+            if hasOpenFiles {
+                // Coming back from the start page: fade in rather than
+                // appearing whole under a page that is fading out.
+                pane.view.alphaValue = 0
+                pane.view.isHidden = false
+                Self.fade(pane.view, to: 1)
+            } else {
+                pane.view.isHidden = true
+            }
+        }
+    }
+
+    /// How long the editor area takes to change what it is showing. Short
+    /// enough to read as the view settling rather than as a transition being
+    /// performed at you.
+    static let crossfadeDuration: TimeInterval = 0.14
+
+    static func fade(_ view: NSView, to alpha: CGFloat,
+                     then finish: (() -> Void)? = nil) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = crossfadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            view.animator().alphaValue = alpha
+        } completionHandler: { finish?() }
     }
 
     private var welcomePending = false
 
     private func updateWelcome() {
         guard wantsWelcome else {
-            welcome?.removeFromSuperview()
+            guard let leaving = welcome else { return }
             welcome = nil
+            // Faded out and then removed, so opening a project does not snap
+            // the page away under the file that is arriving.
+            Self.fade(leaving, to: 0) { leaving.removeFromSuperview() }
             return
         }
         guard welcome == nil, isViewLoaded, !welcomePending else { return }
@@ -226,7 +253,9 @@ final class EditorViewController: NSViewController {
         welcome.onOpenRecent = { [weak self] url in self?.onOpenRecent?(url) }
         welcome.onOpenChecked = { [weak self] urls in self?.onOpenChecked?(urls) }
         // Over the pane, under the hints and the settings gear.
+        welcome.alphaValue = 0
         view.addSubview(welcome, positioned: .below, relativeTo: emptyHints)
+        Self.fade(welcome, to: 1)
         NSLayoutConstraint.activate([
             welcome.topAnchor.constraint(equalTo: view.topAnchor),
             welcome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
