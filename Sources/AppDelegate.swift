@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hasCompletedInitialActivation = false
     private let recentProjects: RecentProjects
     /// Rebuilt each time the menu opens, so it always reflects current history.
-    private let recentMenu = NSMenu(title: "Open Recent")
+    private let recentMenu = NSMenu(title: "Recent")
 
     override convenience init() {
         self.init(recentProjects: .shared)
@@ -405,10 +405,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
-        fileMenu.addItem(withTitle: "Open…",
-                         action: #selector(WorkspaceWindowController.openFolder(_:)), keyEquivalent: "o")
-        fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Quick Open…",
                          action: #selector(WorkspaceWindowController.quickOpen(_:)),
                          keyEquivalent: "p")
@@ -432,15 +428,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          keyEquivalent: "T")
         fileMenuItem.submenu = fileMenu
 
-        // Open Recent is a menu of its own rather than a submenu under File.
-        // Not where macOS usually puts it, and deliberately so: reopening a
-        // project is the single most common thing done from this menu bar, and
-        // one click beats two. It uses the same project-window matching as
-        // Open, and fills itself from the delegate when it is pulled down.
+        // Open, Recent and Terminal sit on the bar itself rather than inside
+        // File. These are the three errands that start a session — pick a
+        // project, go back to one, get a shell in it — and burying them one
+        // level down was what the two icons in the sidebar's title band were
+        // compensating for. Those icons are gone; this is where they went.
+        //
+        // Each is a menu rather than a title that acts on click, because the
+        // menu bar will not have the latter: a top-level item with no submenu
+        // is dropped from the bar entirely, even though the menu still holds
+        // it and still reports it enabled.
+        let openMenuItem = NSMenuItem()
+        mainMenu.addItem(openMenuItem)
+        let openMenu = NSMenu(title: "Open")
+        openMenu.addItem(withTitle: "Open Project…",
+                         action: #selector(WorkspaceWindowController.openFolder(_:)),
+                         keyEquivalent: "o")
+        openMenu.addItem(withTitle: "New Window",
+                         action: #selector(newWindow(_:)), keyEquivalent: "n")
+        openMenuItem.submenu = openMenu
+
+        // Filled by the delegate when it is pulled down, and using the same
+        // project-window matching as Open.
         let recentMenuItem = NSMenuItem()
         mainMenu.addItem(recentMenuItem)
         recentMenu.delegate = self
         recentMenuItem.submenu = recentMenu
+
+        let terminalMenuItem = NSMenuItem()
+        mainMenu.addItem(terminalMenuItem)
+        let terminalMenu = NSMenu(title: "Terminal")
+        terminalMenu.addItem(
+            withTitle: "Open Project in Terminal",
+            action: #selector(WorkspaceWindowController.openProjectInTerminal(_:)),
+            keyEquivalent: "")
+        terminalMenuItem.submenu = terminalMenu
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)

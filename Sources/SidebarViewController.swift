@@ -20,15 +20,6 @@ final class SidebarViewController: NSViewController {
     var onReorderProjectRows: ((Int, Int) -> Void)?
     /// The Git mark on a project row was clicked: pull that project.
     var onPullProjectRow: ((Int) -> Void)?
-    /// The buttons at the end of the title band: one opens another project,
-    /// the one past it opens a terminal on the project showing. The terminal
-    /// used to be what clicking the project's name did, where it sat on top of
-    /// the more common errand of going back to the list.
-    private let addProjectButton = NSButton()
-    private let terminalButton = NSButton()
-    var onAddProject: (() -> Void)?
-    var onOpenTerminal: (() -> Void)?
-
     // Search and Git each own an outline/table view, scroll view, controls and
     // (for Git) another NSTextView. Most windows never show both panels, so do
     // not build those view trees until the user asks for them.
@@ -69,16 +60,6 @@ final class SidebarViewController: NSViewController {
         root.addSubview(containerView)
         root.addSubview(activityBar)
         root.addSubview(projectTitle)
-        configure(addProjectButton, symbol: "plus",
-                  label: "Open project",
-                  tip: "Open another project",
-                  action: #selector(addProjectAction))
-        root.addSubview(addProjectButton)
-        configure(terminalButton, image: Self.promptImage(),
-                  label: "Open terminal",
-                  tip: "Open this project in a terminal",
-                  action: #selector(openTerminalAction))
-        root.addSubview(terminalButton)
         root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
@@ -96,19 +77,11 @@ final class SidebarViewController: NSViewController {
             // traffic lights' centre line.
             projectTitle.topAnchor.constraint(equalTo: root.topAnchor),
             projectTitle.bottomAnchor.constraint(equalTo: containerView.topAnchor),
-            // The name truncates rather than pushing the button off the end.
+            // Nothing sits at the end of the band any more — opening a
+            // project and opening a terminal are on the menu bar — so the
+            // name has the whole strip and truncates against its edge.
             projectTitle.trailingAnchor.constraint(
-                lessThanOrEqualTo: addProjectButton.leadingAnchor, constant: -6),
-            addProjectButton.trailingAnchor.constraint(
-                equalTo: terminalButton.leadingAnchor, constant: -2),
-            addProjectButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            addProjectButton.widthAnchor.constraint(equalToConstant: 22),
-            addProjectButton.heightAnchor.constraint(equalToConstant: 20),
-            terminalButton.trailingAnchor.constraint(
-                equalTo: root.trailingAnchor, constant: -8),
-            terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            terminalButton.widthAnchor.constraint(equalToConstant: 22),
-            terminalButton.heightAnchor.constraint(equalToConstant: 20),
+                lessThanOrEqualTo: root.trailingAnchor, constant: -8),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -153,59 +126,6 @@ final class SidebarViewController: NSViewController {
         mount(projectsPanel)
         showFiles()
     }
-
-    /// The title band's buttons, drawn like the editor's settings gear.
-    private func configure(_ button: NSButton, symbol: String, label: String,
-                           tip: String, action: Selector) {
-        configure(button,
-                  image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-                    .withSymbolConfiguration(.init(pointSize: 12, weight: .regular)),
-                  label: label, tip: tip, action: action)
-    }
-
-    private func configure(_ button: NSButton, image: NSImage?, label: String,
-                           tip: String, action: Selector) {
-        button.image = image
-        button.isBordered = false
-        button.bezelStyle = .regularSquare
-        button.imageScaling = .scaleProportionallyDown
-        button.contentTintColor = Theme.dimText
-        button.toolTip = tip
-        button.setAccessibilityLabel(label)
-        button.target = self
-        button.action = action
-        button.translatesAutoresizingMaskIntoConstraints = false
-    }
-
-    /// A shell prompt: one chevron and the cursor's underscore, drawn at the
-    /// weight of the SF Symbols beside it. The `terminal` symbol puts a window
-    /// frame around the same two marks, which at this size reads as a filled
-    /// box next to the bare `+`.
-    private static func promptImage() -> NSImage {
-        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { _ in
-            let path = NSBezierPath()
-            path.lineWidth = 1.3
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.move(to: NSPoint(x: 3, y: 10.25))
-            path.line(to: NSPoint(x: 6.5, y: 7))
-            path.line(to: NSPoint(x: 3, y: 3.75))
-            path.move(to: NSPoint(x: 8, y: 3.75))
-            path.line(to: NSPoint(x: 11.5, y: 3.75))
-            NSColor.black.setStroke()
-            path.stroke()
-            return true
-        }
-        // Tinted by the button, like every other mark in the band.
-        image.isTemplate = true
-        return image
-    }
-
-    @objc private func addProjectAction() { onAddProject?() }
-    @objc private func openTerminalAction() { onOpenTerminal?() }
-
-    var addProjectButtonForTesting: NSButton { addProjectButton }
-    var terminalButtonForTesting: NSButton { terminalButton }
 
     func setFileTabHeight(_ height: CGFloat) {
         containerTopConstraint.constant = height

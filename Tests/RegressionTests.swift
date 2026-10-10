@@ -37,7 +37,7 @@ enum RegressionTests {
         try testContainerImageFormats()
         try testUndisplayableFilesCentreTheirMessage()
         try testTabMenuClosesEveryTab()
-        try testOpenRecentSitsBesideFile()
+        try testStartingErrandsAreOnTheMenuBar()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1736,22 +1736,42 @@ enum RegressionTests {
                    "Close All left \(pane.openURLs.count) tabs open")
     }
 
-    private static func testOpenRecentSitsBesideFile() throws {
+    private static func testStartingErrandsAreOnTheMenuBar() throws {
         let delegate = AppDelegate()
         let mainMenu = delegate.buildMainMenuForTesting()
         let titles = mainMenu.items.map { $0.submenu?.title ?? $0.title }
         guard let file = titles.firstIndex(of: "File") else {
             throw Failure(description: "no File menu: \(titles)")
         }
-        guard let recent = titles.firstIndex(of: "Open Recent") else {
-            throw Failure(description: "Open Recent is not a menu of its own: \(titles)")
+        try expect(Array(titles.dropFirst(file + 1).prefix(3))
+                    == ["Open", "Recent", "Terminal"],
+                   "the three starting errands are not on the bar after File: \(titles)")
+
+        // A top-level item with no submenu is dropped from the menu bar
+        // entirely, so each of these has to carry one or it simply will not
+        // appear. This is the check that catches someone "simplifying" them
+        // into bare action items.
+        for title in ["Open", "Recent", "Terminal"] {
+            guard let item = mainMenu.items.first(where: { $0.submenu?.title == title })
+            else { throw Failure(description: "\(title) is not on the bar") }
+            try expect(item.submenu != nil, "\(title) would not render: it has no submenu")
         }
-        try expect(recent == file + 1,
-                   "Open Recent is not next to File: \(titles)")
-        // It must have left the File menu rather than being in both places.
+
+        func items(of title: String) -> [String] {
+            mainMenu.items.first { $0.submenu?.title == title }?
+                .submenu?.items.map(\.title) ?? []
+        }
+        try expect(items(of: "Open").contains("Open Project…"),
+                   "Open cannot open a project: \(items(of: "Open"))")
+        try expect(items(of: "Terminal").contains("Open Project in Terminal"),
+                   "Terminal cannot open a terminal: \(items(of: "Terminal"))")
+
+        // They must have left File rather than being in both places.
         let fileItems = mainMenu.items[file].submenu?.items.map(\.title) ?? []
-        try expect(!fileItems.contains("Open Recent"),
-                   "Open Recent is still inside File as well: \(fileItems)")
+        for stale in ["Open…", "Open Recent", "New Window"] {
+            try expect(!fileItems.contains(stale),
+                       "\(stale) is still inside File as well: \(fileItems)")
+        }
     }
 
     private static func testContainerImageFormats() throws {
@@ -4201,11 +4221,6 @@ enum RegressionTests {
         try expect(app.windowsForTesting.count == 3
                     && app.window(showingProject: inner)?.editor.currentURL == file.resolvingSymlinksInPath(),
                    "the picker ignored the deepest open project")
-
-        // The title band still offers to open another project; listing the ones
-        // already open is the Projects panel's job.
-        try expect(outerWindow.sidebar.addProjectButtonForTesting.toolTip?.isEmpty == false,
-                   "the title band's button does not say what it does")
 
         // One window, several projects: the Projects panel lists them down the
         // side and switching loads the chosen one from scratch. Nothing of the
@@ -9676,34 +9691,12 @@ enum RegressionTests {
                    "clicking the branch switched the sidebar away: "
                      + "\(workspace.sidebar.visiblePanel)")
 
-        // The terminal is its own button, past the one that opens another
-        // project, at the end of the band.
-        let terminalButton = workspace.sidebar.terminalButtonForTesting
-        let addButton = workspace.sidebar.addProjectButtonForTesting
+        // Opening a terminal is a menu-bar errand now, and the window answers
+        // the menu's selector through the responder chain.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        try expect(terminalButton.toolTip?.isEmpty == false
-                    && terminalButton.image != nil,
-                   "the terminal button says nothing about what it does")
-        // Drawn here rather than taken from SF Symbols, whose `terminal` puts a
-        // window frame around the prompt. A template image so the band tints it
-        // like everything else in it.
-        try expect(terminalButton.image?.isTemplate == true
-                    && terminalButton.image?.size == NSSize(width: 14, height: 14),
-                   "the terminal mark is not the band's own 14pt template: "
-                     + "\(String(describing: terminalButton.image?.size))")
-        try expect(terminalButton.frame.minX >= addButton.frame.maxX,
-                   "the terminal button is not past the add-project button: "
-                     + "\(terminalButton.frame) vs \(addButton.frame)")
-        try expect(terminalButton.frame.maxX
-                    <= workspace.sidebar.view.bounds.maxX,
-                   "the terminal button hangs off the end of the band: "
-                     + "\(terminalButton.frame)")
-        try expect(workspace.sidebar.onOpenTerminal != nil,
-                   "nothing answers the terminal button")
-        var openedTerminal = false
-        workspace.sidebar.onOpenTerminal = { openedTerminal = true }
-        terminalButton.performClick(nil)
-        try expect(openedTerminal, "the terminal button did nothing")
+        try expect(workspace.responds(to: #selector(
+                    WorkspaceWindowController.openProjectInTerminal(_:))),
+                   "nothing answers the Terminal menu's selector")
 
         // It opens the folder in iTerm, with Terminal as the fallback where
         // iTerm is not installed.

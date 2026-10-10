@@ -103,7 +103,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(applicationDidBecomeActive(_:)),
             name: NSApplication.didBecomeActiveNotification, object: nil)
-        sidebar.onAddProject = { [weak self] in self?.openFolder(nil) }
         sidebar.onSelectProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             let wanted = self.projects[index]
@@ -189,7 +188,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // The name goes back to the list it was chosen from; the terminal has
         // its own button at the end of the band.
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
-        sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal() }
         // The branch in the title band drops the list of branches to switch
         // to, anchored under the name. (The branch on a project row is the
         // one that goes to the Git panel.)
@@ -868,7 +866,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
     /// ask it for a new one by script, and keep the plain open as the fallback
     /// (no iTerm, or automation not permitted).
-    private func openProjectInTerminal() {
+    @objc func openProjectInTerminal(_ sender: Any?) {
         guard let projectURL else { return }
         Self.openTerminal(at: projectURL)
     }
