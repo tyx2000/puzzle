@@ -1778,15 +1778,33 @@ enum RegressionTests {
         }
         let column = welcome.columnFrameForTesting
         try expect(abs(column.midX - welcome.bounds.midX) < 1,
-                   "the page's column is not centred: \(column) in \(welcome.bounds)")
-        try expect(column.width >= WelcomeView.minimumColumnWidth - 1,
-                   "the column is narrower than its floor: \(column.width)")
+                   "the page's block is not centred: \(column) in \(welcome.bounds)")
+        // One left edge shared by the name, the buttons and every row. A
+        // centred title over a ragged list is what this replaced.
+        try expect(abs(welcome.titleFrameForTesting.minX - column.minX) < 1,
+                   "the title is not on the block's left edge: "
+                    + "\(welcome.titleFrameForTesting.minX) vs \(column.minX)")
         for row in rows {
             let inColumn = welcome.convert(row.bounds, from: row)
             try expect(abs(inColumn.minX - column.minX) < 1,
-                       "a recent row does not start at the column's edge: "
+                       "a recent row does not start at the block's edge: "
                         + "\(inColumn.minX) vs \(column.minX)")
+            try expect(abs(inColumn.width - column.width) < 1,
+                       "recent rows are not all the block's width, so a hover "
+                        + "highlight would be ragged: \(inColumn.width) vs \(column.width)")
         }
+        // The block takes its width from its content; nothing is pinned to a
+        // constant that a longer project name would overflow.
+        try expect(column.width < welcome.bounds.width - 40,
+                   "the block filled the window instead of hugging its rows")
+        // Sizing to content is exactly what lets a long name squeeze the path
+        // out: the path resists compression at the lowest priority there is,
+        // so without a floor it collapses to nothing and the row loses half
+        // its meaning.
+        let pathWidths = welcome.pathWidthsForTesting()
+        try expect(pathWidths.count == rows.count, "a row reported no path label")
+        try expect(pathWidths.allSatisfy { $0 > 40 },
+                   "a project name squeezed its path out of the row: \(pathWidths)")
     }
 
     private static func testStartingErrandsAreOnTheMenuBar() throws {

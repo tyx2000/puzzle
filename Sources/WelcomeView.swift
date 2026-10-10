@@ -8,11 +8,6 @@ final class WelcomeView: FlatView {
     /// Open several at once — every recent project whose box is ticked.
     var onOpenChecked: (([URL]) -> Void)?
 
-    /// Narrowest the centred column the page is laid out in may be. It grows
-    /// past this for a long project name, which by design never truncates —
-    /// only the parent path does.
-    static let minimumColumnWidth: CGFloat = 360
-
     private let stack = NSStackView()
     /// Ties the list to the column's width. Remade on every reload because the
     /// list leaves the view hierarchy whenever there are no recents, which
@@ -29,7 +24,7 @@ final class WelcomeView: FlatView {
         let title = NSTextField(labelWithString: "Puzzle")
         title.font = Theme.uiFont(22)
         title.textColor = Theme.foreground
-        title.alignment = .center
+        title.alignment = .left
 
         let openButton = NSButton(title: "Open", target: self,
                                   action: #selector(openFolderTapped))
@@ -51,27 +46,32 @@ final class WelcomeView: FlatView {
         buttons.spacing = 8
 
         recentStack.orientation = .vertical
-        recentStack.alignment = .leading
+        // Every row the width of the widest, so the hover highlight is the
+        // same rectangle down the list rather than tracking each name.
+        recentStack.alignment = .width
         recentStack.spacing = 2
 
         stack.orientation = .vertical
-        stack.alignment = .centerX
+        // Everything on one left edge: the name, the buttons and the list.
+        //
+        // The list is a column of names of unequal length, so its right edge is
+        // ragged however it is arranged. Centring the title over it made that
+        // raggedness read as the list being pushed off to one side, and pulling
+        // the paths over to a flush right edge only moved the gap into the
+        // middle of each row, where it separates a project from its own path.
+        stack.alignment = .leading
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.setViews([title, buttons], in: .top)
         stack.setCustomSpacing(18, after: title)
 
         addSubview(stack)
-        // One column, centred in the window, that the title, the buttons and
-        // the list all share. Without it the list was only as wide as its own
-        // rows and sat off to one side of a centred title.
-        let column = stack.widthAnchor.constraint(
-            greaterThanOrEqualToConstant: Self.minimumColumnWidth)
-        column.priority = .defaultHigh
+        // The block is as wide as its widest row and sits in the middle of the
+        // window. No fixed width: a project name is never truncated, so the
+        // block has to be able to grow for one.
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            column,
             stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -40),
         ])
 
@@ -122,9 +122,9 @@ final class WelcomeView: FlatView {
                 removeAction: { RecentProjects.shared.remove(url) }))
         }
         stack.addArrangedSubview(recentStack)
-        // The rows fill the column and align to its left edge, which is what
-        // makes a list of names readable; the title and the buttons stay
-        // centred over them.
+        // The list spans the whole block, so a hovered row's highlight reaches
+        // the same right edge whether the widest thing above it is a button or
+        // a project name.
         recentWidthConstraint?.isActive = false
         let width = recentStack.widthAnchor.constraint(equalTo: stack.widthAnchor)
         width.isActive = true
@@ -138,8 +138,21 @@ final class WelcomeView: FlatView {
     var openCheckedTitleForTesting: String { openCheckedButton.title }
     func openCheckedForTesting() { openCheckedTapped() }
     func rowsForTesting() -> [NSView] { recentStack.arrangedSubviews }
-    /// The centred column everything on the page is laid out in.
+    /// Width each row gives its parent path. Zero means a long project name
+    /// squeezed the path out of the row entirely.
+    func pathWidthsForTesting() -> [CGFloat] {
+        recentStack.arrangedSubviews.compactMap { ($0 as? RecentRowView)?.pathWidthForTesting }
+    }
+    /// The block everything on the page is laid out in.
     var columnFrameForTesting: NSRect { stack.frame }
+    /// The title's alignment rect, in this view's coordinates. The frame is
+    /// not the same thing — a text field's frame carries a couple of points of
+    /// bearing outside the glyphs, and the stack lines its children up on the
+    /// alignment rect, so comparing frames would always be off by that much.
+    var titleFrameForTesting: NSRect {
+        guard let title = stack.arrangedSubviews.first else { return .zero }
+        return stack.convert(title.alignmentRect(forFrame: title.frame), to: self)
+    }
     func toggleCheckForTesting(at index: Int) {
         (recentStack.arrangedSubviews[index] as? RecentRowView)?.toggleCheckForTesting()
     }
@@ -159,6 +172,12 @@ final class WelcomeView: FlatView {
 
 /// One clickable recent-project row: name + dimmed parent folder.
 private final class RecentRowView: FlatView {
+    /// How much of the parent path is always shown before it truncates.
+    static let minimumPathWidth: CGFloat = 104
+
+    private var pathLabel: NSTextField?
+    var pathWidthForTesting: CGFloat { pathLabel?.frame.width ?? 0 }
+
     private let action: () -> Void
     private let checkAction: (Bool) -> Void
     private let removeAction: () -> Void
@@ -195,10 +214,16 @@ private final class RecentRowView: FlatView {
         parent.textColor = Theme.dimText
         parent.lineBreakMode = .byTruncatingHead
 
-        // Long paths must truncate rather than stretch the welcome layout.
+        // Long paths truncate rather than stretch the page, and the name never
+        // does. But resistance that low lets the path collapse to nothing as
+        // well, which it did the moment the row stopped being pinned to a fixed
+        // width: the longest name took the whole row and its path vanished.
+        // The floor is what a path has to show before it starts truncating.
         name.setContentCompressionResistancePriority(.required, for: .horizontal)
         parent.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         parent.setContentHuggingPriority(.init(1), for: .horizontal)
+        parent.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.minimumPathWidth).isActive = true
 
         // Remove-from-history button, revealed on hover.
         removeButton.image = NSImage(systemSymbolName: "xmark",
@@ -212,6 +237,8 @@ private final class RecentRowView: FlatView {
         removeButton.toolTip = "Remove from Recent"
         removeButton.isHidden = true
         removeButton.translatesAutoresizingMaskIntoConstraints = false
+
+        pathLabel = parent
 
         let row = NSStackView(views: [name, parent])
         row.orientation = .horizontal
@@ -231,7 +258,6 @@ private final class RecentRowView: FlatView {
             removeButton.widthAnchor.constraint(equalToConstant: 16),
             removeButton.heightAnchor.constraint(equalToConstant: 16),
             heightAnchor.constraint(equalToConstant: 22),
-            widthAnchor.constraint(equalToConstant: 420),
         ])
         toolTip = url.path
 
