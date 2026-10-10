@@ -214,8 +214,10 @@ final class EditorViewController: NSViewController {
     var welcomeShownForTesting: Bool { welcome?.superview != nil }
 
     func stepTab(by offset: Int) { pane?.stepTab(by: offset) }
-    /// Every tab, as a project switch requires.
-    func closeAllTabs() { pane?.closeAllTabs() }
+    /// Every tab, as a project switch requires. False when one would not
+    /// close — the user kept a file whose disk version changed under an edit.
+    @discardableResult
+    func closeAllTabs() -> Bool { pane?.closeAllTabs() ?? true }
 
     @discardableResult
     func reopenLastClosedTab() -> Bool {

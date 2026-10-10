@@ -1181,12 +1181,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// anchor tab open by design — and because this is the path that writes
     /// each buffer on the way out. A refused close (a disk conflict the user
     /// cancelled) stops the walk rather than looping on it.
-    func closeAllTabs() {
+    /// True once every tab has closed; false when one would not, which stops
+    /// the rest from closing too.
+    @discardableResult
+    func closeAllTabs() -> Bool {
         while !openURLs.isEmpty {
             let before = openURLs.count
             close(index: openURLs.count - 1)
-            guard openURLs.count < before else { return }
+            guard openURLs.count < before else { return false }
         }
+        return true
     }
 
     /// Close every tab except `index`.

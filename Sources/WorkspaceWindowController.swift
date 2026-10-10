@@ -165,7 +165,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onGitCommitDiff = { [weak self] commit, file, directory in
             self?.showCommitDiff(commit: commit, file: file, in: directory)
         }
-        sidebar.onGitChanged = { [weak self] in self?.gitChanged() }
+        sidebar.onGitChanged = { [weak self] directory in
+            guard let self else { return }
+            // Finished where the user still is: everything Git-derived reads
+            // again. Finished in a project they have left: its row is all
+            // that shows it, and it reads again.
+            if directory == self.projectURL {
+                self.gitChanged()
+            } else {
+                self.refreshProjectSummaries(all: true)
+            }
+        }
         sidebar.onProjectGitChanged = { [weak self] directory in
             guard let self else { return }
             self.gitChanged()
@@ -336,10 +346,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// it had just been opened. That is deliberate; keeping per-project tab
     /// state would mean a bundle of caret positions, folds and find state that
     /// every future per-tab feature would have to remember to join.
+    ///
+    /// A tab that will not close — a file changed on disk under an edit, and
+    /// the user cancelled the question that asks which to keep — keeps the
+    /// project it belongs to on screen. Switching anyway left that file open
+    /// in the next project, its gutter and blame read against the wrong
+    /// repository.
     func activateProject(_ url: URL) {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
         guard projects.contains(resolved) else { return }
-        if projectURL != resolved { editor.closeAllTabs() }
+        if projectURL != resolved, !editor.closeAllTabs() { return }
         loadProject(resolved)
     }
 
@@ -739,7 +755,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// How a failed pull is reported. A test answers without a sheet.
+    /// How a failed pull or branch switch is reported. A test answers without
+    /// a sheet.
     var presentSyncError: ((_ title: String, _ message: String) -> Void)?
 
     private func presentPullError(_ message: String, for url: URL) {
@@ -972,6 +989,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         panel.present(over: window)
     }
 
+    var quickOpenIndexForTesting: [String] { quickOpenIndex }
+
     private func ensurePalette() -> PalettePanel {
         if let palette { return palette }
         let made = PalettePanel()
@@ -994,8 +1013,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let paths = QuickOpen.index(in: directory)
             DispatchQueue.main.async {
-                guard let self, self.projectURL == directory else { return }
+                guard let self else { return }
+                // Down before anything else: left up by an index that came back
+                // for a project no longer on screen, it turned every later ⌘P
+                // in this window away, and the list stayed empty for good.
                 self.quickOpenIndexInFlight = false
+                guard self.projectURL == directory else {
+                    // ⌘P opened on the project switched to while this one was
+                    // being read is still waiting for an index of its own.
+                    if let current = self.projectURL, self.palette?.isVisible == true {
+                        self.refreshQuickOpenIndex(for: current)
+                    }
+                    return
+                }
                 self.quickOpenIndex = paths
                 guard let palette = self.palette, palette.isVisible else { return }
                 palette.setItems(self.quickOpenItems(matching: palette.query))
@@ -1148,21 +1178,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         gitSummaryQueue.async { [weak self] in
             let result = GitService.switchBranch(branch, in: directory)
             DispatchQueue.main.async {
-                guard let self, self.projectURL == directory else { return }
-                if result.ok {
-                    self.refreshExternalGitState()
-                } else {
-                    // Git refused it — a dirty tree it cannot preserve, a
-                    // missing ref — so hand its own words to the user.
-                    self.presentBranchAlert(
-                        title: "Could not switch to “\(branch.name)”",
-                        message: result.message)
-                }
+                self?.branchSwitchFinished(result, branchName: branch.name, in: directory)
             }
         }
     }
 
+    /// The user may have moved to another project while the switch ran. It
+    /// still lands: that project's row reads its new branch, and a refusal is
+    /// still reported — dropped, the user was never told the switch did not
+    /// happen.
+    private func branchSwitchFinished(_ result: GitService.RemoteResult, branchName: String,
+                                      in directory: URL) {
+        let here = projectURL == directory
+        if result.ok {
+            if here { refreshExternalGitState() } else { refreshProjectSummaries(all: true) }
+            return
+        }
+        // Git refused it — a dirty tree it cannot preserve, a missing ref — so
+        // hand its own words to the user, naming the project when it is not
+        // the one on screen.
+        presentBranchAlert(
+            title: here ? "Could not switch to “\(branchName)”"
+                : "Could not switch “\(directory.lastPathComponent)” to “\(branchName)”",
+            message: result.message)
+    }
+
+    func branchSwitchFinishedForTesting(ok: Bool, message: String, branchName: String,
+                                        in directory: URL) {
+        branchSwitchFinished(GitService.RemoteResult(ok: ok, message: message),
+                             branchName: branchName,
+                             in: directory.standardizedFileURL.resolvingSymlinksInPath())
+    }
+    func summaryBranchForTesting(for url: URL) -> String? {
+        projectSummaries[url.standardizedFileURL.resolvingSymlinksInPath()]?.branch
+    }
+
     private func presentBranchAlert(title: String, message: String) {
+        if let presentSyncError {
+            presentSyncError(title, message)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1222,6 +1277,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
         guard let index = projects.firstIndex(of: resolved) else { return }
         let wasShowing = projectURL == resolved
+        // The project on screen goes only once its tabs have: one that will
+        // not close keeps the project, and its row, where they are.
+        if wasShowing, !editor.closeAllTabs() { return }
         projects.remove(at: index)
         // A summary outliving its project was also a wrong one: the sweep reads
         // only projects with none, so the same folder added back later showed
@@ -1245,8 +1303,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// page, and the recent projects on it — except that the rows are still
     /// there to come back to.
     func deactivateProject() {
-        guard projectURL != nil else { return }
-        clearProject()
+        guard projectURL != nil, clearProject() else { return }
         refreshProjectTabs()
     }
 
@@ -1257,9 +1314,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     /// Put the window back to having nothing open: no tabs, no monitors, no
     /// tree, no Git. Whether any projects remain in the list is the caller's
-    /// business.
-    private func clearProject() {
-        editor.closeAllTabs()
+    /// business. Nothing changes if a tab will not close.
+    @discardableResult
+    private func clearProject() -> Bool {
+        guard editor.closeAllTabs() else { return false }
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
         workspaceFileMonitor?.stop()
@@ -1281,6 +1339,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         currentBranchName = nil
         window?.subtitle = ""
         refreshWindowTitle(activeFile: nil)
+        return true
     }
 
     /// What each row says after the project's name: the branch it is on, who

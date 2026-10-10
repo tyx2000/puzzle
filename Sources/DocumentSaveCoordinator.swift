@@ -109,9 +109,12 @@ final class DocumentSaveCoordinator {
 
     // MARK: - Conflicts
 
-    private enum DiskConflictChoice { case overwrite, reload, cancel }
+    enum DiskConflictChoice { case overwrite, reload, cancel }
+    /// The answer a test gives in place of the alert.
+    static var conflictChoiceForTesting: DiskConflictChoice?
 
     private func askAboutDiskConflict(for document: Document) -> DiskConflictChoice {
+        if let choice = Self.conflictChoiceForTesting { return choice }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "“\(document.name)” changed on disk since you started editing"

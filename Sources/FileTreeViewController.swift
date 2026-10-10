@@ -199,6 +199,7 @@ final class FileTreeViewController: NSViewController {
         cancelPendingEdit()
         deferredTreeReload = false
         deferredDiskRefresh = false
+        forgetStatus()
         root = nil
         outlineView.reloadData()
     }
@@ -207,6 +208,10 @@ final class FileTreeViewController: NSViewController {
         cancelPendingEdit()
         deferredTreeReload = false
         deferredDiskRefresh = false
+        // Another project's changes and ignored paths are relative paths too:
+        // kept, they coloured this project's files at the same paths until its
+        // own status came back — seconds, in a large repository.
+        if root?.url.standardizedFileURL != url.standardizedFileURL { forgetStatus() }
         root = FileNode(url: url, isDirectory: true)
         outlineView.reloadData()
         if let root {
@@ -419,6 +424,14 @@ final class FileTreeViewController: NSViewController {
             return
         }
         outlineView.reloadData()
+    }
+
+    private func forgetStatus() {
+        dirtyPaths = []
+        untrackedPaths = []
+        dirtyDirectories = []
+        untrackedDirectories = []
+        ignoredPaths = []
     }
 
     /// Every directory prefix of the given paths.

@@ -42,7 +42,8 @@ final class SidebarViewController: NSViewController {
     var onGitFile: ((URL) -> Void)?
     var onGitDiff: ((GitService.Status.Entry, URL) -> Void)?
     var onGitCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
-    var onGitChanged: (() -> Void)?
+    /// A Git panel operation finished in the given project.
+    var onGitChanged: ((URL) -> Void)?
     /// The commit line over a project's changes committed or pushed in this
     /// repository — the project on screen, or one the user has since left.
     var onProjectGitChanged: ((URL) -> Void)?
@@ -371,7 +372,7 @@ final class SidebarViewController: NSViewController {
         git.onOpenCommitDiff = { [weak self] commit, file, directory in
             self?.onGitCommitDiff?(commit, file, directory)
         }
-        git.onChanged = { [weak self] in self?.onGitChanged?() }
+        git.onChanged = { [weak self] directory in self?.onGitChanged?(directory) }
         if let directory { git.setDirectory(directory) }
         gitController = git
         mount(git)

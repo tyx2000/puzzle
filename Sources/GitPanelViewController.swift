@@ -8,7 +8,9 @@ final class GitPanelViewController: NSViewController {
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
     /// Clicking a file inside an expanded commit shows that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
-    var onChanged: (() -> Void)?
+    /// An operation finished in the given project — which may no longer be
+    /// the one on screen; the window refreshes whatever shows that project.
+    var onChanged: ((URL) -> Void)?
 
     /// History rows: a commit, or one of its files when the commit is expanded.
     private enum HistoryRow {
@@ -28,6 +30,11 @@ final class GitPanelViewController: NSViewController {
     private var commitFiles: [String: [GitService.CommitFile]] = [:]
 
     private var directory: URL?
+    /// A message typed for one project stays with that project. Without this
+    /// it followed a switch to another project, one ⌘↩ away from committing
+    /// that project's changes under it — the commit line over a project's
+    /// changes keeps its drafts the same way.
+    private var drafts: [URL: String] = [:]
     private var entries: [GitService.Status.Entry] = []
     private var history: [GitService.Commit] = []
     private var historyGraphRows: [String: GitHistoryGraph.Row] = [:]
@@ -117,8 +124,21 @@ final class GitPanelViewController: NSViewController {
     private(set) var historyLoadCountForTesting = 0
 
     func setDirectory(_ url: URL?) {
+        if url != directory {
+            if let old = directory {
+                drafts[old] = commitField.string.isEmpty ? nil : commitField.string
+            }
+            commitField.string = url.flatMap { drafts[$0] } ?? ""
+        }
         directory = url
         currentBranch = ""
+        // What the last project had open, expanded or cached names its own
+        // paths and commits: a change at the same path here is not the diff
+        // that was open there.
+        activeChangesPath = nil
+        activeCommitFile = nil
+        expandedCommits.removeAll()
+        commitFiles.removeAll()
         entries.removeAll()
         // Another repository's depth is not this one's.
         resetHistoryDepth()
@@ -736,11 +756,12 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
-                guard self.directory == operationDirectory else { return }
-                self.refreshExternal()
-                self.onChanged?()
+                if self.directory == operationDirectory { self.refreshExternal() }
+                self.onChanged?(operationDirectory)
                 if !result.ok {
-                    self.presentOperationError(title: "\(verb) failed", message: result.message)
+                    self.presentOperationError(
+                        title: self.failureTitle("\(verb) failed", in: operationDirectory),
+                        message: result.message)
                 }
             }
         }
@@ -767,35 +788,40 @@ final class GitPanelViewController: NSViewController {
             let postCommitStatus = commit.code == 0 ? GitService.status(in: directory) : nil
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else { return }
-                guard self.directory == directory else {
-                    self.finishOperation(operationID)
-                    return
-                }
+                // The user may have moved to another project while this ran.
+                // It still finishes there: its row hears of it, a failure is
+                // still reported, and a push that was asked for still goes.
+                let here = self.directory == directory
                 if commit.code != 0 {
                     self.finishOperation(operationID)
-                    self.refreshExternal()
-                    self.onChanged?()
+                    if here { self.refreshExternal() }
+                    self.onChanged?(directory)
                     self.presentOperationError(
-                        title: "Commit failed",
+                        title: self.failureTitle("Commit failed", in: directory),
                         message: commit.err.isEmpty ? commit.out : commit.err)
                     return
                 }
 
-                // Commit succeeded. Reflect the local repository state before
-                // starting any network push, so Changes clears immediately.
-                self.commitField.string = ""
-                self.refreshCommitButton()
-                if let postCommitStatus {
-                    self.applyStatus(postCommitStatus, in: directory)
-                    self.table.reloadData()
+                // Commit succeeded: the message has been used, whether it is
+                // on screen or put away as the draft of the project left.
+                self.drafts[directory] = nil
+                if here {
+                    // Reflect the local repository state before starting any
+                    // network push, so Changes clears immediately.
+                    self.commitField.string = ""
+                    self.refreshCommitButton()
+                    if let postCommitStatus {
+                        self.applyStatus(postCommitStatus, in: directory)
+                        self.table.reloadData()
+                    }
                 }
-                self.onChanged?()
+                self.onChanged?(directory)
                 if push {
                     self.continuePushAfterCommit(operationID: operationID,
                                                  directory: directory)
                 } else {
                     self.finishOperation(operationID)
-                    self.refreshExternal()
+                    if here { self.refreshExternal() }
                 }
             }
         }
@@ -809,12 +835,12 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
-                guard self.directory == directory else { return }
-                self.refreshExternal()
-                self.onChanged?()
+                if self.directory == directory { self.refreshExternal() }
+                self.onChanged?(directory)
                 if !result.ok {
-                    self.presentOperationError(title: "Committed, but push failed",
-                                               message: result.message)
+                    self.presentOperationError(
+                        title: self.failureTitle("Committed, but push failed", in: directory),
+                        message: result.message)
                 }
             }
         }
@@ -857,7 +883,20 @@ final class GitPanelViewController: NSViewController {
         progressShimmer.stop()
     }
 
+    /// A failure in the project on screen is just what failed; one in a
+    /// project the user has since left says which project.
+    private func failureTitle(_ title: String, in directory: URL) -> String {
+        directory == self.directory ? title : "\(title) in “\(directory.lastPathComponent)”"
+    }
+
+    /// How a failure is shown; a test reads it instead of a sheet.
+    var presentErrorForTesting: ((_ title: String, _ message: String) -> Void)?
+
     private func presentOperationError(title: String, message: String) {
+        if let presentErrorForTesting {
+            presentErrorForTesting(title, message)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1170,15 +1209,16 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
-                guard self.directory == directory else { return }
-                self.applyStatus(status, in: directory)
-                self.activeChangesPath = nil
-                self.table.reloadData()
-                self.onChanged?()
-                self.refreshExternal()
+                if self.directory == directory {
+                    self.applyStatus(status, in: directory)
+                    self.activeChangesPath = nil
+                    self.table.reloadData()
+                    self.refreshExternal()
+                }
+                self.onChanged?(directory)
                 if let failure = result.failure {
                     self.presentOperationError(
-                        title: "Discard all changes failed",
+                        title: self.failureTitle("Discard all changes failed", in: directory),
                         message: "\(result.discarded) of \(entries.count) discarded.\n\(failure)")
                 }
             }
@@ -1210,19 +1250,21 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard self.activeOperationID == operationID else { return }
                 self.finishOperation(operationID)
-                guard self.directory == directory else { return }
-                if let status {
+                guard let status else {
+                    self.presentOperationError(
+                        title: self.failureTitle("Discard changes failed", in: directory),
+                        message: result.message)
+                    return
+                }
+                if self.directory == directory {
                     self.applyStatus(status, in: directory)
                     if !status.entries.contains(where: { $0.path == entry.path }) {
                         self.activeChangesPath = nil
                     }
                     self.table.reloadData()
-                    self.onChanged?()
                     self.refreshExternal()
-                } else {
-                    self.presentOperationError(title: "Discard changes failed",
-                                               message: result.message)
                 }
+                self.onChanged?(directory)
             }
         }
     }
@@ -1364,6 +1406,18 @@ final class GitPanelViewController: NSViewController {
         commitField.keyDown(with: event)
     }
     var isOperationRunningForTesting: Bool { activeOperationID != nil }
+    var commitMessageForTesting: String { commitField.string }
+    func commitForTesting() {
+        _ = view
+        performCommit(push: false)
+    }
+    /// Return on a row, as the keys do it.
+    func activateRowForTesting(_ row: Int) {
+        _ = view
+        activate(row: row)
+    }
+    var activeChangesPathForTesting: String? { activeChangesPath }
+    var expandedCommitCountForTesting: Int { expandedCommits.count }
     var operationQueueForTesting: DispatchQueue { gitQueue }
 
     /// The line above the commit box: project, branch and commit author.

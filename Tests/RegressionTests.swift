@@ -114,6 +114,7 @@ enum RegressionTests {
         try testScopedHistoryGraphParents()
         try testAllBranchesHistoryGraph()
         try testProjectHistoryIsTheCurrentBranch()
+        try testProjectSwitchKeepsStateApart()
         try testProjectHistoryMarksTheBranchBase()
         try testRefPillText()
         try testIgnoredFilesAreDimmed()
@@ -5762,6 +5763,218 @@ enum RegressionTests {
                    "the default branch's history has a rule: \(history.rowOutlineForTesting)")
         try git(["checkout", "-q", "--detach", "a"])
         try expect(base() == nil, "a detached HEAD has a base: \(String(describing: base()))")
+    }
+
+    /// Switching projects must leave nothing of the project left behind on
+    /// the one switched to — and what was still running in the project left
+    /// behind must still land there.
+    private static func testProjectSwitchKeepsStateApart() throws {
+        var cleanup: [URL] = []
+        defer { cleanup.forEach { try? FileManager.default.removeItem(at: $0) } }
+        func folder(_ label: String) throws -> URL {
+            let url = try temporaryDirectory(label)
+            cleanup.append(url)
+            return url
+        }
+        func waitUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        @discardableResult
+        func git(_ args: [String], in directory: URL) throws -> String {
+            let result = GitService.run(args, in: directory)
+            try expect(result.code == 0, "switch fixture failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func repository(_ label: String) throws -> URL {
+            let url = try folder(label)
+            try git(["init", "-q", "-b", "main"], in: url)
+            try git(["config", "user.name", "Switch Test"], in: url)
+            try git(["config", "user.email", "switch@example.invalid"], in: url)
+            try Data("first\n".utf8).write(to: url.appendingPathComponent("same.txt"))
+            try git(["add", "-A"], in: url)
+            try git(["commit", "-q", "-m", "first"], in: url)
+            return url.standardizedFileURL.resolvingSymlinksInPath()
+        }
+
+        // 1. ⌘P on a project, then a switch before its file index came back:
+        // the index that lands for the project left must not turn every later
+        // ⌘P away.
+        let quickA = try folder("switch-quick-a"), quickB = try folder("switch-quick-b")
+        try Data("a".utf8).write(to: quickA.appendingPathComponent("alpha.txt"))
+        try Data("b".utf8).write(to: quickB.appendingPathComponent("beta.txt"))
+        let quick = WorkspaceWindowController()
+        defer { quick.window?.close() }
+        quick.openProject(quickA)
+        quick.quickOpen(nil)
+        quick.openProject(quickB)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        quick.quickOpen(nil)
+        try expect(waitUntil { quick.quickOpenIndexForTesting == ["beta.txt"] },
+                   "⌘P after a switch mid-index never read the new project: "
+                     + "\(quick.quickOpenIndexForTesting)")
+        // ⌘P already open on the project switched to while the old index is
+        // out: the old one's arrival reads the new project for it.
+        quick.openProject(quickA)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        quick.quickOpen(nil)
+        quick.openProject(quickB)
+        quick.quickOpen(nil)
+        try expect(waitUntil { quick.quickOpenIndexForTesting == ["beta.txt"] },
+                   "⌘P open on the new project waited for an index that never came: "
+                     + "\(quick.quickOpenIndexForTesting)")
+        quick.openProject(quickA)
+
+        // 2, 5, 6. The Git panel: a message typed for one project stays with
+        // it, what was open there does not follow, and an operation that
+        // finishes after the switch still lands in its own project.
+        let repoA = try repository("switch-panel-a"), repoB = try repository("switch-panel-b")
+        for repo in [repoA, repoB] {
+            try Data("changed\n".utf8).write(to: repo.appendingPathComponent("same.txt"))
+        }
+        let panel = GitPanelViewController()
+        _ = panel.view
+        var errors: [String] = []
+        panel.presentErrorForTesting = { title, _ in errors.append(title) }
+        var changedIn: [URL] = []
+        panel.onChanged = { changedIn.append($0) }
+        panel.setDirectory(repoA)
+        try expect(waitUntil { panel.rowCountForTesting == 1 }, "project A's change never listed")
+        panel.activateRowForTesting(0)
+        try expect(panel.activeChangesPathForTesting == "same.txt", "the change's diff did not open")
+        panel.setCommitMessageForTesting("message for A")
+        panel.setDirectory(repoB)
+        try expect(panel.commitMessageForTesting.isEmpty,
+                   "A's message followed the switch to B: \(panel.commitMessageForTesting)")
+        try expect(panel.activeChangesPathForTesting == nil
+                    && panel.expandedCommitCountForTesting == 0,
+                   "what was open in A is still marked open in B")
+        panel.setDirectory(repoA)
+        try expect(panel.commitMessageForTesting == "message for A",
+                   "A's message did not come back with A: \(panel.commitMessageForTesting)")
+        // Commit A, and move to B before it lands.
+        panel.commitForTesting()
+        panel.setDirectory(repoB)
+        try expect(waitUntil { !panel.isOperationRunningForTesting }, "the commit never finished")
+        let landed = try git(["log", "-1", "--format=%s"], in: repoA)
+        try expect(landed == "message for A", "the commit did not land in A: \(landed)")
+        try expect(changedIn.contains(repoA),
+                   "a commit finishing after the switch was not reported for A: \(changedIn)")
+        try expect(panel.commitMessageForTesting.isEmpty && errors.isEmpty,
+                   "B's field took A's message, or the commit reported an error: \(errors)")
+        panel.setDirectory(repoA)
+        try expect(panel.commitMessageForTesting.isEmpty,
+                   "the message A's commit used came back as a draft")
+        // A failure after the switch is still told, naming its project.
+        panel.setCommitMessageForTesting("nothing to commit")
+        panel.commitForTesting()
+        panel.setDirectory(repoB)
+        try expect(waitUntil { !panel.isOperationRunningForTesting }, "the empty commit never ended")
+        try expect(errors == ["Commit failed in “\(repoA.lastPathComponent)”"],
+                   "a commit failing after the switch was not reported: \(errors)")
+        panel.setDirectory(repoA)
+        try expect(panel.commitMessageForTesting == "nothing to commit",
+                   "a message whose commit failed was not kept")
+
+        // 3. A tab that will not close keeps its project on screen.
+        let tabA = try folder("switch-tab-a"), tabB = try folder("switch-tab-b")
+        let held = tabA.appendingPathComponent("held.txt")
+        try Data("on disk\n".utf8).write(to: held)
+        try Data("b".utf8).write(to: tabB.appendingPathComponent("b.txt"))
+        let tabs = WorkspaceWindowController()
+        defer { tabs.window?.close() }
+        tabs.openProject(tabB)
+        tabs.openProject(tabA)
+        tabs.editor.open(url: held)
+        guard let document = DocumentStore.shared.cachedDocument(for: held) else {
+            throw Failure(description: "the held file did not open")
+        }
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length),
+                                           with: "mine\n")
+        document.markLocalEdit()
+        try Data("theirs\n".utf8).write(to: held)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                              ofItemAtPath: held.path)
+        _ = DocumentStore.shared.reloadExternalChanges(at: [held])
+        try expect(document.hasDiskConflict, "the fixture did not make a disk conflict")
+        DocumentSaveCoordinator.conflictChoiceForTesting = .cancel
+        defer { DocumentSaveCoordinator.conflictChoiceForTesting = nil }
+        let resolvedA = tabA.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedB = tabB.standardizedFileURL.resolvingSymlinksInPath()
+        tabs.activateProject(tabB)
+        try expect(tabs.projectURL == resolvedA
+                    && tabs.editor.openURLs.map(\.lastPathComponent) == ["held.txt"],
+                   "the switch went ahead past a tab that would not close: "
+                     + "\(String(describing: tabs.projectURL)) \(tabs.editor.openURLs)")
+        tabs.closeProject(tabA)
+        try expect(tabs.projects.contains(resolvedA) && tabs.projectURL == resolvedA,
+                   "closing the project went ahead past a tab that would not close")
+        tabs.deactivateProject()
+        try expect(tabs.projectURL == resolvedA,
+                   "collapsing the project went ahead past a tab that would not close")
+        // Answered, the switch goes.
+        DocumentSaveCoordinator.conflictChoiceForTesting = .reload
+        tabs.activateProject(tabB)
+        try expect(tabs.projectURL == resolvedB && tabs.editor.openURLs.isEmpty,
+                   "once the tab closed, the switch still did not happen")
+
+        // 4. The tree forgets the last project's colours with its root.
+        let treeA = try folder("switch-tree-a"), treeB = try folder("switch-tree-b")
+        for root in [treeA, treeB] {
+            try Data("x".utf8).write(to: root.appendingPathComponent("same.txt"))
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("build"),
+                                                    withIntermediateDirectories: true)
+        }
+        let tree = FileTreeViewController()
+        _ = tree.view
+        tree.setRoot(treeA)
+        tree.setStatus(modified: ["same.txt"], untracked: [], ignored: ["build"])
+        tree.setRoot(treeB)
+        func treeRow(_ name: String) -> Int? {
+            (0..<tree.rowCountForTesting).first {
+                tree.nodeForTesting(at: $0)?.url.lastPathComponent == name
+            }
+        }
+        guard let sameRow = treeRow("same.txt"), let buildRow = treeRow("build") else {
+            throw Failure(description: "the tree fixture rows are missing")
+        }
+        try expect(tree.statusColorForTesting(at: sameRow) == nil
+                    && !tree.isIgnoredForTesting(at: buildRow),
+                   "the new project's tree wears the last project's Git colours")
+        // The same root again — the project re-shown — keeps what it knows.
+        tree.setStatus(modified: ["same.txt"], untracked: [], ignored: ["build"])
+        tree.setRoot(treeB)
+        try expect(tree.statusColorForTesting(at: treeRow("same.txt") ?? -1) != nil,
+                   "re-showing the same project dropped its colours")
+
+        // 5. A branch switch, or a Git panel operation, that lands in a
+        // project the user has left updates that project's row, and a refusal
+        // is still told.
+        let rowA = try repository("switch-row-a"), rowB = try repository("switch-row-b")
+        let host = WorkspaceWindowController()
+        defer { host.window?.close() }
+        var alerts: [String] = []
+        host.presentSyncError = { title, _ in alerts.append(title) }
+        host.openProject(rowA)
+        try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "main" },
+                   "project A's row never read its branch")
+        host.openProject(rowB)
+        try git(["checkout", "-q", "-b", "other"], in: rowA)
+        host.branchSwitchFinishedForTesting(ok: true, message: "", branchName: "other", in: rowA)
+        try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "other" },
+                   "a branch switch landing in a project left did not update its row: "
+                     + "\(String(describing: host.summaryBranchForTesting(for: rowA)))")
+        host.branchSwitchFinishedForTesting(ok: false, message: "refused",
+                                            branchName: "gone", in: rowA)
+        try expect(alerts == ["Could not switch “\(rowA.lastPathComponent)” to “gone”"],
+                   "a refused switch in a project left was not told: \(alerts)")
+        try git(["checkout", "-q", "main"], in: rowA)
+        host.sidebar.onGitChanged?(rowA)
+        try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "main" },
+                   "a Git panel operation landing in a project left did not update its row")
     }
 
     private static func testProjectHistoryIsTheCurrentBranch() throws {
