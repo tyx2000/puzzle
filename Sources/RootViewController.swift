@@ -46,8 +46,11 @@ final class RootViewController: NSViewController {
         // Upper bound is 80% of the window (applied live in onDividerDrag);
         // this static cap is just a sane ceiling before the window exists.
         sidebarItem.maximumThickness = 2000
-        // The panel is always visible; all sidebar commands select a panel.
-        sidebarItem.canCollapse = false
+        // Collapsible only so the start page can put it away — see
+        // `setSidebarHidden`. Dragging still cannot collapse it: the divider
+        // stops at `minimumThickness`, and every sidebar command selects a
+        // panel rather than toggling one.
+        sidebarItem.canCollapse = true
         // The panel holds its width; the editor absorbs window resizing. With
         // `.defaultLow` the panel is the pane that yields, so it snapped back to
         // its content minimum and could not be widened.
@@ -156,4 +159,22 @@ final class RootViewController: NSViewController {
     func showSidebar() {
         applyWidth(max(lastSidebarWidth, minimumSidebarWidth))
     }
+
+    /// Put the panel away, or bring it back.
+    ///
+    /// The start page is the only caller. With no project open the panel has
+    /// nothing to show — its three tabs list a project's files, search it and
+    /// show its Git — and at half the window's width that was a large empty
+    /// rectangle beside a short column of text. Hidden, the page has the whole
+    /// window and sits in the middle of it.
+    func setSidebarHidden(_ hidden: Bool) {
+        guard sidebarItem.isCollapsed != hidden else { return }
+        sidebarItem.isCollapsed = hidden
+        // The handle is drawn over the split view rather than by it, so it has
+        // to go as well — otherwise a draggable divider is left at the window's
+        // left edge with nothing behind it.
+        dividerHandle.isHidden = hidden
+    }
+
+    var sidebarIsHiddenForTesting: Bool { sidebarItem.isCollapsed }
 }

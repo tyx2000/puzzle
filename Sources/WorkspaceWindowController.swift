@@ -11,6 +11,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     let editor = EditorViewController()
     private let resizeHandles = WindowResizeHandleView()
     private var root: RootViewController!
+    var rootForTesting: RootViewController { root }
     private(set) var projectURL: URL?
     private var gitRepositoryMonitor: GitRepositoryMonitor?
     private var workspaceFileMonitor: WorkspaceFileMonitor?
@@ -195,6 +196,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self?.showBranchMenu(from: rect)
         }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
+        editor.onWelcomeVisibilityChanged = { [weak self] showing in
+            self?.root.setSidebarHidden(showing)
+        }
         editor.onOpenSettings = { [weak self] in self?.openSettings() }
         editor.onOpenRecent = { [weak self] url in self?.openSelection([url]) }
         // Every ticked project joins this window, and the last one read becomes

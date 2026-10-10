@@ -8,7 +8,16 @@ final class WelcomeView: FlatView {
     /// Open several at once — every recent project whose box is ticked.
     var onOpenChecked: (([URL]) -> Void)?
 
+    /// Narrowest the centred column the page is laid out in may be. It grows
+    /// past this for a long project name, which by design never truncates —
+    /// only the parent path does.
+    static let minimumColumnWidth: CGFloat = 360
+
     private let stack = NSStackView()
+    /// Ties the list to the column's width. Remade on every reload because the
+    /// list leaves the view hierarchy whenever there are no recents, which
+    /// takes any constraint on it with it.
+    private var recentWidthConstraint: NSLayoutConstraint?
     private let recentStack = NSStackView()
     private let openCheckedButton = NSButton()
     private var checked: Set<URL> = []
@@ -53,9 +62,16 @@ final class WelcomeView: FlatView {
         stack.setCustomSpacing(18, after: title)
 
         addSubview(stack)
+        // One column, centred in the window, that the title, the buttons and
+        // the list all share. Without it the list was only as wide as its own
+        // rows and sat off to one side of a centred title.
+        let column = stack.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.minimumColumnWidth)
+        column.priority = .defaultHigh
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            column,
             stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -40),
         ])
 
@@ -106,6 +122,13 @@ final class WelcomeView: FlatView {
                 removeAction: { RecentProjects.shared.remove(url) }))
         }
         stack.addArrangedSubview(recentStack)
+        // The rows fill the column and align to its left edge, which is what
+        // makes a list of names readable; the title and the buttons stay
+        // centred over them.
+        recentWidthConstraint?.isActive = false
+        let width = recentStack.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        width.isActive = true
+        recentWidthConstraint = width
     }
 
     var checkedForTesting: [URL] {
@@ -115,6 +138,8 @@ final class WelcomeView: FlatView {
     var openCheckedTitleForTesting: String { openCheckedButton.title }
     func openCheckedForTesting() { openCheckedTapped() }
     func rowsForTesting() -> [NSView] { recentStack.arrangedSubviews }
+    /// The centred column everything on the page is laid out in.
+    var columnFrameForTesting: NSRect { stack.frame }
     func toggleCheckForTesting(at index: Int) {
         (recentStack.arrangedSubviews[index] as? RecentRowView)?.toggleCheckForTesting()
     }

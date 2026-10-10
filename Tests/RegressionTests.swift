@@ -38,6 +38,7 @@ enum RegressionTests {
         try testUndisplayableFilesCentreTheirMessage()
         try testTabMenuClosesEveryTab()
         try testStartingErrandsAreOnTheMenuBar()
+        try testStartPageHasTheWindowToItself()
         try testEditorManualSave()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
@@ -1734,6 +1735,58 @@ enum RegressionTests {
         pane.closeAllTabs()
         try expect(pane.openURLs.isEmpty,
                    "Close All left \(pane.openURLs.count) tabs open")
+    }
+
+    private static func testStartPageHasTheWindowToItself() throws {
+        let directory = try temporaryDirectory("start-page")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1000, height: 640))
+        _ = workspace.window
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+
+        // No project: the panel's three tabs would all be empty, so it is put
+        // away and the page has the window to itself.
+        try expect(workspace.rootForTesting.sidebarIsHiddenForTesting,
+                   "the start page still has an empty panel beside it")
+
+        // Opening one brings it straight back.
+        workspace.openSelection([project])
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(!workspace.rootForTesting.sidebarIsHiddenForTesting,
+                   "the panel did not come back when a project opened")
+
+        // Dragging still cannot collapse it, even though it is collapsible now.
+        workspace.rootForTesting.resizeSidebarForTesting(to: 20)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(!workspace.rootForTesting.sidebarIsHiddenForTesting
+                    && workspace.rootForTesting.sidebarWidthForTesting
+                        >= RootViewController.minimumSidebarWidth,
+                   "dragging the divider collapsed the panel")
+
+        // The page is one column: the title is centred over a list that is
+        // left-aligned to the same column, not floating beside it.
+        let welcome = WelcomeView(frame: NSRect(x: 0, y: 0, width: 1000, height: 640))
+        welcome.layoutSubtreeIfNeeded()
+        let rows = welcome.rowsForTesting()
+        guard !rows.isEmpty else {
+            throw Failure(description: "no recent projects to lay the page out with")
+        }
+        let column = welcome.columnFrameForTesting
+        try expect(abs(column.midX - welcome.bounds.midX) < 1,
+                   "the page's column is not centred: \(column) in \(welcome.bounds)")
+        try expect(column.width >= WelcomeView.minimumColumnWidth - 1,
+                   "the column is narrower than its floor: \(column.width)")
+        for row in rows {
+            let inColumn = welcome.convert(row.bounds, from: row)
+            try expect(abs(inColumn.minX - column.minX) < 1,
+                       "a recent row does not start at the column's edge: "
+                        + "\(inColumn.minX) vs \(column.minX)")
+        }
     }
 
     private static func testStartingErrandsAreOnTheMenuBar() throws {

@@ -161,6 +161,22 @@ final class EditorViewController: NSViewController {
         pane?.releaseTransientMemory()
     }
 
+    /// The start page came up, or went away. The window hides the sidebar
+    /// while it is showing: with no project there is nothing in the panel.
+    ///
+    /// Subscribing delivers the state immediately. The view is loaded while the
+    /// window is still being assembled, so the first change happens before the
+    /// window has anything wired to hear it; without this the panel stayed up
+    /// on the very start page the callback exists for.
+    var onWelcomeVisibilityChanged: ((Bool) -> Void)? {
+        didSet {
+            reportedWelcome = wantsWelcome
+            onWelcomeVisibilityChanged?(wantsWelcome)
+        }
+    }
+    /// Last value handed to that callback, so it only fires on a change.
+    private var reportedWelcome: Bool?
+
     private var hasOpenFiles: Bool { !(pane?.openURLs.isEmpty ?? true) }
     /// The start page is for a window with no project and nothing open.
     private var wantsWelcome: Bool { !hasOpenFiles && !hasProject }
@@ -168,6 +184,13 @@ final class EditorViewController: NSViewController {
     private func updatePlaceholder() {
         let hasOpenFiles = self.hasOpenFiles
         updateWelcome()
+        // Reported from the condition rather than from whether the view has
+        // been built: the page is created one turn late on purpose, and the
+        // sidebar must not flash in and out across that turn.
+        if reportedWelcome != wantsWelcome {
+            reportedWelcome = wantsWelcome
+            onWelcomeVisibilityChanged?(wantsWelcome)
+        }
         emptyHints.isHidden = hasOpenFiles || !hasProject
         // The pane (and its blank text view) must not cover the welcome screen.
         pane?.view.isHidden = !hasOpenFiles
