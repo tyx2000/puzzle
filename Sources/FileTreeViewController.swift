@@ -217,9 +217,10 @@ final class FileTreeViewController: NSViewController {
         if let root {
             outlineView.expandItem(root)
         }
-        // A whole different project's files: settle them in rather than
-        // blinking one tree out and another in.
-        outlineView.enclosingScrollView?.settleIn()
+        // Deliberately not faded in. The Projects panel already slides the
+        // rows when a project is opened or swapped, and this tree is inside
+        // what it slides: a fade on top of that movement arrives a beat late
+        // and drags the old rows along behind it.
     }
 
     /// Refresh from disk, keeping expansion where possible.

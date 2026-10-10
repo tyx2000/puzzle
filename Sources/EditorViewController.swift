@@ -215,6 +215,18 @@ final class EditorViewController: NSViewController {
 
     static func fade(_ view: NSView, to alpha: CGFloat,
                      then finish: (() -> Void)? = nil) {
+        // Off screen there is no run loop to carry the animation, and the view
+        // would sit at whatever alpha it started from — for the start page,
+        // built one turn after it is asked for, that meant a page faded to
+        // nothing and left there.
+        guard view.window != nil else {
+            view.alphaValue = alpha
+            finish?()
+            return
+        }
+        // Composited rather than redrawn, so nothing behind it has to repaint
+        // in step and no stale pixels are left where it used to be.
+        view.wantsLayer = true
         NSAnimationContext.runAnimationGroup { context in
             context.duration = crossfadeDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -255,13 +267,17 @@ final class EditorViewController: NSViewController {
         // Over the pane, under the hints and the settings gear.
         welcome.alphaValue = 0
         view.addSubview(welcome, positioned: .below, relativeTo: emptyHints)
-        Self.fade(welcome, to: 1)
         NSLayoutConstraint.activate([
             welcome.topAnchor.constraint(equalTo: view.topAnchor),
             welcome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             welcome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             welcome.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        // After the constraints, and after a layout pass: a view still at zero
+        // size when the fade starts has nothing to fade, and the page appeared
+        // without one.
+        view.layoutSubtreeIfNeeded()
+        Self.fade(welcome, to: 1)
         self.welcome = welcome
     }
 

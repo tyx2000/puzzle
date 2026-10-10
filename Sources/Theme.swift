@@ -301,11 +301,16 @@ extension NSView {
     ///
     /// A view with no window is not animated at all, so an offscreen rebuild
     /// does not leave itself half-faded waiting for a run loop that never comes.
-    func settleIn(from startAlpha: CGFloat = 0.3, duration: TimeInterval = 0.14) {
+    func settleIn(from startAlpha: CGFloat = 0.55, duration: TimeInterval = 0.1) {
         guard window != nil else {
             alphaValue = 1
             return
         }
+        // Layer-backed first. Fading a view that is not leaves AppKit redrawing
+        // it and everything behind it every frame, and anything that does not
+        // repaint in time stays on screen — the trail of old rows left under a
+        // list that had just been replaced.
+        wantsLayer = true
         alphaValue = startAlpha
         NSAnimationContext.runAnimationGroup { context in
             context.duration = duration

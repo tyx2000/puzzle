@@ -1756,7 +1756,11 @@ enum RegressionTests {
         window.contentView?.addSubview(onscreen)
         window.makeKeyAndOrderFront(nil)
         onscreen.settleIn()
-        try expect(onscreen.alphaValue < 1, "the fade did not start")
+        // Layer-backed, which is what stops the fade leaving stale pixels
+        // behind it. It also means the model value is already the end value
+        // while the presentation layer animates, so there is no mid-fade
+        // alpha to read here — what matters is that it never sticks.
+        try expect(onscreen.wantsLayer, "the fade was not layer-backed")
         RunLoop.main.run(until: Date().addingTimeInterval(0.4))
         try expect(onscreen.alphaValue == 1,
                    "the fade did not finish: \(onscreen.alphaValue)")
