@@ -59,6 +59,7 @@ enum RegressionTests {
         try testMarkdownReading()
         try testMarkdownRevealsOnEdit()
         try testMarkdownEditingKeys()
+        try testRecentProjectsDialog()
         try testGutterRibbonRunsUnbroken()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
@@ -149,10 +150,6 @@ enum RegressionTests {
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
-        // Last: once this process has shown a popover, AppKit no longer hands a
-        // key typed into a window that is not key to that window, and the
-        // commit line's ⇧⌘↩ test types into one on purpose.
-        try testRecentProjectsPopover()
         print("Regression tests passed")
     }
 
@@ -4535,13 +4532,14 @@ enum RegressionTests {
         settle()
     }
 
-    /// The R button's popover lists the recents the way the start page does,
-    /// and does what the start page's list does.
-    private static func testRecentProjectsPopover() throws {
-        let root = try temporaryDirectory("recent-popover")
+    /// The R button opens a dialog over the window listing the recents the
+    /// way the start page does, and doing what the start page's list does.
+    private static func testRecentProjectsDialog() throws {
+        let root = try temporaryDirectory("recent-dialog")
         defer { try? FileManager.default.removeItem(at: root) }
         var projects: [URL] = []
-        for name in ["alpha", "beta", "gamma"] {
+        let long = "a-project-with-an-extraordinarily-long-folder-name-that-goes-on-and-on"
+        for name in ["alpha", "beta", "gamma", long] {
             let url = root.appendingPathComponent(name, isDirectory: true)
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             projects.append(url)
@@ -4556,84 +4554,108 @@ enum RegressionTests {
         workspace.window?.makeKeyAndOrderFront(nil)
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        guard let window = workspace.window else {
+            throw Failure(description: "the workspace has no window")
+        }
 
-        // R opens it, not a menu.
-        let popover = workspace.recentProjectsPopoverForTesting
-        /// Closing animates: give it the moment it takes.
-        func settled() { RunLoop.main.run(until: Date().addingTimeInterval(0.4)) }
+        // R opens a dialog: a panel of its own in the middle of the window,
+        // not a popover hanging off the button.
+        let dialog = workspace.recentProjectsPanelForTesting
         workspace.showRecentProjectsForTesting()
-        try expect(popover.isShown, "the R button did not open the recents popover")
-        let list = popover.listForTesting
-        let listed = RecentProjects.shared.urls.prefix(RecentProjects.displayLimit)
+        try expect(dialog.isShown && dialog.parent === window,
+                   "the R button did not open the recents dialog over the window")
+        try expect(abs(dialog.frame.midX - window.frame.midX) <= 1
+                    && abs(dialog.frame.midY - window.frame.midY) <= 1,
+                   "the dialog is not in the middle of the window: \(dialog.frame) in "
+                     + "\(window.frame)")
+        let list = dialog.listForTesting
+        let listed = Array(RecentProjects.shared.urls.prefix(RecentProjects.displayLimit))
         try expect(list.arrangedSubviews.count == listed.count,
-                   "the popover lists \(list.arrangedSubviews.count) projects, not "
+                   "the dialog lists \(list.arrangedSubviews.count) projects, not "
                      + "\(listed.count)")
         try expect(!list.pathWidthsForTesting().contains(0),
                    "a row shows its name without its path")
+        // However long a name, the box beside it keeps its size.
+        try expect(list.checkWidthsForTesting().allSatisfy { $0.given >= $0.needed - 0.5 },
+                   "a long name squeezed a row's box: \(list.checkWidthsForTesting())")
         var opened: [[URL]] = []
-        popover.onOpen = { opened.append($0) }
+        dialog.onOpen = { opened.append($0) }
 
         // A click ticks; Open Checked has something to do only then, and opens
         // the ticked ones in the order they are listed.
-        let rows = Array(listed)
-        guard let alpha = rows.firstIndex(of: projects[0]),
-              let gamma = rows.firstIndex(of: projects[2]) else {
+        guard let alpha = listed.firstIndex(of: projects[0]),
+              let gamma = listed.firstIndex(of: projects[2]) else {
             throw Failure(description: "the fixture projects are not listed")
         }
-        try expect(!popover.openCheckedEnabledForTesting, "Open Checked is offered unticked")
+        try expect(!dialog.openCheckedEnabledForTesting, "Open Checked is offered unticked")
         list.toggleCheckForTesting(at: max(alpha, gamma))
         list.toggleCheckForTesting(at: min(alpha, gamma))
-        try expect(popover.openCheckedEnabledForTesting,
+        try expect(dialog.openCheckedEnabledForTesting,
                    "Open Checked stayed unavailable with projects ticked")
-        popover.openCheckedForTesting()
-        settled()
-        try expect(opened.last == [rows[min(alpha, gamma)], rows[max(alpha, gamma)]],
+        dialog.openCheckedForTesting()
+        try expect(opened.last == [listed[min(alpha, gamma)], listed[max(alpha, gamma)]],
                    "Open Checked did not open the ticked projects in listed order: \(opened)")
-        try expect(!popover.isShown, "opening the ticked projects left the popover up")
+        try expect(!dialog.isShown, "opening the ticked projects left the dialog up")
 
         // A double click opens the one.
         workspace.showRecentProjectsForTesting()
-        try expect(popover.isShown, "the popover did not open again")
+        try expect(dialog.isShown, "the dialog did not open again")
         list.openRowForTesting(gamma)
-        settled()
-        try expect(opened.last == [projects[2]] && !popover.isShown,
-                   "a double click did not open its project and close the popover")
+        try expect(opened.last == [projects[2]] && !dialog.isShown,
+                   "a double click did not open its project and close the dialog")
 
         // The cross takes one off the list, and the list follows.
         workspace.showRecentProjectsForTesting()
         let before = list.arrangedSubviews.count
-        let beta = list.arrangedSubviews.indices.first {
-            Array(RecentProjects.shared.urls.prefix(RecentProjects.displayLimit))[$0] == projects[1]
+        if let beta = Array(RecentProjects.shared.urls.prefix(RecentProjects.displayLimit))
+            .firstIndex(of: projects[1]) {
+            list.removeRowForTesting(beta)
         }
-        list.removeRowForTesting(beta ?? 0)
         try expect(!RecentProjects.shared.urls.contains(projects[1])
                     && list.arrangedSubviews.count == before - 1,
                    "removing a row did not take it off the list")
 
         // Open Checked alone, in the bottom right corner.
-        if let content = popover.contentForTesting {
-            let frame = popover.openCheckedFrameForTesting
+        if let content = dialog.contentView {
+            content.layoutSubtreeIfNeeded()
+            let frame = dialog.openCheckedFrameForTesting
             let bottom = content.isFlipped ? content.bounds.maxY - frame.maxY : frame.minY
-            try expect(abs(content.bounds.maxX - frame.maxX - RecentProjectsPopover.padding) <= 1
-                        && abs(bottom - RecentProjectsPopover.padding) <= 1,
+            try expect(abs(content.bounds.maxX - frame.maxX - RecentProjectsPanel.padding) <= 1
+                        && abs(bottom - RecentProjectsPanel.padding) <= 1,
                        "Open Checked is not in the bottom right corner: \(frame) in "
                          + "\(content.bounds)")
         }
 
+        // Inside it, a click is the dialog's; outside it, it closes the dialog
+        // and still lands where it was aimed.
+        try expect(dialog.clickForTesting(in: nil) && dialog.isShown,
+                   "a click inside the dialog closed it")
+        try expect(dialog.clickForTesting(in: window) && !dialog.isShown,
+                   "a click outside the dialog did not close it, or was swallowed")
+        // That click, on R, closes it rather than opening it once more.
+        workspace.showRecentProjectsForTesting()
+        try expect(!dialog.isShown, "a click on R, closing the dialog, opened it again")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         // Esc closes it, and goes no further; other keys pass.
-        try expect(popover.pressKeyForTesting(code: 0, characters: "a"),
-                   "the popover swallowed a key that was not Esc")
-        let escapePassed = popover.pressKeyForTesting(code: 53, characters: "\u{1b}")
-        settled()
-        try expect(!escapePassed && !popover.isShown, "Esc did not close the popover")
-        // A click outside closes it: AppKit's transient behaviour.
         workspace.showRecentProjectsForTesting()
-        try expect(popover.behaviorForTesting == .transient,
-                   "a click outside the popover would not close it")
-        // R again closes it rather than opening it once more.
+        try expect(dialog.isShown && dialog.isWatchingForTesting,
+                   "the dialog did not open again after closing")
+        try expect(dialog.pressKeyForTesting(code: 0, characters: "a"),
+                   "the dialog swallowed a key that was not Esc")
+        try expect(!dialog.pressKeyForTesting(code: 53, characters: "\u{1b}") && !dialog.isShown,
+                   "Esc did not close the dialog")
+        try expect(!dialog.isWatchingForTesting, "the closed dialog still watches the app")
+        // Leaving the app closes it too.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         workspace.showRecentProjectsForTesting()
-        settled()
-        try expect(!popover.isShown, "R did not close the popover it had opened")
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification,
+                                        object: NSApp)
+        try expect(!dialog.isShown, "leaving the app left the dialog up")
+        // R again closes it.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        workspace.showRecentProjectsForTesting()
+        workspace.showRecentProjectsForTesting()
+        try expect(!dialog.isShown, "R did not close the dialog it had opened")
 
         // The title band's letters take the hand, which they set themselves:
         // they had no cursor of their own and kept the code's I-beam.

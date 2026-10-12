@@ -195,6 +195,10 @@ final class RecentProjectsListView: NSStackView {
     func openRowForTesting(_ index: Int) { row(index)?.openForTesting() }
     func isRowCheckedForTesting(_ index: Int) -> Bool { row(index)?.isCheckedForTesting ?? false }
     func removeRowForTesting(_ index: Int) { row(index)?.removeForTesting() }
+    /// Each row's box: the width it was given, and the width it needs.
+    func checkWidthsForTesting() -> [(given: CGFloat, needed: CGFloat)] {
+        arrangedSubviews.compactMap { ($0 as? RecentRowView)?.checkWidthForTesting }
+    }
 }
 
 /// One clickable recent-project row: name + dimmed parent folder.
@@ -232,21 +236,27 @@ private final class RecentRowView: FlatView {
         check.action = #selector(checkToggled)
         check.setAccessibilityLabel("Open \(url.lastPathComponent) with the others")
         check.translatesAutoresizingMaskIntoConstraints = false
+        // The box keeps its size whatever the name beside it: in a list of
+        // fixed width, a long name squeezed it half out of sight.
+        check.setContentCompressionResistancePriority(.required, for: .horizontal)
+        check.setContentHuggingPriority(.required, for: .horizontal)
 
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = Theme.uiFont(12)
         name.textColor = Theme.foreground
+        name.lineBreakMode = .byTruncatingTail
         let parent = NSTextField(labelWithString: RecentProjects.displayParent(for: url))
         parent.font = Theme.uiFont(10)
         parent.textColor = Theme.dimText
         parent.lineBreakMode = .byTruncatingHead
 
-        // Long paths truncate rather than stretch the page, and the name never
-        // does. But resistance that low lets the path collapse to nothing as
-        // well, which it did the moment the row stopped being pinned to a fixed
-        // width: the longest name took the whole row and its path vanished.
-        // The floor is what a path has to show before it starts truncating.
-        name.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // Long paths truncate rather than stretch the page, and the name only
+        // once the path is down to its floor — never the box before it. But
+        // resistance that low lets the path collapse to nothing as well, which
+        // it did the moment the row stopped being pinned to a fixed width: the
+        // longest name took the whole row and its path vanished. The floor is
+        // what a path has to show before it starts truncating.
+        name.setContentCompressionResistancePriority(.init(760), for: .horizontal)
         parent.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         parent.setContentHuggingPriority(.init(1), for: .horizontal)
         parent.widthAnchor.constraint(
@@ -306,6 +316,9 @@ private final class RecentRowView: FlatView {
     @objc private func removeTapped() { removeAction() }
 
     var isCheckedForTesting: Bool { check.state == .on }
+    var checkWidthForTesting: (given: CGFloat, needed: CGFloat) {
+        (check.frame.width, check.intrinsicContentSize.width)
+    }
     func removeForTesting() { removeAction() }
     /// What a double click does.
     func openForTesting() { action() }

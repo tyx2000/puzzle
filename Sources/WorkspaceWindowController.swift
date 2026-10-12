@@ -876,23 +876,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
     /// ask it for a new one by script, and keep the plain open as the fallback
     /// (no iTerm, or automation not permitted).
-    /// The recents under the R button, listed and handled as the start page
-    /// lists them.
+    /// The recents in a dialog over the window, listed and handled as the
+    /// start page lists them.
     private func showRecentProjectsMenu(from rect: NSRect) {
-        if recentProjectsPopover.isShown || recentProjectsPopover.justClosed {
-            recentProjectsPopover.close()
+        if recentProjectsPanel.isShown || recentProjectsPanel.justClosed {
+            recentProjectsPanel.dismiss()
             return
         }
-        recentProjectsPopover.show(relativeTo: rect, of: sidebar.view)
+        guard let window else { return }
+        recentProjectsPanel.present(over: window)
     }
-    private lazy var recentProjectsPopover: RecentProjectsPopover = {
-        let popover = RecentProjectsPopover()
-        popover.onOpen = { [weak self] urls in self?.openSelection(urls) }
-        return popover
+    private lazy var recentProjectsPanel: RecentProjectsPanel = {
+        let panel = RecentProjectsPanel()
+        panel.onOpen = { [weak self] urls in self?.openSelection(urls) }
+        return panel
     }()
-    var recentProjectsPopoverForTesting: RecentProjectsPopover { recentProjectsPopover }
+    var recentProjectsPanelForTesting: RecentProjectsPanel { recentProjectsPanel }
+    /// The R button's action, sent as its click sends it. Not `performClick`:
+    /// a simulated click left AppKit routing later keys away from a window
+    /// that was not key, which a later test types into on purpose.
     func showRecentProjectsForTesting() {
-        sidebar.titleButtonsForTesting[1].performClick(nil)
+        let button = sidebar.titleButtonsForTesting[1]
+        if let action = button.action { NSApp.sendAction(action, to: button.target, from: button) }
     }
 
     /// The panel goes away only for a window that holds no projects at all —
