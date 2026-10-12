@@ -1,8 +1,59 @@
 import AppKit
 
+extension NSAttributedString.Key {
+    /// How one line of rendered Markdown is laid out. Set by the styler on
+    /// every line, read by the layout manager in place of the fixed code row.
+    static let markdownLineLayout = NSAttributedString.Key("PuzzleMarkdownLineLayout")
+}
+
+/// The height of one line of rendered Markdown, the space above it, and the
+/// metrics of the face it is set in — what the layout manager needs to size
+/// the line and put its baseline in the middle of it.
+///
+/// An object rather than a struct because attribute values are compared with
+/// `isEqual`: equal layouts on neighbouring lines then share one attribute run.
+final class MarkdownLineLayout: NSObject {
+    let lineHeight: CGFloat
+    /// Applied to a line's first fragment only, never to the lines it wraps
+    /// onto.
+    let spaceBefore: CGFloat
+    let ascender: CGFloat
+    let descender: CGFloat
+
+    init(lineHeight: CGFloat, spaceBefore: CGFloat = 0, font: NSFont) {
+        self.lineHeight = lineHeight
+        self.spaceBefore = spaceBefore
+        ascender = font.ascender
+        descender = font.descender
+    }
+
+    /// Where the baseline goes in a fragment that starts with `spaceAbove`.
+    func baselineOffset(spaceAbove: CGFloat) -> CGFloat {
+        spaceAbove + (lineHeight - (ascender - descender)) / 2 + ascender
+    }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? MarkdownLineLayout else { return false }
+        return lineHeight == other.lineHeight && spaceBefore == other.spaceBefore
+            && ascender == other.ascender && descender == other.descender
+    }
+
+    override var hash: Int {
+        var hasher = Hasher()
+        hasher.combine(lineHeight)
+        hasher.combine(spaceBefore)
+        hasher.combine(ascender)
+        hasher.combine(descender)
+        return hasher.finalize()
+    }
+}
+
 struct MarkdownCodeBlockDecoration: Equatable {
     let range: NSRange
     let language: String?
+    /// Where the block's box starts across the column: in from the margin by
+    /// whatever list or quote holds the block.
+    var indent: CGFloat = 0
 }
 
 struct MarkdownTableDecoration: Equatable {
@@ -29,6 +80,8 @@ struct MarkdownTableDecoration: Equatable {
 struct MarkdownTaskDecoration: Equatable {
     let sourceRange: NSRange
     let checked: Bool
+    /// Where the item's text starts; the box is drawn in the margin before it.
+    var indent: CGFloat = 0
 }
 
 enum MarkdownLineMarkerKind: Equatable {
@@ -38,8 +91,12 @@ enum MarkdownLineMarkerKind: Equatable {
 }
 
 struct MarkdownLineMarkerDecoration: Equatable {
+    /// A bullet or footnote marker's own characters, or a whole quote.
     let sourceRange: NSRange
     let kind: MarkdownLineMarkerKind
+    /// For a bullet or a footnote, where the text starts: the marker is drawn
+    /// in the margin to the left of it. For a quote, where its bar goes.
+    var indent: CGFloat = 0
 }
 
 struct MarkdownRuleDecoration: Equatable {
@@ -108,10 +165,18 @@ enum MarkdownLiveStyler {
         let storage: NSTextStorage
         let documentURL: URL?
 
-        private let baseFont = Theme.editorFont()
+        /// Prose is set in the reading face; code keeps the editor's.
+        private let baseFont = Theme.markdownFont()
+        private let codeFont = Theme.editorFont()
         private let boldFont: NSFont
         private let italicFont: NSFont
         private let boldItalicFont: NSFont
+        /// A face that has no italic of its own is slanted instead.
+        private let fakesItalic: Bool
+        private let bodyLayout: MarkdownLineLayout
+        private let blankLayout: MarkdownLineLayout
+        private let codeLayout: MarkdownLineLayout
+        private let fencePaddingLayout: MarkdownLineLayout
         private let marker: [NSAttributedString.Key: Any]
         private let codeStyle: [NSAttributedString.Key: Any]
         private let inlineCodeStyle: [NSAttributedString.Key: Any]
@@ -141,14 +206,25 @@ enum MarkdownLiveStyler {
             self.source = text as NSString
             self.storage = storage
             self.documentURL = documentURL
-            let bold = NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
+            let bold = NSFont.boldSystemFont(ofSize: baseFont.pointSize)
             boldFont = bold
-            italicFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
+            let italic = NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
+            fakesItalic = !NSFontManager.shared.traits(of: italic).contains(.italicFontMask)
+            italicFont = italic
             boldItalicFont = NSFontManager.shared.convert(bold, toHaveTrait: .italicFontMask)
+            bodyLayout = MarkdownLineLayout(lineHeight: Theme.markdownLineHeight(),
+                                            font: baseFont)
+            blankLayout = MarkdownLineLayout(lineHeight: Theme.markdownBlankLineHeight(),
+                                             font: baseFont)
+            codeLayout = MarkdownLineLayout(lineHeight: Theme.lineMetrics().target,
+                                            font: codeFont)
+            fencePaddingLayout = MarkdownLineLayout(lineHeight: Theme.markdownCodePaddingY,
+                                                    font: baseFont)
             marker = [.foregroundColor: Theme.dimText]
-            codeStyle = [.foregroundColor: Theme.foreground]
+            codeStyle = [.foregroundColor: Theme.foreground, .font: codeFont]
             inlineCodeStyle = [.foregroundColor: Theme.yellow,
-                               .backgroundColor: Theme.inputBackground]
+                               .backgroundColor: Theme.inputBackground,
+                               .font: codeFont]
             linkStyle = [.foregroundColor: Theme.blue,
                          .underlineStyle: NSUnderlineStyle.single.rawValue]
         }
@@ -166,7 +242,8 @@ enum MarkdownLiveStyler {
         mutating func run() {
             let document = MarkdownSyntaxTree.parse(text)
             storage.beginEditing()
-            walkBlocks(document.blocks, quoteDepth: 0)
+            setUpLines()
+            walkBlocks(document.blocks, quoteDepth: 0, indent: 0)
             walkInlines(document.inlines)
             bareURLs()
             resolveReferenceLinks()
@@ -214,50 +291,109 @@ enum MarkdownLiveStyler {
             return source.lineRange(for: NSRange(location: probe, length: 0))
         }
 
-        /// Wrapped lines of a block start under its text rather than at the
-        /// margin. `firstLineHeadIndent` is left alone: every source line is its
-        /// own paragraph to TextKit, so only soft wraps are affected.
-        func hangingIndent(_ range: NSRange, by columns: CGFloat) {
+        /// Every line set as prose before the blocks say otherwise: the reading
+        /// face, a paragraph with no fixed height, and a layout — a line of
+        /// text, or the shorter gap a blank line stands for.
+        func setUpLines() {
+            let full = NSRange(location: 0, length: storage.length)
+            style([.font: baseFont,
+                   .paragraphStyle: MarkdownLiveStyler.paragraph(indent: 0),
+                   .markdownLineLayout: bodyLayout], full)
+            // Then only the blank lines, found by scanning rather than by
+            // slicing each line out: this runs on every keystroke.
+            var lineStart = 0
+            var blank = true
+            for index in 0..<source.length {
+                let character = source.character(at: index)
+                if character == 0x0A {
+                    if blank {
+                        style([.markdownLineLayout: blankLayout],
+                              NSRange(location: lineStart, length: index + 1 - lineStart))
+                    }
+                    lineStart = index + 1
+                    blank = true
+                } else if character != 0x20 && character != 0x09 && character != 0x0D {
+                    blank = false
+                }
+            }
+            if blank, lineStart < source.length {
+                style([.markdownLineLayout: blankLayout],
+                      NSRange(location: lineStart, length: source.length - lineStart))
+            }
+        }
+
+        /// The whole lines `range` touches. TextKit reads a paragraph's style
+        /// from its first character, so an indent has to cover the line from
+        /// its start — the hidden marker included.
+        func lines(of range: NSRange) -> NSRange {
+            guard source.length > 0 else { return range }
+            let first = line(at: range.location)
+            let last = line(at: max(range.location, NSMaxRange(range) - 1))
+            return NSUnionRange(first, last)
+        }
+
+        /// Set the lines of `range` in from the margin by `indent`, wrapped
+        /// lines with them.
+        func indentLines(_ range: NSRange, by indent: CGFloat) {
             guard range.length > 0 else { return }
-            let style = (Theme.paragraphStyle().mutableCopy() as? NSMutableParagraphStyle)
-                ?? NSMutableParagraphStyle()
-            style.headIndent = columns * Theme.characterWidth()
-            self.style([.paragraphStyle: style.copy()], range)
+            style([.paragraphStyle: MarkdownLiveStyler.paragraph(indent: indent)],
+                  lines(of: range))
+        }
+
+        func layOutLines(_ range: NSRange, as layout: MarkdownLineLayout) {
+            guard range.length > 0 else { return }
+            style([.markdownLineLayout: layout], lines(of: range))
         }
 
         // MARK: Blocks
 
-        mutating func walkBlocks(_ nodes: [MarkdownNode], quoteDepth: Int) {
+        /// `indent` is where the blocks being walked start across the column:
+        /// a list item or a quote sets what it holds further in.
+        mutating func walkBlocks(_ nodes: [MarkdownNode], quoteDepth: Int, indent: CGFloat) {
             for node in nodes {
                 switch node.type {
-                case "atx_heading": heading(node)
-                case "setext_heading": setextHeading(node)
-                case "fenced_code_block": fencedCode(node)
-                case "indented_code_block": indentedCode(node)
+                case "atx_heading": heading(node, indent: indent)
+                case "setext_heading": setextHeading(node, indent: indent)
+                case "fenced_code_block": fencedCode(node, indent: indent)
+                case "indented_code_block": indentedCode(node, indent: indent)
                 case "thematic_break": thematicBreak(node)
                 case "pipe_table": table(node)
                 case "link_reference_definition": referenceDefinition(node)
                 case "html_block": hide(node.range)
+                case "block_continuation":
+                    // What a container repeats at the start of each line it
+                    // holds — a list item's indent, a quote's `>` — is drawn
+                    // as the container's own indent and bar instead.
+                    dim(node.range)
+                    hide(node.range)
                 case "block_quote":
+                    // The bar goes down the whole quote, not only beside the
+                    // lines that repeat its marker.
                     for child in node.all("block_quote_marker") {
                         dim(child.range)
-                        lineMarkers.append(MarkdownLineMarkerDecoration(
-                            sourceRange: child.range, kind: .quote(quoteDepth + 1)))
+                        hide(child.range)
                     }
-                    walkBlocks(node.children, quoteDepth: quoteDepth + 1)
+                    lineMarkers.append(MarkdownLineMarkerDecoration(
+                        sourceRange: node.range, kind: .quote(quoteDepth + 1), indent: indent))
+                    let inner = indent + Theme.markdownQuoteIndent()
+                    indentLines(node.range, by: inner)
+                    walkBlocks(node.children, quoteDepth: quoteDepth + 1, indent: inner)
                 case "list_item":
-                    listItem(node)
-                    walkBlocks(node.children, quoteDepth: quoteDepth)
+                    let inner = indent + Theme.markdownListIndent()
+                    listItem(node, textStart: inner)
+                    walkBlocks(node.children, quoteDepth: quoteDepth, indent: inner)
                 case "paragraph":
-                    footnoteDefinition(node)
-                    walkBlocks(node.children, quoteDepth: quoteDepth)
+                    // Already where its list item or quote set every line it
+                    // holds, or at the margin the base pass set.
+                    footnoteDefinition(node, indent: indent)
+                    walkBlocks(node.children, quoteDepth: quoteDepth, indent: indent)
                 default:
-                    walkBlocks(node.children, quoteDepth: quoteDepth)
+                    walkBlocks(node.children, quoteDepth: quoteDepth, indent: indent)
                 }
             }
         }
 
-        mutating func heading(_ node: MarkdownNode) {
+        mutating func heading(_ node: MarkdownNode, indent: CGFloat) {
             guard let markerNode = node.children.first(where: {
                 $0.type.hasPrefix("atx_h") && $0.type.hasSuffix("_marker")
             }) else { return }
@@ -278,15 +414,28 @@ enum MarkdownLiveStyler {
                 hide(NSRange(location: contentEnd, length: lineEnd - contentEnd))
             }
             style(headingAttributes(level: level), content.range)
+            layOutHeading(node.range, level: level, indent: indent)
         }
 
-        mutating func setextHeading(_ node: MarkdownNode) {
+        /// A heading's line: tall enough for its size, with room above it —
+        /// none at the very top, where the pane's own margin already is.
+        mutating func layOutHeading(_ range: NSRange, level: Int, indent: CGFloat) {
+            let font = headingFont(level: level)
+            let lines = self.lines(of: range)
+            layOutLines(range, as: MarkdownLineLayout(
+                lineHeight: (font.pointSize * 1.3).rounded(),
+                spaceBefore: lines.location == 0 ? 0 : Theme.markdownHeadingSpaceBefore(level: level),
+                font: font))
+        }
+
+        mutating func setextHeading(_ node: MarkdownNode, indent: CGFloat) {
             guard let underline = node.children.first(where: {
                 $0.type.hasPrefix("setext_h") && $0.type.hasSuffix("_underline")
             }) else { return }
             let level = node.first("setext_h1_underline") != nil ? 1 : 2
             for content in node.descendants("inline") {
                 style(headingAttributes(level: level), content.range)
+                layOutHeading(content.range, level: level, indent: indent)
             }
             let underlineLine = line(at: underline.range.location)
             dim(underlineLine)
@@ -294,15 +443,19 @@ enum MarkdownLiveStyler {
             collapse(underlineLine)
         }
 
-        func headingAttributes(level: Int) -> [NSAttributedString.Key: Any] {
-            let scale: CGFloat = [1.0, 1.22, 1.16, 1.10, 1.05, 1.0, 1.0][max(1, min(6, level))]
-            let maximum = max(baseFont.pointSize, Theme.lineMetrics().target * 0.72)
-            let size = min(baseFont.pointSize * scale, maximum)
-            let font = NSFont(descriptor: boldFont.fontDescriptor, size: size) ?? boldFont
-            return [.font: font, .strokeWidth: -2.0, .foregroundColor: Theme.foreground]
+        /// Each level its own size: the line a heading is set on grows to fit
+        /// it, so the size is no longer held under the height of a code row —
+        /// which had left H1, H2 and H3 all within a point of each other.
+        func headingFont(level: Int) -> NSFont {
+            NSFont.boldSystemFont(ofSize: Theme.markdownHeadingSize(level: level))
         }
 
-        mutating func fencedCode(_ node: MarkdownNode) {
+        func headingAttributes(level: Int) -> [NSAttributedString.Key: Any] {
+            [.font: headingFont(level: level),
+             .foregroundColor: level >= 6 ? Theme.dimText : Theme.foreground]
+        }
+
+        mutating func fencedCode(_ node: MarkdownNode, indent: CGFloat) {
             let language = node.descendants("language").first
                 .map { source.substring(with: $0.range) }
                 ?? node.first("info_string").map {
@@ -327,10 +480,17 @@ enum MarkdownLiveStyler {
                                    length: max(0, last.location - content.location))
                 }
             }
+            // Inside a list the code's lines repeat the item's indent; that is
+            // the item's, drawn as the block's own indent, not the code's.
+            for continuation in node.descendants("block_continuation") {
+                hide(continuation.range)
+            }
             if let body, body.length > 0 {
                 style(codeStyle, body)
+                layOutCode(body, indent: indent)
                 codeBlocks.append(MarkdownCodeBlockDecoration(
-                    range: body, language: (language?.isEmpty ?? true) ? nil : language))
+                    range: body, language: (language?.isEmpty ?? true) ? nil : language,
+                    indent: indent))
                 literalRanges.append(body)
             }
             // The fence lines leave the layout — from the fence marker onwards,
@@ -349,21 +509,30 @@ enum MarkdownLiveStyler {
                                    length: max(0, NSMaxRange(content) - fence.location))
                 dim(tail)
                 hide(tail)
-                // Only a line that is nothing but its fence can leave the
-                // layout; one that carries a marker still has to be drawn.
+                // A line that is nothing but its fence becomes the padding
+                // inside the block's box, above or below the code; one that
+                // carries a marker still has to be drawn as a line of its own.
                 let prefix = source.substring(
                     with: NSRange(location: content.location,
                                   length: max(0, fence.location - content.location)))
                 if prefix.allSatisfy({ $0 == " " || $0 == "\t" }) {
-                    collapse(fenceLine)
+                    style([.markdownLineLayout: fencePaddingLayout], fenceLine)
                 }
             }
         }
 
-        mutating func indentedCode(_ node: MarkdownNode) {
+        mutating func indentedCode(_ node: MarkdownNode, indent: CGFloat) {
             style(codeStyle, node.range)
-            codeBlocks.append(MarkdownCodeBlockDecoration(range: node.range, language: nil))
+            layOutCode(node.range, indent: indent)
+            codeBlocks.append(MarkdownCodeBlockDecoration(range: node.range, language: nil,
+                                                         indent: indent))
             literalRanges.append(node.range)
+        }
+
+        /// Code keeps the editor's face and row, set in from the box's edge.
+        mutating func layOutCode(_ range: NSRange, indent: CGFloat) {
+            layOutLines(range, as: codeLayout)
+            indentLines(range, by: indent + Theme.markdownCodePaddingX)
         }
 
         mutating func thematicBreak(_ node: MarkdownNode) {
@@ -373,23 +542,37 @@ enum MarkdownLiveStyler {
             rules.append(MarkdownRuleDecoration(lineRange: ruleLine))
         }
 
-        mutating func listItem(_ node: MarkdownNode) {
+        /// A list item's text starts at `textStart`, on every line it has, and
+        /// its marker is drawn in the margin to the left — so items line up
+        /// whatever their marker, and a wrapped line comes back under the text
+        /// rather than under the bullet.
+        mutating func listItem(_ node: MarkdownNode, textStart: CGFloat) {
             guard let bullet = node.children.first(where: {
                 $0.type.hasPrefix("list_marker_")
             }) else { return }
             dim(bullet.range)
-            // A line too long for the column wraps, and the wrap used to come
-            // back to the left margin — in the middle of a list item, which read
-            // as if the text had escaped its bullet.
-            hangingIndent(node.range, by: CGFloat(bullet.range.length))
-            let checkbox = node.descendants("task_list_marker_checked").first
-                ?? node.descendants("task_list_marker_unchecked").first
+            indentLines(node.range, by: textStart)
+            // The item's own checkbox, never one belonging to an item nested
+            // inside it: searching every descendant took a nested `[x]` for
+            // this item's, and everything between the two left the page.
+            let checkbox = node.first("task_list_marker_checked")
+                ?? node.first("task_list_marker_unchecked")
+            // Everything from the start of the line to the text — the indent
+            // the source nests with, the marker, a checkbox — leaves the line.
+            let markerLine = line(at: bullet.range.location)
+            var lead = NSMaxRange(checkbox?.range ?? bullet.range)
+            while lead < NSMaxRange(markerLine),
+                  source.character(at: lead) == 0x20 || source.character(at: lead) == 0x09 {
+                lead += 1
+            }
+            hide(NSRange(location: markerLine.location, length: lead - markerLine.location))
             guard let checkbox else {
                 let label = source.substring(with: bullet.range)
                     .trimmingCharacters(in: .whitespaces)
                 lineMarkers.append(MarkdownLineMarkerDecoration(
                     sourceRange: bullet.range,
-                    kind: .bullet(label.allSatisfy { "-+*".contains($0) } ? "•" : label)))
+                    kind: .bullet(label.allSatisfy { "-+*".contains($0) } ? "•" : label),
+                    indent: textStart))
                 return
             }
             let checked = checkbox.type.hasSuffix("checked")
@@ -397,7 +580,8 @@ enum MarkdownLiveStyler {
             let span = NSRange(location: bullet.range.location,
                                length: max(0, NSMaxRange(checkbox.range) - bullet.range.location))
             dim(span)
-            tasks.append(MarkdownTaskDecoration(sourceRange: span, checked: checked))
+            tasks.append(MarkdownTaskDecoration(sourceRange: span, checked: checked,
+                                                indent: textStart))
             guard checked else { return }
             let content = MarkdownLiveStyler.lineContentRange(
                 line(at: span.location), in: source)
@@ -411,7 +595,7 @@ enum MarkdownLiveStyler {
         /// `[^note]: text`. Footnotes are an extension the grammar does not
         /// enable, so a definition arrives as an ordinary paragraph and the
         /// marker has to be recognised here.
-        mutating func footnoteDefinition(_ node: MarkdownNode) {
+        mutating func footnoteDefinition(_ node: MarkdownNode, indent: CGFloat) {
             let content = MarkdownLiveStyler.lineContentRange(
                 line(at: node.range.location), in: source)
             guard content.length > 3 else { return }
@@ -425,8 +609,14 @@ enum MarkdownLiveStyler {
                                length: close.location + 2)
             dim(span)
             hide(span)
+            // The body hangs like a list item's, its label in the margin.
+            var lead = NSMaxRange(span)
+            while lead < NSMaxRange(content), source.character(at: lead) == 0x20 { lead += 1 }
+            hide(NSRange(location: NSMaxRange(span), length: lead - NSMaxRange(span)))
+            let textStart = indent + Theme.markdownListIndent()
+            indentLines(node.range, by: textStart)
             lineMarkers.append(MarkdownLineMarkerDecoration(
-                sourceRange: span, kind: .footnote(identifier)))
+                sourceRange: span, kind: .footnote(identifier), indent: textStart))
         }
 
         /// Record one link. The destination is kept verbatim as well as
@@ -567,17 +757,23 @@ enum MarkdownLiveStyler {
             }
             switch node.type {
             case "strong_emphasis":
-                style([.font: boldFont, .strokeWidth: -2.0], content)
+                style([.font: boldFont], content)
             case "strikethrough":
                 style([.strikethroughStyle: NSUnderlineStyle.single.rawValue], content)
             default:
                 // Emphasis inside strong emphasis wants both, and the strong
                 // pass has already run over this range.
-                let isStrong = storage.length > content.location
-                    && storage.attribute(.strokeWidth, at: content.location,
-                                         effectiveRange: nil) != nil
-                style([.font: isStrong ? boldItalicFont : italicFont,
-                       .obliqueness: 0.16], content)
+                let current = storage.length > content.location
+                    ? storage.attribute(.font, at: content.location, effectiveRange: nil)
+                        as? NSFont : nil
+                let isStrong = current.map {
+                    NSFontManager.shared.traits(of: $0).contains(.boldFontMask)
+                } ?? false
+                var attributes: [NSAttributedString.Key: Any] = [
+                    .font: isStrong ? boldItalicFont : italicFont,
+                ]
+                if fakesItalic { attributes[.obliqueness] = 0.16 }
+                style(attributes, content)
             }
             for delimiter in delimiters {
                 dim(delimiter.range)
@@ -663,6 +859,25 @@ enum MarkdownLiveStyler {
     }
 
     // MARK: - Shared helpers
+
+    /// A paragraph of rendered Markdown: in from the margin by `indent` on
+    /// every line, wrapped ones included, and no fixed height — the layout
+    /// manager sizes each line from its `MarkdownLineLayout`.
+    static func paragraph(indent: CGFloat) -> NSParagraphStyle {
+        if let cached = paragraphCache[indent] { return cached }
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = indent
+        style.headIndent = indent
+        style.lineBreakMode = .byWordWrapping
+        style.defaultTabInterval = (Theme.markdownFontSize() * 2).rounded()
+        style.tabStops = []
+        let frozen = style.copy() as! NSParagraphStyle
+        paragraphCache[indent] = frozen
+        return frozen
+    }
+    private static var paragraphCache: [CGFloat: NSParagraphStyle] = [:]
+    /// Called when the settings change the type size the indents follow.
+    static func invalidateCaches() { paragraphCache.removeAll() }
 
     /// Link labels match case-insensitively and ignore surrounding brackets and
     /// whitespace, which is what CommonMark says about reference labels.
@@ -767,19 +982,21 @@ enum MarkdownLiveStyler {
     /// is resolved to the text it stands for.
     static func renderedCell(_ source: String) -> String {
         var value = source.trimmingCharacters(in: .whitespaces)
-        if let expression = try? NSRegularExpression(pattern: #"!?\[([^\]]+)\]\([^)]+\)"#) {
+        func replace(_ expression: NSRegularExpression?, with template: String) {
+            guard let expression else { return }
             value = expression.stringByReplacingMatches(
                 in: value, range: NSRange(location: 0, length: (value as NSString).length),
-                withTemplate: "$1")
+                withTemplate: template)
         }
-        for token in ["**", "__", "~~", "`", "*", "_"] {
-            value = value.replacingOccurrences(of: token, with: "")
-        }
+        replace(cellLink, with: "$1")
+        // Only delimiters that open and close a span are markup. Removing every
+        // `_` and `*` took the underscores out of `code_line_height` and the
+        // operator out of `2 * 3`.
+        for span in cellSpans { replace(span, with: "$1") }
         value = value.replacingOccurrences(of: #"\|"#, with: "|")
-        if let expression = try? NSRegularExpression(
-            pattern: #"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);"#) {
+        if let cellEntity {
             let mutable = NSMutableString(string: value)
-            for match in expression.matches(
+            for match in cellEntity.matches(
                 in: value, range: NSRange(location: 0, length: mutable.length)).reversed() {
                 let entity = (value as NSString).substring(with: match.range)
                 if let character = decodedEntity(entity), let scalar = UnicodeScalar(character) {
@@ -790,4 +1007,19 @@ enum MarkdownLiveStyler {
         }
         return value
     }
+
+    // Compiled once: every cell of every table is resolved on every keystroke,
+    // and compiling the patterns per cell was most of the time spent styling a
+    // document with tables in it.
+    private static let cellLink = try? NSRegularExpression(pattern: #"!?\[([^\]]+)\]\([^)]+\)"#)
+    private static let cellSpans: [NSRegularExpression] = [
+        #"`([^`]+)`"#,
+        #"(?<![\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])"#,
+        #"(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])"#,
+        #"~~(?=\S)(.+?)(?<=\S)~~"#,
+        #"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])"#,
+        #"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])"#,
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    private static let cellEntity = try? NSRegularExpression(
+        pattern: #"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);"#)
 }

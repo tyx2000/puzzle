@@ -56,6 +56,7 @@ enum RegressionTests {
         try testImageDownsampling()
         try testEPUBReading()
         try testMarkdownLiveEditing()
+        try testMarkdownReading()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCommentToggleRules()
@@ -3162,10 +3163,15 @@ enum RegressionTests {
                                                        effectiveRange: nil) as? NSNumber
         let strongStroke = document.storage.attribute(.strokeWidth, at: strongLocation,
                                                       effectiveRange: nil) as? NSNumber
-        try expect(headingFont?.pointSize ?? 0 > Theme.editorFont().pointSize
-                   && (headingStroke?.doubleValue ?? 0) < 0,
+        func isBold(_ font: NSFont?) -> Bool {
+            font.map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } ?? false
+        }
+        // Bold is the face's own bold now; the stroke that faked it on a
+        // monospaced face with none would only smear a real one.
+        try expect(headingFont?.pointSize ?? 0 > Theme.markdownFontSize()
+                   && isBold(headingFont) && headingStroke == nil,
                    "Markdown heading was not formatted in the editable buffer")
-        try expect(strongFont != nil && (strongStroke?.doubleValue ?? 0) < 0,
+        try expect(isBold(strongFont) && strongStroke == nil,
                    "Markdown strong emphasis was not formatted in the editable buffer")
         try expect(sameColor(linkColor, Theme.blue),
                    "Markdown link label was not rendered as a link")
@@ -3276,12 +3282,12 @@ enum RegressionTests {
         try expect(!pane.hasActiveLineForTesting,
                    "Markdown editor still displayed an active-line background")
         try expect(document.markdownCollapsedLineRanges.count >= 3,
-                   "Markdown fence/table separator lines were not collapsed")
+                   "Markdown table separator, setext and definition lines were not collapsed")
 
         // Prose is set in a column, not across the whole window: Markdown is
         // read, and a full-width measure is hard to track line to line. Code
         // still fills the pane — a line means something at column 120.
-        let measure = PuzzleTextView.readingColumns * Theme.characterWidth()
+        let measure = Theme.markdownReadingWidth()
         let wide = NSWindow(contentRect: NSRect(x: 0, y: 0,
                                                 width: measure + 400, height: 600),
                             styleMask: [.titled], backing: .buffered, defer: false)
@@ -3306,9 +3312,9 @@ enum RegressionTests {
         try expect(pane.textInsetForTesting < 20,
                    "source was indented like prose: \(pane.textInsetForTesting)pt")
         let setextLocation = (edited as NSString).range(of: "Setext heading").location
-        let setextStroke = document.storage.attribute(
-            .strokeWidth, at: setextLocation, effectiveRange: nil) as? NSNumber
-        try expect((setextStroke?.doubleValue ?? 0) < 0,
+        let setextFont = document.storage.attribute(
+            .font, at: setextLocation, effectiveRange: nil) as? NSFont
+        try expect(isBold(setextFont) && setextFont?.pointSize ?? 0 > Theme.markdownFontSize(),
                    "Setext heading did not receive rendered heading typography")
         let referenceDestination = (edited as NSString).range(of: "https://example.com/docs").location
         let escapedSlash = (edited as NSString).range(of: #"\*literal"#).location
@@ -3369,16 +3375,27 @@ enum RegressionTests {
             replacements: document.markdownGlyphReplacements,
             revealing: nil)
         let fenceLocation = (edited as NSString).range(of: "```swift").location
-        try expect(tableLayout.isMarkdownControlLineCollapsed(at: fenceLocation),
-                   "collapsed Markdown fence line would still draw a gutter number")
+        // A fence line is the code box's padding now, not a collapsed line:
+        // nothing on it is drawn, and it is exactly the padding high.
+        try expect(!tableLayout.isMarkdownControlLineCollapsed(at: fenceLocation)
+                    && tableLayout.isCharacterHidden(at: fenceLocation),
+                   "a Markdown fence line is collapsed, or still shows its backticks")
         let wrappedLocation = (edited as NSString).range(of: "Alpha").location
         let dynamicHeight = tableLayout.markdownTableRowHeightForTesting(
             at: wrappedLocation) ?? 0
-        try expect(dynamicHeight > Theme.lineMetrics().target,
-                   "wrapped Markdown table content retained the fixed code-line height")
+        try expect(dynamicHeight > Theme.markdownLineHeight(),
+                   "wrapped Markdown table content kept the height of one line")
         try expect(tableLayout.isCharacterHidden(at: wrappedLocation),
                    "rendered table source still participated in ordinary text wrapping")
         tableLayout.ensureLayout(for: tableContainer)
+        // The fence's own fragment is its terminator: the hidden backticks
+        // before it are laid out with the line above.
+        let fenceFragment = tableLayout.lineFragmentRect(
+            forGlyphAt: tableLayout.glyphIndexForCharacter(
+                at: fenceLocation + ("```swift" as NSString).length),
+            effectiveRange: nil)
+        try expect(abs(fenceFragment.height - Theme.markdownCodePaddingY) < 0.5,
+                   "the fence line is not the code box's padding: \(fenceFragment.height)pt")
         let fencedBodyLocation = (edited as NSString).range(of: "let value = 1").location
         let fencedBodyGlyph = tableLayout.glyphIndexForCharacter(at: fencedBodyLocation)
         let fencedBodyFragment = tableLayout.lineFragmentRect(
@@ -3396,32 +3413,290 @@ enum RegressionTests {
             return tableLayout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
         }
         let wrappedFragment = rowFragment(wrappedRow)
-        try expect(wrappedFragment.height > Theme.lineMetrics().target,
+        try expect(wrappedFragment.height > Theme.markdownLineHeight(),
                    "TextKit did not apply the measured Markdown table row height")
         guard let headerRow = document.markdownTables[0].rows.first(where: \.isHeader)
         else { throw Failure(description: "table header row metadata was missing") }
         let headerFragment = rowFragment(headerRow)
         // The header used to anchor onto the collapsed delimiter line below it,
         // a 1pt fragment, which drew the header text outside the table.
-        try expect(headerFragment.height >= Theme.lineMetrics().target,
+        try expect(headerFragment.height >= Theme.markdownLineHeight(),
                    "Markdown table header row collapsed onto the delimiter line")
         try expect(headerFragment.maxY <= wrappedFragment.minY + 0.5,
                    "Markdown table header row was not laid out above the body rows")
         try expect(document.markdownTables[0].leadsWithBlankLine,
                    "blank line above the table was not recorded")
-        try expect(headerFragment.height >= Theme.lineMetrics().target * 2,
+        try expect(headerFragment.height
+                    >= Theme.markdownLineHeight() + Theme.markdownBlankLineHeight(),
                    "first table row did not absorb the blank line above the table")
         let trailingTerminator = NSMaxRange(document.markdownTables[0].rows.last!.sourceRange)
         let terminatorFragment = tableLayout.lineFragmentRect(
             forGlyphAt: tableLayout.glyphIndexForCharacter(at: trailingTerminator),
             effectiveRange: nil)
-        try expect(terminatorFragment.height < Theme.lineMetrics().target,
+        try expect(terminatorFragment.height < Theme.markdownBlankLineHeight(),
                    "the table's trailing terminator drew as an extra blank line")
         document.storage.removeLayoutManager(tableLayout)
 
         pane.prepareForClose()
         document.isModified = false
         DocumentStore.shared.release(url, stillOpen: false)
+    }
+
+    /// Rendered Markdown is set to be read: a proportional face, headings a
+    /// size apart, room between lines and blocks, a column a line can be
+    /// followed across, and lists, quotes and code laid out as blocks.
+    private static func testMarkdownReading() throws {
+        let directory = try temporaryDirectory("markdown-reading")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("notes.md")
+        let words = String(repeating: "reading comfort depends on the measure ", count: 6)
+        let chinese = String(repeating: "中文阅读需要合适的行宽与行距", count: 8)
+        let source = """
+        # Title
+
+        A paragraph with *emphasis* that runs on: \(words)
+
+        ## Section
+
+        ### Detail
+
+        - first item \(words)
+        - second
+          - nested
+          - [ ] nested task
+        - [x] done
+
+        ## A heading long enough to wrap: \(words)
+
+        1. one
+        2. two
+
+        > quoted \(words)
+        > second quote line
+
+        ```bash
+        echo ok
+        ```
+
+        Inline `code_span` here.
+
+        | Key | Value |
+        | --- | --- |
+        | `code_line_height` | 2 * 3 |
+
+        \(chinese)
+
+        """
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 1200, height: 900))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.repositoryRoot = directory
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let document = DocumentStore.shared.document(for: url)
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        layout.ensureLayout(for: container)
+        let nsSource = source as NSString
+        func at(_ needle: String) -> Int { nsSource.range(of: needle).location }
+        func font(_ needle: String) -> NSFont? {
+            document.storage.attribute(.font, at: at(needle), effectiveRange: nil) as? NSFont
+        }
+        func fragment(_ location: Int) -> NSRect {
+            layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
+                                    effectiveRange: nil)
+        }
+        /// The fragments a line's text is drawn in, from `location` — its
+        /// first drawn character — on: hidden characters before it are laid out
+        /// with the line above.
+        func fragments(ofLineAt location: Int) -> [NSRect] {
+            let line = nsSource.lineRange(for: NSRange(location: location, length: 0))
+            let drawn = NSRange(location: location, length: NSMaxRange(line) - location)
+            let glyphs = layout.glyphRange(forCharacterRange: drawn, actualCharacterRange: nil)
+            var found: [NSRect] = []
+            layout.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
+                if found.last != rect { found.append(rect) }
+            }
+            return found
+        }
+        /// Where a character's glyph starts across the container.
+        func textX(_ location: Int) -> CGFloat {
+            let glyph = layout.glyphIndexForCharacter(at: location)
+            return fragment(location).minX + layout.location(forGlyphAt: glyph).x
+        }
+
+        // Prose in a proportional face, a step above the editor's; code and
+        // inline code keep the editor's monospaced one.
+        let body = Theme.markdownFontSize()
+        try expect(font("A paragraph").map { !$0.isFixedPitch && $0.pointSize == body } == true
+                    && body > Theme.editorFont().pointSize,
+                   "prose is not set in a proportional face above the editor's size: "
+                     + "\(String(describing: font("A paragraph")))")
+        try expect(font("echo ok") == Theme.editorFont() && font("code_span") == Theme.editorFont(),
+                   "code lost the editor's monospaced face")
+        try expect(font("emphasis").map {
+                        NSFontManager.shared.traits(of: $0).contains(.italicFontMask) } == true
+                    && document.storage.attribute(.obliqueness, at: at("emphasis"),
+                                                  effectiveRange: nil) == nil,
+                   "emphasis is not the face's own italic")
+
+        // Headings a size apart, each level its own.
+        let sizes = ["Title", "Section", "Detail"].map { font($0)?.pointSize ?? 0 }
+        try expect(sizes[0] > sizes[1] && sizes[1] > sizes[2] && sizes[2] > body
+                    && sizes[0] >= body * 1.5,
+                   "headings are not a clear size apart: \(sizes) over \(body)")
+
+        // Room in the lines: prose leads at 1.6, wrapped lines alike.
+        let paragraphLines = fragments(ofLineAt: at("A paragraph"))
+        try expect(paragraphLines.count >= 2
+                    && paragraphLines.allSatisfy { $0.height == Theme.markdownLineHeight() }
+                    && Theme.markdownLineHeight() >= body * 1.5,
+                   "a wrapped paragraph's lines are not prose lines: "
+                     + "\(paragraphLines.map(\.height))")
+        // A blank line is a gap, not a line.
+        let blank = fragment(at("\n\nA paragraph") + 1)
+        try expect(blank.height == Theme.markdownBlankLineHeight()
+                    && blank.height < Theme.markdownLineHeight(),
+                   "a blank line is \(blank.height)pt, not the gap between blocks")
+        // A heading has room above it, none at the very top, and sits nearer
+        // the text below it than the text above it.
+        guard let title = layout.markdownTextBox(forGlyphAt: layout.glyphIndexForCharacter(at: at("Title"))),
+              let detail = layout.markdownTextBox(forGlyphAt: layout.glyphIndexForCharacter(at: at("Detail")))
+        else { throw Failure(description: "a heading has no rendered line box") }
+        try expect(title.fragment.height == title.text.height,
+                   "the first heading has room above it at the top of the page")
+        try expect(detail.text.minY - detail.fragment.minY
+                    == Theme.markdownHeadingSpaceBefore(level: 3),
+                   "a heading has no room above it of its own: \(detail)")
+        // And the blank line before it is a blank line's height, though the
+        // heading's hidden `###` is laid out with it.
+        try expect(fragment(at("\n\n### Detail") + 1).height == Theme.markdownBlankLineHeight()
+                    && fragment(at("\n\n- first") + 1).height == Theme.markdownBlankLineHeight(),
+                   "a blank line took the height of the heading or list item after it")
+        let aboveDetail = detail.text.minY - fragment(at("Section")).maxY
+        let belowDetail = fragment(at("first item")).minY - detail.text.maxY
+        try expect(aboveDetail > belowDetail,
+                   "a heading sits as far from its own text as from the text before it: "
+                     + "\(aboveDetail) above, \(belowDetail) below")
+
+        // A column a line can be followed across: about 40 Chinese characters.
+        let chineseLine = layout.glyphRange(
+            forCharacterRange: NSRange(location: at(chinese), length: 1), actualCharacterRange: nil)
+        var chineseFragment = NSRange()
+        _ = layout.lineFragmentRect(forGlyphAt: chineseLine.location,
+                                    effectiveRange: &chineseFragment)
+        let perLine = layout.characterRange(forGlyphRange: chineseFragment,
+                                            actualGlyphRange: nil).length
+        try expect((32...44).contains(perLine),
+                   "a line of Chinese holds \(perLine) characters, not about 40")
+        try expect(text.textContainerInset.height >= Theme.markdownTopInset,
+                   "the document starts against the tabs")
+
+        // Lists: text in by one step a level, wrapped lines under the text,
+        // and the marker in the margin on the item's own line.
+        text.display()
+        let paragraphX = textX(at("A paragraph"))
+        let firstX = textX(at("first item"))
+        try expect(abs(firstX - paragraphX - Theme.markdownListIndent()) < 1,
+                   "a list item's text is not one step in: \(firstX) vs \(paragraphX)")
+        let firstItemLines = fragments(ofLineAt: at("first item"))
+        let wrappedStart = layout.characterIndexForGlyph(
+            at: layout.glyphIndex(for: NSPoint(x: firstItemLines[1].minX + 1,
+                                               y: firstItemLines[1].midY), in: container))
+        try expect(firstItemLines.count >= 2 && abs(textX(wrappedStart) - firstX) < 1,
+                   "a wrapped list item does not come back under its text")
+        try expect(abs(textX(at("nested")) - firstX - Theme.markdownListIndent()) < 1,
+                   "a nested item is not a step further in")
+        try expect(!layout.isCharacterHidden(at: at("second"))
+                    && !layout.isCharacterHidden(at: at("nested"))
+                    && !layout.isCharacterHidden(at: at("nested task")),
+                   "a list item vanished behind a nested item's checkbox")
+        // A heading that wraps keeps its room above its first line only.
+        let longHeading = fragments(ofLineAt: at("A heading long enough"))
+        let headingLine = (font("A heading long enough")!.pointSize * 1.3).rounded()
+        try expect(longHeading.count >= 2
+                    && longHeading[0].height == headingLine
+                        + Theme.markdownHeadingSpaceBefore(level: 2)
+                    && longHeading.dropFirst().allSatisfy { $0.height == headingLine },
+                   "a wrapped heading's room above went on every line: "
+                     + "\(longHeading.map(\.height))")
+        let origin = text.textContainerOrigin
+        for (marker, offset) in [("- first", 2), ("1. one", 3), ("- [x] done", 6)] {
+            guard let drawn = text.markerRectsForTesting[at(marker)] else {
+                throw Failure(description: "no marker was drawn for \(marker)")
+            }
+            let item = at(marker) + offset
+            let line = fragment(item).offsetBy(dx: origin.x, dy: origin.y)
+            try expect(drawn.midY > line.minY && drawn.midY < line.maxY,
+                       "the \(marker) marker is not on its item's line: \(drawn) vs \(line)")
+            try expect(drawn.maxX <= textX(item) + origin.x - 3,
+                       "the \(marker) marker runs into its text")
+        }
+
+        // A quote: one bar from its first line to its last, the text clear of it.
+        guard let bar = text.markerRectsForTesting[at("> quoted")] else {
+            throw Failure(description: "the quote drew no bar")
+        }
+        let quoteTop = fragment(at("quoted")).minY + origin.y
+        let quoteBottom = fragment(at("second quote line")).maxY + origin.y
+        try expect(abs(bar.minY - quoteTop) < 0.5 && abs(bar.maxY - quoteBottom) < 0.5,
+                   "the quote's bar does not run its whole length: \(bar) vs "
+                     + "\(quoteTop)...\(quoteBottom)")
+        try expect(textX(at("quoted")) + origin.x > bar.maxX + 6,
+                   "the quote's text runs into its bar")
+
+        // Code: a box padded round the code, its fence lines the padding.
+        guard let box = text.codeBoxRectsForTesting[at("echo ok")] else {
+            throw Failure(description: "the code block drew no box")
+        }
+        let codeLine = fragment(at("echo ok")).offsetBy(dx: origin.x, dy: origin.y)
+        try expect(textX(at("echo ok")) + origin.x >= box.minX + Theme.markdownCodePaddingX,
+                   "code runs against the edge of its box")
+        try expect(abs(codeLine.minY - box.minY - Theme.markdownCodePaddingY) < 0.5
+                    && abs(box.maxY - codeLine.maxY - Theme.markdownCodePaddingY) < 0.5
+                    && codeLine.height == Theme.lineMetrics().target,
+                   "the code box is not padded above and below its code: \(box) vs \(codeLine)")
+        try expect(fragment(at("```bash") + 7).height == Theme.markdownCodePaddingY,
+                   "the fence line is not the box's padding")
+
+        // A table cell keeps its words: only paired markup comes off.
+        try expect(document.markdownTables.first?.rows.last?.cells
+                    == ["code_line_height", "2 * 3"],
+                   "a table cell lost characters: "
+                     + "\(String(describing: document.markdownTables.first?.rows.last?.cells))")
+        for (cell, rendered) in [("**bold** and _em_", "bold and em"),
+                                 ("snake_case_name", "snake_case_name"),
+                                 ("2*3*4 and a * b", "2*3*4 and a * b"),
+                                 ("~~gone~~ `kept_name`", "gone kept_name")] {
+            try expect(MarkdownLiveStyler.renderedCell(cell) == rendered,
+                       "\"\(cell)\" was rendered as \"\(MarkdownLiveStyler.renderedCell(cell))\"")
+        }
+
+        // The caret is as tall as the line it is on: a heading's, or code's.
+        func caret(at location: Int) -> NSRect {
+            let line = fragment(location)
+            return text.caretRect(from: NSRect(x: textX(location) + origin.x,
+                                               y: line.minY + origin.y,
+                                               width: 1, height: line.height))
+        }
+        let headingCaret = caret(at: at("Detail"))
+        try expect(headingCaret.height == detail.text.height
+                    && abs(headingCaret.minY - (detail.text.minY + origin.y)) < 0.5,
+                   "the caret in a heading is \(headingCaret), not the heading's line")
+        try expect(caret(at: at("echo ok")).height == Theme.lineMetrics().target,
+                   "the caret in code is not a code row")
     }
 
     private static func testFindMatchesAreComplete() throws {

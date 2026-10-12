@@ -215,7 +215,7 @@ final class PuzzleTextView: NSTextView {
                 // a fragment holding nothing but that terminator would take the
                 // row's height a second time.
                 let leading = index == 0 && table.leadsWithBlankLine
-                    ? Theme.lineMetrics().target : 0
+                    ? Theme.markdownBlankLineHeight() : 0
                 metrics.append(MarkdownTableRowMetric(
                     range: row.sourceRange,
                     height: markdownTableRowHeight(row, widths: widths) + leading))
@@ -243,13 +243,13 @@ final class PuzzleTextView: NSTextView {
         -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
-        var attributes: [NSAttributedString.Key: Any] = [
-            .font: Theme.editorFont(),
+        // The table is part of the prose, in its face; the header in its bold.
+        let size = Theme.markdownFontSize()
+        return [
+            .font: header ? NSFont.boldSystemFont(ofSize: size) : Theme.markdownFont(),
             .foregroundColor: Theme.foreground,
             .paragraphStyle: paragraph,
         ]
-        if header { attributes[.strokeWidth] = -2.0 }
-        return attributes
     }
 
     private func markdownTableColumnWidths(for table: MarkdownTableDecoration) -> [CGFloat] {
@@ -285,7 +285,7 @@ final class PuzzleTextView: NSTextView {
                 attributes: attributes)
             contentHeight = max(contentHeight, ceil(bounds.height))
         }
-        return max(Theme.lineMetrics().target, contentHeight + 8)
+        return max(Theme.markdownLineHeight(), contentHeight + 12)
     }
 
     private func markdownImage(_ decoration: MarkdownImageDecoration) -> NSImage? {
@@ -311,9 +311,9 @@ final class PuzzleTextView: NSTextView {
     private func markdownImageHeight(_ decoration: MarkdownImageDecoration) -> CGFloat {
         let available = max(80, bounds.width - textContainerInset.width * 2)
         guard let image = markdownImage(decoration), image.size.width > 0,
-              image.size.height > 0 else { return Theme.lineMetrics().target * 2 }
+              image.size.height > 0 else { return Theme.markdownLineHeight() * 2 }
         let scale = min(1, available / image.size.width, 320 / image.size.height)
-        return max(Theme.lineMetrics().target * 2, floor(image.size.height * scale) + 8)
+        return max(Theme.markdownLineHeight() * 2, floor(image.size.height * scale) + 8)
     }
 
     private(set) var codeBlocks: [CodeBlock] = []
@@ -644,8 +644,13 @@ final class PuzzleTextView: NSTextView {
               let layoutManager, textContainer != nil else { return }
         let inset = textContainerInset
         for block in markdownCodeBlocks {
+            // Inside a list the first line starts with the item's hidden
+            // indent, which TextKit keeps with the line above.
+            let start = firstDrawnCharacter(from: block.range.location)
+            let drawn = NSRange(location: start,
+                                length: max(0, NSMaxRange(block.range) - start))
             let clamped = NSIntersectionRange(
-                block.range, NSRange(location: 0, length: (string as NSString).length))
+                drawn, NSRange(location: 0, length: (string as NSString).length))
             guard clamped.length > 0 else { continue }
             let glyphs = layoutManager.glyphRange(
                 forCharacterRange: clamped, actualCharacterRange: nil)
@@ -655,10 +660,15 @@ final class PuzzleTextView: NSTextView {
                 fragment, _, _, _, _ in union = union.union(fragment)
             }
             guard !union.isNull else { continue }
-            let rect = NSRect(x: inset.width,
-                              y: union.minY + inset.height,
-                              width: max(0, bounds.width - inset.width * 2),
-                              height: union.height)
+            // The fence lines above and below are the box's padding; an
+            // indented block has none, and takes the same room from the gap
+            // around it.
+            let padding = Theme.markdownCodePaddingY
+            let rect = NSRect(x: inset.width + block.indent,
+                              y: union.minY + inset.height - padding,
+                              width: max(0, bounds.width - inset.width * 2 - block.indent),
+                              height: union.height + padding * 2)
+            codeBoxRectsForTesting[block.range.location] = rect
             guard rect.intersects(dirtyRect) else { continue }
             Theme.inputBackground.setFill()
             let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
@@ -678,12 +688,14 @@ final class PuzzleTextView: NSTextView {
         for block in markdownCodeBlocks {
             guard let language = block.language, !language.isEmpty,
                   block.range.length > 0 else { continue }
-            let glyph = layoutManager.glyphIndexForCharacter(at: block.range.location)
+            let glyph = layoutManager.glyphIndexForCharacter(
+                at: firstDrawnCharacter(from: block.range.location))
             let line = layoutManager.lineFragmentRect(forGlyphAt: glyph,
                                                        effectiveRange: nil)
             let size = (language as NSString).size(withAttributes: attributes)
-            let rect = NSRect(x: max(inset.width, bounds.width - inset.width - size.width - 6),
-                              y: line.minY + inset.height + 2,
+            // In the box's top padding, clear of the code.
+            let rect = NSRect(x: max(inset.width, bounds.width - inset.width - size.width - 8),
+                              y: line.minY + inset.height - Theme.markdownCodePaddingY + 1,
                               width: size.width, height: size.height)
             guard rect.intersects(dirtyRect) else { continue }
             (language as NSString).draw(in: rect, withAttributes: attributes)
@@ -770,36 +782,54 @@ final class PuzzleTextView: NSTextView {
         }
     }
 
+    /// How far a marker drawn in the margin stays from the text it marks.
+    private var markerGap: CGFloat { (Theme.markdownFontSize() * 0.45).rounded() }
+
+    /// The first character from `location` on its line that is drawn. A
+    /// hidden character at the start of a line — a list marker, a quote's
+    /// `>` — has no place of its own, and TextKit puts it with the line
+    /// before: anchoring there drew every bullet a line too high.
+    private func firstDrawnCharacter(from location: Int) -> Int {
+        let source = string as NSString
+        guard location < source.length else { return location }
+        let line = source.lineRange(for: NSRange(location: location, length: 0))
+        var index = location
+        while index < NSMaxRange(line) {
+            let character = source.character(at: index)
+            if character == 0x0A || character == 0x0D { break }
+            if foldingManager?.isCharacterHidden(at: index) != true { return index }
+            index += 1
+        }
+        return location
+    }
+
+    /// The box a rendered line's text sits in, in view coordinates: the line
+    /// a marker in the margin is centred on.
+    private func markdownLineBox(at location: Int) -> NSRect? {
+        guard let layoutManager, location < (string as NSString).length else { return nil }
+        let glyph = layoutManager.glyphIndexForCharacter(at: firstDrawnCharacter(from: location))
+        let origin = textContainerOrigin
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let text = foldingManager?.markdownTextBox(forGlyphAt: glyph)?.text ?? fragment
+        return text.offsetBy(dx: origin.x, dy: origin.y)
+    }
+
     private func drawMarkdownTasks(in dirtyRect: NSRect) {
-        guard !markdownTasks.isEmpty, let layoutManager, textContainer != nil else { return }
+        guard !markdownTasks.isEmpty else { return }
         let origin = textContainerOrigin
         for task in markdownTasks {
             if let active = markdownActiveSourceRange,
                NSIntersectionRange(active, task.sourceRange).length > 0 {
                 continue
             }
-            let clamped = NSIntersectionRange(
-                task.sourceRange,
-                NSRange(location: 0, length: (string as NSString).length))
-            guard clamped.length > 0 else { continue }
-            let glyphs = layoutManager.glyphRange(
-                forCharacterRange: clamped, actualCharacterRange: nil)
-            guard glyphs.length > 0 else { continue }
-            let raw = layoutManager.boundingRect(forGlyphRange: glyphs,
-                                                  in: textContainer!)
-            let fragment = layoutManager.lineFragmentRect(
-                forGlyphAt: glyphs.location, effectiveRange: nil)
-            let cover = NSRect(x: raw.minX + origin.x,
-                               y: fragment.minY + origin.y,
-                               width: raw.width, height: fragment.height)
-            guard cover.intersects(dirtyRect) else { continue }
-
-            Theme.editorBackground.setFill()
-            cover.fill()
-            let side = min(14, max(10, fragment.height - 8))
-            let box = NSRect(x: cover.minX + 1,
-                             y: cover.midY - side / 2,
+            guard task.sourceRange.length > 0,
+                  let line = markdownLineBox(at: task.sourceRange.location) else { continue }
+            // The box hangs in the margin, as a bullet does, the text after it.
+            let side = min(14, max(10, line.height - 8))
+            let box = NSRect(x: origin.x + task.indent - markerGap - side,
+                             y: line.midY - side / 2,
                              width: side, height: side)
+            guard box.intersects(dirtyRect) else { continue }
             let outline = NSBezierPath(roundedRect: box, xRadius: 2.5, yRadius: 2.5)
             if task.checked {
                 Theme.blue.setFill()
@@ -821,55 +851,70 @@ final class PuzzleTextView: NSTextView {
                 outline.lineWidth = 1.2
                 outline.stroke()
             }
+            markerRectsForTesting[task.sourceRange.location] = box
         }
     }
 
     private func drawMarkdownLineMarkers(in dirtyRect: NSRect) {
-        guard !markdownLineMarkers.isEmpty,
-              let layoutManager, let container = textContainer else { return }
+        guard !markdownLineMarkers.isEmpty, let layoutManager else { return }
         let origin = textContainerOrigin
-        let bulletAttributes: [NSAttributedString.Key: Any] = [
-            .font: Theme.editorFont(), .foregroundColor: Theme.dimText,
+        let labelAttributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.markdownFont(), .foregroundColor: Theme.dimText,
         ]
         for marker in markdownLineMarkers {
-            if let active = markdownActiveSourceRange,
-               NSIntersectionRange(active, marker.sourceRange).length > 0 { continue }
-            let glyphs = layoutManager.glyphRange(
-                forCharacterRange: marker.sourceRange, actualCharacterRange: nil)
-            guard glyphs.length > 0 else { continue }
-            let raw = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
-            let fragment = layoutManager.lineFragmentRect(
-                forGlyphAt: glyphs.location, effectiveRange: nil)
-            let cover = NSRect(x: raw.minX + origin.x,
-                               y: fragment.minY + origin.y,
-                               width: raw.width, height: fragment.height)
-            guard cover.intersects(dirtyRect) else { continue }
-            Theme.editorBackground.setFill()
-            cover.fill()
             switch marker.kind {
-            case .bullet(let label):
-                let size = (label as NSString).size(withAttributes: bulletAttributes)
-                let rect = NSRect(x: max(cover.minX, cover.maxX - size.width - 3),
-                                  y: cover.midY - size.height / 2,
-                                  width: size.width, height: size.height)
-                (label as NSString).draw(in: rect, withAttributes: bulletAttributes)
-            case .quote(let depth):
-                Theme.border.setFill()
-                for level in 0..<depth {
-                    NSRect(x: cover.minX + CGFloat(level) * 4 + 1,
-                           y: cover.minY + 2,
-                           width: 2, height: max(0, cover.height - 4)).fill()
+            case .quote:
+                // One bar down the whole quote, every line of it — including
+                // those that do not repeat its `>`. From its first drawn
+                // character: the hidden `>` before it belongs to the line above.
+                let start = firstDrawnCharacter(from: marker.sourceRange.location)
+                let quote = NSRange(location: start,
+                                    length: max(0, NSMaxRange(marker.sourceRange) - start))
+                let glyphs = layoutManager.glyphRange(
+                    forCharacterRange: quote, actualCharacterRange: nil)
+                guard glyphs.length > 0 else { continue }
+                var union = NSRect.null
+                layoutManager.enumerateLineFragments(forGlyphRange: glyphs) {
+                    fragment, _, _, _, _ in union = union.union(fragment)
                 }
-            case .footnote(let identifier):
-                let label = "\(identifier)."
-                let size = (label as NSString).size(withAttributes: bulletAttributes)
-                let rect = NSRect(x: max(cover.minX, cover.maxX - size.width - 3),
-                                  y: cover.midY - size.height / 2,
+                guard !union.isNull else { continue }
+                let bar = NSRect(x: origin.x + marker.indent + 1, y: union.minY + origin.y,
+                                 width: 3, height: union.height)
+                guard bar.intersects(dirtyRect) else { continue }
+                Theme.dimText.withAlphaComponent(0.45).setFill()
+                bar.fill()
+                markerRectsForTesting[marker.sourceRange.location] = bar
+            case .bullet, .footnote:
+                if let active = markdownActiveSourceRange,
+                   NSIntersectionRange(active, marker.sourceRange).length > 0 { continue }
+                guard let line = markdownLineBox(at: marker.sourceRange.location) else {
+                    continue
+                }
+                let label: String
+                if case .footnote(let identifier) = marker.kind {
+                    label = "\(identifier)."
+                } else if case .bullet(let text) = marker.kind {
+                    label = text
+                } else {
+                    continue
+                }
+                // Right-aligned against the text, so a column of numbers lines
+                // up on its full stops and every item's text starts together.
+                let size = (label as NSString).size(withAttributes: labelAttributes)
+                let rect = NSRect(x: origin.x + marker.indent - markerGap - size.width,
+                                  y: line.midY - size.height / 2,
                                   width: size.width, height: size.height)
-                (label as NSString).draw(in: rect, withAttributes: bulletAttributes)
+                guard rect.intersects(dirtyRect) else { continue }
+                (label as NSString).draw(in: rect, withAttributes: labelAttributes)
+                markerRectsForTesting[marker.sourceRange.location] = rect
             }
         }
     }
+
+    /// Where each marker was last drawn, by the location of its source.
+    private(set) var markerRectsForTesting: [Int: NSRect] = [:]
+    /// Where each code block's box was last drawn, by where its code starts.
+    private(set) var codeBoxRectsForTesting: [Int: NSRect] = [:]
 
     private func drawMarkdownRules(in dirtyRect: NSRect) {
         guard !markdownRules.isEmpty, let layoutManager else { return }
@@ -1109,11 +1154,20 @@ final class PuzzleTextView: NSTextView {
     }
 
     /// The caret uses the complete configured code row, matching the active
-    /// line background exactly.
+    /// line background exactly — or, in rendered Markdown, the height of the
+    /// line it is on: a heading's, or a line of prose, not the code row.
     func caretRect(from rect: NSRect) -> NSRect {
         var r = rect
         r.size.height = Theme.lineMetrics().target
         r.size.width = 2
+        guard let foldingManager, let container = textContainer else { return r }
+        let origin = textContainerOrigin
+        let point = NSPoint(x: max(0, rect.minX - origin.x), y: rect.midY - origin.y)
+        let glyph = foldingManager.glyphIndex(for: point, in: container)
+        guard let placed = foldingManager.markdownTextBox(forGlyphAt: glyph),
+              point.y >= placed.fragment.minY, point.y <= placed.fragment.maxY else { return r }
+        r.origin.y = placed.text.minY + origin.y
+        r.size.height = placed.text.height
         return r
     }
 
@@ -1385,13 +1439,13 @@ final class PuzzleTextView: NSTextView {
             applyReadingInset()
         }
     }
-    /// The measure, in characters of the editor's own font, so it follows
-    /// `buffer_font_size` instead of being a fixed number of points.
-    static let readingColumns: CGFloat = 114
-
-    /// The horizontal inset the pane configured, before any centring.
+    /// The insets the pane configured, before any centring.
     private var baseHorizontalInset: CGFloat = 6
-    func rememberBaseInset() { baseHorizontalInset = textContainerInset.width }
+    private var baseVerticalInset: CGFloat = 0
+    func rememberBaseInset() {
+        baseHorizontalInset = textContainerInset.width
+        baseVerticalInset = textContainerInset.height
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -1400,16 +1454,20 @@ final class PuzzleTextView: NSTextView {
 
     private func applyReadingInset() {
         guard let readingWidth else {
-            setHorizontalInset(baseHorizontalInset)
+            setInset(width: baseHorizontalInset, height: baseVerticalInset)
             return
         }
         // Split the leftover evenly; never narrower than the pane's own margin.
-        setHorizontalInset(max(baseHorizontalInset, (bounds.width - readingWidth) / 2))
+        // A document also starts a little way down the page rather than
+        // against the tabs.
+        setInset(width: max(baseHorizontalInset, (bounds.width - readingWidth) / 2),
+                 height: max(baseVerticalInset, Theme.markdownTopInset))
     }
 
-    private func setHorizontalInset(_ width: CGFloat) {
-        guard abs(textContainerInset.width - width) > 0.5 else { return }
-        textContainerInset = NSSize(width: width, height: textContainerInset.height)
+    private func setInset(width: CGFloat, height: CGFloat) {
+        guard abs(textContainerInset.width - width) > 0.5
+                || abs(textContainerInset.height - height) > 0.5 else { return }
+        textContainerInset = NSSize(width: width, height: height)
         // Decorations are drawn from the inset, and the container's width is
         // derived from it, so both have to be redrawn from scratch.
         needsDisplay = true

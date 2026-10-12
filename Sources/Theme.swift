@@ -167,6 +167,7 @@ enum Theme {
         // Symbols are appearance-independent templates, but clearing here also
         // bounds the cache if future settings add configurable symbol sizes.
         cachedSymbols.removeAll()
+        MarkdownLiveStyler.invalidateCaches()
     }
 
     static func paragraphStyle() -> NSParagraphStyle {
@@ -181,6 +182,76 @@ enum Theme {
         cachedParagraph = frozen
         return frozen
     }
+
+    // MARK: - Rendered Markdown
+
+    /// Prose in a rendered Markdown document is set in the system's text face,
+    /// a step above the editor's size. A monospaced face gives every letter the
+    /// same width — right for code, where columns mean something, and slow to
+    /// read as sentences. Chinese falls back to the system's own CJK face.
+    static func markdownFont() -> NSFont {
+        NSFont.systemFont(ofSize: markdownFontSize())
+    }
+
+    static func markdownFontSize() -> CGFloat {
+        (editorFont().pointSize * 1.15).rounded()
+    }
+
+    /// One line of prose: 1.6 times the type, the leading text wants and code
+    /// does not.
+    static func markdownLineHeight() -> CGFloat {
+        (markdownFontSize() * 1.6).rounded()
+    }
+
+    /// A blank source line is the gap between two blocks, not a line of text:
+    /// three quarters of the type, where a whole row left every paragraph
+    /// floating a full line away from the next.
+    static func markdownBlankLineHeight() -> CGFloat {
+        (markdownFontSize() * 0.75).rounded()
+    }
+
+    /// The column prose is set in: 40 of the type's em. That is about 40
+    /// Chinese characters a line, and 70 to 80 Latin ones — the range a reader
+    /// can carry from the end of one line to the start of the next.
+    static func markdownReadingWidth() -> CGFloat {
+        (markdownFontSize() * 40).rounded()
+    }
+
+    /// Heading sizes, as multiples of the prose size, H1 to H6. Far enough
+    /// apart that each level reads as its own; H5 and H6 are told apart by
+    /// weight and colour instead.
+    static let markdownHeadingScales: [CGFloat] = [1.75, 1.4, 1.2, 1.05, 1.0, 0.9]
+
+    static func markdownHeadingSize(level: Int) -> CGFloat {
+        let index = max(1, min(6, level)) - 1
+        return (markdownFontSize() * markdownHeadingScales[index]).rounded()
+    }
+
+    /// Space above a heading, beyond the blank line before it, so a heading
+    /// sits nearer the text it heads than the text it ends.
+    static func markdownHeadingSpaceBefore(level: Int) -> CGFloat {
+        let ems: [CGFloat] = [1.0, 0.9, 0.6, 0.5, 0.4, 0.4]
+        return (markdownFontSize() * ems[max(1, min(6, level)) - 1]).rounded()
+    }
+
+    /// How far a list item's text sits in from its container, one step per
+    /// level; the marker hangs in that space, to the left of the text.
+    static func markdownListIndent() -> CGFloat {
+        (markdownFontSize() * 1.6).rounded()
+    }
+
+    /// How far a quote's text sits in from its bar.
+    static func markdownQuoteIndent() -> CGFloat {
+        (markdownFontSize() * 1.0).rounded()
+    }
+
+    /// Room inside a code block's box, around the code: across, and the
+    /// height its fence lines are given above and below.
+    static let markdownCodePaddingX: CGFloat = 12
+    static let markdownCodePaddingY: CGFloat = 8
+
+    /// Space between the top of the pane and a rendered document's first line.
+    static let markdownTopInset: CGFloat = 24
 
     /// Attributes shared by the editor text and the gutter numbers, so both sit
     /// on the same baseline.

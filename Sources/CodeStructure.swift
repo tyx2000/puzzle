@@ -583,6 +583,15 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
                 return true
             }
         }
+        // Rendered Markdown sizes each line for what it holds — a heading, a
+        // line of prose, the gap a blank line stands for, a row of code —
+        // rather than giving every line the code row.
+        if glyphRange.length > 0, let placed = markdownLineBox(forGlyphRange: glyphRange) {
+            lineFragmentRect.pointee.size.height = placed.height
+            lineFragmentUsedRect.pointee.size.height = placed.height
+            baselineOffset.pointee = placed.layout.baselineOffset(spaceAbove: placed.spaceAbove)
+            return true
+        }
         let metrics = Theme.lineMetrics()
         lineFragmentRect.pointee.size.height = metrics.target
         lineFragmentUsedRect.pointee.size.height = metrics.target
@@ -591,6 +600,74 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         let glyphHeight = font.ascender - font.descender
         baselineOffset.pointee = (metrics.target - glyphHeight) / 2 + font.ascender
         return true
+    }
+
+    /// The layout of the rendered-Markdown line a fragment belongs to, and the
+    /// space above it — given only to the first fragment of its line, never to
+    /// the lines a long one wraps onto. Nil outside rendered Markdown.
+    ///
+    /// A fragment is the line its first *drawn* character is on. Characters
+    /// hidden at the start of a line — a heading's `#`, a list's `-` — have
+    /// no place of their own, and TextKit lays them out with the line before:
+    /// read by its first character, the blank line above a heading took the
+    /// heading's height and the heading lost the room above it.
+    private func markdownLineBox(forGlyphRange glyphRange: NSRange)
+        -> (layout: MarkdownLineLayout, spaceAbove: CGFloat, height: CGFloat)? {
+        guard let storage = textStorage, storage.length > 0 else { return nil }
+        let source = storage.string as NSString
+        let first = characterIndexForGlyph(at: glyphRange.location)
+        let last = characterIndexForGlyph(at: NSMaxRange(glyphRange) - 1)
+        let characters = NSRange(location: min(first, last),
+                                 length: abs(last - first) + 1)
+        var representative = min(characters.location, source.length - 1)
+        for index in characters.location..<min(NSMaxRange(characters), source.length) {
+            let character = source.character(at: index)
+            if character == 0x0A || character == 0x0D { continue }
+            if !isMarkdownSyntaxHidden(at: index) {
+                representative = index
+                break
+            }
+        }
+        guard let layout = storage.attribute(.markdownLineLayout, at: representative,
+                                             effectiveRange: nil) as? MarkdownLineLayout
+        else { return nil }
+        // The room above a line is its first fragment's: the first one that
+        // draws anything of the line, whatever hidden characters lead it.
+        let lineStart = source.lineRange(
+            for: NSRange(location: representative, length: 0)).location
+        var isFirst = true
+        var index = lineStart
+        while index < representative {
+            if !isMarkdownSyntaxHidden(at: index) {
+                isFirst = false
+                break
+            }
+            index += 1
+        }
+        let spaceAbove = isFirst ? layout.spaceBefore : 0
+        return (layout, spaceAbove, layout.lineHeight + spaceAbove)
+    }
+
+    /// Hidden as Markdown syntax — the lookup the line sizing can afford for
+    /// every fragment, without the folds `isCharacterHidden` also checks.
+    private func isMarkdownSyntaxHidden(at location: Int) -> Bool {
+        revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
+            && contains(location, in: markdownSyntaxRanges)
+    }
+
+    /// Where the text of the rendered-Markdown line holding `glyph` sits in
+    /// its fragment: below the space a heading keeps above it, and as tall as
+    /// the line — what the caret is drawn against. Nil outside rendered
+    /// Markdown, and for the collapsed and measured lines that hold no text.
+    func markdownTextBox(forGlyphAt glyph: Int) -> (fragment: NSRect, text: NSRect)? {
+        guard glyph < numberOfGlyphs else { return nil }
+        var fragmentGlyphs = NSRange()
+        let fragment = lineFragmentRect(forGlyphAt: glyph, effectiveRange: &fragmentGlyphs)
+        guard fragmentGlyphs.length > 0,
+              let placed = markdownLineBox(forGlyphRange: fragmentGlyphs),
+              abs(fragment.height - placed.height) < 0.5 else { return nil }
+        return (fragment, NSRect(x: fragment.minX, y: fragment.minY + placed.spaceAbove,
+                                 width: fragment.width, height: placed.layout.lineHeight))
     }
 
     private func firstContentCharacter(in range: NSRange) -> Int {
