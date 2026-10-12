@@ -182,6 +182,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             self?.navigateToDefinition(at: location) ?? false
         }
         textView.onOpenLink = { [weak self] link in self?.openMarkdownLink(link) }
+        textView.onEditLink = { [weak self] link in self?.editMarkdownLinkSource(link) }
         textView.onCommandHover = { [weak self] location in
             self?.updateDefinitionHover(at: location)
         }
@@ -213,6 +214,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         scrollView.verticalRulerView = ruler
         scrollView.rulersVisible = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipViewScrolled(_:)),
+            name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
         tabBar.translatesAutoresizingMaskIntoConstraints = false
@@ -1012,9 +1017,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             if prev != openURLs[index] { autosaveIfNeeded() }
         }
 
+        let previousURL = currentURL
         activeIndex = index
         clearDefinitionHover()
         let url = openURLs[index]
+        if url != previousURL {
+            markdownLinkSource = nil
+            textView.topSlack = 0
+        }
         let doc = DocumentStore.shared.document(for: url)
 
         // Lay out only what is asked for. A full layout of a multi-megabyte file
@@ -1065,22 +1075,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.diffLineNumbers = doc.diffLineNumbers
         textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
         layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
-        let markdownReveal = self.markdownReveal(for: doc)
-        layoutManager.updateMarkdownSyntaxRanges(
-            doc.markdownSyntaxRanges,
-            leads: doc.markdownLeadRanges,
-            collapsedLines: doc.markdownCollapsedLineRanges,
-            replacements: doc.markdownGlyphReplacements,
-            revealing: markdownReveal.line,
-            revealingLead: markdownReveal.lead)
-        textView.updateMarkdownDecorations(
-            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
-            tasks: doc.markdownTasks,
-            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
-            images: doc.markdownImages,
-            links: doc.markdownLinks,
-            activeSourceRange: markdownReveal.line,
-            revealedLead: markdownReveal.lead)
+        presentMarkdown(of: doc)
 
         if !doc.isPDF {
             releasePDFPreview()
@@ -1652,13 +1647,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if let document = currentDocument {
             // Leaving the line being edited ends its editing: it goes back to
             // being read.
+            let selection = textView.selectedRange()
             if let editing = markdownEditLine {
-                let caret = min(textView.selectedRange().location, document.storage.length)
+                let caret = min(selection.location, document.storage.length)
                 let line = (document.storage.string as NSString)
                     .lineRange(for: NSRange(location: caret, length: 0))
                 if editing.url != currentURL || editing.start != line.location {
                     markdownEditLine = nil
                 }
+            }
+            // And a link shown as written goes back to being a link.
+            if let link = markdownLinkSource,
+               link.url != currentURL || selection.location < link.range.location
+                || NSMaxRange(selection) > NSMaxRange(link.range) {
+                markdownLinkSource = nil
             }
             applyMarkdownReveal(for: document)
         }
@@ -1691,24 +1693,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               document.url == currentURL else { return }
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
-        keepingCaretInPlace {
-            let reveal = markdownReveal(for: document)
-            layoutManager.updateMarkdownSyntaxRanges(
-                document.markdownSyntaxRanges,
-                leads: document.markdownLeadRanges,
-                collapsedLines: document.markdownCollapsedLineRanges,
-                replacements: document.markdownGlyphReplacements,
-                revealing: reveal.line,
-                revealingLead: reveal.lead)
-            textView.updateMarkdownDecorations(
-                codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
-                tasks: document.markdownTasks,
-                lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
-                images: document.markdownImages,
-                links: document.markdownLinks,
-                activeSourceRange: reveal.line,
-                revealedLead: reveal.lead)
-        }
+        keepingCaretInPlace { presentMarkdown(of: document) }
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {
@@ -1731,67 +1716,128 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
-        keepingCaretInPlace {
-            let reveal = markdownReveal(for: document)
-            layoutManager.updateMarkdownSyntaxRanges(
-                document.markdownSyntaxRanges,
-                leads: document.markdownLeadRanges,
-                collapsedLines: document.markdownCollapsedLineRanges,
-                replacements: document.markdownGlyphReplacements,
-                revealing: reveal.line,
-                revealingLead: reveal.lead)
-            textView.updateMarkdownDecorations(
-                codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
-                tasks: document.markdownTasks,
-                lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
-                images: document.markdownImages,
-                links: document.markdownLinks,
-                activeSourceRange: reveal.line,
-                revealedLead: reveal.lead)
-        }
+        keepingCaretInPlace { presentMarkdown(of: document) }
         textView.refreshBracketMatches()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
     }
 
     /// The line of a rendered Markdown document being edited, by where it
-    /// starts. A click only places the caret; an edit shows the line's source,
-    /// until the caret leaves the line.
+    /// starts — until the caret leaves the line.
     private var markdownEditLine: (url: URL, start: Int)?
 
+    /// A link whose source the reader asked to edit, from the bar under it:
+    /// shown as written until the caret leaves it. Kept in step with every
+    /// edit to the buffer, which is what moves its end as the address is
+    /// typed into.
+    private var markdownLinkSource: (url: URL, range: NSRange)? {
+        didSet {
+            // Moving the range is done from inside the observer itself; only
+            // a different link — or none — changes what is observed.
+            guard markdownLinkSource?.url != oldValue?.url
+                    || (markdownLinkSource == nil) != (oldValue == nil) else { return }
+            if let observer = linkSourceObserver {
+                NotificationCenter.default.removeObserver(observer)
+                linkSourceObserver = nil
+            }
+            guard markdownLinkSource != nil, let storage = currentDocument?.storage else { return }
+            linkSourceObserver = NotificationCenter.default.addObserver(
+                forName: NSTextStorage.didProcessEditingNotification,
+                object: storage, queue: nil) { [weak self] notification in
+                guard let storage = notification.object as? NSTextStorage,
+                      storage.editedMask.contains(.editedCharacters) else { return }
+                self?.shiftMarkdownLinkSource(edited: storage.editedRange,
+                                              delta: storage.changeInLength)
+            }
+        }
+    }
+    private var linkSourceObserver: NSObjectProtocol?
+
+    private func shiftMarkdownLinkSource(edited: NSRange, delta: Int) {
+        guard var source = markdownLinkSource else { return }
+        let removedEnd = edited.location + edited.length - delta
+        if removedEnd <= source.range.location {
+            source.range.location += delta
+        } else if edited.location < NSMaxRange(source.range) {
+            // An edit that reaches back before the link has taken its start
+            // with it: there is no link left to show.
+            guard edited.location >= source.range.location else {
+                markdownLinkSource = nil
+                return
+            }
+            source.range.length = max(0, source.range.length + delta)
+        }
+        markdownLinkSource = source
+    }
+
     /// What of a rendered Markdown document shows its source.
-    ///
-    /// `line`: the line being edited — or, wherever the caret is, a line that
-    /// draws nothing otherwise (a code fence, a table's divider, a setext
-    /// underline, a link definition), which is only there to be edited.
-    /// Clicking into the text shows nothing: the reader is reading, and a line
-    /// that turned to source under the pointer moved the very text clicked.
-    ///
-    /// `lead`: a block's lead — a heading's `#`, a list's marker — while the
-    /// caret is inside it. Editing the line leaves the lead in the margin, so
-    /// the text does not move sideways as editing starts.
-    private func markdownReveal(for document: Document) -> (line: NSRange?, lead: NSRange?) {
+    private struct MarkdownReveal {
+        /// Shown in the text as written — laid out again, so only ever what
+        /// cannot be edited any other way: a line that draws nothing (a code
+        /// fence, a table's divider, a link definition), a table row or a
+        /// picture being edited — both are drawn over their source — a link
+        /// the reader asked to edit, an entity the caret is inside.
+        var text: NSRange?
+        /// The line being edited: its lead is shown in the margin as written.
+        var editLine: NSRange?
+        /// A block's lead — a heading's `#`, a list's marker — while the caret
+        /// is inside it.
+        var lead: NSRange?
+        /// What the decorations treat as source: the line being edited, or
+        /// whatever line-sized thing the text shows.
+        var source: NSRange? { editLine ?? text }
+    }
+
+    /// Editing a line leaves its inline syntax hidden: showing it moved the
+    /// text being edited sideways and, for a long link, pushed every line
+    /// under it down. The caret's place among hidden syntax is shown instead
+    /// by marks that take no room, and a link's address by the bar under it.
+    private func markdownReveal(for document: Document) -> MarkdownReveal {
         guard document.languageSpec?.name == "markdown", let url = currentURL else {
-            return (nil, nil)
+            return MarkdownReveal()
         }
         let source = document.storage.string as NSString
         let selection = textView.selectedRange()
         let location = min(selection.location, source.length)
         let line = source.lineRange(for: NSRange(location: location, length: 0))
-        var revealed: NSRange?
+        var reveal = MarkdownReveal()
         if let editing = markdownEditLine, editing.url == url, editing.start == line.location {
-            revealed = line
+            reveal.editLine = line
+            if isMarkdownDrawnLine(line, in: document) { reveal.text = line }
         }
         // Merely opening a file leaves it rendered: the caret starts at the
         // top, which may well be inside a heading's `#`.
-        guard lineActivatedURLs.contains(url) else { return (revealed, nil) }
-        if revealed == nil, isMarkdownControlLine(line, in: document) {
-            revealed = line
+        guard lineActivatedURLs.contains(url) else { return reveal }
+        if reveal.text == nil, isMarkdownControlLine(line, in: document) {
+            reveal.text = line
         }
-        let lead = document.markdownLeadRanges.first {
+        if reveal.text == nil, let link = markdownLinkSource, link.url == url,
+           link.range.location <= location, location <= NSMaxRange(link.range) {
+            reveal.text = link.range
+        }
+        if reveal.text == nil, selection.length == 0,
+           let entity = document.markdownGlyphReplacements.first(where: {
+               $0.sourceRange.location < location && location < NSMaxRange($0.sourceRange)
+           }) {
+            reveal.text = entity.sourceRange
+        }
+        reveal.lead = document.markdownLeadRanges.first {
             NSLocationInRange(location, $0) && selection.length == 0
         }
-        return (revealed, lead)
+        return reveal
+    }
+
+    /// A table row or a picture: drawn over its source, so editing one shows
+    /// the source instead.
+    private func isMarkdownDrawnLine(_ line: NSRange, in document: Document) -> Bool {
+        let content = MarkdownLiveStyler.lineContentRange(
+            line, in: document.storage.string as NSString)
+        guard content.length > 0 else { return false }
+        return document.markdownTables.contains(where: { table in
+            table.rows.contains { NSLocationInRange(content.location, $0.lineRange) }
+        }) || document.markdownImages.contains(where: {
+            NSLocationInRange(content.location, $0.lineRange)
+        })
     }
 
     /// A line whose every character is hidden — and which is not a table row
@@ -1799,12 +1845,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private func isMarkdownControlLine(_ line: NSRange, in document: Document) -> Bool {
         let source = document.storage.string as NSString
         let content = MarkdownLiveStyler.lineContentRange(line, in: source)
-        guard content.length > 0 else { return false }
-        if document.markdownTables.contains(where: { table in
-            table.rows.contains { NSLocationInRange(content.location, $0.lineRange) }
-        }) || document.markdownImages.contains(where: {
-            NSLocationInRange(content.location, $0.lineRange)
-        }) { return false }
+        guard content.length > 0, !isMarkdownDrawnLine(line, in: document) else { return false }
         let hidden = document.markdownSyntaxRanges + document.markdownLeadRanges
         var covered = content.location
         for range in hidden.sorted(by: { $0.location < $1.location })
@@ -1815,22 +1856,90 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return false
     }
 
+    /// Hand the layout and the text view the document's Markdown, and what
+    /// of it the caret shows.
+    private func presentMarkdown(of document: Document) {
+        let reveal = markdownReveal(for: document)
+        layoutManager.updateMarkdownSyntaxRanges(
+            document.markdownSyntaxRanges,
+            leads: document.markdownLeadRanges,
+            collapsedLines: document.markdownCollapsedLineRanges,
+            replacements: document.markdownGlyphReplacements,
+            revealing: reveal.text,
+            revealingLead: reveal.lead)
+        updateMarkdownDecorations(of: document, reveal: reveal)
+    }
+
     /// Apply what `markdownReveal` says, holding the caret's line in place.
     private func applyMarkdownReveal(for document: Document) {
         keepingCaretInPlace {
             let reveal = markdownReveal(for: document)
-            layoutManager.revealMarkdownSyntax(in: reveal.line, lead: reveal.lead)
-            textView.updateMarkdownDecorations(
-                codeBlocks: document.markdownCodeBlocks,
-                tables: document.markdownTables,
-                tasks: document.markdownTasks,
-                lineMarkers: document.markdownLineMarkers,
-                rules: document.markdownRules,
-                images: document.markdownImages,
-                links: document.markdownLinks,
-                activeSourceRange: reveal.line,
-                revealedLead: reveal.lead)
+            layoutManager.revealMarkdownSyntax(in: reveal.text, lead: reveal.lead)
+            updateMarkdownDecorations(of: document, reveal: reveal)
         }
+    }
+
+    private func updateMarkdownDecorations(of document: Document, reveal: MarkdownReveal) {
+        textView.updateMarkdownDecorations(
+            codeBlocks: document.markdownCodeBlocks,
+            tables: document.markdownTables,
+            tasks: document.markdownTasks,
+            lineMarkers: document.markdownLineMarkers,
+            rules: document.markdownRules,
+            images: document.markdownImages,
+            links: document.markdownLinks,
+            activeSourceRange: reveal.source,
+            revealedLead: reveal.lead)
+        updateMarkdownCaretCues(for: document, reveal: reveal)
+    }
+
+    /// The marks at the edges of the formatting the caret is in, and the bar
+    /// under the link it is in.
+    private func updateMarkdownCaretCues(for document: Document, reveal: MarkdownReveal) {
+        guard document.languageSpec?.name == "markdown", let url = currentURL,
+              lineActivatedURLs.contains(url) else {
+            textView.setMarkdownSpanMarks([])
+            textView.setCaretLink(nil, editable: false)
+            return
+        }
+        let selection = textView.selectedRange()
+        let location = selection.location
+        // At either edge as well as inside: that is where a `**` is on one
+        // side of the caret or the other, and where the marks are wanted.
+        let spans = selection.length > 0 ? [] : document.markdownSpans.filter { span in
+            span.range.location <= location && location <= NSMaxRange(span.range)
+                && reveal.text.map { NSIntersectionRange($0, span.range).length > 0 } != true
+        }
+        textView.setMarkdownSpanMarks(spans)
+        let link = selection.length > 0 ? nil : document.markdownLinks.first {
+            $0.fullRange.location < location && location < NSMaxRange($0.fullRange)
+        }
+        guard let link, Self.hidesDestination(link, in: document),
+              reveal.text.map({ NSIntersectionRange($0, link.fullRange).length > 0 }) != true
+        else {
+            textView.setCaretLink(nil, editable: false)
+            return
+        }
+        // Brackets alone are not worth showing: a `[label]` defined elsewhere
+        // has nothing here to edit.
+        textView.setCaretLink(link, editable: link.fullRange.length - link.sourceRange.length > 2)
+    }
+
+    /// Whether the reader cannot see where a link goes — its text is a label,
+    /// not the address. An autolink or a bare URL shows its own.
+    private static func hidesDestination(_ link: MarkdownLinkDecoration,
+                                         in document: Document) -> Bool {
+        let source = document.storage.string as NSString
+        guard NSMaxRange(link.sourceRange) <= source.length else { return false }
+        let label = source.substring(with: link.sourceRange)
+        return label != link.destination && "mailto:" + label != link.destination
+    }
+
+    /// The bar's Edit: show the link as written, caret where it was.
+    private func editMarkdownLinkSource(_ link: MarkdownLinkDecoration) {
+        guard let url = currentURL, let document = currentDocument else { return }
+        markdownLinkSource = (url, link.fullRange)
+        applyMarkdownReveal(for: document)
     }
 
     /// Keep the caret's line where it is on screen while `change` lays the
@@ -1838,6 +1947,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// caret has left it, changes heights — and a line above the one just
     /// clicked growing or shrinking moved the clicked line from under the
     /// pointer. The view scrolls by whatever the change moved the caret's line.
+    ///
+    /// Near the top of the document there may be nothing left to scroll: the
+    /// text above shrank by more than the view is scrolled down. The page
+    /// takes the shortfall as room above the text instead, which it gives up
+    /// again once it is scrolled out of sight — or as soon as anything above
+    /// the caret, or the caret's own line, grows back into it.
     private func keepingCaretInPlace(_ change: () -> Void) {
         guard currentDocument?.languageSpec?.name == "markdown",
               let storage = textView.textStorage, storage.length > 0 else {
@@ -1848,21 +1963,55 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // On screen — measured against the visible area, not the text: when
         // the change is above what is visible, AppKit scrolls to make up for it
         // itself, and making up for it again moved the line twice as far.
-        func caretLineOnScreen() -> CGFloat {
+        func caretLineOnScreen() -> (top: CGFloat, height: CGFloat) {
             let caret = min(textView.selectedRange().location, storage.length - 1)
             let glyph = layoutManager.glyphIndexForCharacter(at: caret)
-            return layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
-                - clip.bounds.minY
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            return (line.minY + textView.textContainerOrigin.y - clip.bounds.minY, line.height)
         }
         let before = caretLineOnScreen()
         change()
-        let moved = caretLineOnScreen() - before
+        let after = caretLineOnScreen()
+        var moved = after.top - before.top
+        // The caret's own line growing — a fence the caret came onto — grows
+        // up into the room rather than pushing everything under it down: the
+        // room was left by that very line shrinking. The line moving up by as
+        // much is the point, so that is not made up for below.
+        let grown = after.height - before.height
+        if grown > 0.5, textView.topSlack > 0 {
+            textView.topSlack -= min(textView.topSlack, grown)
+        }
         guard abs(moved) > 0.5 else { return }
-        let target = NSRect(origin: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + moved),
+        // Text above that grows back takes back the room it left first.
+        if moved > 0, textView.topSlack > 0 {
+            let taken = min(textView.topSlack, moved)
+            textView.topSlack -= taken
+            moved -= taken
+        }
+        var origin = clip.bounds.minY + moved
+        if origin < 0 {
+            textView.topSlack += -origin
+            origin = 0
+        }
+        guard abs(origin - clip.bounds.minY) > 0.5 else { return }
+        let target = NSRect(origin: NSPoint(x: clip.bounds.minX, y: origin),
                             size: clip.bounds.size)
         clip.setBoundsOrigin(clip.constrainBoundsRect(target).origin)
         scrollView.reflectScrolledClipView(clip)
     }
+
+    /// The room `keepingCaretInPlace` left above the text goes as soon as it
+    /// is out of sight, with the view moved by as much, so nothing on screen
+    /// moves.
+    @objc private func clipViewScrolled(_ notification: Notification) {
+        let slack = textView.topSlack
+        let clip = scrollView.contentView
+        guard slack > 0, clip.bounds.minY >= slack else { return }
+        textView.topSlack = 0
+        clip.setBoundsOrigin(NSPoint(x: clip.bounds.minX, y: clip.bounds.minY - slack))
+        scrollView.reflectScrolledClipView(clip)
+    }
+    var topSlackForTesting: CGFloat { textView.topSlack }
 
     // MARK: - Inline blame
 

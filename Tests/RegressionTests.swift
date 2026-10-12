@@ -3720,6 +3720,7 @@ enum RegressionTests {
         let directory = try temporaryDirectory("markdown-reveal")
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("notes.md")
+        let topURL = directory.appendingPathComponent("top.md")
         let longLink = "https://example.com/" + String(repeating: "segment/", count: 24)
         let filler = (1...40).map { "Filler line \($0)." }.joined(separator: "\n\n")
         let source = """
@@ -3744,20 +3745,26 @@ enum RegressionTests {
 
         ![picture](missing.png)
 
+        Fish &amp; chips, and ***strong italic*** words.
+
         \(filler)
 
         Target line.
 
         \(filler)
 
-        Deep paragraph with a [deep link](\(longLink)) in it.
+        ```text
+        deep code
+        ```
 
-        Line under the deep paragraph.
+        Line under the deep block.
 
         \(filler)
 
         """
         try Data(source.utf8).write(to: url)
+        try Data("```bash\necho top\n```\n\nText after the block.\n\n\(filler)\n".utf8)
+            .write(to: topURL)
         let pane = EditorPaneViewController()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -3766,18 +3773,22 @@ enum RegressionTests {
         defer {
             pane.prepareForClose()
             window.close()
-            DocumentStore.shared.document(for: url).isModified = false
-            DocumentStore.shared.release(url, stillOpen: false)
+            for file in [url, topURL] {
+                DocumentStore.shared.document(for: file).isModified = false
+                DocumentStore.shared.release(file, stillOpen: false)
+            }
         }
         pane.repositoryRoot = directory
         pane.open(url: url)
         window.contentView?.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         let text = pane.textViewForTesting
+        window.makeFirstResponder(text)
         guard let layout = text.layoutManager as? FoldingLayoutManager,
               let container = text.textContainer else {
             throw Failure(description: "the Markdown pane has no folding layout")
         }
+        let clip = pane.scrollViewForTesting.contentView
         func settle() {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
             layout.ensureLayout(for: container)
@@ -3789,10 +3800,19 @@ enum RegressionTests {
             layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
                                     effectiveRange: nil).minY
         }
+        /// Where a line is in the window, which is what the reader sees move.
+        func onScreen(_ location: Int) -> CGFloat {
+            top(location) + text.textContainerOrigin.y - clip.bounds.minY
+        }
         func textX(_ location: Int) -> CGFloat {
             let glyph = layout.glyphIndexForCharacter(at: location)
             return layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minX
                 + layout.location(forGlyphAt: glyph).x
+        }
+        func glyphEnd(_ location: Int) -> CGFloat {
+            let glyph = layout.glyphIndexForCharacter(at: location)
+            return layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1),
+                                       in: container).maxX
         }
         /// Where every line's text starts, top to bottom: what a click must
         /// leave alone.
@@ -3813,6 +3833,9 @@ enum RegressionTests {
         settle()
         try expect(text.selectedRange().location == 0 && hidden("# Title"),
                    "opening the file showed the first heading's `#`")
+        try expect(text.spanMarksForTesting.isEmpty
+                    && !text.caretLinkBarForTesting.isVisible,
+                   "opening the file showed the caret's marks")
 
         // Clicking anywhere in the text moves nothing.
         let rendered = layoutSnapshot()
@@ -3833,23 +3856,125 @@ enum RegressionTests {
                     at: NSPoint(x: origin.x + 2, y: headingLine.midY + origin.y)) == headingStart,
                    "a click in the margin of a heading landed inside its hidden `##`")
 
-        // Editing a line shows its inline syntax — and only that line's.
+        // Editing a line leaves its inline syntax hidden: showing it moved the
+        // words being typed between sideways, and everything under them down.
+        let boldX = textX(at("bold words"))
+        let sectionTop = top(at("Section heading"))
         pane.clickForTesting(at: at("bold words") + 10)
         pane.insertTextForTesting("!")
         settle()
-        try expect(!hidden("**bold") && !hidden("](https"),
-                   "editing a line did not show its inline syntax")
-        try expect(hidden("# Title") && hidden("## Section") && hidden("- a list"),
-                   "editing one line showed other lines' source")
-        // Clicking away hides it again; clicking back is still only a click.
+        try expect(hidden("**bold") && hidden("!**") == false && layout.isCharacterHidden(
+                    at: at("!**") + 1) && hidden("](https"),
+                   "editing a line showed its inline syntax")
+        try expect(abs(textX(at("bold words")) - boldX) < 0.5
+                    && abs(top(at("Section heading")) - sectionTop) < 0.5,
+                   "editing a line moved the text")
+        // What was typed at the inside edge went inside.
+        if let font = text.textStorage?.attribute(.font, at: at("!**"),
+                                                  effectiveRange: nil) as? NSFont {
+            try expect(NSFontManager.shared.traits(of: font).contains(.boldFontMask),
+                       "typing at the end of bold text did not stay bold")
+        }
+
+        // Instead, the edges of the formatting the caret is in are marked —
+        // small, above the capitals, against the text they close.
+        let marks = text.spanMarksForTesting
+        try expect(marks.map(\.text) == ["**", "**"],
+                   "the caret in bold text did not mark its edges: \(marks.map(\.text))")
+        let caretGlyph = layout.glyphIndexForCharacter(at: at("bold words"))
+        let baseline = layout.lineFragmentRect(forGlyphAt: caretGlyph, effectiveRange: nil).minY
+            + layout.location(forGlyphAt: caretGlyph).y + origin.y
+        if marks.count == 2 {
+            try expect(abs(marks[0].rect.maxX - (boldX + origin.x)) <= 1
+                        && abs(marks[1].rect.minX - (glyphEnd(at("!**")) + origin.x)) <= 1,
+                       "the marks are not against the edges of the bold text: \(marks)")
+            try expect(marks.allSatisfy { $0.rect.maxY < baseline },
+                       "the marks are not above the line's text: \(marks), baseline \(baseline)")
+        }
+        // At the outside edge too — the one place the caret can be on either
+        // side of a `**` it cannot see — and not a character further.
+        pane.clickForTesting(at: at("!**") + 3)
+        settle()
+        try expect(text.spanMarksForTesting.count == 2,
+                   "the caret just after bold text did not mark its edges")
+        pane.clickForTesting(at: at("!**") + 5)
+        settle()
+        try expect(text.spanMarksForTesting.isEmpty,
+                   "the caret outside bold text marked it")
+        // Both delimiters of `***both***` meet at each edge: one mark each.
+        pane.clickForTesting(at: at("strong italic") + 3)
+        settle()
+        try expect(text.spanMarksForTesting.map(\.text) == ["***", "***"],
+                   "nested formatting was not marked as one run per edge: "
+                     + "\(text.spanMarksForTesting.map(\.text))")
+        if let font = text.textStorage?.attribute(.font, at: at("strong italic"),
+                                                  effectiveRange: nil) as? NSFont {
+            let traits = NSFontManager.shared.traits(of: font)
+            try expect(traits.contains(.boldFontMask) && traits.contains(.italicFontMask),
+                       "`***strong italic***` is not both bold and italic")
+        }
+
+        // An entity is shown as written only with the caret inside it.
+        let entity = at("&amp;")
+        func entityRendered() -> Bool {
+            layout.propertyForGlyph(at: layout.glyphIndexForCharacter(at: entity + 1)) == .null
+        }
+        try expect(entityRendered(), "`&amp;` was not drawn as `&`")
+        pane.clickForTesting(at: entity + 2)
+        settle()
+        try expect(!entityRendered(), "the caret inside `&amp;` did not show it as written")
+        pane.clickForTesting(at: entity + 5)
+        settle()
+        try expect(entityRendered(), "the caret after `&amp;` kept showing it as written")
+
+        // Clicking away and back is still only a click.
         pane.clickForTesting(at: at("a quoted line") + 2)
         settle()
-        try expect(hidden("**bold") && hidden("](https"),
-                   "the line clicked away from kept showing its source")
         pane.clickForTesting(at: at("bold words") + 2)
         settle()
         try expect(hidden("**bold") && hidden("](https"),
-                   "a click back onto a line edited earlier showed its source again")
+                   "a click back onto a line edited earlier showed its source")
+
+        // A link's address, hidden in the text, is on a bar under the link
+        // while the caret is in it.
+        let bar = text.caretLinkBarForTesting
+        pane.clickForTesting(at: at("[link]") + 3)
+        settle()
+        let linkGlyphs = layout.glyphRange(forCharacterRange: NSRange(location: at("[link]") + 1,
+                                                                      length: 4),
+                                           actualCharacterRange: nil)
+        var linkRect = layout.boundingRect(forGlyphRange: linkGlyphs, in: container)
+        linkRect.origin.x += origin.x
+        linkRect.origin.y += origin.y
+        let linkOnScreen = window.convertToScreen(text.convert(linkRect, to: nil))
+        try expect(bar.isVisible && bar.destinationForTesting == longLink && bar.offersEditForTesting,
+                   "the caret in a link did not show its address with Edit under it")
+        try expect(bar.screenFrame.maxY <= linkOnScreen.minY
+                    && abs(bar.screenFrame.minX - linkOnScreen.minX) < 1,
+                   "the bar is not under the link: \(bar.screenFrame) for \(linkOnScreen)")
+        try expect(hidden("](https"), "the caret in a link showed its source")
+        // Edit shows that link as written — and nothing else.
+        bar.editForTesting()
+        settle()
+        try expect(!hidden("](https") && !hidden("[link]") && hidden("**bold"),
+                   "Edit did not show the link — and only the link — as written")
+        try expect(!bar.isVisible, "the bar stayed up over the link's own source")
+        // Typing into the address moves its end; the link stays written out
+        // to its last character.
+        pane.clickForTesting(at: at("segment/) in it.") + 3)
+        pane.insertTextForTesting("abc")
+        settle()
+        try expect(!hidden("](https") && !layout.isCharacterHidden(at: at(") in it.")),
+                   "typing into a link's address hid part of the link again")
+        pane.clickForTesting(at: at("a quoted line") + 2)
+        settle()
+        try expect(hidden("](https") && hidden("[link]") && !bar.isVisible,
+                   "the link stayed written out after the caret left it")
+        // Coming back to it later is coming back to a link, not to its source.
+        pane.clickForTesting(at: at("[link]") + 3)
+        settle()
+        try expect(hidden("](https") && bar.isVisible,
+                   "coming back to a link edited earlier showed its source again")
 
         // Editing a list item leaves its marker in the margin, as source.
         let itemX = textX(at("a list item"))
@@ -3857,8 +3982,6 @@ enum RegressionTests {
         pane.insertTextForTesting("!")
         settle()
         text.display()
-        try expect(hidden("**bold") && hidden("](https"),
-                   "the line left behind kept showing its source")
         try expect(hidden("- a list") && abs(textX(at("a list item")) - itemX) < 0.5,
                    "editing a list item moved its text: the marker came into the line")
         try expect(text.markerLabelsForTesting[at("- a list")] == "-",
@@ -3915,49 +4038,96 @@ enum RegressionTests {
                     effectiveRange: nil).height == Theme.markdownBlankLineHeight(),
                    "the blank line above a picture took the picture's height as well")
 
-        // The caret's line stays where it is on screen. Edit the paragraph with
-        // the long link, scroll down to a line far below, and click it: the
-        // paragraph above hides its source again and gets shorter, which moved
-        // the clicked line from under the pointer.
-        pane.clickForTesting(at: at("bold words") + 10)
-        pane.insertTextForTesting("?")
-        settle()
-        try expect(!hidden("](https"), "the paragraph's source did not show for the test")
+        // The caret's line stays where it is on screen. With the caret on the
+        // fence, scroll down to a line far below and click it: the fence above
+        // goes back to its padding and gets shorter, which moved the clicked
+        // line from under the pointer.
         let target = at("Target line.")
         text.scrollRangeToVisible(NSRange(location: target, length: 1))
         settle()
-        let clip = pane.scrollViewForTesting.contentView
-        let onScreenBefore = top(target) + origin.y - clip.bounds.minY
+        let onScreenBefore = onScreen(target)
         pane.clickForTesting(at: target + 2)
         settle()
-        let onScreenAfter = top(target) + origin.y - clip.bounds.minY
-        try expect(hidden("](https"), "the paragraph left behind kept its source")
-        try expect(abs(onScreenAfter - onScreenBefore) < 0.5,
-                   "the clicked line moved on screen by \(onScreenAfter - onScreenBefore)pt "
-                     + "as the paragraph above it hid its source")
+        try expect(hidden("```bash"), "the fence left behind kept its source")
+        try expect(abs(onScreen(target) - onScreenBefore) < 0.5,
+                   "the clicked line moved on screen by \(onScreen(target) - onScreenBefore)pt "
+                     + "as the fence above it hid its source")
 
-        // The same with the paragraph still on screen above the line clicked —
+        // The same with the fence still on screen above the line clicked —
         // AppKit makes up only for what changes above the visible area.
-        pane.clickForTesting(at: at("in it.\n\nLine under") - 1)
-        pane.insertTextForTesting("?")
+        let under = at("Line under the deep block.")
+        text.scrollRangeToVisible(NSRange(location: under, length: 1))
         settle()
-        let deepLink = at("deep link](") + 9
-        try expect(!layout.isCharacterHidden(at: deepLink),
-                   "the deep paragraph's source did not show for the test")
-        let under = at("Line under the deep paragraph.")
-        let visible = clip.bounds
-        try expect(top(deepLink) + origin.y > visible.minY
-                    && top(under) + origin.y < visible.maxY - 20,
-                   "the edited paragraph and the line under it are not both on screen")
-        let underBefore = top(under) + origin.y - clip.bounds.minY
+        pane.clickForTesting(at: at("```text") + 3)
+        settle()
+        try expect(!hidden("```text"), "the deep fence's source did not show for the test")
+        try expect(top(at("```text")) + origin.y > clip.bounds.minY
+                    && top(under) + origin.y < clip.bounds.maxY - 20,
+                   "the deep fence and the line under it are not both on screen")
+        let underBefore = onScreen(under)
         pane.clickForTesting(at: under + 2)
         settle()
-        let underAfter = top(under) + origin.y - clip.bounds.minY
-        try expect(layout.isCharacterHidden(at: deepLink),
-                   "the deep paragraph kept its source after the caret left it")
-        try expect(abs(underAfter - underBefore) < 0.5,
-                   "the clicked line moved on screen by \(underAfter - underBefore)pt as the "
-                     + "paragraph just above it, on screen, hid its source")
+        try expect(hidden("```text"), "the deep fence kept its source after the caret left it")
+        try expect(abs(onScreen(under) - underBefore) < 0.5,
+                   "the clicked line moved on screen by \(onScreen(under) - underBefore)pt as the "
+                     + "fence just above it, on screen, hid its source")
+
+        // At the very top there is nothing to scroll back: the page takes the
+        // difference as room above the text instead. (The caret is left at the
+        // top here, so coming back to this document later does not scroll.)
+        pane.clickForTesting(at: 0)
+        pane.open(url: topURL)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        settle()
+        pane.clickForTesting(at: 3)
+        settle()
+        try expect(!layout.isCharacterHidden(at: 0), "the top fence did not show for the test")
+        let echo = at("echo top")
+        let echoBefore = onScreen(echo)
+        pane.clickForTesting(at: echo + 2)
+        settle()
+        let slack = pane.topSlackForTesting
+        try expect(layout.isCharacterHidden(at: 0) && abs(onScreen(echo) - echoBefore) < 0.5,
+                   "the line clicked at the top of a document moved by "
+                     + "\(onScreen(echo) - echoBefore)pt as the fence above it shrank")
+        try expect(slack > 0.5 && clip.bounds.minY == 0,
+                   "the shortfall at the top was not taken as room: \(slack)pt")
+        // Back onto the fence: it grows up into that room, nothing under it
+        // moves, and the room is gone — round and round never piles it up.
+        let after = at("Text after the block.")
+        let afterBefore = onScreen(after)
+        pane.clickForTesting(at: 3)
+        settle()
+        try expect(pane.topSlackForTesting < 0.5 && abs(onScreen(after) - afterBefore) < 0.5,
+                   "the fence did not grow back into the room above it: room "
+                     + "\(pane.topSlackForTesting)pt, the text under it moved "
+                     + "\(onScreen(after) - afterBefore)pt")
+        pane.clickForTesting(at: echo + 2)
+        settle()
+        try expect(abs(pane.topSlackForTesting - slack) < 0.5,
+                   "the room above the text piled up: \(pane.topSlackForTesting)pt after \(slack)pt")
+        // Scrolled out of sight, the room goes, and nothing on screen moves.
+        let reference = at("Filler line 20.")
+        let referenceAt = onScreen(reference)
+        clip.setBoundsOrigin(NSPoint(x: clip.bounds.minX, y: slack + 100))
+        pane.scrollViewForTesting.reflectScrolledClipView(clip)
+        settle()
+        try expect(pane.topSlackForTesting == 0,
+                   "the room above the text stayed after it was scrolled away")
+        try expect(abs(onScreen(reference) - (referenceAt - slack - 100)) < 0.5,
+                   "giving the room back moved the text on screen by "
+                     + "\(onScreen(reference) - (referenceAt - slack - 100))pt")
+        // And a different document starts without any.
+        clip.setBoundsOrigin(NSPoint(x: clip.bounds.minX, y: 0))
+        pane.clickForTesting(at: 3)
+        settle()
+        pane.clickForTesting(at: echo + 2)
+        settle()
+        try expect(pane.topSlackForTesting > 0.5, "no room was left for the test")
+        pane.open(url: url)
+        settle()
+        try expect(pane.topSlackForTesting == 0,
+                   "the room left above one document stayed for the next")
     }
 
     private static func testFindMatchesAreComplete() throws {

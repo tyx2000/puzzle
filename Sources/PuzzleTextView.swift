@@ -472,6 +472,7 @@ final class PuzzleTextView: NSTextView {
         NSBezierPath(rect: NSIntersectionRect(dirtyRect, bounds)).setClip()
         drawMarkdownLineMarkers(in: dirtyRect)
         drawMarkdownTasks(in: dirtyRect)
+        drawMarkdownSpanMarks(in: dirtyRect)
         NSGraphicsContext.restoreGraphicsState()
         drawMarkdownRules(in: dirtyRect)
         drawMarkdownCodeLabels(in: dirtyRect)
@@ -1334,6 +1335,10 @@ final class PuzzleTextView: NSTextView {
 
     deinit {
         if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
+        if let caretLinkScrollObserver {
+            NotificationCenter.default.removeObserver(caretLinkScrollObserver)
+        }
+        caretLinkBar.close()
     }
 
     override func mouseEntered(with event: NSEvent) { updateCommandHover(with: event) }
@@ -1370,6 +1375,9 @@ final class PuzzleTextView: NSTextView {
                 return nil
             }
             return markdownLinks.first { NSLocationInRange(index, $0.sourceRange) }
+        }.flatMap { link in
+            // The caret's link has its bar already.
+            caretLink?.sourceRange == link.sourceRange && caretLinkBar.isVisible ? nil : link
         }
         guard link?.sourceRange != hoveredLink?.sourceRange else { return }
         linkHoverWork?.cancel()
@@ -1418,6 +1426,159 @@ final class PuzzleTextView: NSTextView {
     /// owns the decision.
     var onOpenLink: ((MarkdownLinkDecoration) -> Void)?
     var linkCardForTesting: MarkdownLinkCard { linkCard }
+
+    // MARK: - The caret's link
+
+    /// The link the caret is in, whose address the bar under it shows: the
+    /// address is hidden in the text, and editing no longer shows it.
+    private var caretLink: MarkdownLinkDecoration?
+    private var caretLinkEditable = false
+    private let caretLinkBar = MarkdownLinkCard()
+    private var caretLinkScrollObserver: NSObjectProtocol?
+    /// The bar's Edit: the pane shows the link as written.
+    var onEditLink: ((MarkdownLinkDecoration) -> Void)?
+
+    func setCaretLink(_ link: MarkdownLinkDecoration?, editable: Bool) {
+        guard link != caretLink || editable != caretLinkEditable || link != nil else { return }
+        caretLink = link
+        caretLinkEditable = editable
+        // The bar says what the hover card would.
+        if let link, hoveredLink?.sourceRange == link.sourceRange { hideLinkPopover() }
+        placeCaretLinkBar()
+    }
+
+    /// Under the link, while this view has the caret and the link is in sight.
+    private func placeCaretLinkBar() {
+        guard let link = caretLink, let window, window.firstResponder === self,
+              let layoutManager, let textContainer,
+              NSMaxRange(link.sourceRange) <= (string as NSString).length else {
+            caretLinkBar.close()
+            return
+        }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: link.sourceRange,
+                                              actualCharacterRange: nil)
+        var anchor = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        anchor.origin.x += textContainerOrigin.x
+        anchor.origin.y += textContainerOrigin.y
+        guard visibleRect.intersects(anchor) else {
+            caretLinkBar.close()
+            return
+        }
+        let onScreen = window.convertToScreen(convert(anchor, to: nil))
+        caretLinkBar.onOpen = { [weak self] in self?.onOpenLink?(link) }
+        caretLinkBar.onEdit = caretLinkEditable
+            ? { [weak self] in self?.onEditLink?(link) } : nil
+        caretLinkBar.show(destination: link.destination, below: onScreen, in: window)
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if let caretLinkScrollObserver {
+            NotificationCenter.default.removeObserver(caretLinkScrollObserver)
+            self.caretLinkScrollObserver = nil
+        }
+        guard let clip = superview as? NSClipView else { return }
+        clip.postsBoundsChangedNotifications = true
+        caretLinkScrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip,
+            queue: .main) { [weak self] _ in
+            guard let self, self.caretLink != nil else { return }
+            self.placeCaretLinkBar()
+        }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became, caretLink != nil { placeCaretLinkBar() }
+        return became
+    }
+
+    var caretLinkBarForTesting: MarkdownLinkCard { caretLinkBar }
+
+    // MARK: - Marks at the edges of formatting
+
+    /// Formatting the caret is in or at the edge of, whose hidden delimiters
+    /// are drawn faintly at its edges.
+    private var markdownSpanMarks: [MarkdownSpanDecoration] = []
+
+    func setMarkdownSpanMarks(_ spans: [MarkdownSpanDecoration]) {
+        guard spans != markdownSpanMarks else { return }
+        markdownSpanMarks = spans
+        needsDisplay = true
+    }
+
+    /// One mark: the delimiters on one side of a span — or of several, when
+    /// they meet, as `***` does — drawn small, above the capitals, outside the
+    /// text they close: an opening one ends where the text starts, a closing
+    /// one starts where it ends. Laid over the text, so nothing moves to make
+    /// room — and above it, where all they cross is the odd ascender.
+    private func markdownSpanMarkLayout() -> [(text: String, rect: NSRect)] {
+        guard !markdownSpanMarks.isEmpty, let layoutManager, let textContainer,
+              let folding = foldingManager else { return [] }
+        let source = string as NSString
+        var runs: [(range: NSRange, opens: Bool)] = []
+        for span in markdownSpanMarks {
+            runs.append((span.opening, true))
+            runs.append((span.closing, false))
+        }
+        runs.sort { $0.range.location < $1.range.location }
+        var merged: [(range: NSRange, opens: Bool)] = []
+        for run in runs {
+            if let last = merged.last, last.opens == run.opens,
+               NSMaxRange(last.range) == run.range.location {
+                merged[merged.count - 1].range.length += run.range.length
+            } else if merged.last?.range != run.range {
+                merged.append(run)
+            }
+        }
+        let font = Self.spanMarkFont
+        let prose = Theme.markdownFont()
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let origin = textContainerOrigin
+        var marks: [(text: String, rect: NSRect)] = []
+        for run in merged {
+            guard NSMaxRange(run.range) <= source.length,
+                  folding.isCharacterHidden(at: run.range.location) else { continue }
+            // The character the mark sits against: the first one after an
+            // opening run, the last one before a closing run.
+            let neighbour = run.opens ? NSMaxRange(run.range) : run.range.location - 1
+            guard neighbour >= 0, neighbour < source.length,
+                  !folding.isCharacterHidden(at: neighbour) else { continue }
+            let glyph = layoutManager.glyphIndexForCharacter(at: neighbour)
+            let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                          effectiveRange: nil)
+            let location = layoutManager.location(forGlyphAt: glyph)
+            let glyphBox = layoutManager.boundingRect(
+                forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+            let text = source.substring(with: run.range)
+            let measured = (text as NSString).size(withAttributes: attributes)
+            let edge = run.opens ? fragment.minX + location.x : glyphBox.maxX
+            let baseline = fragment.minY + location.y - prose.capHeight
+            let rect = NSRect(x: origin.x + (run.opens ? edge - measured.width - 0.5 : edge + 0.5),
+                              y: origin.y + baseline - font.ascender,
+                              width: ceil(measured.width), height: ceil(measured.height))
+            marks.append((text, rect))
+        }
+        return marks
+    }
+
+    private func drawMarkdownSpanMarks(in dirtyRect: NSRect) {
+        let marks = markdownSpanMarkLayout()
+        guard !marks.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Self.spanMarkFont, .foregroundColor: Theme.dimText,
+        ]
+        for mark in marks where mark.rect.intersects(dirtyRect) {
+            (mark.text as NSString).draw(at: mark.rect.origin, withAttributes: attributes)
+        }
+    }
+
+    private static var spanMarkFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: round(Theme.markdownFontSize() * 0.55),
+                                    weight: .regular)
+    }
+
+    var spanMarksForTesting: [(text: String, rect: NSRect)] { markdownSpanMarkLayout() }
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
@@ -1520,21 +1681,32 @@ final class PuzzleTextView: NSTextView {
         applyReadingInset()
     }
 
+    /// Room above the text, left by the pane when the text above the caret
+    /// got shorter by more than the view could scroll back up: the caret's
+    /// line stays put, the page above it grows instead. The pane takes it back
+    /// once it is out of sight.
+    var topSlack: CGFloat = 0 {
+        didSet {
+            guard topSlack != oldValue else { return }
+            applyReadingInset()
+        }
+    }
+
     private func applyReadingInset() {
         guard let readingWidth else {
-            setInset(width: baseHorizontalInset, height: baseVerticalInset)
+            setInset(width: baseHorizontalInset, height: baseVerticalInset + topSlack)
             return
         }
         // Split the leftover evenly; never narrower than the pane's own margin.
         // A document also starts a little way down the page rather than
         // against the tabs.
         setInset(width: max(baseHorizontalInset, (bounds.width - readingWidth) / 2),
-                 height: max(baseVerticalInset, Theme.markdownTopInset))
+                 height: max(baseVerticalInset, Theme.markdownTopInset) + topSlack)
     }
 
     private func setInset(width: CGFloat, height: CGFloat) {
-        guard abs(textContainerInset.width - width) > 0.5
-                || abs(textContainerInset.height - height) > 0.5 else { return }
+        guard abs(textContainerInset.width - width) > 0.01
+                || abs(textContainerInset.height - height) > 0.01 else { return }
         textContainerInset = NSSize(width: width, height: height)
         // Decorations are drawn from the inset, and the container's width is
         // derived from it, so both have to be redrawn from scratch.
@@ -1543,7 +1715,10 @@ final class PuzzleTextView: NSTextView {
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
-        if resigned { onLostFocus?() }
+        if resigned {
+            caretLinkBar.close()
+            onLostFocus?()
+        }
         return resigned
     }
 

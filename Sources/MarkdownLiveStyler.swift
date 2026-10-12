@@ -127,6 +127,27 @@ struct MarkdownLinkDecoration: Equatable {
     let sourceRange: NSRange
     let destination: String
     let url: URL?
+    /// The whole link as written, `[…](…)` and all: what is shown when the
+    /// link itself is to be edited.
+    var fullRange: NSRange
+
+    init(sourceRange: NSRange, destination: String, url: URL?, fullRange: NSRange? = nil) {
+        self.sourceRange = sourceRange
+        self.destination = destination
+        self.url = url
+        self.fullRange = fullRange ?? sourceRange
+    }
+}
+
+/// Inline formatting — emphasis, strong, strikethrough, a code span — with
+/// its delimiters, which are hidden. While the caret is in the span or at its
+/// edge the delimiters are drawn faintly at its edges, taking no room: the
+/// reader can see which side of a `**` the caret is on without the line
+/// moving to show it.
+struct MarkdownSpanDecoration: Equatable {
+    let range: NSRange
+    let opening: NSRange
+    let closing: NSRange
 }
 
 struct MarkdownGlyphReplacement: Equatable {
@@ -151,6 +172,7 @@ struct MarkdownPresentation: Equatable {
     var images: [MarkdownImageDecoration] = []
     var glyphReplacements: [MarkdownGlyphReplacement] = []
     var links: [MarkdownLinkDecoration] = []
+    var spans: [MarkdownSpanDecoration] = []
 }
 
 /// Paints Markdown semantics directly onto the editable source buffer.
@@ -208,9 +230,10 @@ enum MarkdownLiveStyler {
         private var images: [MarkdownImageDecoration] = []
         private var glyphs: [MarkdownGlyphReplacement] = []
         private var links: [MarkdownLinkDecoration] = []
+        private var spans: [MarkdownSpanDecoration] = []
         /// Reference links resolved once the whole document is known: a
         /// definition may sit below the paragraph that uses it.
-        private var pendingReferenceLinks: [(range: NSRange, label: String)] = []
+        private var pendingReferenceLinks: [(range: NSRange, full: NSRange, label: String)] = []
         private var linkDefinitions: [String: String] = [:]
         /// Spans whose text is literal — a code span or a fenced block — so the
         /// GFM bare-URL scan does not link inside them.
@@ -253,7 +276,7 @@ enum MarkdownLiveStyler {
                     collapsed.filter { $0.length > 0 }),
                 codeBlocks: codeBlocks, tables: tables, tasks: tasks,
                 lineMarkers: lineMarkers, rules: rules, images: images,
-                glyphReplacements: glyphs, links: links)
+                glyphReplacements: glyphs, links: links, spans: spans)
         }
 
         mutating func run() {
@@ -653,12 +676,13 @@ enum MarkdownLiveStyler {
         /// Record one link. The destination is kept verbatim as well as
         /// resolved: a relative path that points at nothing is still worth
         /// showing to whoever is hovering it.
-        mutating func note(link range: NSRange, destination: String) {
+        mutating func note(link range: NSRange, full: NSRange? = nil, destination: String) {
             let trimmed = destination.trimmingCharacters(in: .whitespaces)
             guard range.length > 0, !trimmed.isEmpty else { return }
             links.append(MarkdownLinkDecoration(
                 sourceRange: range, destination: trimmed,
-                url: MarkdownLiveStyler.resolvedLinkURL(trimmed, relativeTo: documentURL)))
+                url: MarkdownLiveStyler.resolvedLinkURL(trimmed, relativeTo: documentURL),
+                fullRange: full))
         }
 
         /// Reference links, once every definition in the document has been read.
@@ -666,7 +690,7 @@ enum MarkdownLiveStyler {
             for pending in pendingReferenceLinks {
                 guard let destination =
                         linkDefinitions[MarkdownLiveStyler.linkKey(pending.label)] else { continue }
-                note(link: pending.range, destination: destination)
+                note(link: pending.range, full: pending.full, destination: destination)
             }
             pendingReferenceLinks.removeAll()
         }
@@ -736,10 +760,12 @@ enum MarkdownLiveStyler {
                 case "code_span":
                     style(inlineCodeStyle, node.range)
                     literalRanges.append(node.range)
-                    for delimiter in node.all("code_span_delimiter") {
+                    let delimiters = node.all("code_span_delimiter")
+                    for delimiter in delimiters {
                         dim(delimiter.range)
                         hide(delimiter.range)
                     }
+                    noteSpan(node, delimiters: delimiters)
                 case "emphasis", "strong_emphasis", "strikethrough":
                     emphasis(node)
                 case "inline_link", "full_reference_link", "collapsed_reference_link",
@@ -753,7 +779,7 @@ enum MarkdownLiveStyler {
                     let inner = NSRange(location: node.range.location + 1,
                                         length: max(0, node.range.length - 2))
                     style(linkStyle, inner)
-                    note(link: inner,
+                    note(link: inner, full: node.range,
                          destination: node.type == "email_autolink"
                             ? "mailto:" + source.substring(with: inner)
                             : source.substring(with: inner))
@@ -786,20 +812,22 @@ enum MarkdownLiveStyler {
             } else {
                 content = node.range
             }
+            // Whichever of the two is outside has already styled the range:
+            // `***both***` wants bold and italic, not the inner one alone.
+            let current = storage.length > content.location
+                ? storage.attribute(.font, at: content.location, effectiveRange: nil)
+                    as? NSFont : nil
+            let traits = current.map { NSFontManager.shared.traits(of: $0) } ?? []
             switch node.type {
             case "strong_emphasis":
-                style([.font: boldFont], content)
+                // A slanted face keeps its slant: that is an attribute of its
+                // own, and setting the font leaves it.
+                style([.font: traits.contains(.italicFontMask) ? boldItalicFont : boldFont],
+                      content)
             case "strikethrough":
                 style([.strikethroughStyle: NSUnderlineStyle.single.rawValue], content)
             default:
-                // Emphasis inside strong emphasis wants both, and the strong
-                // pass has already run over this range.
-                let current = storage.length > content.location
-                    ? storage.attribute(.font, at: content.location, effectiveRange: nil)
-                        as? NSFont : nil
-                let isStrong = current.map {
-                    NSFontManager.shared.traits(of: $0).contains(.boldFontMask)
-                } ?? false
+                let isStrong = traits.contains(.boldFontMask)
                 var attributes: [NSAttributedString.Key: Any] = [
                     .font: isStrong ? boldItalicFont : italicFont,
                 ]
@@ -810,6 +838,28 @@ enum MarkdownLiveStyler {
                 dim(delimiter.range)
                 hide(delimiter.range)
             }
+            noteSpan(node, delimiters: delimiters)
+        }
+
+        /// A span whose delimiters open and close it — the only kind whose
+        /// edges can be marked.
+        /// The grammar gives `**` as two delimiters, one per character, so an
+        /// edge is the run of them that touches it.
+        mutating func noteSpan(_ node: MarkdownNode, delimiters: [MarkdownNode]) {
+            var opening = NSRange(location: node.range.location, length: 0)
+            for delimiter in delimiters where delimiter.range.location == NSMaxRange(opening) {
+                opening.length += delimiter.range.length
+            }
+            var closing = NSRange(location: NSMaxRange(node.range), length: 0)
+            for delimiter in delimiters.reversed()
+            where NSMaxRange(delimiter.range) == closing.location {
+                closing = NSRange(location: delimiter.range.location,
+                                  length: closing.length + delimiter.range.length)
+            }
+            guard opening.length > 0, closing.length > 0,
+                  NSMaxRange(opening) <= closing.location else { return }
+            spans.append(MarkdownSpanDecoration(range: node.range, opening: opening,
+                                                closing: closing))
         }
 
         mutating func link(_ node: MarkdownNode) {
@@ -824,12 +874,13 @@ enum MarkdownLiveStyler {
             if node.type == "shortcut_link", identifier.hasPrefix("^") {
                 style([.superscript: 1], label.range)
             } else if let destination = node.first("link_destination") {
-                note(link: label.range, destination: source.substring(with: destination.range))
+                note(link: label.range, full: node.range,
+                     destination: source.substring(with: destination.range))
             } else {
                 // A reference link names a definition that may not have been
                 // read yet. `[text][label]` names one; `[text]` is its own.
                 let reference = node.first("link_label").map { source.substring(with: $0.range) }
-                pendingReferenceLinks.append((label.range, reference ?? identifier))
+                pendingReferenceLinks.append((label.range, node.range, reference ?? identifier))
             }
             // Everything around the text — brackets, destination, title — is
             // syntax.
