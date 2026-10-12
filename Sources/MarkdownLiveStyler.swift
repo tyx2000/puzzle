@@ -145,9 +145,18 @@ struct MarkdownLinkDecoration: Equatable {
 /// reader can see which side of a `**` the caret is on without the line
 /// moving to show it.
 struct MarkdownSpanDecoration: Equatable {
+    enum Kind: Equatable { case emphasis, strong, strikethrough, code }
+
     let range: NSRange
     let opening: NSRange
     let closing: NSRange
+    var kind: Kind = .emphasis
+
+    /// What is between the delimiters. The caret anywhere in it, either end
+    /// included, types into the span.
+    var content: NSRange {
+        NSRange(location: NSMaxRange(opening), length: closing.location - NSMaxRange(opening))
+    }
 }
 
 struct MarkdownGlyphReplacement: Equatable {
@@ -858,8 +867,15 @@ enum MarkdownLiveStyler {
             }
             guard opening.length > 0, closing.length > 0,
                   NSMaxRange(opening) <= closing.location else { return }
+            let kind: MarkdownSpanDecoration.Kind
+            switch node.type {
+            case "strong_emphasis": kind = .strong
+            case "strikethrough": kind = .strikethrough
+            case "code_span": kind = .code
+            default: kind = .emphasis
+            }
             spans.append(MarkdownSpanDecoration(range: node.range, opening: opening,
-                                                closing: closing))
+                                                closing: closing, kind: kind))
         }
 
         mutating func link(_ node: MarkdownNode) {

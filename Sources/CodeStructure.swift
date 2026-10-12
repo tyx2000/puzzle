@@ -680,6 +680,31 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
             && contains(location, in: markdownSyntaxRanges)
     }
 
+    /// Inline syntax that is hidden — a `**`, a link's `](…)` — as opposed to
+    /// a block's lead. The caret steps over it, and Delete never removes it
+    /// unseen.
+    func isMarkdownInlineSyntaxHidden(at location: Int) -> Bool {
+        !contains(location, in: markdownLeadRanges) && isMarkdownSyntaxHidden(at: location)
+    }
+
+    /// A block's lead that is hidden — a heading's `## `, a list's `- `.
+    func isMarkdownLeadHidden(at location: Int) -> Bool {
+        contains(location, in: markdownLeadRanges) && isMarkdownSyntaxHidden(at: location)
+    }
+
+    /// The lead that ends at `location`, where the block's text starts.
+    func markdownLeadRange(endingAt location: Int) -> NSRange? {
+        markdownLeadRanges.first { NSMaxRange($0) == location }
+    }
+
+    /// An entity drawn as the one character it stands for — `&amp;` as `&` —
+    /// which the caret and Delete take whole.
+    func markdownDrawnReplacement(containing location: Int) -> NSRange? {
+        guard revealedMarkdownRange.map({ NSLocationInRange(location, $0) }) != true,
+              let replacement = markdownReplacement(containing: location) else { return nil }
+        return replacement.sourceRange
+    }
+
     /// Where the text of the rendered-Markdown line holding `glyph` sits in
     /// its fragment: below the space a heading keeps above it, and as tall as
     /// the line — what the caret is drawn against. Nil outside rendered

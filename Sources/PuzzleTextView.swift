@@ -1240,9 +1240,51 @@ final class PuzzleTextView: NSTextView {
         return r
     }
 
+    /// In rendered Markdown the caret also says what typing would be: thicker
+    /// in bold, slanted in italic, capped at both ends in code — the only way
+    /// to tell the two places at a hidden `**` apart.
     override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
-        super.drawInsertionPoint(in: caretRect(from: rect), color: color, turnedOn: flag)
+        let caret = caretRect(from: rect)
+        let formats = caretFormats
+        guard flag, !formats.isEmpty else {
+            // Whatever the caret was, a slanted one reaches past the rect.
+            if rendersMarkdown {
+                setNeedsDisplay(NSRect(x: caret.minX - Self.codeCaretCap - 1, y: caret.minY,
+                                       width: caret.width + Self.italicCaretSlant(caret)
+                                        + Self.codeCaretCap * 2 + 3,
+                                       height: caret.height))
+            }
+            super.drawInsertionPoint(in: caret, color: color, turnedOn: flag)
+            return
+        }
+        color.setFill()
+        Self.caretShape(in: caret, formats: formats).fill()
     }
+
+    static func caretShape(in caret: NSRect,
+                           formats: Set<MarkdownSpanDecoration.Kind>) -> NSBezierPath {
+        let width: CGFloat = formats.contains(.strong) ? 3 : caret.width
+        let slant = formats.contains(.emphasis) ? italicCaretSlant(caret) : 0
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: caret.minX, y: caret.maxY))
+        path.line(to: NSPoint(x: caret.minX + width, y: caret.maxY))
+        path.line(to: NSPoint(x: caret.minX + width + slant, y: caret.minY))
+        path.line(to: NSPoint(x: caret.minX + slant, y: caret.minY))
+        path.close()
+        if formats.contains(.code) {
+            let cap = codeCaretCap
+            path.append(NSBezierPath(rect: NSRect(x: caret.minX + slant - cap, y: caret.minY,
+                                                  width: width + cap * 2, height: 2)))
+            path.append(NSBezierPath(rect: NSRect(x: caret.minX - cap, y: caret.maxY - 2,
+                                                  width: width + cap * 2, height: 2)))
+        }
+        return path
+    }
+
+    private static func italicCaretSlant(_ caret: NSRect) -> CGFloat {
+        round(caret.height * 0.18)
+    }
+    private static let codeCaretCap: CGFloat = 2
 
     /// Lay the caret's own line out before the caret is placed on it.
     ///
@@ -2046,7 +2088,361 @@ final class PuzzleTextView: NSTextView {
         if item.action == #selector(toggleComment(_:)) {
             return isEditable && commentSyntax != nil
         }
-        return super.validateUserInterfaceItem(item)
+        switch item.action {
+        case #selector(toggleMarkdownBold(_:)), #selector(toggleMarkdownItalic(_:)),
+             #selector(toggleMarkdownCode(_:)), #selector(insertMarkdownLink(_:)):
+            return isEditable && rendersMarkdown
+        case #selector(toggleMarkdownSource(_:)):
+            return rendersMarkdown
+        default:
+            return super.validateUserInterfaceItem(item)
+        }
+    }
+
+    // MARK: - Editing rendered Markdown
+
+    /// Set by the pane for a Markdown document, rendered or shown as source.
+    var rendersMarkdown = false
+    /// Every span of inline formatting in the document, for the commands that
+    /// add and remove it and for the caret that shows it.
+    var markdownSpans: [MarkdownSpanDecoration] = []
+    /// Show `range` as written until the caret leaves it: a link just made,
+    /// whose address goes where nothing is drawn.
+    var onShowMarkdownSource: ((NSRange) -> Void)?
+    /// ⇧⌘M: the whole document as source, or rendered again.
+    var onToggleMarkdownSource: (() -> Void)?
+
+    // AppKit's arrows step over hidden characters, but land on one side of
+    // them only — after a `**` going right, before it going left — so typing
+    // at the end of bold text, or just before it, could not be reached from
+    // the keyboard at all. Each edge of a span is two stops here, outside and
+    // then inside, that look alike: the marks at the edges and the caret
+    // itself say which one it is. A block's lead is one stop, the text's
+    // start: stepping into a `##` would bring it into the line.
+    override func moveRight(_ sender: Any?) {
+        guard let target = markdownStep(forward: true) else {
+            super.moveRight(sender)
+            return
+        }
+        placeCaretByKeyboard(target)
+    }
+
+    override func moveLeft(_ sender: Any?) {
+        guard let target = markdownStep(forward: false) else {
+            super.moveLeft(sender)
+            return
+        }
+        placeCaretByKeyboard(target)
+    }
+
+    override func moveForward(_ sender: Any?) {
+        guard let target = markdownStep(forward: true) else {
+            super.moveForward(sender)
+            return
+        }
+        placeCaretByKeyboard(target)
+    }
+
+    override func moveBackward(_ sender: Any?) {
+        guard let target = markdownStep(forward: false) else {
+            super.moveBackward(sender)
+            return
+        }
+        placeCaretByKeyboard(target)
+    }
+
+    private func placeCaretByKeyboard(_ location: Int) {
+        setSelectedRange(NSRange(location: location, length: 0))
+        scrollRangeToVisible(NSRange(location: location, length: 0))
+    }
+
+    /// Where one press of an arrow takes the caret in rendered Markdown; nil
+    /// where AppKit's own step is the right one — a selection, or no hidden
+    /// syntax next to the caret, where AppKit also knows which way is visually
+    /// right in a right-to-left line. Next to hidden syntax it is not: from
+    /// just before a `**` its left arrow went to another line entirely.
+    private func markdownStep(forward: Bool) -> Int? {
+        guard rendersMarkdown, let folding = foldingManager else { return nil }
+        let selection = selectedRange()
+        let source = string as NSString
+        guard selection.length == 0 else { return nil }
+        var position = min(selection.location, source.length)
+        let besideHidden = (position > 0 && folding.isCharacterHidden(at: position - 1))
+            || (position < source.length && folding.isCharacterHidden(at: position))
+        if forward {
+            guard position < source.length else { return nil }
+            if folding.isMarkdownInlineSyntaxHidden(at: position) {
+                // Outside an edge: in.
+                while position < source.length,
+                      folding.isMarkdownInlineSyntaxHidden(at: position) { position += 1 }
+                return position
+            }
+            let character = visibleCharacter(at: position, in: source)
+            position = NSMaxRange(character)
+            // Onto a line with a lead: at its text.
+            var skippedLead = false
+            while position < source.length, folding.isMarkdownLeadHidden(at: position) {
+                position += 1
+                skippedLead = true
+            }
+            // Up to an edge, where AppKit would carry on past it; or over an
+            // entity, which it would step into.
+            let stopsAtEdge = position < source.length
+                && folding.isMarkdownInlineSyntaxHidden(at: position)
+            let isEntity = character != source.rangeOfComposedCharacterSequence(
+                at: character.location)
+            return skippedLead || stopsAtEdge || isEntity || besideHidden ? position : nil
+        }
+        guard position > 0 else { return nil }
+        if folding.isMarkdownInlineSyntaxHidden(at: position - 1) {
+            // Inside an edge: out.
+            while position > 0, folding.isMarkdownInlineSyntaxHidden(at: position - 1) {
+                position -= 1
+            }
+            return position
+        }
+        if folding.isMarkdownLeadHidden(at: position - 1) {
+            // From a block's text, over its lead, to the end of the line above.
+            while position > 0, folding.isMarkdownLeadHidden(at: position - 1) { position -= 1 }
+            return position > 0 ? position - 1 : selection.location
+        }
+        let character = visibleCharacter(at: position - 1, in: source)
+        let stopsAtEdge = character.location > 0
+            && folding.isMarkdownInlineSyntaxHidden(at: character.location - 1)
+        let isEntity = character != source.rangeOfComposedCharacterSequence(at: position - 1)
+        return stopsAtEdge || isEntity || besideHidden ? character.location : nil
+    }
+
+    /// The drawn character at `location`: a composed sequence, or an entity
+    /// drawn as one character.
+    private func visibleCharacter(at location: Int, in source: NSString) -> NSRange {
+        foldingManager?.markdownDrawnReplacement(containing: location)
+            ?? source.rangeOfComposedCharacterSequence(at: location)
+    }
+
+    /// Delete never takes a character that is not drawn: removing half a `**`
+    /// changed the formatting of a whole span with nothing seen to go. Hidden
+    /// syntax in front of the caret is stepped over, and the character the
+    /// reader sees before it goes instead — with its span, when it was all
+    /// the span held. At the start of a heading or a list item, what goes is
+    /// the `##` or the `-`: the block becomes a paragraph, as the line shows.
+    override func deleteBackward(_ sender: Any?) {
+        guard rendersMarkdown, let folding = foldingManager, isEditable,
+              selectedRange().length == 0 else {
+            super.deleteBackward(sender)
+            return
+        }
+        let source = string as NSString
+        let caret = min(selectedRange().location, source.length)
+        var visible = caret
+        while visible > 0, folding.isMarkdownInlineSyntaxHidden(at: visible - 1) { visible -= 1 }
+        if visible > 0, folding.isMarkdownLeadHidden(at: visible - 1),
+           let lead = folding.markdownLeadRange(endingAt: visible) {
+            let marker = Self.leadMarker(in: source.substring(with: lead))
+            replaceMarkdown(NSRange(location: NSMaxRange(lead) - marker, length: marker),
+                            with: "", caret: NSMaxRange(lead) - marker)
+            return
+        }
+        guard visible > 0 else {
+            if visible < caret { setSelectedRange(NSRange(location: 0, length: 0)) }
+            return
+        }
+        let character = visibleCharacter(at: visible - 1, in: source)
+        // Nothing hidden in the way: AppKit's own Delete, which is what joins
+        // a run of them into one ⌘Z.
+        guard visible < caret
+                || character != source.rangeOfComposedCharacterSequence(at: visible - 1)
+                || markdownSpans.contains(where: { $0.content == character }) else {
+            super.deleteBackward(sender)
+            return
+        }
+        deleteVisibleCharacter(character)
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        guard rendersMarkdown, let folding = foldingManager, isEditable,
+              selectedRange().length == 0 else {
+            super.deleteForward(sender)
+            return
+        }
+        let source = string as NSString
+        let caret = min(selectedRange().location, source.length)
+        var visible = caret
+        while visible < source.length, folding.isMarkdownInlineSyntaxHidden(at: visible) {
+            visible += 1
+        }
+        guard visible < source.length else {
+            if visible > caret { setSelectedRange(NSRange(location: source.length, length: 0)) }
+            return
+        }
+        let character = visibleCharacter(at: visible, in: source)
+        guard visible > caret
+                || character != source.rangeOfComposedCharacterSequence(at: visible)
+                || markdownSpans.contains(where: { $0.content == character }) else {
+            super.deleteForward(sender)
+            return
+        }
+        deleteVisibleCharacter(character)
+    }
+
+    /// Delete one drawn character — or, when it is all a span holds, the span:
+    /// an empty `****` is not formatting any more but four asterisks. The
+    /// caret keeps its side of the hidden syntax it was on: Delete from after
+    /// a `**` leaves it after the `**`, still outside the bold.
+    private func deleteVisibleCharacter(_ character: NSRange) {
+        let deleted = markdownSpans.first(where: { $0.content == character })?.range ?? character
+        let caret = selectedRange().location
+        let after = caret >= NSMaxRange(deleted) ? caret - deleted.length
+            : caret <= deleted.location ? caret : deleted.location
+        replaceMarkdown(deleted, with: "", caret: after)
+    }
+
+    /// How much of a lead's end one Delete takes: its last marker and the
+    /// space after it — a `- [ ] `'s box before its bullet, the innermost of
+    /// `> - `, the whole of an indent.
+    static func leadMarker(in lead: String) -> Int {
+        let characters = Array(lead.utf16)
+        var end = characters.count
+        while end > 0, characters[end - 1] == 0x20 || characters[end - 1] == 0x09 { end -= 1 }
+        guard end > 0 else { return characters.count }
+        // A task's box has a space inside it.
+        if end >= 3, characters[end - 1] == 0x5D, characters[end - 3] == 0x5B {
+            return characters.count - (end - 3)
+        }
+        var start = end
+        while start > 0, characters[start - 1] != 0x20, characters[start - 1] != 0x09 { start -= 1 }
+        return characters.count - start
+    }
+
+    /// One edit, one ⌘Z.
+    private func replaceMarkdown(_ range: NSRange, with replacement: String, caret: Int,
+                                 selecting length: Int = 0) {
+        guard shouldChangeText(in: range, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: range, with: replacement)
+        didChangeText()
+        setSelectedRange(NSRange(location: caret, length: length))
+    }
+
+    /// The formatting typing at the caret would get: the spans whose text the
+    /// caret is in, either end of it included.
+    var caretFormats: Set<MarkdownSpanDecoration.Kind> {
+        guard rendersMarkdown else { return [] }
+        let selection = selectedRange()
+        guard selection.length == 0 else { return [] }
+        return Set(markdownSpans.filter {
+            NSLocationInRange(selection.location, NSRange(location: $0.content.location,
+                                                          length: $0.content.length + 1))
+                && foldingManager?.isCharacterHidden(at: $0.opening.location) == true
+        }.map(\.kind))
+    }
+
+    // MARK: Formatting commands
+
+    @objc func toggleMarkdownBold(_ sender: Any?) { toggleMarkdownSpan(.strong) }
+    @objc func toggleMarkdownItalic(_ sender: Any?) { toggleMarkdownSpan(.emphasis) }
+    @objc func toggleMarkdownCode(_ sender: Any?) { toggleMarkdownSpan(.code) }
+    @objc func toggleMarkdownSource(_ sender: Any?) { onToggleMarkdownSource?() }
+
+    private static func delimiter(for kind: MarkdownSpanDecoration.Kind) -> String {
+        switch kind {
+        case .strong: return "**"
+        case .emphasis: return "*"
+        case .strikethrough: return "~~"
+        case .code: return "`"
+        }
+    }
+
+    /// Bold, italic or code: off where the selection or the caret is already
+    /// in it, on otherwise — around the selection, the word at the caret, or
+    /// an empty pair to type into.
+    func toggleMarkdownSpan(_ kind: MarkdownSpanDecoration.Kind) {
+        guard isEditable, rendersMarkdown else {
+            NSSound.beep()
+            return
+        }
+        let source = string as NSString
+        let selection = selectedRange()
+        // Taking it off: the span the selection is, or the caret is in.
+        if let span = markdownSpans.filter({ span in
+            span.kind == kind && (selection.length > 0
+                ? selection == span.content || selection == span.range
+                : NSLocationInRange(selection.location,
+                                    NSRange(location: span.content.location,
+                                            length: span.content.length + 1)))
+        }).min(by: { $0.range.length < $1.range.length }) {
+            let content = source.substring(with: span.content)
+            let offset = selection.location - span.content.location
+            replaceMarkdown(span.range, with: content,
+                            caret: span.range.location + max(0, min(offset, span.content.length)),
+                            selecting: selection.length > 0 ? span.content.length : 0)
+            return
+        }
+        var target = selection
+        if target.length > 0 {
+            // `**word **` is not bold: the delimiters go against the text.
+            while target.length > 0, Self.isSpace(source.character(at: target.location)) {
+                target.location += 1
+                target.length -= 1
+            }
+            while target.length > 0, Self.isSpace(source.character(at: NSMaxRange(target) - 1)) {
+                target.length -= 1
+            }
+        } else {
+            target = wordRange(at: selection.location, in: source)
+        }
+        var delimiter = Self.delimiter(for: kind)
+        let text = source.substring(with: target)
+        var inner = text
+        if kind == .code, text.contains("`") {
+            delimiter = "``"
+            inner = " " + text + " "
+        }
+        let caret = target.location + delimiter.utf16.count
+            + (selection.length > 0 ? (inner.utf16.count - text.utf16.count) / 2
+                                    : selection.location - target.location)
+        replaceMarkdown(target, with: delimiter + inner + delimiter, caret: caret,
+                        selecting: selection.length > 0 ? text.utf16.count : 0)
+    }
+
+    private static func isSpace(_ character: unichar) -> Bool {
+        character == 0x20 || character == 0x09 || character == 0x0A || character == 0x0D
+    }
+
+    /// The word the caret is in or against; empty where there is none.
+    private func wordRange(at location: Int, in source: NSString) -> NSRange {
+        func isWord(_ index: Int) -> Bool {
+            guard index >= 0, index < source.length else { return false }
+            guard let scalar = UnicodeScalar(source.character(at: index)) else { return false }
+            return CharacterSet.alphanumerics.contains(scalar)
+        }
+        var start = location
+        while isWord(start - 1) { start -= 1 }
+        var end = location
+        while isWord(end) { end += 1 }
+        return NSRange(location: start, length: end - start)
+    }
+
+    /// ⌘K: a link around the selection — or, in a link already, that link's
+    /// source — with what goes nowhere on screen shown until the caret leaves.
+    @objc func insertMarkdownLink(_ sender: Any?) {
+        guard isEditable, rendersMarkdown else {
+            NSSound.beep()
+            return
+        }
+        let selection = selectedRange()
+        if let link = markdownLinks.first(where: {
+            $0.fullRange.location < selection.location
+                && NSMaxRange(selection) < NSMaxRange($0.fullRange)
+        }) {
+            onEditLink?(link)
+            return
+        }
+        let label = (string as NSString).substring(with: selection)
+        let link = "[" + label + "]()"
+        replaceMarkdown(selection, with: link,
+                        caret: selection.length > 0 ? selection.location + link.utf16.count - 1
+                                                    : selection.location + 1)
+        onShowMarkdownSource?(NSRange(location: selection.location, length: link.utf16.count))
     }
 
     /// The full leading whitespace of a line, whatever the caret is doing:

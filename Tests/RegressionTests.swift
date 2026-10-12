@@ -58,6 +58,7 @@ enum RegressionTests {
         try testMarkdownLiveEditing()
         try testMarkdownReading()
         try testMarkdownRevealsOnEdit()
+        try testMarkdownEditingKeys()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCommentToggleRules()
@@ -4128,6 +4129,345 @@ enum RegressionTests {
         settle()
         try expect(pane.topSlackForTesting == 0,
                    "the room left above one document stayed for the next")
+    }
+
+    /// Editing rendered Markdown from the keyboard: where the arrows stop,
+    /// what Delete takes, what the caret says, the formatting commands and the
+    /// source view.
+    private static func testMarkdownEditingKeys() throws {
+        let directory = try temporaryDirectory("markdown-keys")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("keys.md")
+        let filler = (1...30).map { "Filler line \($0)." }.joined(separator: "\n\n")
+        let source = """
+        # Title
+
+        Intro with **bold words** here, *italic* and `code`.
+
+        Fish &amp; chips, a *z* tiny span, and a [site](https://example.com/s) link.
+
+        ## Section
+
+        - an *item*
+        - [ ] a task
+
+        ```bash
+        echo hello
+        ```
+
+        Some text plain words and target here.
+
+        \(filler)
+
+        Last line.
+
+        """
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 420))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.document(for: url).isModified = false
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.repositoryRoot = directory
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let text = pane.textViewForTesting
+        window.makeFirstResponder(text)
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        let clip = pane.scrollViewForTesting.contentView
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            layout.ensureLayout(for: container)
+        }
+        var current: NSString { text.string as NSString }
+        /// Far past the end when missing, so a wrong edit fails a check below
+        /// rather than the arithmetic.
+        func at(_ needle: String) -> Int {
+            let found = current.range(of: needle).location
+            return found == NSNotFound ? 1 << 40 : found
+        }
+        func hidden(_ needle: String) -> Bool {
+            let location = at(needle)
+            return location < current.length && layout.isCharacterHidden(at: location)
+        }
+        func line(_ needle: String) -> String {
+            let location = at(needle)
+            guard location < current.length else { return "<no \(needle)>" }
+            return current.substring(with: current.lineRange(
+                for: NSRange(location: location, length: 0)))
+                .trimmingCharacters(in: .newlines)
+        }
+        var caret: Int { text.selectedRange().location }
+        func press(_ key: (Any?) -> Void, _ times: Int = 1) {
+            for _ in 0..<times { key(nil) }
+            settle()
+        }
+        pane.clickForTesting(at: at("Intro"))
+        settle()
+
+        // Each edge of a span is two stops — outside, then inside — that
+        // AppKit's own arrows reduced to one, and the caret says which.
+        let opening = at("**bold")
+        pane.clickForTesting(at: opening - 1)
+        press(text.moveRight)
+        try expect(caret == opening && text.caretFormats.isEmpty,
+                   "the arrow did not stop outside the bold: \(caret), \(text.caretFormats)")
+        press(text.moveRight)
+        try expect(caret == opening + 2 && text.caretFormats == [.strong],
+                   "the arrow did not stop inside the bold: \(caret), \(text.caretFormats)")
+        let closing = at("** here")
+        pane.clickForTesting(at: closing - 1)
+        press(text.moveRight)
+        try expect(caret == closing && text.caretFormats == [.strong],
+                   "the arrow did not stop at the end of the bold text, inside it: \(caret)")
+        press(text.moveRight)
+        try expect(caret == closing + 2 && text.caretFormats.isEmpty,
+                   "the arrow did not stop just after the bold text: \(caret)")
+        press(text.moveRight)
+        try expect(caret == closing + 3, "the arrow did not go on past the bold: \(caret)")
+        press(text.moveLeft, 2)
+        try expect(caret == closing, "left did not come back inside the bold: \(caret)")
+        pane.clickForTesting(at: opening + 2)
+        press(text.moveLeft)
+        try expect(caret == opening, "left did not stop outside the bold: \(caret)")
+        press(text.moveLeft)
+        try expect(caret == opening - 1, "left did not go on past the bold: \(caret)")
+        try expect(hidden("**bold") && hidden("** here"), "stepping over a `**` showed it")
+        // An entity is one character to the arrows.
+        let entity = at("&amp;")
+        pane.clickForTesting(at: entity - 1)
+        press(text.moveRight, 2)
+        try expect(caret == entity + 5, "the arrows stepped into `&amp;`: \(caret)")
+        press(text.moveLeft)
+        try expect(caret == entity, "left did not take `&amp;` whole: \(caret)")
+        // A lead is one stop, the start of its text: stepping into a `##`
+        // brought it into the line.
+        let section = at("Section")
+        pane.clickForTesting(at: at("## Section") - 1)
+        press(text.moveRight)
+        try expect(caret == section && hidden("## Section"),
+                   "the arrow did not go from the line above to the heading's text: \(caret)")
+        press(text.moveLeft)
+        try expect(caret == at("## Section") - 1 && hidden("## Section"),
+                   "left from a heading's text did not go to the line above: \(caret)")
+        // The same from a line that ends in hidden syntax.
+        pane.clickForTesting(at: at("item*") + 5)
+        press(text.moveRight)
+        try expect(caret == at("a task") && hidden("- [ ] a task"),
+                   "the arrow stopped in a task's hidden `- [ ]`: \(caret)")
+
+        // The caret's own shape: thicker in bold, slanted in italic, capped in
+        // code.
+        let box = NSRect(x: 100, y: 10, width: 2, height: 22)
+        let plain = PuzzleTextView.caretShape(in: box, formats: []).bounds
+        let bold = PuzzleTextView.caretShape(in: box, formats: [.strong]).bounds
+        let italic = PuzzleTextView.caretShape(in: box, formats: [.emphasis]).bounds
+        let code = PuzzleTextView.caretShape(in: box, formats: [.code]).bounds
+        try expect(bold.width > plain.width && italic.width > plain.width + 2
+                    && code.minX < plain.minX && code.maxX > plain.maxX,
+                   "the caret looks the same in bold, italic and code: \(plain) \(bold) "
+                     + "\(italic) \(code)")
+        // And it is what is drawn: in bold, wider than outside it.
+        func drawnCaretWidth(at location: Int) -> Int {
+            pane.clickForTesting(at: location)
+            settle()
+            let glyph = layout.glyphIndexForCharacter(at: location)
+            let fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let origin = text.textContainerOrigin
+            let x = fragment.minX + layout.location(forGlyphAt: glyph).x + origin.x
+            let area = NSRect(x: x - 8, y: fragment.minY + origin.y, width: 24,
+                              height: fragment.height)
+            guard let pixels = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(area.width), pixelsHigh: Int(area.height),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: pixels) else { return -1 }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.cgContext.translateBy(x: 0, y: area.height)
+            context.cgContext.scaleBy(x: 1, y: -1)
+            context.cgContext.translateBy(x: -area.minX, y: -area.minY)
+            text.drawInsertionPoint(in: NSRect(x: x, y: area.minY, width: 1, height: area.height),
+                                    color: .white, turnedOn: true)
+            NSGraphicsContext.restoreGraphicsState()
+            let row = pixels.pixelsHigh / 2
+            return (0..<pixels.pixelsWide).filter {
+                (pixels.colorAt(x: $0, y: row)?.alphaComponent ?? 0) > 0.5
+            }.count
+        }
+        let insideWidth = drawnCaretWidth(at: at("bold words") + 2)
+        let outsideWidth = drawnCaretWidth(at: at("Intro") + 2)
+        try expect(insideWidth > outsideWidth && outsideWidth > 0,
+                   "the caret drawn in bold is no different: \(insideWidth)px against "
+                     + "\(outsideWidth)px")
+        pane.clickForTesting(at: at("italic") + 2)
+        settle()
+        try expect(text.caretFormats == [.emphasis], "the caret in italic is not italic")
+        pane.clickForTesting(at: at("code`") + 2)
+        settle()
+        try expect(text.caretFormats == [.code], "the caret in code is not code")
+
+        // Delete never takes what is not drawn. From just after the bold, the
+        // `**` stays and the `s` goes, and the caret stays outside.
+        pane.clickForTesting(at: closing + 2)
+        press(text.deleteBackward)
+        try expect(line("Intro").contains("**bold word** here"),
+                   "Delete after bold text did not take its last letter: \(line("Intro"))")
+        try expect(caret == at("** here") + 2 && text.caretFormats.isEmpty,
+                   "Delete moved the caret inside the bold: \(caret), \(text.caretFormats)")
+        pane.clickForTesting(at: at("**bold"))
+        press(text.deleteForward)
+        try expect(line("Intro").contains("**old word**") && caret == at("**old")
+                    && text.caretFormats.isEmpty,
+                   "forward Delete before bold text did not take its first letter: "
+                     + "\(line("Intro")), \(caret)")
+        // A span's last letter takes the span: `**` alone is not formatting.
+        pane.clickForTesting(at: at("z* tiny") + 2)
+        press(text.deleteBackward)
+        try expect(line("Fish").contains("a  tiny span"),
+                   "deleting a span's only letter left its delimiters: \(line("Fish"))")
+        // An entity goes whole, as the one character it is drawn as.
+        pane.clickForTesting(at: at("&amp;") + 5)
+        press(text.deleteBackward)
+        try expect(line("Fish").hasPrefix("Fish  chips"),
+                   "Delete after `&amp;` did not take it whole: \(line("Fish"))")
+        // At the start of a block, what goes is its marker: the line shows it.
+        pane.clickForTesting(at: at("Section"))
+        press(text.deleteBackward)
+        try expect(line("Section") == "Section",
+                   "Delete at a heading's start did not make it a paragraph: \(line("Section"))")
+        text.undoManager?.undo()
+        settle()
+        try expect(line("Section") == "## Section", "undoing that did not bring the heading back")
+        pane.clickForTesting(at: at("a task"))
+        press(text.deleteBackward)
+        try expect(line("a task") == "- a task",
+                   "Delete at a task's text did not take its box first: \(line("a task"))")
+
+        // Typed `**` hides once it pairs, and the caret is then outside.
+        pane.clickForTesting(at: at("Last line.") + 10)
+        for character in ["*", "*", "x"] { pane.insertTextForTesting(character); settle() }
+        try expect(!hidden("**x"), "an unpaired `**` was hidden while typed")
+        for character in ["*", "*"] { pane.insertTextForTesting(character); settle() }
+        try expect(hidden("**x**") && layout.isCharacterHidden(at: at("x**") + 1)
+                    && text.caretFormats.isEmpty,
+                   "a typed pair of `**` did not hide once it closed")
+
+        // Bold, italic and code: on around the word or selection, off again.
+        let plainWord = at("plain")
+        pane.clickForTesting(at: plainWord + 2)
+        text.toggleMarkdownBold(nil)
+        settle()
+        try expect(line("plain").contains("**plain**") && caret == at("plain") + 2
+                    && text.caretFormats == [.strong],
+                   "⇧⌘B did not make the caret's word bold: \(line("plain"))")
+        text.toggleMarkdownBold(nil)
+        settle()
+        try expect(line("plain").contains(" plain ") && !line("plain").contains("*")
+                    && caret == plainWord + 2,
+                   "⇧⌘B again did not take the bold off: \(line("plain"))")
+        text.setSelectedRange(NSRange(location: plainWord, length: 6))
+        text.toggleMarkdownItalic(nil)
+        settle()
+        try expect(line("plain").contains("*plain* words")
+                    && current.substring(with: text.selectedRange()) == "plain",
+                   "⌘I did not put the delimiters against the selected word: \(line("plain"))")
+        text.toggleMarkdownItalic(nil)
+        settle()
+        try expect(!line("plain").contains("*"), "⌘I on italic text did not take it off")
+        text.setSelectedRange(NSRange(location: at("words and"), length: 5))
+        text.toggleMarkdownCode(nil)
+        settle()
+        try expect(line("plain").contains("`words`"), "⌘E did not make the selection code")
+        pane.clickForTesting(at: at("old word") + 2)
+        text.toggleMarkdownBold(nil)
+        settle()
+        try expect(line("Intro").contains("Intro with old word here"),
+                   "⇧⌘B in bold text did not take the bold off: \(line("Intro"))")
+
+        // ⌘K: a link around the selection, written out until the caret
+        // leaves, the caret where its address goes.
+        text.setSelectedRange(NSRange(location: at("target"), length: 6))
+        text.insertMarkdownLink(nil)
+        settle()
+        try expect(line("target").contains("[target]()") && caret == at("]()") + 2
+                    && !hidden("]()"),
+                   "⌘K did not make a link to type the address of: \(line("target")), \(caret)")
+        pane.insertTextForTesting("https://x.y")
+        settle()
+        try expect(!hidden("](https://x.y)") && !layout.isCharacterHidden(at: at("x.y)") + 3),
+                   "the new link's address hid while it was typed")
+        pane.clickForTesting(at: at("Last line"))
+        settle()
+        try expect(hidden("](https://x.y)") && hidden("[target"),
+                   "the new link stayed written out after the caret left it")
+        // In a link already, ⌘K shows that link's source.
+        pane.clickForTesting(at: at("site") + 2)
+        text.insertMarkdownLink(nil)
+        settle()
+        try expect(!hidden("](https://example.com/s)") && line("site").contains("[site]"),
+                   "⌘K in a link did not show it as written")
+
+        // The shortcuts: ⌘B is the sidebar's, so bold is ⇧⌘B.
+        let menu = AppDelegate().buildMainMenuForTesting()
+        func item(_ action: Selector) -> NSMenuItem? {
+            menu.items.compactMap(\.submenu).flatMap(\.items).first { $0.action == action }
+        }
+        for (action, key) in [(#selector(PuzzleTextView.toggleMarkdownBold(_:)), "B"),
+                              (#selector(PuzzleTextView.toggleMarkdownItalic(_:)), "i"),
+                              (#selector(PuzzleTextView.toggleMarkdownCode(_:)), "e"),
+                              (#selector(PuzzleTextView.insertMarkdownLink(_:)), "k"),
+                              (#selector(PuzzleTextView.toggleMarkdownSource(_:)), "M")] {
+            try expect(item(action)?.keyEquivalent == key,
+                       "\(action) is not on \(key): \(String(describing: item(action)?.keyEquivalent))")
+        }
+
+        // The source view shows everything as written, with the line being
+        // read where it was — the caret's, or, with the caret off screen, the
+        // one at the top.
+        pane.clickForTesting(at: at("Some text"))
+        settle()
+        func onScreen(_ location: Int) -> CGFloat {
+            layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
+                                    effectiveRange: nil).minY
+                + text.textContainerOrigin.y - clip.bounds.minY
+        }
+        let readBefore = onScreen(at("Some text"))
+        text.toggleMarkdownSource(nil)
+        settle()
+        try expect(pane.showsMarkdownSourceForTesting && !hidden("# Title")
+                    && !hidden("*italic*") && !hidden("```bash") && !hidden("## Section"),
+                   "the source view still hides syntax")
+        try expect(abs(onScreen(at("Some text")) - readBefore) < 0.5,
+                   "the line being read moved by \(onScreen(at("Some text")) - readBefore)pt "
+                     + "as the source view came on")
+        text.toggleMarkdownSource(nil)
+        settle()
+        try expect(!pane.showsMarkdownSourceForTesting && hidden("# Title") && hidden("```bash"),
+                   "the document did not go back to being rendered")
+        // The caret above everything that changes, and off screen.
+        pane.clickForTesting(at: at("Intro"))
+        let filler20 = at("Filler line 20.")
+        text.scrollRangeToVisible(NSRange(location: filler20, length: 1))
+        settle()
+        let fillerBefore = onScreen(filler20)
+        text.toggleMarkdownSource(nil)
+        settle()
+        try expect(abs(onScreen(filler20) - fillerBefore) < 1,
+                   "the line at the top of the view moved by "
+                     + "\(onScreen(filler20) - fillerBefore)pt as the source view came on")
+        text.toggleMarkdownSource(nil)
+        settle()
     }
 
     private static func testFindMatchesAreComplete() throws {

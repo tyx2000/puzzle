@@ -480,6 +480,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editMenu.addItem(withTitle: "Toggle Comment",
                          action: #selector(PuzzleTextView.toggleComment(_:)), keyEquivalent: "/")
         editMenu.addItem(.separator())
+        // Markdown formatting. ⌘B is the sidebar's, as in Zed, so bold takes
+        // ⇧⌘B; the others are what every editor uses.
+        editMenu.addItem(withTitle: "Bold",
+                         action: #selector(PuzzleTextView.toggleMarkdownBold(_:)),
+                         keyEquivalent: "B")
+        editMenu.addItem(withTitle: "Italic",
+                         action: #selector(PuzzleTextView.toggleMarkdownItalic(_:)),
+                         keyEquivalent: "i")
+        editMenu.addItem(withTitle: "Code",
+                         action: #selector(PuzzleTextView.toggleMarkdownCode(_:)),
+                         keyEquivalent: "e")
+        editMenu.addItem(withTitle: "Link",
+                         action: #selector(PuzzleTextView.insertMarkdownLink(_:)),
+                         keyEquivalent: "k")
+        editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Find in File…",
                          action: #selector(WorkspaceWindowController.findInFile(_:)), keyEquivalent: "f")
         let replaceItem = NSMenuItem(
@@ -508,6 +523,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(WorkspaceWindowController.showGit(_:)), keyEquivalent: "3")
         viewMenu.addItem(withTitle: "Show Sidebar",
                          action: #selector(WorkspaceWindowController.showSidebar(_:)), keyEquivalent: "b")
+        viewMenu.addItem(withTitle: "Show Markdown Source",
+                         action: #selector(PuzzleTextView.toggleMarkdownSource(_:)),
+                         keyEquivalent: "M")
         viewMenu.addItem(.separator())
         // The shortcut every tabbed editor and browser uses; without it the
         // tabs could only be reached with the mouse.

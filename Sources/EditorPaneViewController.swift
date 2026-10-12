@@ -182,7 +182,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             self?.navigateToDefinition(at: location) ?? false
         }
         textView.onOpenLink = { [weak self] link in self?.openMarkdownLink(link) }
-        textView.onEditLink = { [weak self] link in self?.editMarkdownLinkSource(link) }
+        textView.onEditLink = { [weak self] link in self?.showMarkdownSource(link.fullRange) }
+        textView.onShowMarkdownSource = { [weak self] range in self?.showMarkdownSource(range) }
+        textView.onToggleMarkdownSource = { [weak self] in self?.toggleMarkdownSource() }
         textView.onCommandHover = { [weak self] location in
             self?.updateDefinitionHover(at: location)
         }
@@ -992,6 +994,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if findBarURL == oldURL { findBarURL = newURL }
         if let value = selections.removeValue(forKey: oldURL) { selections[newURL] = value }
         if lineActivatedURLs.remove(oldURL) != nil { lineActivatedURLs.insert(newURL) }
+        if markdownSourceURLs.remove(oldURL) != nil { markdownSourceURLs.insert(newURL) }
         if let value = foldedBlocks.removeValue(forKey: oldURL) { foldedBlocks[newURL] = value }
     }
 
@@ -1068,6 +1071,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // language at all, a line ending in "(" is just a line ending in "(".
         textView.usesBracketIndent = doc.languageSpec != nil
             && doc.languageSpec?.name != "markdown"
+        textView.rendersMarkdown = doc.languageSpec?.name == "markdown"
         textView.commentSyntax = CommentToggle.syntax(forLanguage: doc.languageSpec?.name,
                                                       fileExtension: url.pathExtension)
         if !lineIsActive { clearInlineBlameRequest() }
@@ -1184,6 +1188,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         selections.removeValue(forKey: url)
         findStates.removeValue(forKey: url)
         lineActivatedURLs.remove(url)
+        markdownSourceURLs.remove(url)
         foldedBlocks.removeValue(forKey: url)
         defer { onTabClosed?(url) }
         if openURLs.isEmpty {
@@ -1256,6 +1261,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             selections.removeValue(forKey: $0)
             findStates.removeValue(forKey: $0)
             lineActivatedURLs.remove($0)
+            markdownSourceURLs.remove($0)
             foldedBlocks.removeValue(forKey: $0)
         }
         defer { closed.forEach { onTabClosed?($0) } }
@@ -1470,6 +1476,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         findStates.removeAll()
         restoreFindState(for: nil)
         lineActivatedURLs.removeAll()
+        markdownSourceURLs.removeAll()
         foldedBlocks.removeAll()
         urls.forEach { onTabClosed?($0) }
     }
@@ -1797,6 +1804,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             return MarkdownReveal()
         }
         let source = document.storage.string as NSString
+        // The whole document as written, when the reader asked for it.
+        if markdownSourceURLs.contains(url) {
+            let all = NSRange(location: 0, length: source.length)
+            return MarkdownReveal(text: all, editLine: nil, lead: all)
+        }
         let selection = textView.selectedRange()
         let location = min(selection.location, source.length)
         let line = source.lineRange(for: NSRange(location: location, length: 0))
@@ -1890,6 +1902,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             links: document.markdownLinks,
             activeSourceRange: reveal.source,
             revealedLead: reveal.lead)
+        textView.markdownSpans = document.markdownSpans
         updateMarkdownCaretCues(for: document, reveal: reveal)
     }
 
@@ -1935,11 +1948,44 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return label != link.destination && "mailto:" + label != link.destination
     }
 
-    /// The bar's Edit: show the link as written, caret where it was.
-    private func editMarkdownLinkSource(_ link: MarkdownLinkDecoration) {
+    /// Show `range` — a link, from the bar's Edit or ⌘K — as written, caret
+    /// where it was.
+    private func showMarkdownSource(_ range: NSRange) {
         guard let url = currentURL, let document = currentDocument else { return }
-        markdownLinkSource = (url, link.fullRange)
+        markdownLinkSource = (url, range)
         applyMarkdownReveal(for: document)
+    }
+
+    /// Documents shown as source rather than rendered, at the reader's asking.
+    private var markdownSourceURLs: Set<URL> = []
+    var showsMarkdownSourceForTesting: Bool {
+        currentURL.map { markdownSourceURLs.contains($0) } ?? false
+    }
+
+    /// ⇧⌘M. The line being read stays where it is: the caret's, when it is on
+    /// screen, or the one at the top of the view.
+    private func toggleMarkdownSource() {
+        guard let url = currentURL, let document = currentDocument,
+              document.languageSpec?.name == "markdown" else { return }
+        let caret = min(textView.selectedRange().location, max(0, document.storage.length - 1))
+        var anchor = caret
+        if let container = textView.textContainer, document.storage.length > 0 {
+            let caretLine = layoutManager.lineFragmentRect(
+                forGlyphAt: layoutManager.glyphIndexForCharacter(at: caret), effectiveRange: nil)
+                .offsetBy(dx: 0, dy: textView.textContainerOrigin.y)
+            if !textView.visibleRect.intersects(caretLine) {
+                let top = NSPoint(x: 0, y: max(0, textView.visibleRect.minY
+                                                - textView.textContainerOrigin.y))
+                anchor = layoutManager.characterIndexForGlyph(
+                    at: layoutManager.glyphIndex(for: top, in: container))
+            }
+        }
+        keepingCaretInPlace(anchor: anchor) {
+            if markdownSourceURLs.remove(url) == nil { markdownSourceURLs.insert(url) }
+            let reveal = markdownReveal(for: document)
+            layoutManager.revealMarkdownSyntax(in: reveal.text, lead: reveal.lead)
+            updateMarkdownDecorations(of: document, reveal: reveal)
+        }
     }
 
     /// Keep the caret's line where it is on screen while `change` lays the
@@ -1948,12 +1994,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// clicked growing or shrinking moved the clicked line from under the
     /// pointer. The view scrolls by whatever the change moved the caret's line.
     ///
+    /// `anchor` holds another line instead — the one being read, when the
+    /// whole document changes at once.
+    ///
     /// Near the top of the document there may be nothing left to scroll: the
     /// text above shrank by more than the view is scrolled down. The page
     /// takes the shortfall as room above the text instead, which it gives up
     /// again once it is scrolled out of sight — or as soon as anything above
     /// the caret, or the caret's own line, grows back into it.
-    private func keepingCaretInPlace(_ change: () -> Void) {
+    private func keepingCaretInPlace(anchor: Int? = nil, _ change: () -> Void) {
         guard currentDocument?.languageSpec?.name == "markdown",
               let storage = textView.textStorage, storage.length > 0 else {
             change()
@@ -1964,7 +2013,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // the change is above what is visible, AppKit scrolls to make up for it
         // itself, and making up for it again moved the line twice as far.
         func caretLineOnScreen() -> (top: CGFloat, height: CGFloat) {
-            let caret = min(textView.selectedRange().location, storage.length - 1)
+            let caret = min(anchor ?? textView.selectedRange().location, storage.length - 1)
             let glyph = layoutManager.glyphIndexForCharacter(at: caret)
             let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             return (line.minY + textView.textContainerOrigin.y - clip.bounds.minY, line.height)
