@@ -270,9 +270,10 @@ enum MarkdownLiveStyler {
                                                     font: baseFont, whenRevealed: bodyLayout)
             marker = [.foregroundColor: Theme.dimText]
             codeStyle = [.foregroundColor: Theme.foreground, .font: codeFont]
-            inlineCodeStyle = [.foregroundColor: Theme.yellow,
-                               .backgroundColor: Theme.inputBackground,
-                               .font: codeFont]
+            // No background attribute: TextKit fills it the height of the
+            // line, a heading's room above included. The text view draws the
+            // box instead, as tall as the code.
+            inlineCodeStyle = [.foregroundColor: Theme.yellow, .font: codeFont]
             linkStyle = [.foregroundColor: Theme.blue,
                          .underlineStyle: NSUnderlineStyle.single.rawValue]
         }

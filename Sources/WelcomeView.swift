@@ -13,9 +13,8 @@ final class WelcomeView: FlatView {
     /// list leaves the view hierarchy whenever there are no recents, which
     /// takes any constraint on it with it.
     private var recentWidthConstraint: NSLayoutConstraint?
-    private let recentStack = NSStackView()
+    private let recentList = RecentProjectsListView()
     private let openCheckedButton = NSButton()
-    private var checked: Set<URL> = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -45,11 +44,11 @@ final class WelcomeView: FlatView {
         buttons.orientation = .horizontal
         buttons.spacing = 8
 
-        recentStack.orientation = .vertical
-        // Every row the width of the widest, so the hover highlight is the
-        // same rectangle down the list rather than tracking each name.
-        recentStack.alignment = .width
-        recentStack.spacing = 2
+        recentList.onOpen = { [weak self] url in self?.onOpenRecent?(url) }
+        recentList.onCheckedChange = { [weak self] in
+            guard let self else { return }
+            self.openCheckedButton.isEnabled = !self.recentList.checkedURLs.isEmpty
+        }
 
         stack.orientation = .vertical
         // Everything on one left edge: the name, the buttons and the list.
@@ -85,64 +84,38 @@ final class WelcomeView: FlatView {
     @objc private func openFolderTapped() { onOpenFolder?() }
 
     @objc private func openCheckedTapped() {
-        // In the order they are listed, so the projects arrive in the order
-        // they are read.
-        let wanted = RecentProjects.shared.urls.filter { checked.contains($0) }
+        let wanted = recentList.checkedURLs
         guard !wanted.isEmpty else { return }
         onOpenChecked?(wanted)
     }
 
-    private func setChecked(_ url: URL, _ isChecked: Bool) {
-        if isChecked { checked.insert(url) } else { checked.remove(url) }
-        openCheckedButton.isEnabled = !checked.isEmpty
-    }
-
     @objc func reloadRecents() {
-        recentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let recents = RecentProjects.shared.urls
+        recentList.reload()
+        openCheckedButton.isEnabled = !recentList.checkedURLs.isEmpty
         // Drop the recents block entirely when there's nothing to show.
-        if stack.arrangedSubviews.contains(recentStack) {
-            stack.removeArrangedSubview(recentStack)
-            recentStack.removeFromSuperview()
+        if stack.arrangedSubviews.contains(recentList) {
+            stack.removeArrangedSubview(recentList)
+            recentList.removeFromSuperview()
         }
-        guard !recents.isEmpty else { return }
-
-        // Everything the store keeps, which is the same list the Dock menu
-        // shows: a start page that hides half of them sends the reader to the
-        // menu to find the rest.
-        // A project that has left the list cannot stay ticked.
-        checked.formIntersection(recents)
-        openCheckedButton.isEnabled = !checked.isEmpty
-        for url in recents.prefix(RecentProjects.displayLimit) {
-            recentStack.addArrangedSubview(RecentRowView(
-                url: url,
-                isChecked: checked.contains(url),
-                action: { [weak self] in self?.onOpenRecent?(url) },
-                checkAction: { [weak self] on in self?.setChecked(url, on) },
-                removeAction: { RecentProjects.shared.remove(url) }))
-        }
-        stack.addArrangedSubview(recentStack)
+        guard !recentList.arrangedSubviews.isEmpty else { return }
+        stack.addArrangedSubview(recentList)
         // The list spans the whole block, so a hovered row's highlight reaches
         // the same right edge whether the widest thing above it is a button or
         // a project name.
         recentWidthConstraint?.isActive = false
-        let width = recentStack.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        let width = recentList.widthAnchor.constraint(equalTo: stack.widthAnchor)
         width.isActive = true
         recentWidthConstraint = width
     }
 
-    var checkedForTesting: [URL] {
-        RecentProjects.shared.urls.filter { checked.contains($0) }
-    }
+    var checkedForTesting: [URL] { recentList.checkedURLs }
     var openCheckedEnabledForTesting: Bool { openCheckedButton.isEnabled }
     var openCheckedTitleForTesting: String { openCheckedButton.title }
     func openCheckedForTesting() { openCheckedTapped() }
-    func rowsForTesting() -> [NSView] { recentStack.arrangedSubviews }
+    func rowsForTesting() -> [NSView] { recentList.arrangedSubviews }
     /// Width each row gives its parent path. Zero means a long project name
     /// squeezed the path out of the row entirely.
-    func pathWidthsForTesting() -> [CGFloat] {
-        recentStack.arrangedSubviews.compactMap { ($0 as? RecentRowView)?.pathWidthForTesting }
-    }
+    func pathWidthsForTesting() -> [CGFloat] { recentList.pathWidthsForTesting() }
     /// The block everything on the page is laid out in.
     var columnFrameForTesting: NSRect { stack.frame }
     /// The title's alignment rect, in this view's coordinates. The frame is
@@ -153,21 +126,75 @@ final class WelcomeView: FlatView {
         guard let title = stack.arrangedSubviews.first else { return .zero }
         return stack.convert(title.alignmentRect(forFrame: title.frame), to: self)
     }
-    func toggleCheckForTesting(at index: Int) {
-        (recentStack.arrangedSubviews[index] as? RecentRowView)?.toggleCheckForTesting()
-    }
+    func toggleCheckForTesting(at index: Int) { recentList.toggleCheckForTesting(at: index) }
     /// A double click on the row, which is what opens it.
-    func openRowForTesting(_ index: Int) {
-        (recentStack.arrangedSubviews[index] as? RecentRowView)?.openForTesting()
-    }
-    func isRowCheckedForTesting(_ index: Int) -> Bool {
-        (recentStack.arrangedSubviews[index] as? RecentRowView)?.isCheckedForTesting ?? false
-    }
+    func openRowForTesting(_ index: Int) { recentList.openRowForTesting(index) }
+    func isRowCheckedForTesting(_ index: Int) -> Bool { recentList.isRowCheckedForTesting(index) }
 
     func refreshFonts() {
         reloadRecents()
         needsDisplay = true
     }
+}
+
+/// The recent projects, a row each: a click ticks one, a double click opens
+/// it, the cross on a hovered row takes it off the list. The start page shows
+/// it, and so does the R button's popover, which behaves the same.
+final class RecentProjectsListView: NSStackView {
+    var onOpen: ((URL) -> Void)?
+    /// Something was ticked or unticked — or left the list ticked.
+    var onCheckedChange: (() -> Void)?
+    private var checked: Set<URL> = []
+
+    /// Ticked, in the order they are listed, so the projects arrive in the
+    /// order they are read.
+    var checkedURLs: [URL] { RecentProjects.shared.urls.filter { checked.contains($0) } }
+
+    init() {
+        super.init(frame: .zero)
+        orientation = .vertical
+        // Every row the width of the widest, so the hover highlight is the
+        // same rectangle down the list rather than tracking each name.
+        alignment = .width
+        spacing = 2
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Everything the store keeps, up to what it shows — the same list the
+    /// Dock menu has: a list that hides half of them sends the reader to the
+    /// menu to find the rest.
+    func reload() {
+        arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let recents = RecentProjects.shared.urls
+        // A project that has left the list cannot stay ticked.
+        let before = checked
+        checked.formIntersection(recents)
+        for url in recents.prefix(RecentProjects.displayLimit) {
+            addArrangedSubview(RecentRowView(
+                url: url,
+                isChecked: checked.contains(url),
+                action: { [weak self] in self?.onOpen?(url) },
+                checkAction: { [weak self] on in self?.setChecked(url, on) },
+                removeAction: { RecentProjects.shared.remove(url) }))
+        }
+        if checked != before { onCheckedChange?() }
+    }
+
+    private func setChecked(_ url: URL, _ isChecked: Bool) {
+        if isChecked { checked.insert(url) } else { checked.remove(url) }
+        onCheckedChange?()
+    }
+
+    private func row(_ index: Int) -> RecentRowView? {
+        arrangedSubviews.indices.contains(index) ? arrangedSubviews[index] as? RecentRowView : nil
+    }
+    func pathWidthsForTesting() -> [CGFloat] {
+        arrangedSubviews.compactMap { ($0 as? RecentRowView)?.pathWidthForTesting }
+    }
+    func toggleCheckForTesting(at index: Int) { row(index)?.toggleCheckForTesting() }
+    func openRowForTesting(_ index: Int) { row(index)?.openForTesting() }
+    func isRowCheckedForTesting(_ index: Int) -> Bool { row(index)?.isCheckedForTesting ?? false }
+    func removeRowForTesting(_ index: Int) { row(index)?.removeForTesting() }
 }
 
 /// One clickable recent-project row: name + dimmed parent folder.
@@ -279,6 +306,7 @@ private final class RecentRowView: FlatView {
     @objc private func removeTapped() { removeAction() }
 
     var isCheckedForTesting: Bool { check.state == .on }
+    func removeForTesting() { removeAction() }
     /// What a double click does.
     func openForTesting() { action() }
     /// What a single click — or the box itself — does.

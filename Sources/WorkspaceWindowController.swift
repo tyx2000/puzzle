@@ -876,14 +876,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
     /// ask it for a new one by script, and keep the plain open as the fallback
     /// (no iTerm, or automation not permitted).
-    /// Drop the recents under the R button, the way the branch menu hangs
-    /// under the branch name.
+    /// The recents under the R button, listed and handled as the start page
+    /// lists them.
     private func showRecentProjectsMenu(from rect: NSRect) {
-        guard let delegate = NSApp.delegate as? AppDelegate else { return }
-        let menu = delegate.makeRecentProjectsMenu()
-        menu.popUp(positioning: nil,
-                   at: NSPoint(x: rect.minX, y: rect.maxY),
-                   in: sidebar.view)
+        if recentProjectsPopover.isShown || recentProjectsPopover.justClosed {
+            recentProjectsPopover.close()
+            return
+        }
+        recentProjectsPopover.show(relativeTo: rect, of: sidebar.view)
+    }
+    private lazy var recentProjectsPopover: RecentProjectsPopover = {
+        let popover = RecentProjectsPopover()
+        popover.onOpen = { [weak self] urls in self?.openSelection(urls) }
+        return popover
+    }()
+    var recentProjectsPopoverForTesting: RecentProjectsPopover { recentProjectsPopover }
+    func showRecentProjectsForTesting() {
+        sidebar.titleButtonsForTesting[1].performClick(nil)
     }
 
     /// The panel goes away only for a window that holds no projects at all —

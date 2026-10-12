@@ -1,5 +1,43 @@
 import AppKit
 
+/// The hand over a button that floats over code, or sits beside it.
+///
+/// A cursor rectangle is not enough there. The code's own I-beam covers the
+/// whole visible area, the button's rectangle overlaps it, and AppKit kept the
+/// I-beam; the title band's letters had no cursor of their own at all and kept
+/// whatever the pointer arrived with. So the button sets the hand itself
+/// whenever the pointer arrives or moves on it, and on the way out hands the
+/// cursor back to what is underneath.
+enum PointerCursor {
+    static let trackingOptions: NSTrackingArea.Options = [
+        .mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect,
+    ]
+
+    static func enter() { NSCursor.pointingHand.set() }
+
+    /// What is under the pointer now that it has left `view`: text takes the
+    /// I-beam, anything else the arrow.
+    static func leave(_ view: NSView, event: NSEvent) {
+        // `hitTest` takes the point in the superview's coordinates.
+        guard let content = view.window?.contentView,
+              let hit = content.hitTest(
+                content.superview?.convert(event.locationInWindow, from: nil)
+                    ?? event.locationInWindow) else {
+            NSCursor.arrow.set()
+            return
+        }
+        var candidate: NSView? = hit
+        while let current = candidate {
+            if current is NSTextView {
+                NSCursor.iBeam.set()
+                return
+            }
+            candidate = current.superview
+        }
+        NSCursor.arrow.set()
+    }
+}
+
 /// One round button in the search navigator.
 final class RoundIconButton: FlatView {
     var onClick: (() -> Void)?
@@ -26,16 +64,25 @@ final class RoundIconButton: FlatView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero,
-                                  options: [.mouseEnteredAndExited, .activeInKeyWindow,
-                                            .inVisibleRect],
+        let area = NSTrackingArea(rect: .zero, options: PointerCursor.trackingOptions,
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         tracking = area
     }
 
-    override func mouseEntered(with event: NSEvent) { hovered = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; pressed = false }
+    var trackingOptionsForTesting: NSTrackingArea.Options? { tracking?.options }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        PointerCursor.enter()
+    }
+    override func mouseMoved(with event: NSEvent) { PointerCursor.enter() }
+    override func cursorUpdate(with event: NSEvent) { PointerCursor.enter() }
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        pressed = false
+        PointerCursor.leave(self, event: event)
+    }
     override func mouseDown(with event: NSEvent) { pressed = true }
     override func mouseUp(with event: NSEvent) {
         let was = pressed

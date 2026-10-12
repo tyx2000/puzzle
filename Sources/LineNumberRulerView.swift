@@ -264,10 +264,25 @@ final class LineNumberRulerView: NSRulerView {
             NSCursor.pointingHand.set()
         } else if bounds.contains(point) {
             NSCursor.arrow.set()
-        } else {
+        } else if pointerIsOverText(event) {
             NSCursor.iBeam.set()
         }
     }
+
+    /// This view also follows the pointer across the code, to show the fold
+    /// arrow of the row it is on — including where something floats over the
+    /// code, like the search navigator's buttons. Setting the I-beam there
+    /// took the buttons' hand away on every move.
+    private func pointerIsOverText(_ event: NSEvent) -> Bool {
+        // `hitTest` takes the point in the superview's coordinates.
+        guard let textView, let content = window?.contentView,
+              let hit = content.hitTest(
+                content.superview?.convert(event.locationInWindow, from: nil)
+                    ?? event.locationInWindow)
+        else { return false }
+        return hit === textView || hit.isDescendant(of: textView)
+    }
+    func pointerIsOverTextForTesting(_ event: NSEvent) -> Bool { pointerIsOverText(event) }
 
     override func mouseExited(with event: NSEvent) {
         if let window {
@@ -349,11 +364,37 @@ final class LineNumberRulerView: NSRulerView {
         let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
             .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
         let numbers = Self.numberColumn(digits: currentDigits, font: font)
+        // Changed lines next to each other, of one kind, are one ribbon: drawn
+        // a row at a time, each row's rounded ends made a dashed line of what
+        // is a single block of change. A wrapped line's ribbon runs down all
+        // of its rows.
+        var ribbon: (rect: NSRect, change: GitLineChanges.Change, line: Int)?
+        var currentLine = 0
+        func flushRibbon() {
+            guard let drawn = ribbon else { return }
+            drawn.change.colour.setFill()
+            NSBezierPath(roundedRect: drawn.rect, xRadius: 1.5, yRadius: 1.5).fill()
+            self.changeMarkBars.append(drawn.rect)
+            ribbon = nil
+        }
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
             let fragChar = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
             let isLineStart = fragChar.location == 0
                 || content.character(at: fragChar.location - 1) == 10
-            guard isLineStart else { return }  // skip wrapped continuations
+            guard isLineStart else {
+                // A wrapped continuation: no number, but the line's ribbon
+                // and its click target carry on down it.
+                let y = fragRect.minY + inset - visibleRect.minY
+                if let drawn = ribbon, drawn.line == currentLine,
+                   abs(drawn.rect.maxY - y) < 0.5 {
+                    ribbon?.rect.size.height += fragRect.height
+                    self.changeMarkRects.append(
+                        (drawn.change, NSRect(x: Self.dividerReach, y: y,
+                                              width: numbers.end - Self.dividerReach,
+                                              height: fragRect.height)))
+                }
+                return
+            }
             // Markdown fence and table-separator source lines are collapsed to
             // layout control rows. Drawing their numbers into a 1pt fragment
             // stacked labels on top of the adjacent real lines.
@@ -365,6 +406,7 @@ final class LineNumberRulerView: NSRulerView {
             // Folded glyphs may skip many hard lines, so incrementing a visual
             // counter would incorrectly renumber the source after a fold.
             let lineNo = index.line(at: fragChar.location)
+            currentLine = lineNo
             let y = fragRect.minY + inset - visibleRect.minY
             // A diff buffer numbers its lines as they sit in the file, and
             // leaves the headers between hunks blank.
@@ -398,21 +440,29 @@ final class LineNumberRulerView: NSRulerView {
             // The change ribbon runs along the outer edge of the gutter. It used
             // to sit against the code, where it shared a column with the fold
             // arrow and stole its clicks on any line that had changed.
-            if let change = GitLineChanges.change(at: lineNo, in: self.gitChanges) {
+            let change = GitLineChanges.change(at: lineNo, in: self.gitChanges)
+            if let change {
                 let width = self.markWidth(for: change)
                 let markRect = NSRect(x: Self.dividerReach, y: y,
                                       width: width, height: fragRect.height)
-                change.colour.setFill()
                 if change.kind == .deleted {
+                    flushRibbon()
                     // Nothing occupies the line any more, so mark the seam
                     // rather than the whole row.
                     let seam = NSRect(x: markRect.minX, y: markRect.minY,
                                       width: markRect.width, height: 3)
+                    change.colour.setFill()
                     NSBezierPath(roundedRect: seam, xRadius: 1.5, yRadius: 1.5).fill()
+                    self.changeMarkBars.append(markRect)
+                } else if let drawn = ribbon, drawn.change.kind == change.kind,
+                          drawn.rect.width == width, abs(drawn.rect.maxY - y) < 0.5 {
+                    ribbon?.rect.size.height += fragRect.height
+                    ribbon?.line = lineNo
+                    ribbon?.change = change
                 } else {
-                    NSBezierPath(roundedRect: markRect, xRadius: 1.5, yRadius: 1.5).fill()
+                    flushRibbon()
+                    ribbon = (markRect, change, lineNo)
                 }
-                self.changeMarkBars.append(markRect)
                 // The ribbon is 3pt wide; the target is the ribbon plus the
                 // number column, which clears the divider handle on one side
                 // and the fold arrow on the other.
@@ -421,6 +471,7 @@ final class LineNumberRulerView: NSRulerView {
                                     width: numbers.end - Self.dividerReach,
                                     height: fragRect.height)))
             }
+            if change == nil { flushRibbon() }
             if let block = foldableByLine[fragChar.location] {
                 let rowRect = NSRect(
                     x: 0, y: y,
@@ -443,6 +494,7 @@ final class LineNumberRulerView: NSRulerView {
                 }
             }
         }
+        flushRibbon()
     }
 
     /// What the last draw put under the caret's line number, so the mark can be

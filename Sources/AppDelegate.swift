@@ -580,15 +580,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Open Recent
 
-    /// A recents menu for the sidebar's R button, built the same way the
-    /// menu-bar one is so the two can never drift apart.
-    func makeRecentProjectsMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.font = Theme.uiFont(11)
-        populateRecents(menu)
-        return menu
-    }
-
     /// Rebuild just before the submenu is shown.
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === recentMenu else { return }

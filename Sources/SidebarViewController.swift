@@ -406,28 +406,47 @@ final class TitleLetterButton: NSButton {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    override var isEnabled: Bool { didSet { needsDisplay = true } }
+    override var isEnabled: Bool {
+        didSet {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let hoverTracking { removeTrackingArea(hoverTracking) }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: .zero, options: PointerCursor.trackingOptions,
+                                  owner: self, userInfo: nil)
         addTrackingArea(area)
         hoverTracking = area
     }
+
+    var trackingOptionsForTesting: NSTrackingArea.Options? { hoverTracking?.options }
 
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
         isHovered = true
         needsDisplay = true
+        PointerCursor.enter()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if isEnabled { PointerCursor.enter() }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if isEnabled { PointerCursor.enter() } else { NSCursor.arrow.set() }
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         needsDisplay = true
+        PointerCursor.leave(self, event: event)
+    }
+
+    override func resetCursorRects() {
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
 
     override func draw(_ dirtyRect: NSRect) {

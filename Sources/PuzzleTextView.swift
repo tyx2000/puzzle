@@ -649,7 +649,61 @@ final class PuzzleTextView: NSTextView {
         super.drawBackground(in: rect)
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
+        drawMarkdownInlineCode(in: rect)
         drawCurrentLineBand()
+    }
+
+    /// A code span's box: as tall as the code's own type rather than its line
+    /// — a heading's line has the room above it, and a background attribute
+    /// filled that too — and only around what is drawn: the backtick of a span
+    /// opening a line is laid out, hidden, with the line above, and its
+    /// background ran across the whole of that line.
+    private func drawMarkdownInlineCode(in dirtyRect: NSRect) {
+        guard rendersMarkdown, let layoutManager, let container = textContainer else { return }
+        let origin = textContainerOrigin
+        let visibleGlyphs = layoutManager.glyphRange(
+            forBoundingRect: dirtyRect.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
+        let visible = layoutManager.characterRange(forGlyphRange: visibleGlyphs,
+                                                   actualGlyphRange: nil)
+        Theme.inputBackground.setFill()
+        for box in markdownInlineCodeBoxes(in: visible, font: Theme.editorFont()) {
+            NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3).fill()
+        }
+    }
+
+    private func markdownInlineCodeBoxes(in visible: NSRange, font: NSFont) -> [NSRect] {
+        guard let layoutManager, let container = textContainer else { return [] }
+        let origin = textContainerOrigin
+        let notSelected = NSRange(location: NSNotFound, length: 0)
+        let length = (string as NSString).length
+        var boxes: [NSRect] = []
+        for span in markdownSpans where span.kind == .code && span.content.length > 0
+            && NSIntersectionRange(span.range, visible).length > 0
+            && NSMaxRange(span.content) <= length {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: span.content,
+                                                  actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            layoutManager.enumerateEnclosingRects(
+                forGlyphRange: glyphs, withinSelectedGlyphRange: notSelected, in: container
+            ) { rect, _ in
+                guard rect.width > 0 else { return }
+                let glyph = layoutManager.glyphIndex(for: NSPoint(x: rect.midX, y: rect.midY),
+                                                     in: container)
+                let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
+                                                              effectiveRange: nil)
+                let baseline = fragment.minY + layoutManager.location(forGlyphAt: glyph).y
+                boxes.append(NSRect(x: rect.minX - 2 + origin.x,
+                                    y: baseline - font.ascender - 1 + origin.y,
+                                    width: rect.width + 4,
+                                    height: font.ascender - font.descender + 2))
+            }
+        }
+        return boxes
+    }
+
+    var inlineCodeBoxesForTesting: [NSRect] {
+        markdownInlineCodeBoxes(in: NSRange(location: 0, length: (string as NSString).length),
+                                font: Theme.editorFont())
     }
 
     private func drawMarkdownCodeBlocks(in dirtyRect: NSRect) {
@@ -698,9 +752,10 @@ final class PuzzleTextView: NSTextView {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: Theme.uiFont(9.5), .foregroundColor: Theme.dimText,
         ]
+        let length = (string as NSString).length
         for block in markdownCodeBlocks {
             guard let language = block.language, !language.isEmpty,
-                  block.range.length > 0 else { continue }
+                  block.range.length > 0, NSMaxRange(block.range) <= length else { continue }
             let glyph = layoutManager.glyphIndexForCharacter(
                 at: firstDrawnCharacter(from: block.range.location))
             let line = layoutManager.lineFragmentRect(forGlyphAt: glyph,
@@ -988,8 +1043,11 @@ final class PuzzleTextView: NSTextView {
     private func drawMarkdownRules(in dirtyRect: NSRect) {
         guard !markdownRules.isEmpty, let layoutManager else { return }
         let origin = textContainerOrigin
+        let length = (string as NSString).length
         for rule in markdownRules {
-            guard rule.lineRange.length > 0 else { continue }
+            // Decorations from the document this view held last, if it has
+            // been handed another one since.
+            guard rule.lineRange.length > 0, NSMaxRange(rule.lineRange) <= length else { continue }
             let anchor = NSMaxRange(rule.lineRange) - 1
             let glyph = layoutManager.glyphIndexForCharacter(at: anchor)
             let fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph,
@@ -1699,14 +1757,14 @@ final class PuzzleTextView: NSTextView {
     /// inactive. What that is worth saving is the pane's business.
     var onLostFocus: (() -> Void)?
 
-    /// Widest the text is allowed to get before it stops growing and centres
-    /// instead. `nil` for source, which fills the pane: a line of code means
+    /// The column the text is set in, centred, following the pane's width
+    /// between its narrowest and widest. `nil` for source, which fills the pane: a line of code means
     /// something at column 120, and moving it would misrepresent the file.
     /// Rendered Markdown is prose, and prose read across a full-width window is
     /// hard to track from one line to the next.
-    var readingWidth: CGFloat? {
+    var readingColumn: MarkdownColumn? {
         didSet {
-            guard readingWidth != oldValue else { return }
+            guard readingColumn != oldValue else { return }
             applyReadingInset()
         }
     }
@@ -1735,14 +1793,13 @@ final class PuzzleTextView: NSTextView {
     }
 
     private func applyReadingInset() {
-        guard let readingWidth else {
+        guard let readingColumn else {
             setInset(width: baseHorizontalInset, height: baseVerticalInset + topSlack)
             return
         }
-        // Split the leftover evenly; never narrower than the pane's own margin.
-        // A document also starts a little way down the page rather than
-        // against the tabs.
-        setInset(width: max(baseHorizontalInset, (bounds.width - readingWidth) / 2),
+        // Centred; never narrower than the pane's own margin. A document also
+        // starts a little way down the page rather than against the tabs.
+        setInset(width: readingColumn.inset(forWidth: bounds.width, base: baseHorizontalInset),
                  height: max(baseVerticalInset, Theme.markdownTopInset) + topSlack)
     }
 

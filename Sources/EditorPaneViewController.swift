@@ -1162,7 +1162,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // pane.
             let isMarkdown = doc.languageSpec?.name == "markdown"
             scrollView.rulersVisible = !isMarkdown
-            textView.readingWidth = isMarkdown ? Theme.markdownReadingWidth() : nil
+            textView.readingColumn = isMarkdown ? Theme.markdownColumn() : nil
             showDiffHeader(for: doc.diffLineNumbers.isEmpty ? nil : url)
         }
 

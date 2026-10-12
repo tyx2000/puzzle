@@ -59,6 +59,8 @@ enum RegressionTests {
         try testMarkdownReading()
         try testMarkdownRevealsOnEdit()
         try testMarkdownEditingKeys()
+        try testGutterRibbonRunsUnbroken()
+        try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCommentToggleRules()
@@ -147,6 +149,10 @@ enum RegressionTests {
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
         try testFileOpensRouteToTheirProjectWindow()
+        // Last: once this process has shown a popover, AppKit no longer hands a
+        // key typed into a window that is not key to that window, and the
+        // commit line's ⇧⌘↩ test types into one on purpose.
+        try testRecentProjectsPopover()
         print("Regression tests passed")
     }
 
@@ -717,6 +723,44 @@ enum RegressionTests {
             try expect(claimed?.rect == button.bounds && claimed?.cursor == .pointingHand,
                        "a button does not take the hand under the pointer: "
                          + "\(String(describing: claimed))")
+        }
+        // And set it themselves: the code's I-beam covers them, and the gutter
+        // — which follows the pointer across the code for its fold arrows —
+        // set the I-beam on every move over them.
+        for button in navigator.buttonsForTesting {
+            button.updateTrackingAreas()
+            try expect(button.trackingOptionsForTesting?
+                        .isSuperset(of: [.cursorUpdate, .mouseMoved]) == true,
+                       "a button does not follow the pointer for its cursor")
+            NSCursor.iBeam.set()
+            if let update = NSEvent.enterExitEvent(
+                with: .cursorUpdate, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+                button.cursorUpdate(with: update)
+            }
+            try expect(NSCursor.current == .pointingHand, "a button does not show the hand")
+        }
+        window.setContentSize(NSSize(width: 700, height: 300))
+        window.orderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        if let ruler = pane.lineNumberRulerForTesting,
+           let button = navigator.buttonsForTesting.first {
+            func moved(to point: NSPoint) -> NSEvent? {
+                NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [],
+                                   timestamp: 0, windowNumber: window.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+            }
+            let overButton = button.convert(NSPoint(x: button.bounds.midX,
+                                                    y: button.bounds.midY), to: nil)
+            let code = pane.textViewForTesting
+            let overCode = code.convert(NSPoint(x: code.visibleRect.midX - 100,
+                                                y: code.visibleRect.minY + 20), to: nil)
+            if let overButton = moved(to: overButton), let overCode = moved(to: overCode) {
+                try expect(!ruler.pointerIsOverTextForTesting(overButton)
+                            && ruler.pointerIsOverTextForTesting(overCode),
+                           "the gutter would set the I-beam over the search buttons")
+            }
         }
 
         // A search that finds nothing has nothing for them to do.
@@ -3258,9 +3302,9 @@ enum RegressionTests {
         try expect(document.storage.string == edited,
                    "editing live Markdown no longer preserved its source")
         let codeLocation = (edited as NSString).range(of: "payload").location
-        let codeBackground = document.storage.attribute(.backgroundColor, at: codeLocation,
-                                                        effectiveRange: nil) as? NSColor
-        try expect(sameColor(codeBackground, Theme.inputBackground),
+        let codeColour = document.storage.attribute(.foregroundColor, at: codeLocation,
+                                                    effectiveRange: nil) as? NSColor
+        try expect(sameColor(codeColour, Theme.yellow),
                    "Markdown edit was not formatted on the next run-loop turn")
         try expect(document.markdownCodeBlocks.count == 2
                    && document.markdownCodeBlocks[0].language == "swift",
@@ -3300,7 +3344,8 @@ enum RegressionTests {
         // Prose is set in a column, not across the whole window: Markdown is
         // read, and a full-width measure is hard to track line to line. Code
         // still fills the pane — a line means something at column 120.
-        let measure = Theme.markdownReadingWidth()
+        let column = Theme.markdownColumn()
+        let measure = column.maximum
         let wide = NSWindow(contentRect: NSRect(x: 0, y: 0,
                                                 width: measure + 400, height: 600),
                             styleMask: [.titled], backing: .buffered, defer: false)
@@ -3310,13 +3355,32 @@ enum RegressionTests {
         wide.setContentSize(NSSize(width: measure + 400, height: 600))
         wide.contentView?.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
-        let inset = pane.textInsetForTesting
-        // The column is the measure, whatever is left over is the margin.
+        var inset = pane.textInsetForTesting
+        // At its widest the column stops growing and the margins take the rest.
         try expect(abs((pane.textViewWidthForTesting - inset * 2) - measure) <= 1,
                    "the Markdown column is \(pane.textViewWidthForTesting - inset * 2)pt "
-                    + "wide, not the \(measure)pt measure")
-        try expect(inset > 20,
+                    + "wide, not the \(measure)pt widest")
+        try expect(inset > column.margin,
                    "Markdown is not set in a centred column: \(inset)pt of margin")
+        // Narrower, the column follows the pane between margins of their own.
+        let middling = column.minimum + column.margin * 2 + 120
+        wide.setContentSize(NSSize(width: middling, height: 600))
+        wide.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        inset = pane.textInsetForTesting
+        try expect(abs(inset - column.margin) <= 1,
+                   "between its narrowest and widest the column kept \(inset)pt of margin, "
+                    + "not \(column.margin)pt")
+        // And below its narrowest the margins give way, down to the pane's own.
+        let base: CGFloat = 6
+        try expect(column.inset(forWidth: column.minimum + column.margin, base: base)
+                    == ((column.margin) / 2).rounded(.down),
+                   "a narrow pane kept the full margins and cut the column instead")
+        try expect(column.inset(forWidth: column.minimum - 100, base: base) == base,
+                   "a very narrow pane did not use all of its width")
+        try expect(column.inset(forWidth: column.maximum + column.margin * 2 + 300, base: base)
+                    == ((column.margin * 2 + 300) / 2).rounded(.down),
+                   "a wide pane did not centre the widest column")
         let listing = directory.appendingPathComponent("listing.swift")
         try Data("let value = 1\n".utf8).write(to: listing)
         pane.open(url: listing)
@@ -3605,7 +3669,8 @@ enum RegressionTests {
                    "a heading sits as far from its own text as from the text before it: "
                      + "\(aboveDetail) above, \(belowDetail) below")
 
-        // A column a line can be followed across: about 40 Chinese characters.
+        // A column a line can be followed across: at its widest, about 50
+        // Chinese characters.
         let chineseLine = layout.glyphRange(
             forCharacterRange: NSRange(location: at(chinese), length: 1), actualCharacterRange: nil)
         var chineseFragment = NSRange()
@@ -3613,8 +3678,8 @@ enum RegressionTests {
                                     effectiveRange: &chineseFragment)
         let perLine = layout.characterRange(forGlyphRange: chineseFragment,
                                             actualGlyphRange: nil).length
-        try expect((32...44).contains(perLine),
-                   "a line of Chinese holds \(perLine) characters, not about 40")
+        try expect((44...52).contains(perLine),
+                   "a line of Chinese holds \(perLine) characters, not about 50")
         try expect(text.textContainerInset.height >= Theme.markdownTopInset,
                    "the document starts against the tabs")
 
@@ -4468,6 +4533,270 @@ enum RegressionTests {
                      + "\(onScreen(filler20) - fillerBefore)pt as the source view came on")
         text.toggleMarkdownSource(nil)
         settle()
+    }
+
+    /// The R button's popover lists the recents the way the start page does,
+    /// and does what the start page's list does.
+    private static func testRecentProjectsPopover() throws {
+        let root = try temporaryDirectory("recent-popover")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var projects: [URL] = []
+        for name in ["alpha", "beta", "gamma"] {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            projects.append(url)
+            RecentProjects.shared.add(url)
+        }
+        defer { projects.forEach { RecentProjects.shared.remove($0) } }
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1000, height: 640))
+        workspace.openSelection([projects[0]])
+        workspace.window?.makeKeyAndOrderFront(nil)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        // R opens it, not a menu.
+        let popover = workspace.recentProjectsPopoverForTesting
+        /// Closing animates: give it the moment it takes.
+        func settled() { RunLoop.main.run(until: Date().addingTimeInterval(0.4)) }
+        workspace.showRecentProjectsForTesting()
+        try expect(popover.isShown, "the R button did not open the recents popover")
+        let list = popover.listForTesting
+        let listed = RecentProjects.shared.urls.prefix(RecentProjects.displayLimit)
+        try expect(list.arrangedSubviews.count == listed.count,
+                   "the popover lists \(list.arrangedSubviews.count) projects, not "
+                     + "\(listed.count)")
+        try expect(!list.pathWidthsForTesting().contains(0),
+                   "a row shows its name without its path")
+        var opened: [[URL]] = []
+        popover.onOpen = { opened.append($0) }
+
+        // A click ticks; Open Checked has something to do only then, and opens
+        // the ticked ones in the order they are listed.
+        let rows = Array(listed)
+        guard let alpha = rows.firstIndex(of: projects[0]),
+              let gamma = rows.firstIndex(of: projects[2]) else {
+            throw Failure(description: "the fixture projects are not listed")
+        }
+        try expect(!popover.openCheckedEnabledForTesting, "Open Checked is offered unticked")
+        list.toggleCheckForTesting(at: max(alpha, gamma))
+        list.toggleCheckForTesting(at: min(alpha, gamma))
+        try expect(popover.openCheckedEnabledForTesting,
+                   "Open Checked stayed unavailable with projects ticked")
+        popover.openCheckedForTesting()
+        settled()
+        try expect(opened.last == [rows[min(alpha, gamma)], rows[max(alpha, gamma)]],
+                   "Open Checked did not open the ticked projects in listed order: \(opened)")
+        try expect(!popover.isShown, "opening the ticked projects left the popover up")
+
+        // A double click opens the one.
+        workspace.showRecentProjectsForTesting()
+        try expect(popover.isShown, "the popover did not open again")
+        list.openRowForTesting(gamma)
+        settled()
+        try expect(opened.last == [projects[2]] && !popover.isShown,
+                   "a double click did not open its project and close the popover")
+
+        // The cross takes one off the list, and the list follows.
+        workspace.showRecentProjectsForTesting()
+        let before = list.arrangedSubviews.count
+        let beta = list.arrangedSubviews.indices.first {
+            Array(RecentProjects.shared.urls.prefix(RecentProjects.displayLimit))[$0] == projects[1]
+        }
+        list.removeRowForTesting(beta ?? 0)
+        try expect(!RecentProjects.shared.urls.contains(projects[1])
+                    && list.arrangedSubviews.count == before - 1,
+                   "removing a row did not take it off the list")
+
+        // Open Checked alone, in the bottom right corner.
+        if let content = popover.contentForTesting {
+            let frame = popover.openCheckedFrameForTesting
+            let bottom = content.isFlipped ? content.bounds.maxY - frame.maxY : frame.minY
+            try expect(abs(content.bounds.maxX - frame.maxX - RecentProjectsPopover.padding) <= 1
+                        && abs(bottom - RecentProjectsPopover.padding) <= 1,
+                       "Open Checked is not in the bottom right corner: \(frame) in "
+                         + "\(content.bounds)")
+        }
+
+        // Esc closes it, and goes no further; other keys pass.
+        try expect(popover.pressKeyForTesting(code: 0, characters: "a"),
+                   "the popover swallowed a key that was not Esc")
+        let escapePassed = popover.pressKeyForTesting(code: 53, characters: "\u{1b}")
+        settled()
+        try expect(!escapePassed && !popover.isShown, "Esc did not close the popover")
+        // A click outside closes it: AppKit's transient behaviour.
+        workspace.showRecentProjectsForTesting()
+        try expect(popover.behaviorForTesting == .transient,
+                   "a click outside the popover would not close it")
+        // R again closes it rather than opening it once more.
+        workspace.showRecentProjectsForTesting()
+        settled()
+        try expect(!popover.isShown, "R did not close the popover it had opened")
+
+        // The title band's letters take the hand, which they set themselves:
+        // they had no cursor of their own and kept the code's I-beam.
+        for button in workspace.sidebar.titleButtonsForTesting where button.isEnabled {
+            button.updateTrackingAreas()
+            try expect(button.trackingOptionsForTesting?
+                        .isSuperset(of: [.cursorUpdate, .mouseMoved]) == true,
+                       "\(button.letterForTesting) does not follow the pointer for its cursor")
+            NSCursor.iBeam.set()
+            if let update = NSEvent.enterExitEvent(
+                with: .cursorUpdate, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+                button.cursorUpdate(with: update)
+            }
+            try expect(NSCursor.current == .pointingHand,
+                       "\(button.letterForTesting) does not show the hand")
+        }
+    }
+
+    /// Changed lines next to each other, of one kind, are one ribbon in the
+    /// gutter, and a wrapped line's runs down all of its rows.
+    private static func testGutterRibbonRunsUnbroken() throws {
+        let directory = try temporaryDirectory("gutter-ribbon")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("sample.swift")
+        let long = "let long = \"" + String(repeating: "wrap me ", count: 40) + "\""
+        try Data("one\ntwo\nthree\nfour\n\(long)\nsix\nseven\n".utf8).write(to: file)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        pane.open(url: file)
+        window.setContentSize(NSSize(width: 600, height: 400))
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        guard let ruler = pane.lineNumberRulerForTesting,
+              let layout = pane.textViewForTesting.layoutManager else {
+            throw Failure(description: "the editor has no gutter")
+        }
+        func change(_ kind: GitLineChanges.Change.Kind, _ lines: ClosedRange<Int>)
+            -> GitLineChanges.Change {
+            GitLineChanges.Change(kind: kind, lines: lines, removed: [], added: [])
+        }
+        // Two modifications and the wrapped line after them, then an addition.
+        ruler.gitChanges = [change(.modified, 2...2), change(.modified, 3...3),
+                            change(.modified, 4...5), change(.added, 6...7)]
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        let bars = ruler.changeMarkBarsForTesting
+        let text = pane.textViewForTesting.string as NSString
+        func row(_ needle: String) -> NSRect {
+            layout.lineFragmentRect(
+                forGlyphAt: layout.glyphIndexForCharacter(at: text.range(of: needle).location),
+                effectiveRange: nil)
+        }
+        let longEnd = layout.lineFragmentRect(
+            forGlyphAt: layout.glyphIndexForCharacter(
+                at: NSMaxRange(text.range(of: long)) - 1), effectiveRange: nil)
+        try expect(longEnd.minY > row("let long").minY,
+                   "the long line did not wrap, so the test proves nothing")
+        try expect(bars.count == 2,
+                   "the ribbon is drawn in \(bars.count) pieces, not one per run: \(bars)")
+        if bars.count == 2 {
+            try expect(abs(bars[0].height - (longEnd.maxY - row("two").minY)) < 0.5,
+                       "the modified run is not one ribbon down to the wrapped line's last "
+                         + "row: \(bars[0].height)pt")
+            try expect(abs(bars[1].height - (row("seven").maxY - row("six").minY)) < 0.5,
+                       "the added run is not one ribbon: \(bars[1].height)pt")
+        }
+    }
+
+    /// A code span's box is as tall as the code, wherever it is — a heading's
+    /// line has room above it, and the box filled that — and nothing outside
+    /// the spans is boxed: the hidden backtick of a heading's opening span is
+    /// laid out with the blank line above, and its box ran across that line.
+    private static func testMarkdownInlineCodeBoxes() throws {
+        let directory = try temporaryDirectory("markdown-code-boxes")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("go.md")
+        let source = """
+        Intro with `inline` code.
+
+        ## 3. `var` vs 4. `const` vs `:=`
+
+        ### `var` — 声明变量
+
+        Text after.
+
+        """
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        pane.open(url: url)
+        window.setContentSize(NSSize(width: 900, height: 400))
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer, let storage = text.textStorage else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        layout.ensureLayout(for: container)
+        let current = text.string as NSString
+        try expect(storage.attribute(.backgroundColor, at: current.range(of: "const").location,
+                                     effectiveRange: nil) == nil,
+                   "code still carries a background attribute, which TextKit fills line-high")
+        let boxes = text.inlineCodeBoxesForTesting
+        let code = Theme.editorFont()
+        try expect(boxes.count == 5, "\(boxes.count) code boxes for 5 code spans: \(boxes)")
+        try expect(boxes.allSatisfy { abs($0.height - (code.ascender - code.descender + 2)) < 0.5 },
+                   "a code box is not the height of the code: \(boxes.map(\.height))")
+        let heading = layout.markdownTextBox(
+            forGlyphAt: layout.glyphIndexForCharacter(at: current.range(of: "vs 4").location))
+        if let heading {
+            let origin = text.textContainerOrigin
+            try expect(boxes.filter { abs($0.midY - (heading.text.midY + origin.y)) < 12 }
+                        .allSatisfy { $0.minY >= heading.text.minY + origin.y },
+                       "a heading's code box reaches into the room above the heading")
+        }
+        // And the box is drawn: its padding, left of the code, is not the page.
+        if let first = boxes.first {
+            // From the empty margin to the box, along the middle of the box.
+            let along = NSRect(x: 0, y: first.midY - 1, width: first.minX + 3, height: 2)
+            if let sample = text.bitmapImageRepForCachingDisplay(in: along) {
+                text.cacheDisplay(in: along, to: sample)
+                let scale = CGFloat(sample.pixelsWide) / along.width
+                let page = sample.colorAt(x: Int(2 * scale), y: 0)
+                let padding = sample.colorAt(x: sample.pixelsWide - Int(1.5 * scale), y: 0)
+                try expect(page != nil && padding != nil && page != padding,
+                           "the code box is not drawn behind the code")
+            }
+        }
+        // The blank line above `### \`var\``: nothing drawn on it at all.
+        let blank = current.range(of: "\n\n### ").location + 1
+        let row = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: blank),
+                                          effectiveRange: nil)
+            .offsetBy(dx: 0, dy: text.textContainerOrigin.y)
+        let strip = NSRect(x: 0, y: row.minY + 1, width: text.bounds.width,
+                           height: max(1, row.height - 2))
+        guard let pixels = text.bitmapImageRepForCachingDisplay(in: strip) else {
+            throw Failure(description: "the blank line could not be drawn")
+        }
+        text.cacheDisplay(in: strip, to: pixels)
+        let background = pixels.colorAt(x: 1, y: 1)
+        var painted = 0
+        for y in 0..<pixels.pixelsHigh {
+            for x in 0..<pixels.pixelsWide where pixels.colorAt(x: x, y: y) != background {
+                painted += 1
+            }
+        }
+        try expect(painted == 0,
+                   "the blank line above a heading opening with code is painted: \(painted)px")
     }
 
     private static func testFindMatchesAreComplete() throws {

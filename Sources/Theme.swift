@@ -210,11 +210,15 @@ enum Theme {
         (markdownFontSize() * 0.75).rounded()
     }
 
-    /// The column prose is set in: 40 of the type's em. That is about 40
-    /// Chinese characters a line, and 70 to 80 Latin ones — the range a reader
-    /// can carry from the end of one line to the start of the next.
-    static func markdownReadingWidth() -> CGFloat {
-        (markdownFontSize() * 40).rounded()
+    /// The column prose is set in, which follows the pane: as wide as the pane
+    /// leaves between margins of 3 em, up to 50 em — about 50 Chinese
+    /// characters a line, 90 or so Latin ones, and room for a line of code —
+    /// and down to 30, the margins giving way before the column does. A fixed
+    /// 40 em left a wide pane mostly empty and squeezed the code blocks.
+    static func markdownColumn() -> MarkdownColumn {
+        let size = markdownFontSize()
+        return MarkdownColumn(minimum: (size * 30).rounded(), maximum: (size * 50).rounded(),
+                              margin: (size * 3).rounded())
     }
 
     /// Heading sizes, as multiples of the prose size, H1 to H6. Far enough
@@ -388,5 +392,20 @@ extension NSView {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
+    }
+}
+
+/// A column of rendered prose, centred in a pane of any width.
+struct MarkdownColumn: Equatable {
+    let minimum: CGFloat
+    let maximum: CGFloat
+    /// Either side of the column while the pane has room for it.
+    let margin: CGFloat
+
+    /// How far in from each side the column starts in a pane `width` wide,
+    /// never less than `base`, the pane's own margin.
+    func inset(forWidth width: CGFloat, base: CGFloat) -> CGFloat {
+        let column = min(maximum, max(width - margin * 2, min(minimum, width - base * 2)))
+        return max(base, ((width - column) / 2).rounded(.down))
     }
 }
