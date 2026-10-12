@@ -153,7 +153,10 @@ final class PuzzleTextView: NSTextView {
     /// most 320pt tall, so a larger frame would only be thrown away by `draw`.
     private static let markdownImagePixels = 1600
     private static let markdownImageByteBudget = 48 * 1024 * 1024
+    /// The line being edited, whose source shows.
     private var markdownActiveSourceRange: NSRange?
+    /// A block's lead the caret is inside, shown in the text itself.
+    private var markdownRevealedLead: NSRange?
     private var measuredMarkdownTableWidth: CGFloat = -1
 
     func updateMarkdownDecorations(codeBlocks: [MarkdownCodeBlockDecoration],
@@ -163,7 +166,8 @@ final class PuzzleTextView: NSTextView {
                                    rules: [MarkdownRuleDecoration] = [],
                                    images: [MarkdownImageDecoration] = [],
                                    links: [MarkdownLinkDecoration] = [],
-                                   activeSourceRange: NSRange?) {
+                                   activeSourceRange: NSRange?,
+                                   revealedLead: NSRange? = nil) {
         if links != markdownLinks {
             markdownLinks = links
             hideLinkPopover()
@@ -173,7 +177,8 @@ final class PuzzleTextView: NSTextView {
                 || lineMarkers != markdownLineMarkers
                 || rules != markdownRules
                 || images != markdownImages
-                || activeSourceRange != markdownActiveSourceRange else { return }
+                || activeSourceRange != markdownActiveSourceRange
+                || revealedLead != markdownRevealedLead else { return }
         markdownCodeBlocks = codeBlocks
         markdownTables = tables
         markdownTasks = tasks
@@ -183,6 +188,7 @@ final class PuzzleTextView: NSTextView {
         let retainedURLs = Set(images.compactMap(\.url))
         markdownImageCache = markdownImageCache.filter { retainedURLs.contains($0.key) }
         markdownActiveSourceRange = activeSourceRange
+        markdownRevealedLead = revealedLead
         measuredMarkdownTableWidth = -1
         updateMarkdownTableRowMetrics()
         needsDisplay = true
@@ -232,7 +238,7 @@ final class PuzzleTextView: NSTextView {
         for image in markdownImages {
             metrics.append(MarkdownTableRowMetric(
                 range: image.lineRange,
-                height: markdownImageHeight(image)))
+                height: markdownImageHeight(image), isImage: true))
         }
         foldingManager?.updateMarkdownTableRowMetrics(metrics)
         needsDisplay = true
@@ -459,8 +465,14 @@ final class PuzzleTextView: NSTextView {
         drawSearchUnderlines()
         drawMarkdownTables(in: dirtyRect)
         drawMarkdownImages(in: dirtyRect)
+        // Markers hang in the margin, left of the text container — and AppKit
+        // leaves the clip at the container once it has drawn the text, which
+        // cut a heading's `##` off entirely and a task's `-` off its `[ ]`.
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: NSIntersectionRect(dirtyRect, bounds)).setClip()
         drawMarkdownLineMarkers(in: dirtyRect)
         drawMarkdownTasks(in: dirtyRect)
+        NSGraphicsContext.restoreGraphicsState()
         drawMarkdownRules(in: dirtyRect)
         drawMarkdownCodeLabels(in: dirtyRect)
         drawCommandHoverUnderline()
@@ -814,21 +826,72 @@ final class PuzzleTextView: NSTextView {
         return text.offsetBy(dx: origin.x, dy: origin.y)
     }
 
+    /// How a block's lead is shown: as its rendered marker, as its own source
+    /// in the margin while the line is edited, or not at all once the caret
+    /// is inside it and the source is in the text.
+    private enum LeadDisplay { case rendered, source, inText }
+
+    private func leadDisplay(for range: NSRange) -> LeadDisplay {
+        if let lead = markdownRevealedLead, NSIntersectionRange(lead, range).length > 0 {
+            return .inText
+        }
+        if let active = markdownActiveSourceRange,
+           NSIntersectionRange(active, range).length > 0 {
+            return .source
+        }
+        return .rendered
+    }
+
+    /// A lead's own characters, as the margin shows them while it is edited.
+    private func leadSource(_ range: NSRange) -> String {
+        let source = string as NSString
+        let clamped = NSIntersectionRange(range, NSRange(location: 0, length: source.length))
+        return source.substring(with: clamped).trimmingCharacters(in: .whitespaces)
+    }
+
+    private var leadSourceAttributes: [NSAttributedString.Key: Any] {
+        [.font: Theme.markdownFont(), .foregroundColor: Theme.dimText.withAlphaComponent(0.8)]
+    }
+
+    /// Right-aligned against the text, in the margin before it, centred on
+    /// the line: where every marker is drawn.
+    @discardableResult
+    private func drawMarginLabel(_ label: String, attributes: [NSAttributedString.Key: Any],
+                                 indent: CGFloat, line: NSRect, in dirtyRect: NSRect) -> NSRect? {
+        let size = (label as NSString).size(withAttributes: attributes)
+        let rect = NSRect(x: textContainerOrigin.x + indent - markerGap - size.width,
+                          y: line.midY - size.height / 2,
+                          width: size.width, height: size.height)
+        guard rect.intersects(dirtyRect) else { return rect }
+        (label as NSString).draw(in: rect, withAttributes: attributes)
+        return rect
+    }
+
     private func drawMarkdownTasks(in dirtyRect: NSRect) {
         guard !markdownTasks.isEmpty else { return }
         let origin = textContainerOrigin
         for task in markdownTasks {
-            if let active = markdownActiveSourceRange,
-               NSIntersectionRange(active, task.sourceRange).length > 0 {
-                continue
-            }
             guard task.sourceRange.length > 0,
                   let line = markdownLineBox(at: task.sourceRange.location) else { continue }
+            switch leadDisplay(for: task.sourceRange) {
+            case .inText:
+                continue
+            case .source:
+                markerRectsForTesting[task.sourceRange.location] = drawMarginLabel(
+                    leadSource(task.sourceRange), attributes: leadSourceAttributes,
+                    indent: task.indent, line: line, in: dirtyRect)
+                markerLabelsForTesting[task.sourceRange.location] = leadSource(task.sourceRange)
+                continue
+            case .rendered:
+                break
+            }
             // The box hangs in the margin, as a bullet does, the text after it.
             let side = min(14, max(10, line.height - 8))
             let box = NSRect(x: origin.x + task.indent - markerGap - side,
                              y: line.midY - side / 2,
                              width: side, height: side)
+            markerRectsForTesting[task.sourceRange.location] = box
+            markerLabelsForTesting[task.sourceRange.location] = task.checked ? "☑" : "☐"
             guard box.intersects(dirtyRect) else { continue }
             let outline = NSBezierPath(roundedRect: box, xRadius: 2.5, yRadius: 2.5)
             if task.checked {
@@ -851,7 +914,6 @@ final class PuzzleTextView: NSTextView {
                 outline.lineWidth = 1.2
                 outline.stroke()
             }
-            markerRectsForTesting[task.sourceRange.location] = box
         }
     }
 
@@ -884,35 +946,41 @@ final class PuzzleTextView: NSTextView {
                 Theme.dimText.withAlphaComponent(0.45).setFill()
                 bar.fill()
                 markerRectsForTesting[marker.sourceRange.location] = bar
-            case .bullet, .footnote:
-                if let active = markdownActiveSourceRange,
-                   NSIntersectionRange(active, marker.sourceRange).length > 0 { continue }
+            case .bullet, .footnote, .heading:
                 guard let line = markdownLineBox(at: marker.sourceRange.location) else {
                     continue
                 }
+                let display = leadDisplay(for: marker.sourceRange)
                 let label: String
-                if case .footnote(let identifier) = marker.kind {
+                var attributes = labelAttributes
+                switch (display, marker.kind) {
+                case (.inText, _):
+                    continue
+                case (.source, _):
+                    label = leadSource(marker.sourceRange)
+                    attributes = leadSourceAttributes
+                case (.rendered, .footnote(let identifier)):
                     label = "\(identifier)."
-                } else if case .bullet(let text) = marker.kind {
+                case (.rendered, .bullet(let text)):
                     label = text
-                } else {
+                default:
+                    // A heading draws nothing of its marker until it is edited.
                     continue
                 }
                 // Right-aligned against the text, so a column of numbers lines
                 // up on its full stops and every item's text starts together.
-                let size = (label as NSString).size(withAttributes: labelAttributes)
-                let rect = NSRect(x: origin.x + marker.indent - markerGap - size.width,
-                                  y: line.midY - size.height / 2,
-                                  width: size.width, height: size.height)
-                guard rect.intersects(dirtyRect) else { continue }
-                (label as NSString).draw(in: rect, withAttributes: labelAttributes)
-                markerRectsForTesting[marker.sourceRange.location] = rect
+                markerRectsForTesting[marker.sourceRange.location] = drawMarginLabel(
+                    label, attributes: attributes, indent: marker.indent,
+                    line: line, in: dirtyRect)
+                markerLabelsForTesting[marker.sourceRange.location] = label
             }
         }
     }
 
-    /// Where each marker was last drawn, by the location of its source.
+    /// Where each marker was last drawn, by the location of its source, and
+    /// what it said.
     private(set) var markerRectsForTesting: [Int: NSRect] = [:]
+    private(set) var markerLabelsForTesting: [Int: String] = [:]
     /// Where each code block's box was last drawn, by where its code starts.
     private(set) var codeBoxRectsForTesting: [Int: NSRect] = [:]
 

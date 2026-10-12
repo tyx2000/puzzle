@@ -57,6 +57,7 @@ enum RegressionTests {
         try testEPUBReading()
         try testMarkdownLiveEditing()
         try testMarkdownReading()
+        try testMarkdownRevealsOnEdit()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
         try testCommentToggleRules()
@@ -3179,6 +3180,7 @@ enum RegressionTests {
                    "Markdown source marker did not visually recede")
         let markdownLayout = FoldingLayoutManager()
         markdownLayout.updateMarkdownSyntaxRanges(document.markdownSyntaxRanges,
+                                                   leads: document.markdownLeadRanges,
                                                    replacements: document.markdownGlyphReplacements,
                                                    revealing: nil)
         let linkDestination = (initial as NSString).range(of: "https://example.com").location
@@ -3188,9 +3190,17 @@ enum RegressionTests {
                    "opening Markdown did not collapse source syntax into rendered text")
         let headingLine = (initial as NSString).lineRange(
             for: NSRange(location: headingLocation, length: 0))
+        // Editing the line shows its inline syntax; the `#` before it stays in
+        // the margin until the caret is inside it.
         markdownLayout.revealMarkdownSyntax(in: headingLine)
+        try expect(markdownLayout.isCharacterHidden(at: 0),
+                   "editing a heading brought its `#` into the line")
+        guard let headingLead = document.markdownLeadRanges.first(where: {
+            NSLocationInRange(0, $0)
+        }) else { throw Failure(description: "the heading's `#` is not a lead") }
+        markdownLayout.revealMarkdownSyntax(in: headingLine, lead: headingLead)
         try expect(!markdownLayout.isCharacterHidden(at: 0),
-                   "entering a Markdown line did not reveal its editable source markers")
+                   "the caret inside a heading's `#` did not show it")
 
         let edited = """
         ## Live heading
@@ -3268,8 +3278,10 @@ enum RegressionTests {
                    && document.markdownTasks[1].checked
                    && pane.markdownTaskCountForTesting == 2,
                    "Markdown task-list markers were not published as checkboxes")
-        try expect(document.markdownLineMarkers.count == 4,
-                   "blockquote, list and footnote markers were not rendered: "
+        // Each heading carries one too: its `#`s, drawn while it is edited.
+        try expect(document.markdownLineMarkers.filter { $0.kind != .heading }.count == 4
+                    && document.markdownLineMarkers.contains { $0.kind == .heading },
+                   "blockquote, list, footnote and heading markers were not rendered: "
                     + "\(document.markdownLineMarkers.map { ($0.kind, $0.sourceRange) })")
         try expect(document.markdownRules.count == 1,
                    "thematic break was not published as a rendered rule")
@@ -3371,6 +3383,7 @@ enum RegressionTests {
             activeSourceRange: nil)
         tableLayout.updateMarkdownSyntaxRanges(
             document.markdownSyntaxRanges,
+            leads: document.markdownLeadRanges,
             collapsedLines: document.markdownCollapsedLineRanges,
             replacements: document.markdownGlyphReplacements,
             revealing: nil)
@@ -3697,6 +3710,254 @@ enum RegressionTests {
                    "the caret in a heading is \(headingCaret), not the heading's line")
         try expect(caret(at: at("echo ok")).height == Theme.lineMetrics().target,
                    "the caret in code is not a code row")
+    }
+
+    /// Clicking into rendered Markdown moves nothing: a click places the
+    /// caret, and only editing a line shows its source — inline syntax in the
+    /// text, a block's lead in the margin — with the caret's line held in
+    /// place on screen as lines show and hide their source.
+    private static func testMarkdownRevealsOnEdit() throws {
+        let directory = try temporaryDirectory("markdown-reveal")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("notes.md")
+        let longLink = "https://example.com/" + String(repeating: "segment/", count: 24)
+        let filler = (1...40).map { "Filler line \($0)." }.joined(separator: "\n\n")
+        let source = """
+        # Title
+
+        A paragraph with **bold words** and a [link](\(longLink)) in it.
+
+        ## Section heading
+
+        - a list item
+        - [ ] a task item
+
+        > a quoted line
+
+        | Name | Value |
+        | --- | --- |
+        | alpha | 1 |
+
+        ```bash
+        echo hello
+        ```
+
+        ![picture](missing.png)
+
+        \(filler)
+
+        Target line.
+
+        \(filler)
+
+        Deep paragraph with a [deep link](\(longLink)) in it.
+
+        Line under the deep paragraph.
+
+        \(filler)
+
+        """
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 420))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.document(for: url).isModified = false
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.repositoryRoot = directory
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            layout.ensureLayout(for: container)
+        }
+        var current: NSString { text.string as NSString }
+        func at(_ needle: String) -> Int { current.range(of: needle).location }
+        func hidden(_ needle: String) -> Bool { layout.isCharacterHidden(at: at(needle)) }
+        func top(_ location: Int) -> CGFloat {
+            layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
+                                    effectiveRange: nil).minY
+        }
+        func textX(_ location: Int) -> CGFloat {
+            let glyph = layout.glyphIndexForCharacter(at: location)
+            return layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minX
+                + layout.location(forGlyphAt: glyph).x
+        }
+        /// Where every line's text starts, top to bottom: what a click must
+        /// leave alone.
+        func layoutSnapshot() -> [CGFloat] {
+            settle()
+            var lines: [CGFloat] = []
+            var location = 0
+            while location < current.length {
+                let line = current.lineRange(for: NSRange(location: location, length: 0))
+                lines.append(top(line.location))
+                location = NSMaxRange(line)
+            }
+            return lines
+        }
+
+        // Opening a file shows no source, though the caret starts inside the
+        // first heading's `#`.
+        settle()
+        try expect(text.selectedRange().location == 0 && hidden("# Title"),
+                   "opening the file showed the first heading's `#`")
+
+        // Clicking anywhere in the text moves nothing.
+        let rendered = layoutSnapshot()
+        for target in ["bold words", "link", "Section heading", "a list item", "a task item",
+                       "a quoted line", "alpha", "echo hello", "![picture]"] {
+            pane.clickForTesting(at: at(target) + 1)
+            try expect(layoutSnapshot() == rendered,
+                       "clicking \"\(target)\" moved the text")
+            try expect(hidden("**bold") && hidden("](https") && hidden("# Title"),
+                       "clicking \"\(target)\" showed source")
+        }
+        // A click lands at the text, never inside a hidden lead.
+        let headingStart = at("Section heading")
+        let headingLine = layout.lineFragmentRect(
+            forGlyphAt: layout.glyphIndexForCharacter(at: headingStart), effectiveRange: nil)
+        let origin = text.textContainerOrigin
+        try expect(text.characterIndexForInsertion(
+                    at: NSPoint(x: origin.x + 2, y: headingLine.midY + origin.y)) == headingStart,
+                   "a click in the margin of a heading landed inside its hidden `##`")
+
+        // Editing a line shows its inline syntax — and only that line's.
+        pane.clickForTesting(at: at("bold words") + 10)
+        pane.insertTextForTesting("!")
+        settle()
+        try expect(!hidden("**bold") && !hidden("](https"),
+                   "editing a line did not show its inline syntax")
+        try expect(hidden("# Title") && hidden("## Section") && hidden("- a list"),
+                   "editing one line showed other lines' source")
+        // Clicking away hides it again; clicking back is still only a click.
+        pane.clickForTesting(at: at("a quoted line") + 2)
+        settle()
+        try expect(hidden("**bold") && hidden("](https"),
+                   "the line clicked away from kept showing its source")
+        pane.clickForTesting(at: at("bold words") + 2)
+        settle()
+        try expect(hidden("**bold") && hidden("](https"),
+                   "a click back onto a line edited earlier showed its source again")
+
+        // Editing a list item leaves its marker in the margin, as source.
+        let itemX = textX(at("a list item"))
+        pane.clickForTesting(at: at("a list item") + 11)
+        pane.insertTextForTesting("!")
+        settle()
+        text.display()
+        try expect(hidden("**bold") && hidden("](https"),
+                   "the line left behind kept showing its source")
+        try expect(hidden("- a list") && abs(textX(at("a list item")) - itemX) < 0.5,
+                   "editing a list item moved its text: the marker came into the line")
+        try expect(text.markerLabelsForTesting[at("- a list")] == "-",
+                   "the edited item's marker is not shown as its source in the margin: "
+                     + "\(String(describing: text.markerLabelsForTesting[at("- a list")]))")
+
+        // The same for a heading's `##`.
+        let headingX = textX(at("Section heading"))
+        pane.clickForTesting(at: at("Section heading") + 15)
+        pane.insertTextForTesting("!")
+        settle()
+        text.display()
+        try expect(hidden("## Section") && abs(textX(at("Section heading")) - headingX) < 0.5,
+                   "editing a heading moved its text")
+        try expect(text.markerLabelsForTesting[at("## Section")] == "##",
+                   "the edited heading's `##` is not in the margin")
+        // And it reaches the screen: the margin is outside the text container,
+        // where AppKit's own clip had cut it off.
+        guard let headingMark = text.markerRectsForTesting[at("## Section")],
+              headingMark.maxX <= origin.x,
+              let marginPixels = text.bitmapImageRepForCachingDisplay(in: headingMark) else {
+            throw Failure(description: "the heading's `##` is not drawn in the margin")
+        }
+        text.cacheDisplay(in: headingMark, to: marginPixels)
+        var inked = false
+        for y in 0..<marginPixels.pixelsHigh where !inked {
+            for x in 0..<marginPixels.pixelsWide {
+                if let c = marginPixels.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                   c.redComponent + c.greenComponent + c.blueComponent > 0.6 {
+                    inked = true
+                    break
+                }
+            }
+        }
+        try expect(inked, "the heading's `##` was clipped away in the margin")
+        // Inside the lead itself, the lead is in the text, where it can be edited.
+        pane.clickForTesting(at: at("## Section") + 1)
+        settle()
+        try expect(!hidden("## Section"),
+                   "the caret inside a heading's `##` did not show it")
+
+        // A line that draws nothing — a code fence — shows its source when
+        // the caret is on it, on a line its backticks fit in.
+        pane.clickForTesting(at: at("```bash") + 3)
+        settle()
+        let fence = layout.lineFragmentRect(
+            forGlyphAt: layout.glyphIndexForCharacter(at: at("```bash") + 3), effectiveRange: nil)
+        try expect(!hidden("```bash") && fence.height >= Theme.markdownLineHeight(),
+                   "the caret on a fence did not show it on a line of its own: \(fence.height)pt")
+        // And a picture after a blank line takes its height once: the blank
+        // line above it keeps a blank line's.
+        try expect(layout.lineFragmentRect(
+                    forGlyphAt: layout.glyphIndexForCharacter(at: at("![picture]") - 1),
+                    effectiveRange: nil).height == Theme.markdownBlankLineHeight(),
+                   "the blank line above a picture took the picture's height as well")
+
+        // The caret's line stays where it is on screen. Edit the paragraph with
+        // the long link, scroll down to a line far below, and click it: the
+        // paragraph above hides its source again and gets shorter, which moved
+        // the clicked line from under the pointer.
+        pane.clickForTesting(at: at("bold words") + 10)
+        pane.insertTextForTesting("?")
+        settle()
+        try expect(!hidden("](https"), "the paragraph's source did not show for the test")
+        let target = at("Target line.")
+        text.scrollRangeToVisible(NSRange(location: target, length: 1))
+        settle()
+        let clip = pane.scrollViewForTesting.contentView
+        let onScreenBefore = top(target) + origin.y - clip.bounds.minY
+        pane.clickForTesting(at: target + 2)
+        settle()
+        let onScreenAfter = top(target) + origin.y - clip.bounds.minY
+        try expect(hidden("](https"), "the paragraph left behind kept its source")
+        try expect(abs(onScreenAfter - onScreenBefore) < 0.5,
+                   "the clicked line moved on screen by \(onScreenAfter - onScreenBefore)pt "
+                     + "as the paragraph above it hid its source")
+
+        // The same with the paragraph still on screen above the line clicked —
+        // AppKit makes up only for what changes above the visible area.
+        pane.clickForTesting(at: at("in it.\n\nLine under") - 1)
+        pane.insertTextForTesting("?")
+        settle()
+        let deepLink = at("deep link](") + 9
+        try expect(!layout.isCharacterHidden(at: deepLink),
+                   "the deep paragraph's source did not show for the test")
+        let under = at("Line under the deep paragraph.")
+        let visible = clip.bounds
+        try expect(top(deepLink) + origin.y > visible.minY
+                    && top(under) + origin.y < visible.maxY - 20,
+                   "the edited paragraph and the line under it are not both on screen")
+        let underBefore = top(under) + origin.y - clip.bounds.minY
+        pane.clickForTesting(at: under + 2)
+        settle()
+        let underAfter = top(under) + origin.y - clip.bounds.minY
+        try expect(layout.isCharacterHidden(at: deepLink),
+                   "the deep paragraph kept its source after the caret left it")
+        try expect(abs(underAfter - underBefore) < 0.5,
+                   "the clicked line moved on screen by \(underAfter - underBefore)pt as the "
+                     + "paragraph just above it, on screen, hid its source")
     }
 
     private static func testFindMatchesAreComplete() throws {

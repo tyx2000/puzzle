@@ -306,12 +306,19 @@ enum CodeBlockAnalyzer {
 struct MarkdownTableRowMetric: Equatable {
     let range: NSRange
     let height: CGFloat
+    /// A picture's line rather than a table row: found by the fragment's
+    /// first drawn character, so the blank line above it — which TextKit lays
+    /// out with the picture's hidden source — keeps its own height.
+    var isImage = false
 }
 
 final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     private var blocks: [CodeBlock] = []
     private(set) var foldedBlockStarts = Set<Int>()
     private var markdownSyntaxRanges: [NSRange] = []
+    private var markdownLeadRanges: [NSRange] = []
+    /// A block's lead shown in the text: only while the caret is inside it.
+    private var revealedLeadRange: NSRange?
     private var markdownCollapsedLineRanges: [NSRange] = []
     private var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
     private var revealedMarkdownRange: NSRange?
@@ -346,8 +353,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
 
     func isCharacterHidden(at location: Int) -> Bool {
         foldedRanges.contains { NSLocationInRange(location, $0) }
-            || (revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
-                && contains(location, in: markdownSyntaxRanges))
+            || isMarkdownSyntaxHidden(at: location)
     }
 
     func isMarkdownControlLineCollapsed(at location: Int) -> Bool {
@@ -356,24 +362,36 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     }
 
     func updateMarkdownSyntaxRanges(_ ranges: [NSRange],
+                                    leads: [NSRange] = [],
                                     collapsedLines: [NSRange] = [],
                                     replacements: [MarkdownGlyphReplacement] = [],
-                                    revealing range: NSRange?) {
+                                    revealing range: NSRange?,
+                                    revealingLead lead: NSRange? = nil) {
         guard ranges != markdownSyntaxRanges
+                || leads != markdownLeadRanges
                 || collapsedLines != markdownCollapsedLineRanges
                 || replacements != markdownGlyphReplacements
-                || range != revealedMarkdownRange else { return }
+                || range != revealedMarkdownRange
+                || lead != revealedLeadRange else { return }
         markdownSyntaxRanges = ranges
+        markdownLeadRanges = leads
         markdownCollapsedLineRanges = collapsedLines
         markdownGlyphReplacements = replacements
         revealedMarkdownRange = range
+        revealedLeadRange = lead
         invalidateHiddenGlyphs()
     }
 
-    func revealMarkdownSyntax(in range: NSRange?) {
-        guard range != revealedMarkdownRange else { return }
+    /// Show the source of `range` — the line being edited, or a line that
+    /// draws nothing otherwise — and of `lead`, a block's lead the caret is
+    /// inside. Answers whether anything changed.
+    @discardableResult
+    func revealMarkdownSyntax(in range: NSRange?, lead: NSRange? = nil) -> Bool {
+        guard range != revealedMarkdownRange || lead != revealedLeadRange else { return false }
         revealedMarkdownRange = range
+        revealedLeadRange = lead
         invalidateHiddenGlyphs()
+        return true
     }
 
     func updateMarkdownTableRowMetrics(_ metrics: [MarkdownTableRowMetric]) {
@@ -457,7 +475,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         forGlyphRange glyphRange: NSRange
     ) -> Int {
         let folded = foldedRanges
-        guard !folded.isEmpty || !markdownSyntaxRanges.isEmpty
+        guard !folded.isEmpty || !markdownSyntaxRanges.isEmpty || !markdownLeadRanges.isEmpty
                 || !markdownGlyphReplacements.isEmpty else { return 0 }
         var modifiedGlyphs = Array(
             UnsafeBufferPointer(start: glyphs, count: glyphRange.length))
@@ -467,9 +485,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         for offset in 0..<glyphRange.length {
             let character = charIndexes[offset]
             let foldedCharacter = folded.contains { NSLocationInRange(character, $0) }
-            let markdownCharacter = revealedMarkdownRange.map {
-                NSLocationInRange(character, $0)
-            } != true && contains(character, in: markdownSyntaxRanges)
+            let markdownCharacter = isMarkdownSyntaxHidden(at: character)
             if foldedCharacter || markdownCharacter {
                 modified[offset].insert(.null)
                 changed = true
@@ -569,8 +585,8 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
             }
             if !isRevealed,
                let metric = markdownTableRowMetrics.first(where: {
-                   NSLocationInRange(representative, $0.range)
-               }) {
+                   !$0.isImage && NSLocationInRange(representative, $0.range)
+               }) ?? markdownImageMetric(forCharacters: characterRange) {
                 // Heights arrive measured, including the deliberate 1pt one
                 // that swallows a rendered table's trailing terminator.
                 let height = metric.height
@@ -628,9 +644,13 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
                 break
             }
         }
-        guard let layout = storage.attribute(.markdownLineLayout, at: representative,
+        guard var layout = storage.attribute(.markdownLineLayout, at: representative,
                                              effectiveRange: nil) as? MarkdownLineLayout
         else { return nil }
+        if let revealed = layout.whenRevealed,
+           revealedMarkdownRange.map({ NSLocationInRange(representative, $0) }) == true {
+            layout = revealed
+        }
         // The room above a line is its first fragment's: the first one that
         // draws anything of the line, whatever hidden characters lead it.
         let lineStart = source.lineRange(
@@ -649,9 +669,14 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     }
 
     /// Hidden as Markdown syntax — the lookup the line sizing can afford for
-    /// every fragment, without the folds `isCharacterHidden` also checks.
+    /// every fragment, without the folds `isCharacterHidden` also checks. A
+    /// block's lead is hidden even on the line being edited; it shows only
+    /// while the caret is inside it.
     private func isMarkdownSyntaxHidden(at location: Int) -> Bool {
-        revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
+        if contains(location, in: markdownLeadRanges) {
+            return revealedLeadRange.map { NSLocationInRange(location, $0) } != true
+        }
+        return revealedMarkdownRange.map { NSLocationInRange(location, $0) } != true
             && contains(location, in: markdownSyntaxRanges)
     }
 
@@ -668,6 +693,26 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
               abs(fragment.height - placed.height) < 0.5 else { return nil }
         return (fragment, NSRect(x: fragment.minX, y: fragment.minY + placed.spaceAbove,
                                  width: fragment.width, height: placed.layout.lineHeight))
+    }
+
+    /// A picture's metric, by the fragment's first drawn character — or by
+    /// its first character when it draws none, as the picture's own line does.
+    private func markdownImageMetric(forCharacters range: NSRange) -> MarkdownTableRowMetric? {
+        guard markdownTableRowMetrics.contains(where: \.isImage),
+              let storage = textStorage, storage.length > 0 else { return nil }
+        let source = storage.string as NSString
+        var drawn = min(range.location, source.length - 1)
+        for index in range.location..<min(NSMaxRange(range), source.length) {
+            let character = source.character(at: index)
+            if character == 0x0A || character == 0x0D { continue }
+            if !isMarkdownSyntaxHidden(at: index) {
+                drawn = index
+                break
+            }
+        }
+        return markdownTableRowMetrics.first {
+            $0.isImage && NSLocationInRange(drawn, $0.range)
+        }
     }
 
     private func firstContentCharacter(in range: NSRange) -> Int {

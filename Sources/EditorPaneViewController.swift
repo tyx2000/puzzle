@@ -632,6 +632,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func setCaretForTesting(_ location: Int) {
         textView.setSelectedRange(NSRange(location: location, length: 0))
     }
+    /// A click at a character: the explicit interaction a mouse-down reports,
+    /// then the caret where the click lands.
+    func clickForTesting(at location: Int) {
+        textView.onExplicitCaretInteraction?()
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+    }
     var textInsetForTesting: CGFloat { textView.textContainerInset.width }
     var textViewWidthForTesting: CGFloat { textView.bounds.width }
     /// Whether a silent write goes through — false when the file changed on
@@ -1059,19 +1065,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.diffLineNumbers = doc.diffLineNumbers
         textView.updateCodeBlocks(doc.codeBlocks, resetFolds: false)
         layoutManager.restoreFoldedBlockIdentities(foldedBlocks[url] ?? [])
-        let markdownReveal = markdownRevealRange(for: doc)
+        let markdownReveal = self.markdownReveal(for: doc)
         layoutManager.updateMarkdownSyntaxRanges(
             doc.markdownSyntaxRanges,
+            leads: doc.markdownLeadRanges,
             collapsedLines: doc.markdownCollapsedLineRanges,
             replacements: doc.markdownGlyphReplacements,
-            revealing: markdownReveal)
+            revealing: markdownReveal.line,
+            revealingLead: markdownReveal.lead)
         textView.updateMarkdownDecorations(
             codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
             tasks: doc.markdownTasks,
             lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
             images: doc.markdownImages,
             links: doc.markdownLinks,
-            activeSourceRange: markdownReveal)
+            activeSourceRange: markdownReveal.line,
+            revealedLead: markdownReveal.lead)
 
         if !doc.isPDF {
             releasePDFPreview()
@@ -1598,15 +1607,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // immediately; the debounced TSX parse publishes current ranges.
         doc.updateJSXTagMatches([])
         HighlightService.shared.scheduleHighlight(doc)
-        let reveal = markdownRevealRange(for: doc)
-        layoutManager.revealMarkdownSyntax(in: reveal)
-        textView.updateMarkdownDecorations(
-            codeBlocks: doc.markdownCodeBlocks, tables: doc.markdownTables,
-            tasks: doc.markdownTasks,
-            lineMarkers: doc.markdownLineMarkers, rules: doc.markdownRules,
-            images: doc.markdownImages,
-            links: doc.markdownLinks,
-            activeSourceRange: reveal)
+        // An edit is what shows a line's source: the line the caret is on now.
+        if doc.languageSpec?.name == "markdown", let url = currentURL {
+            let caret = min(textView.selectedRange().location, doc.storage.length)
+            markdownEditLine = (url, (doc.storage.string as NSString)
+                .lineRange(for: NSRange(location: caret, length: 0)).location)
+        }
+        applyMarkdownReveal(for: doc)
         textView.refreshBracketMatches()
         scheduleGitLineChanges()
         scheduleIdleSave(for: doc)
@@ -1643,17 +1650,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.refreshBracketMatches()
         if let url = currentURL { selections[url] = textView.selectedRange() }
         if let document = currentDocument {
-            let reveal = markdownRevealRange(for: document)
-            layoutManager.revealMarkdownSyntax(in: reveal)
-            textView.updateMarkdownDecorations(
-                codeBlocks: document.markdownCodeBlocks,
-                tables: document.markdownTables,
-                tasks: document.markdownTasks,
-                lineMarkers: document.markdownLineMarkers,
-                rules: document.markdownRules,
-                images: document.markdownImages,
-                links: document.markdownLinks,
-                activeSourceRange: reveal)
+            // Leaving the line being edited ends its editing: it goes back to
+            // being read.
+            if let editing = markdownEditLine {
+                let caret = min(textView.selectedRange().location, document.storage.length)
+                let line = (document.storage.string as NSString)
+                    .lineRange(for: NSRange(location: caret, length: 0))
+                if editing.url != currentURL || editing.start != line.location {
+                    markdownEditLine = nil
+                }
+            }
+            applyMarkdownReveal(for: document)
         }
         guard let url = currentURL, lineActivatedURLs.contains(url) else {
             textView.showsCurrentLineBand = false
@@ -1684,19 +1691,24 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               document.url == currentURL else { return }
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
-        let reveal = markdownRevealRange(for: document)
-        layoutManager.updateMarkdownSyntaxRanges(
-            document.markdownSyntaxRanges,
-            collapsedLines: document.markdownCollapsedLineRanges,
-            replacements: document.markdownGlyphReplacements,
-            revealing: reveal)
-        textView.updateMarkdownDecorations(
-            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
-            tasks: document.markdownTasks,
-            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
-            images: document.markdownImages,
-            links: document.markdownLinks,
-            activeSourceRange: reveal)
+        keepingCaretInPlace {
+            let reveal = markdownReveal(for: document)
+            layoutManager.updateMarkdownSyntaxRanges(
+                document.markdownSyntaxRanges,
+                leads: document.markdownLeadRanges,
+                collapsedLines: document.markdownCollapsedLineRanges,
+                replacements: document.markdownGlyphReplacements,
+                revealing: reveal.line,
+                revealingLead: reveal.lead)
+            textView.updateMarkdownDecorations(
+                codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+                tasks: document.markdownTasks,
+                lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+                images: document.markdownImages,
+                links: document.markdownLinks,
+                activeSourceRange: reveal.line,
+                revealedLead: reveal.lead)
+        }
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {
@@ -1719,34 +1731,137 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         clearInlineBlameRequest()
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
-        let reveal = markdownRevealRange(for: document)
-        layoutManager.updateMarkdownSyntaxRanges(
-            document.markdownSyntaxRanges,
-            collapsedLines: document.markdownCollapsedLineRanges,
-            replacements: document.markdownGlyphReplacements,
-            revealing: reveal)
-        textView.updateMarkdownDecorations(
-            codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
-            tasks: document.markdownTasks,
-            lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
-            images: document.markdownImages,
-            links: document.markdownLinks,
-            activeSourceRange: reveal)
+        keepingCaretInPlace {
+            let reveal = markdownReveal(for: document)
+            layoutManager.updateMarkdownSyntaxRanges(
+                document.markdownSyntaxRanges,
+                leads: document.markdownLeadRanges,
+                collapsedLines: document.markdownCollapsedLineRanges,
+                replacements: document.markdownGlyphReplacements,
+                revealing: reveal.line,
+                revealingLead: reveal.lead)
+            textView.updateMarkdownDecorations(
+                codeBlocks: document.markdownCodeBlocks, tables: document.markdownTables,
+                tasks: document.markdownTasks,
+                lineMarkers: document.markdownLineMarkers, rules: document.markdownRules,
+                images: document.markdownImages,
+                links: document.markdownLinks,
+                activeSourceRange: reveal.line,
+                revealedLead: reveal.lead)
+        }
         textView.refreshBracketMatches()
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
     }
 
-    /// Reveal source markers only on lines the user explicitly entered. Merely
-    /// opening a Markdown file leaves the document in its rendered appearance.
-    private func markdownRevealRange(for document: Document) -> NSRange? {
-        guard document.languageSpec?.name == "markdown",
-              let url = currentURL, lineActivatedURLs.contains(url) else { return nil }
+    /// The line of a rendered Markdown document being edited, by where it
+    /// starts. A click only places the caret; an edit shows the line's source,
+    /// until the caret leaves the line.
+    private var markdownEditLine: (url: URL, start: Int)?
+
+    /// What of a rendered Markdown document shows its source.
+    ///
+    /// `line`: the line being edited — or, wherever the caret is, a line that
+    /// draws nothing otherwise (a code fence, a table's divider, a setext
+    /// underline, a link definition), which is only there to be edited.
+    /// Clicking into the text shows nothing: the reader is reading, and a line
+    /// that turned to source under the pointer moved the very text clicked.
+    ///
+    /// `lead`: a block's lead — a heading's `#`, a list's marker — while the
+    /// caret is inside it. Editing the line leaves the lead in the margin, so
+    /// the text does not move sideways as editing starts.
+    private func markdownReveal(for document: Document) -> (line: NSRange?, lead: NSRange?) {
+        guard document.languageSpec?.name == "markdown", let url = currentURL else {
+            return (nil, nil)
+        }
         let source = document.storage.string as NSString
         let selection = textView.selectedRange()
         let location = min(selection.location, source.length)
-        let length = min(selection.length, source.length - location)
-        return source.lineRange(for: NSRange(location: location, length: length))
+        let line = source.lineRange(for: NSRange(location: location, length: 0))
+        var revealed: NSRange?
+        if let editing = markdownEditLine, editing.url == url, editing.start == line.location {
+            revealed = line
+        }
+        // Merely opening a file leaves it rendered: the caret starts at the
+        // top, which may well be inside a heading's `#`.
+        guard lineActivatedURLs.contains(url) else { return (revealed, nil) }
+        if revealed == nil, isMarkdownControlLine(line, in: document) {
+            revealed = line
+        }
+        let lead = document.markdownLeadRanges.first {
+            NSLocationInRange(location, $0) && selection.length == 0
+        }
+        return (revealed, lead)
+    }
+
+    /// A line whose every character is hidden — and which is not a table row
+    /// or a picture, which draw themselves.
+    private func isMarkdownControlLine(_ line: NSRange, in document: Document) -> Bool {
+        let source = document.storage.string as NSString
+        let content = MarkdownLiveStyler.lineContentRange(line, in: source)
+        guard content.length > 0 else { return false }
+        if document.markdownTables.contains(where: { table in
+            table.rows.contains { NSLocationInRange(content.location, $0.lineRange) }
+        }) || document.markdownImages.contains(where: {
+            NSLocationInRange(content.location, $0.lineRange)
+        }) { return false }
+        let hidden = document.markdownSyntaxRanges + document.markdownLeadRanges
+        var covered = content.location
+        for range in hidden.sorted(by: { $0.location < $1.location })
+        where range.location <= covered && NSMaxRange(range) > covered {
+            covered = NSMaxRange(range)
+            if covered >= NSMaxRange(content) { return true }
+        }
+        return false
+    }
+
+    /// Apply what `markdownReveal` says, holding the caret's line in place.
+    private func applyMarkdownReveal(for document: Document) {
+        keepingCaretInPlace {
+            let reveal = markdownReveal(for: document)
+            layoutManager.revealMarkdownSyntax(in: reveal.line, lead: reveal.lead)
+            textView.updateMarkdownDecorations(
+                codeBlocks: document.markdownCodeBlocks,
+                tables: document.markdownTables,
+                tasks: document.markdownTasks,
+                lineMarkers: document.markdownLineMarkers,
+                rules: document.markdownRules,
+                images: document.markdownImages,
+                links: document.markdownLinks,
+                activeSourceRange: reveal.line,
+                revealedLead: reveal.lead)
+        }
+    }
+
+    /// Keep the caret's line where it is on screen while `change` lays the
+    /// text out again. Showing a line's source, or hiding it again once the
+    /// caret has left it, changes heights — and a line above the one just
+    /// clicked growing or shrinking moved the clicked line from under the
+    /// pointer. The view scrolls by whatever the change moved the caret's line.
+    private func keepingCaretInPlace(_ change: () -> Void) {
+        guard currentDocument?.languageSpec?.name == "markdown",
+              let storage = textView.textStorage, storage.length > 0 else {
+            change()
+            return
+        }
+        let clip = scrollView.contentView
+        // On screen — measured against the visible area, not the text: when
+        // the change is above what is visible, AppKit scrolls to make up for it
+        // itself, and making up for it again moved the line twice as far.
+        func caretLineOnScreen() -> CGFloat {
+            let caret = min(textView.selectedRange().location, storage.length - 1)
+            let glyph = layoutManager.glyphIndexForCharacter(at: caret)
+            return layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
+                - clip.bounds.minY
+        }
+        let before = caretLineOnScreen()
+        change()
+        let moved = caretLineOnScreen() - before
+        guard abs(moved) > 0.5 else { return }
+        let target = NSRect(origin: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + moved),
+                            size: clip.bounds.size)
+        clip.setBoundsOrigin(clip.constrainBoundsRect(target).origin)
+        scrollView.reflectScrolledClipView(clip)
     }
 
     // MARK: - Inline blame

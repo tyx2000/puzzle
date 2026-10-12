@@ -19,12 +19,18 @@ final class MarkdownLineLayout: NSObject {
     let spaceBefore: CGFloat
     let ascender: CGFloat
     let descender: CGFloat
+    /// The line's layout while its source shows, for a line that draws nothing
+    /// otherwise: a code fence is padding inside its box until the caret is on
+    /// it, and then it has to be a line its backticks fit in.
+    let whenRevealed: MarkdownLineLayout?
 
-    init(lineHeight: CGFloat, spaceBefore: CGFloat = 0, font: NSFont) {
+    init(lineHeight: CGFloat, spaceBefore: CGFloat = 0, font: NSFont,
+         whenRevealed: MarkdownLineLayout? = nil) {
         self.lineHeight = lineHeight
         self.spaceBefore = spaceBefore
         ascender = font.ascender
         descender = font.descender
+        self.whenRevealed = whenRevealed
     }
 
     /// Where the baseline goes in a fragment that starts with `spaceAbove`.
@@ -36,6 +42,7 @@ final class MarkdownLineLayout: NSObject {
         guard let other = object as? MarkdownLineLayout else { return false }
         return lineHeight == other.lineHeight && spaceBefore == other.spaceBefore
             && ascender == other.ascender && descender == other.descender
+            && whenRevealed == other.whenRevealed
     }
 
     override var hash: Int {
@@ -88,6 +95,8 @@ enum MarkdownLineMarkerKind: Equatable {
     case bullet(String)
     case quote(Int)
     case footnote(String)
+    /// A heading's `#`s: drawn only while the heading is edited, in the margin.
+    case heading
 }
 
 struct MarkdownLineMarkerDecoration: Equatable {
@@ -127,6 +136,12 @@ struct MarkdownGlyphReplacement: Equatable {
 
 struct MarkdownPresentation: Equatable {
     var hiddenSyntaxRanges: [NSRange] = []
+    /// What a block puts in front of its text — a heading's `#`, a list's
+    /// marker, a quote's `>`, the indent a container repeats. Kept apart from
+    /// the inline syntax: editing a line shows that line's inline syntax, but
+    /// its lead stays out of the text and is drawn in the margin instead, so
+    /// the text does not move sideways as editing starts.
+    var leadRanges: [NSRange] = []
     var collapsedLineRanges: [NSRange] = []
     var codeBlocks: [MarkdownCodeBlockDecoration] = []
     var tables: [MarkdownTableDecoration] = []
@@ -183,6 +198,7 @@ enum MarkdownLiveStyler {
         private let linkStyle: [NSAttributedString.Key: Any]
 
         private var syntax: [NSRange] = []
+        private var leads: [NSRange] = []
         private var collapsed: [NSRange] = []
         private var codeBlocks: [MarkdownCodeBlockDecoration] = []
         private var tables: [MarkdownTableDecoration] = []
@@ -219,7 +235,7 @@ enum MarkdownLiveStyler {
             codeLayout = MarkdownLineLayout(lineHeight: Theme.lineMetrics().target,
                                             font: codeFont)
             fencePaddingLayout = MarkdownLineLayout(lineHeight: Theme.markdownCodePaddingY,
-                                                    font: baseFont)
+                                                    font: baseFont, whenRevealed: bodyLayout)
             marker = [.foregroundColor: Theme.dimText]
             codeStyle = [.foregroundColor: Theme.foreground, .font: codeFont]
             inlineCodeStyle = [.foregroundColor: Theme.yellow,
@@ -232,6 +248,7 @@ enum MarkdownLiveStyler {
         var result: MarkdownPresentation {
             MarkdownPresentation(
                 hiddenSyntaxRanges: MarkdownLiveStyler.normalized(syntax.filter { $0.length > 0 }),
+                leadRanges: MarkdownLiveStyler.normalized(leads.filter { $0.length > 0 }),
                 collapsedLineRanges: MarkdownLiveStyler.normalized(
                     collapsed.filter { $0.length > 0 }),
                 codeBlocks: codeBlocks, tables: tables, tasks: tasks,
@@ -265,6 +282,18 @@ enum MarkdownLiveStyler {
             }
             guard trimmed.length > 0 else { return }
             syntax.append(trimmed)
+        }
+
+        /// Hidden like syntax, but a block's lead: see `leadRanges`.
+        mutating func lead(_ range: NSRange) {
+            var trimmed = range
+            while trimmed.length > 0 {
+                let last = source.character(at: NSMaxRange(trimmed) - 1)
+                guard last == 0x0A || last == 0x0D else { break }
+                trimmed.length -= 1
+            }
+            guard trimmed.length > 0 else { return }
+            leads.append(trimmed)
         }
 
         mutating func collapse(_ line: NSRange) { collapsed.append(line) }
@@ -365,13 +394,13 @@ enum MarkdownLiveStyler {
                     // holds — a list item's indent, a quote's `>` — is drawn
                     // as the container's own indent and bar instead.
                     dim(node.range)
-                    hide(node.range)
+                    lead(node.range)
                 case "block_quote":
                     // The bar goes down the whole quote, not only beside the
                     // lines that repeat its marker.
                     for child in node.all("block_quote_marker") {
                         dim(child.range)
-                        hide(child.range)
+                        lead(child.range)
                     }
                     lineMarkers.append(MarkdownLineMarkerDecoration(
                         sourceRange: node.range, kind: .quote(quoteDepth + 1), indent: indent))
@@ -403,9 +432,12 @@ enum MarkdownLiveStyler {
                 hide(node.range)
                 return
             }
-            // The marker and the space after it.
-            hide(NSRange(location: node.range.location,
+            // The marker and the space after it — drawn in the margin while
+            // the heading is edited.
+            lead(NSRange(location: node.range.location,
                          length: max(0, content.range.location - node.range.location)))
+            lineMarkers.append(MarkdownLineMarkerDecoration(
+                sourceRange: markerNode.range, kind: .heading, indent: indent))
             // A closing run of #s, if the author wrote one.
             let contentEnd = NSMaxRange(content.range)
             let lineEnd = NSMaxRange(MarkdownLiveStyler.lineContentRange(
@@ -483,7 +515,7 @@ enum MarkdownLiveStyler {
             // Inside a list the code's lines repeat the item's indent; that is
             // the item's, drawn as the block's own indent, not the code's.
             for continuation in node.descendants("block_continuation") {
-                hide(continuation.range)
+                lead(continuation.range)
             }
             if let body, body.length > 0 {
                 style(codeStyle, body)
@@ -565,7 +597,7 @@ enum MarkdownLiveStyler {
                   source.character(at: lead) == 0x20 || source.character(at: lead) == 0x09 {
                 lead += 1
             }
-            hide(NSRange(location: markerLine.location, length: lead - markerLine.location))
+            self.lead(NSRange(location: markerLine.location, length: lead - markerLine.location))
             guard let checkbox else {
                 let label = source.substring(with: bullet.range)
                     .trimmingCharacters(in: .whitespaces)
@@ -608,11 +640,10 @@ enum MarkdownLiveStyler {
             let span = NSRange(location: content.location,
                                length: close.location + 2)
             dim(span)
-            hide(span)
             // The body hangs like a list item's, its label in the margin.
             var lead = NSMaxRange(span)
             while lead < NSMaxRange(content), source.character(at: lead) == 0x20 { lead += 1 }
-            hide(NSRange(location: NSMaxRange(span), length: lead - NSMaxRange(span)))
+            self.lead(NSRange(location: span.location, length: lead - span.location))
             let textStart = indent + Theme.markdownListIndent()
             indentLines(node.range, by: textStart)
             lineMarkers.append(MarkdownLineMarkerDecoration(

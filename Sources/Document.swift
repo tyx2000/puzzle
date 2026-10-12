@@ -173,6 +173,9 @@ final class Document {
     /// Markdown syntax characters retained in storage but collapsed by each
     /// pane's layout manager when their line is not being edited.
     private(set) var markdownSyntaxRanges: [NSRange] = []
+    /// What each block puts in front of its text; hidden even on the line
+    /// being edited, unless the caret is inside it.
+    private(set) var markdownLeadRanges: [NSRange] = []
     private(set) var markdownCollapsedLineRanges: [NSRange] = []
     private(set) var markdownCodeBlocks: [MarkdownCodeBlockDecoration] = []
     private(set) var markdownTables: [MarkdownTableDecoration] = []
@@ -551,6 +554,7 @@ final class Document {
 
     func updateMarkdownPresentation(_ presentation: MarkdownPresentation) {
         guard presentation.hiddenSyntaxRanges != markdownSyntaxRanges
+                || presentation.leadRanges != markdownLeadRanges
                 || presentation.collapsedLineRanges != markdownCollapsedLineRanges
                 || presentation.codeBlocks != markdownCodeBlocks
                 || presentation.tables != markdownTables
@@ -561,6 +565,7 @@ final class Document {
                 || presentation.glyphReplacements != markdownGlyphReplacements
                 || presentation.links != markdownLinks else { return }
         markdownSyntaxRanges = presentation.hiddenSyntaxRanges
+        markdownLeadRanges = presentation.leadRanges
         markdownCollapsedLineRanges = presentation.collapsedLineRanges
         markdownCodeBlocks = presentation.codeBlocks
         markdownTables = presentation.tables
