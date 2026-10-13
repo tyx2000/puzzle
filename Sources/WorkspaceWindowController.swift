@@ -877,9 +877,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// ask it for a new one by script, and keep the plain open as the fallback
     /// (no iTerm, or automation not permitted).
     /// The recents in a dialog over the window, listed and handled as the
-    /// start page lists them.
+    /// start page lists them. A click on R while it is up lands on the
+    /// dimming over the window and only closes it.
     private func showRecentProjectsMenu(from rect: NSRect) {
-        if recentProjectsPanel.isShown || recentProjectsPanel.justClosed {
+        if recentProjectsPanel.isShown {
             recentProjectsPanel.dismiss()
             return
         }

@@ -4,12 +4,13 @@ import AppKit
 /// listing the recent projects as the start page lists them — a click ticks
 /// one, a double click opens it, the cross on a hovered row takes it off the
 /// list — with Open Checked at the top right and Clear All along the bottom.
-/// Esc closes it, and so does a click anywhere outside it — in the window
-/// under it, another of the app's windows, or another app.
+/// Esc closes it, and so does a click anywhere outside it, or leaving the app.
 ///
 /// A panel like the ⌘P palette rather than a popover: a dialog of its own,
-/// not a balloon hanging off the button. It is the colour of the window under
-/// it, so a border and a shadow of its own set it off.
+/// not a balloon hanging off the button. The window under it is dimmed while
+/// it is up — it is the same colour as the dialog, and a heavy border and
+/// shadow were what told them apart before — and a click on the dimmed
+/// window only closes the dialog; it does not reach what is under it.
 final class RecentProjectsPanel: NSPanel {
     /// The projects to open: one double-clicked, or every ticked one.
     var onOpen: (([URL]) -> Void)?
@@ -23,6 +24,15 @@ final class RecentProjectsPanel: NSPanel {
     static let title = "Opened Recently"
 
     private let backdrop = DialogBackdropView()
+    /// Over the window under the dialog while it is up. A view in that
+    /// window rather than a window of its own, so it has the window's own
+    /// rounded corners and size.
+    private let scrim = DialogScrimView()
+    private var parentResizeObserver: NSObjectProtocol?
+    /// Fading out: still on screen, already gone as far as anything asks.
+    private var closing = false
+    static let appearDuration: TimeInterval = 0.15
+    static let disappearDuration: TimeInterval = 0.1
     private let card = NSView()
     private let titleLabel = NSTextField(labelWithString: RecentProjectsPanel.title)
     private let openChecked = NSButton()
@@ -150,7 +160,9 @@ final class RecentProjectsPanel: NSPanel {
             clearAll.heightAnchor.constraint(equalToConstant: DialogRowButton.height),
             clearAll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -padding),
         ])
+        backdrop.wantsLayer = true
         contentView = backdrop
+        scrim.onClick = { [weak self] in self?.dismissByClickOutside() }
         recentsObserver = NotificationCenter.default.addObserver(
             forName: RecentProjects.didChange, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.isVisible else { return }
@@ -160,56 +172,107 @@ final class RecentProjectsPanel: NSPanel {
 
     deinit {
         if let recentsObserver { NotificationCenter.default.removeObserver(recentsObserver) }
+        if let parentResizeObserver {
+            NotificationCenter.default.removeObserver(parentResizeObserver)
+        }
         stopWatching()
     }
 
     override var canBecomeKey: Bool { true }
 
-    var isShown: Bool { isVisible }
+    var isShown: Bool { isVisible && !closing }
 
-    /// In the middle of `parent`, over everything in it.
+    /// In the middle of `parent`, over everything in it, the rest of `parent`
+    /// dimmed. It fades in, the card growing the last few percent to its size.
     func present(over parent: NSWindow) {
+        if closing { finishClosing() }
         reload()
+        center(over: parent)
+        if let content = parent.contentView {
+            scrim.frame = content.bounds
+            scrim.autoresizingMask = [.width, .height]
+            scrim.alphaValue = 0
+            content.addSubview(scrim)
+        }
+        parentResizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: parent,
+            queue: .main) { [weak self, weak parent] _ in
+            guard let self, let parent else { return }
+            self.center(over: parent)
+        }
+        alphaValue = 0
+        parent.addChildWindow(self, ordered: .above)
+        makeKeyAndOrderFront(nil)
+        startWatching()
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let bounds = backdrop.bounds
+            var grown = CATransform3DMakeTranslation(bounds.midX, bounds.midY, 0)
+            grown = CATransform3DScale(grown, 0.97, 0.97, 1)
+            grown = CATransform3DTranslate(grown, -bounds.midX, -bounds.midY, 0)
+            let grow = CABasicAnimation(keyPath: "transform")
+            grow.fromValue = grown
+            grow.toValue = CATransform3DIdentity
+            grow.duration = Self.appearDuration
+            grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            backdrop.layer?.add(grow, forKey: "appear")
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.appearDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().alphaValue = 1
+            self.scrim.animator().alphaValue = 1
+        }
+    }
+
+    private func center(over parent: NSWindow) {
         let parentFrame = parent.frame
         var frame = self.frame
         frame.origin.x = (parentFrame.midX - frame.width / 2).rounded()
         frame.origin.y = (parentFrame.midY - frame.height / 2).rounded()
-        setFrame(frame, display: true)
-        parent.addChildWindow(self, ordered: .above)
-        makeKeyAndOrderFront(nil)
-        startWatching()
+        setFrame(frame, display: isVisible)
     }
 
-    /// Put away, whatever the reason.
+    /// Put away, whatever the reason: faded out with the dimming, then gone.
     func dismiss() {
-        closingItself = true
+        guard isVisible, !closing else { return }
+        closing = true
         stopWatching()
+        if let parentResizeObserver {
+            NotificationCenter.default.removeObserver(parentResizeObserver)
+        }
+        parentResizeObserver = nil
+        // The keyboard goes back to the window the dialog was over.
+        parent?.makeKey()
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Self.disappearDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.animator().alphaValue = 0
+            self.scrim.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.closing else { return }
+            self.finishClosing()
+        })
+    }
+
+    private func finishClosing() {
         parent?.removeChildWindow(self)
         orderOut(nil)
-        closingItself = false
+        scrim.removeFromSuperview()
+        alphaValue = 1
+        closing = false
     }
-    private var closingItself = false
 
     private func dismissByClickOutside() {
-        guard isVisible else { return }
+        guard isShown else { return }
         dismiss()
-        closedByClickAt = Date()
     }
 
-    /// A click outside takes the keyboard to whatever was clicked.
+    /// Losing the keyboard — to another of the app's windows, say — is
+    /// leaving the dialog.
     override func resignKey() {
         super.resignKey()
-        guard !closingItself else { return }
+        guard !closing else { return }
         dismissByClickOutside()
-    }
-
-    /// A click on the R button while the dialog is up closes it on the way
-    /// down — it is a click outside — and would open it again on the way up.
-    /// That click was meant to close it. Only a close of that kind counts:
-    /// one the dialog did itself, opening a project, leaves R free to open it.
-    private var closedByClickAt: Date?
-    var justClosed: Bool {
-        closedByClickAt.map { Date().timeIntervalSince($0) < 0.5 } ?? false
     }
 
     /// And in case the dialog never had the keyboard to lose: the app's own
@@ -234,23 +297,26 @@ final class RecentProjectsPanel: NSPanel {
         resignObserver = nil
     }
 
-    /// A click outside closes it and still lands where it was aimed — the
-    /// shadow round the card is outside too; Esc closes it and goes no
-    /// further; anything else passes.
+    /// A click outside closes it. On the dimmed window — or the shadow
+    /// round the card — that is all it does; in another of the app's windows,
+    /// which is not dimmed, it still lands where it was aimed. Esc closes it
+    /// and goes no further; anything else passes.
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard isVisible else { return event }
+        guard isShown else { return event }
         if event.type == .keyDown {
             guard event.keyCode == 53 else { return event }
             dismiss()
             return nil
         }
-        if event.window !== self {
-            dismissByClickOutside()
-        } else if !card.frame.contains(backdrop.convert(event.locationInWindow, from: nil)) {
+        if event.window === self {
+            guard !card.frame.contains(backdrop.convert(event.locationInWindow, from: nil))
+            else { return event }
             dismissByClickOutside()
             return nil
         }
-        return event
+        let dimmed = event.window != nil && event.window === parent
+        dismissByClickOutside()
+        return dimmed ? nil : event
     }
 
     override func keyDown(with event: NSEvent) {
@@ -309,6 +375,9 @@ final class RecentProjectsPanel: NSPanel {
     var listAreaFrameForTesting: NSRect { scroll.frame }
     var backdropForTesting: NSView { backdrop }
     var isWatchingForTesting: Bool { eventMonitor != nil }
+    /// The dimming over the window under the dialog, while it is there.
+    var scrimForTesting: NSView? { scrim.superview == nil ? nil : scrim }
+    var isFadingOutForTesting: Bool { closing }
     /// A key, as the app's event stream sees it: whether it went on.
     func pressKeyForTesting(code: UInt16, characters: String) -> Bool {
         guard let event = NSEvent.keyEvent(
@@ -348,16 +417,16 @@ private final class DialogBackdropView: NSView {
                                  yRadius: Self.cornerRadius)
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.6)
-        shadow.shadowBlurRadius = 24
-        shadow.shadowOffset = NSSize(width: 0, height: -8)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 20
+        shadow.shadowOffset = NSSize(width: 0, height: -6)
         shadow.set()
         Theme.panelBackground.setFill()
         shape.fill()
         NSGraphicsContext.restoreGraphicsState()
-        // Lighter than the window's own borders: the dialog is the same
-        // colour as what is under it, so its edge has to read on that.
-        Theme.gutter.setStroke()
+        // A hairline of light, not a drawn border: the dimming does the
+        // setting apart, the edge only finishes the card.
+        NSColor.white.withAlphaComponent(0.08).setStroke()
         let edge = NSBezierPath(roundedRect: cardFrame.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
         edge.lineWidth = 1
@@ -445,4 +514,26 @@ final class DialogRowButton: NSView {
     }
 
     func clickForTesting() { if isEnabled { onClick?() } }
+}
+
+/// The dimming over the window under the dialog. It takes every click on
+/// the window, which closes the dialog and goes nowhere else.
+private final class DialogScrimView: NSView {
+    var onClick: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.4).cgColor
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func rightMouseDown(with event: NSEvent) { onClick?() }
+    override func scrollWheel(with event: NSEvent) {}
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
 }

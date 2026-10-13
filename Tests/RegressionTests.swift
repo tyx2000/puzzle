@@ -4576,6 +4576,19 @@ enum RegressionTests {
         workspace.showRecentProjectsForTesting()
         try expect(dialog.isShown && dialog.parent === window,
                    "the R button did not open the recents dialog over the window")
+        // It fades in, over the window dimmed under it.
+        try expect(dialog.alphaValue < 1, "the dialog appeared at once instead of fading in")
+        guard let scrim = dialog.scrimForTesting, let content = window.contentView else {
+            throw Failure(description: "the window under the dialog is not dimmed")
+        }
+        let dim = scrim.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
+        try expect(scrim.superview === content && scrim.frame == content.bounds
+                    && (0.25...0.6).contains(dim?.alphaComponent ?? 0),
+                   "the dimming does not cover the window: \(scrim.frame), "
+                     + "\(String(describing: dim))")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        try expect(dialog.alphaValue == 1 && scrim.alphaValue == 1,
+                   "the dialog did not finish fading in: \(dialog.alphaValue)")
         try expect(abs(dialog.frame.midX - window.frame.midX) <= 1
                     && abs(dialog.frame.midY - window.frame.midY) <= 1,
                    "the dialog is not in the middle of the window: \(dialog.frame) in "
@@ -4684,20 +4697,29 @@ enum RegressionTests {
             RecentProjects.shared.add(project)
         }
 
-        // Inside it, a click is the dialog's; outside it, it closes the dialog
-        // and still lands where it was aimed. The shadow is outside.
+        // Inside it, a click is the dialog's. On the dimmed window it closes
+        // the dialog and goes no further; in another window, which is not
+        // dimmed, it still lands where it was aimed. The shadow is outside.
         try expect(dialog.clickForTesting(in: nil) && dialog.isShown,
                    "a click inside the dialog closed it")
         _ = dialog.clickForTesting(in: nil, at: NSPoint(x: 4, y: 4))
         try expect(!dialog.isShown, "a click on the dialog's shadow did not close it")
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         workspace.showRecentProjectsForTesting()
-        try expect(dialog.clickForTesting(in: window) && !dialog.isShown,
-                   "a click outside the dialog did not close it, or was swallowed")
-        // That click, on R, closes it rather than opening it once more.
-        workspace.showRecentProjectsForTesting()
-        try expect(!dialog.isShown, "a click on R, closing the dialog, opened it again")
+        let elsewhere = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                                 styleMask: [.titled], backing: .buffered, defer: false)
+        defer { elsewhere.close() }
+        try expect(dialog.clickForTesting(in: elsewhere) && !dialog.isShown,
+                   "a click in another window did not close the dialog, or was swallowed")
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        workspace.showRecentProjectsForTesting()
+        try expect(!dialog.clickForTesting(in: window) && !dialog.isShown,
+                   "a click on the dimmed window did not close the dialog, or reached "
+                     + "what is under it")
+        // Faded out, the dimming goes with it.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        try expect(dialog.scrimForTesting == nil && !dialog.isVisible,
+                   "the dimming stayed after the dialog closed")
         // Esc closes it, and goes no further; other keys pass.
         workspace.showRecentProjectsForTesting()
         try expect(dialog.isShown && dialog.isWatchingForTesting,
