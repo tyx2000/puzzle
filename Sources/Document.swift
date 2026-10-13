@@ -553,8 +553,9 @@ final class Document {
             name: Self.structureDidChange, object: self)
     }
 
-    func updateMarkdownPresentation(_ presentation: MarkdownPresentation) {
-        guard presentation.hiddenSyntaxRanges != markdownSyntaxRanges
+    func updateMarkdownPresentation(_ presentation: MarkdownPresentation,
+                                    synchronize: Bool = false) {
+        guard synchronize || presentation.hiddenSyntaxRanges != markdownSyntaxRanges
                 || presentation.leadRanges != markdownLeadRanges
                 || presentation.collapsedLineRanges != markdownCollapsedLineRanges
                 || presentation.codeBlocks != markdownCodeBlocks

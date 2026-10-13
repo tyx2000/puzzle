@@ -16,6 +16,28 @@ enum RegressionTests {
         // As the app does, so every test that parses runs on it.
         TreeSitterAllocator.install()
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--editor-regressions") {
+            try testIncrementalParsing()
+            try testHighlightServiceKeepsParseOwner()
+            try testMarkdownLiveEditing()
+            try testMarkdownReading()
+            try testMarkdownRevealsOnEdit()
+            try testMarkdownEditingKeys()
+            try testMarkdownLayoutStaysWhole()
+            try testMarkdownKeystrokeStaysLocal()
+            try testMarkdownEquivalentEditsRestoreLayout()
+            try testMarkdownInlineCodeBoxes()
+            try testCodeBlockAnalysisAndFolding()
+            try testDeeplyNestedMarkdownIsLeftAsPlainText()
+            try testDiffMarkersStandApart()
+            try testDiffInlineChanges()
+            try testDiffGutterUsesFileLineNumbers()
+            try testDiffHeaderStepsThroughChanges()
+            try testSideBySideDiff()
+            try testRecentProjectsDialog()
+            print("Editor regression tests passed (18)")
+            return
+        }
         try testProcessDrain()
         try testReviewFixes()
         try testQuickOpenAndGoToLine()
@@ -53,6 +75,7 @@ enum RegressionTests {
         try testMediaFilesPlayInsteadOfLoading()
         try testPDFPreview()
         try testIncrementalParsing()
+        try testHighlightServiceKeepsParseOwner()
         try testImageDownsampling()
         try testEPUBReading()
         try testMarkdownLiveEditing()
@@ -62,6 +85,10 @@ enum RegressionTests {
         try testRecentProjectsDialog()
         try testGutterRibbonRunsUnbroken()
         try testDiffMarkersStandApart()
+        try testDiffInlineChanges()
+        try testMarkdownLayoutStaysWhole()
+        try testMarkdownKeystrokeStaysLocal()
+        try testMarkdownEquivalentEditsRestoreLayout()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
@@ -2900,6 +2927,32 @@ enum RegressionTests {
         try expect(incremental.treeDescriptionForTesting == nil, "memory pressure retained a tree")
     }
 
+    private static func testHighlightServiceKeepsParseOwner() throws {
+        let directory = try temporaryDirectory("highlight-owner")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for (ext, language, source) in [("json", "json", "{\"value\": 1}"),
+                                         ("md", "markdown", "# Title\n\nValue 1.\n")] {
+            let url = directory.appendingPathComponent("sample.\(ext)")
+            try Data(source.utf8).write(to: url)
+            let document = Document(url: url)
+            let service = HighlightService()
+            service.highlight(document)
+            let digit = (document.text as NSString).range(of: "1")
+            document.storage.replaceCharacters(in: digit, with: "2")
+            service.highlight(document)
+            service.highlight(document)
+            let counts = service.parseCountsForTesting(language: language)
+            try expect(counts?.full == 1 && counts?.incremental == 1,
+                       "\(language) did not reuse the document's parse tree: \(String(describing: counts))")
+            let otherURL = directory.appendingPathComponent("other.\(ext)")
+            try Data(source.utf8).write(to: otherURL)
+            let other = Document(url: otherURL)
+            service.highlight(other)
+            try expect(service.parseCountsForTesting(language: language)?.full == 2,
+                       "a different document reused the previous document's tree")
+        }
+    }
+
     private static func testImageDownsampling() throws {
         let directory = try temporaryDirectory("image-downsampling")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -4684,6 +4737,12 @@ enum RegressionTests {
         // A double click opens the one.
         workspace.showRecentProjectsForTesting()
         try expect(dialog.isShown, "the dialog did not open again")
+        try expect(list.checkedURLs.isEmpty && !dialog.openCheckedEnabledForTesting,
+                   "reopening the recents dialog retained the previous checks")
+        list.toggleCheckForTesting(at: gamma)
+        NotificationCenter.default.post(name: RecentProjects.didChange, object: nil)
+        try expect(list.checkedURLs == [projects[2]],
+                   "a refresh while the dialog was open discarded the current checks")
         list.openRowForTesting(gamma)
         try expect(opened.last == [projects[2]] && !dialog.isShown,
                    "a double click did not open its project and close the dialog")
@@ -4785,12 +4844,15 @@ enum RegressionTests {
                    "the dialog did not open again after closing")
         try expect(dialog.pressKeyForTesting(code: 0, characters: "a"),
                    "the dialog swallowed a key that was not Esc")
+        list.toggleCheckForTesting(at: 0)
         try expect(!dialog.pressKeyForTesting(code: 53, characters: "\u{1b}") && !dialog.isShown,
                    "Esc did not close the dialog")
         try expect(!dialog.isWatchingForTesting, "the closed dialog still watches the app")
         // Leaving the app closes it too.
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         workspace.showRecentProjectsForTesting()
+        try expect(list.checkedURLs.isEmpty && !dialog.openCheckedEnabledForTesting,
+                   "reopening after Esc retained checked projects")
         NotificationCenter.default.post(name: NSApplication.didResignActiveNotification,
                                         object: NSApp)
         try expect(!dialog.isShown, "leaving the app left the dialog up")
@@ -5001,6 +5063,340 @@ enum RegressionTests {
         let code = text.range(of: "+let b").location + 1
         try expect(storage.attribute(.kern, at: code, effectiveRange: nil) == nil,
                    "the code after a marker was spaced out as well")
+    }
+
+    private static func testDiffInlineChanges() throws {
+        func marked(_ text: NSAttributedString) -> [String] {
+            var result: [String] = []
+            text.enumerateAttribute(.backgroundColor, in: NSRange(location: 0, length: text.length)) {
+                value, range, _ in
+                if value != nil { result.append((text.string as NSString).substring(with: range)) }
+            }
+            return result
+        }
+        let changes = [("let count = 1", "let count = 2", "1", "2"),
+                       ("let status = \"😀\"", "let status = \"😎\"", "😀", "😎"),
+                       ("let status = \"👩‍💻\"", "let status = \"👨‍💻\"", "👩‍💻", "👨‍💻"),
+                       ("let value = \"𠀀\"", "let value = \"𠀁\"", "𠀀", "𠀁"),
+                       ("这是原来的文字", "这是后来的文字", "原", "后")]
+        for (old, new, removed, added) in changes {
+            for (oldEOF, newEOF) in [(false, false), (true, true), (true, false), (false, true)] {
+                let marker = "\\ No newline at end of file\n"
+                let diff = "@@ -1 +1 @@\n-\(old)\n" + (oldEOF ? marker : "")
+                    + "+\(new)\n" + (newEOF ? marker : "")
+                let storage = NSTextStorage(string: diff)
+                DiffHighlighter.apply(to: storage)
+                try expect(marked(storage) == [removed, added],
+                           "unified diff marked \(marked(storage)) for \(old) -> \(new)")
+                let rows = SideBySideDiff.rows(from: diff).filter(\.isChange)
+                try expect(rows.count == 1, "EOF metadata split a replacement row")
+                let left = rows[0].attributedText(onLeft: true, font: Theme.editorFont())!
+                let right = rows[0].attributedText(onLeft: false, font: Theme.editorFont())!
+                try expect(marked(left) == [removed] && marked(right) == [added],
+                           "side-by-side diff omitted the changed words")
+            }
+        }
+        let single = SideBySideDiff.Row.change(left: nil, right: (1, "added"))
+        try expect(marked(single.attributedText(onLeft: false, font: Theme.editorFont())!).isEmpty,
+                   "an unpaired addition received a word-level comparison")
+        let unicode = DiffHighlighter.changedWords(removed: "😀 let count = 1", added: "😀 let count = 2")
+        try expect(unicode?.removed == [NSRange(location: 15, length: 1)]
+                   && unicode?.added == [NSRange(location: 15, length: 1)],
+                   "UTF-16 offsets after emoji drifted: \(String(describing: unicode))")
+    }
+
+    /// What an edit leaves on screen is what laying the whole document out
+    /// afresh gives. Only the lines an edit, a reveal or a fold changed are
+    /// laid out again — every keystroke used to regenerate the glyphs of the
+    /// whole document — so a line left out would show stale hidden syntax or
+    /// a stale height. Checked after each of a run of edits, clicks, reveals
+    /// and source-view switches.
+    private static func testMarkdownLayoutStaysWhole() throws {
+        let directory = try temporaryDirectory("markdown-whole")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("whole.md")
+        let source = """
+        # Title
+
+        Intro with **bold words**, *italic*, `code`, a [link](https://example.com/a) \
+        and Fish &amp; chips.
+
+        ## Section
+
+        - an item with **bold**
+        - [ ] a task
+          - nested item
+
+        > a quote with *emphasis*
+
+        ```swift
+        let x = 1
+        ```
+
+        | Name | Value |
+        | --- | --- |
+        | alpha | 1 |
+
+        | Key | Description |
+        | --- | --- |
+        | k | A description long enough to fill most of its column, but not yet to wrap. |
+
+        ![picture](missing.png)
+
+        Last paragraph with ~~struck~~ text.
+
+        """
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 800, height: 700))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.document(for: url).isModified = false
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let text = pane.textViewForTesting
+        window.makeFirstResponder(text)
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        var current: NSString { text.string as NSString }
+        func at(_ needle: String) -> Int { current.range(of: needle).location }
+        var fragmentText: [String] = []
+        func fragments() -> [NSRect] {
+            layout.ensureLayout(for: container)
+            var rects: [NSRect] = []
+            fragmentText = []
+            layout.enumerateLineFragments(
+                forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) {
+                rect, _, _, glyphs, _ in
+                rects.append(rect)
+                let characters = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+                fragmentText.append(current.substring(with: characters))
+            }
+            return rects
+        }
+        func check(_ step: String) throws {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            layout.ensureLayout(for: container)
+            // Every character's glyph is hidden exactly when it should be.
+            let length = current.length
+            var wrong: [Int] = []
+            var index = 0
+            while index < length {
+                if let entity = layout.markdownDrawnReplacement(containing: index),
+                   entity.location == index {
+                    for tail in (index + 1)..<NSMaxRange(entity)
+                    where !layout.propertyForGlyph(at: layout.glyphIndexForCharacter(at: tail))
+                        .contains(.null) {
+                        wrong.append(tail)
+                    }
+                    index = NSMaxRange(entity)
+                    continue
+                }
+                let isNull = layout.propertyForGlyph(
+                    at: layout.glyphIndexForCharacter(at: index)).contains(.null)
+                if isNull != layout.isCharacterHidden(at: index) { wrong.append(index) }
+                index += 1
+            }
+            try expect(wrong.isEmpty,
+                       "after \(step), \(wrong.count) characters are drawn wrongly hidden or "
+                         + "shown, first at \(wrong.first ?? -1) "
+                         + "\(wrong.map { "[\($0) '\(current.substring(with: NSRange(location: $0, length: 1)))' hidden=\(layout.isCharacterHidden(at: $0))]" }.joined()): "
+                         + "'\(wrong.first.map { current.substring(with: current.lineRange(for: NSRange(location: $0, length: 0))) } ?? "")'")
+            // And the lines are where a fresh layout puts them.
+            let incremental = fragments()
+            let incrementalText = fragmentText
+            let full = NSRange(location: 0, length: length)
+            layout.invalidateGlyphs(forCharacterRange: full, changeInLength: 0,
+                                    actualCharacterRange: nil)
+            layout.invalidateLayout(forCharacterRange: full, actualCharacterRange: nil)
+            let fresh = fragments()
+            let differing = zip(incremental, fresh).enumerated().first { $0.element.0 != $0.element.1 }
+            try expect(incremental == fresh,
+                       "after \(step), the lines are not where a fresh layout puts them: "
+                         + (differing.map {
+                             "\($0.element.0) '\(incrementalText[$0.offset].debugDescription)' vs "
+                               + "\($0.element.1) '\(fragmentText[$0.offset].debugDescription)'"
+                         } ?? "count \(incremental.count) vs \(fresh.count)"))
+        }
+
+        try check("opening")
+        pane.clickForTesting(at: at("Intro") + 2)
+        try check("a click")
+        pane.insertTextForTesting("x")
+        try check("typing in a paragraph")
+        pane.clickForTesting(at: at("bold words") + 4)
+        pane.insertTextForTesting("y")
+        try check("typing in bold text")
+        pane.clickForTesting(at: at("words**") + 7)
+        for character in ["*", "*", "z", "*", "*"] { pane.insertTextForTesting(character) }
+        try check("typing a bold span that pairs")
+        pane.clickForTesting(at: at("Section"))
+        text.deleteBackward(nil)
+        try check("deleting a heading's marker")
+        text.undoManager?.undo()
+        try check("undoing it")
+        pane.clickForTesting(at: at("an item") + 3)
+        pane.insertTextForTesting("\n- new item")
+        try check("adding a list item")
+        pane.clickForTesting(at: at("```swift") + 3)
+        try check("the caret on a fence")
+        pane.clickForTesting(at: at("let x"))
+        try check("leaving the fence")
+        pane.clickForTesting(at: at("alpha") + 2)
+        pane.insertTextForTesting("q")
+        try check("typing in a table row")
+        // A long word in one row's cell widens its column and wraps another
+        // row, which no edit touched.
+        pane.clickForTesting(at: at("Key |") + 3)
+        pane.insertTextForTesting("averyveryverylongheadingwordthatwidensthecolumn")
+        try check("widening a table's column from another row")
+        pane.clickForTesting(at: at("[link]") + 2)
+        text.insertMarkdownLink(nil)
+        try check("showing a link as written")
+        pane.clickForTesting(at: at("Last paragraph"))
+        try check("leaving the link")
+        pane.clickForTesting(at: at("## Section") + 1)
+        try check("the caret in a heading's marker")
+        text.toggleMarkdownSource(nil)
+        try check("the source view")
+        text.toggleMarkdownSource(nil)
+        try check("back to rendered")
+        pane.clickForTesting(at: 0)
+        text.selectAll(nil)
+        pane.insertTextForTesting("# Replaced\n\nWith **one** paragraph.\n")
+        try check("replacing everything")
+    }
+
+    /// A keystroke in a long Markdown document lays out its own lines, not
+    /// the document: every restyle used to rewrite every character's
+    /// attributes and hand the layout every hidden range again, and TextKit
+    /// regenerated every glyph — 1.4s a keystroke in 1,800 lines.
+    private static func testMarkdownKeystrokeStaysLocal() throws {
+        let directory = try temporaryDirectory("markdown-local")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("long.md")
+        let section = (1...40).map { index in
+            """
+            ## \(index). Section with `code` and **bold**
+
+            A paragraph with *italic*, a [link](https://example.com/\(index)) and 中文内容.
+
+            - an item with `code`
+            - [ ] a task
+
+            ```go
+            func f\(index)() {}
+            ```
+
+            | Name | Value |
+            | --- | --- |
+            | alpha | \(index) |
+
+            """
+        }.joined(separator: "\n")
+        try Data(("# Long\n\n" + section).utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 700))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.document(for: url).isModified = false
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager as? FoldingLayoutManager,
+              let container = text.textContainer else {
+            throw Failure(description: "the Markdown pane has no folding layout")
+        }
+        layout.ensureLayout(for: container)
+        let current = text.string as NSString
+        let middle = current.range(of: "## 20.").location
+        let caret = current.range(of: "A paragraph", options: [],
+                                  range: NSRange(location: middle,
+                                                 length: current.length - middle)).location + 5
+        pane.clickForTesting(at: caret)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        layout.ensureLayout(for: container)
+        for (step, typed) in ["x", "**", "y", "**"].enumerated() {
+            layout.glyphsGeneratedForTesting = 0
+            pane.insertTextForTesting(typed)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            layout.ensureLayout(for: container)
+            text.display()
+            let generated = layout.glyphsGeneratedForTesting
+            try expect(generated < current.length / 10,
+                       "keystroke \(step + 1) generated \(generated) glyphs in a document of "
+                         + "\(current.length): it laid the whole document out again")
+        }
+    }
+
+    private static func testMarkdownEquivalentEditsRestoreLayout() throws {
+        let directory = try temporaryDirectory("markdown-equivalent")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("table.md")
+        let source = "# Table\n\n| Key | Description |\n| --- | --- |\n| name | [A long label with enough words to wrap over several lines inside the description column of this table](https://a.example) |\n\n*hello*\n\nAfter table.\n"
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 500, height: 700))
+        defer {
+            pane.prepareForClose()
+            window.close()
+            DocumentStore.shared.document(for: url).isModified = false
+            DocumentStore.shared.release(url, stillOpen: false)
+        }
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        window.makeFirstResponder(text)
+        let layout = text.layoutManager as! FoldingLayoutManager
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            layout.ensureLayout(for: text.textContainer!)
+        }
+        settle()
+        let row = (text.string as NSString).range(of: "| name").location
+        let before = layout.markdownTableRowHeightForTesting(at: row)
+        try expect((before ?? 0) > Theme.markdownFontSize(), "table fixture has no measured height")
+        let location = (text.string as NSString).range(of: "a.example").location
+        pane.clickForTesting(at: location)
+        text.setSelectedRange(NSRange(location: location, length: 1))
+        pane.insertTextForTesting("b")
+        settle()
+        pane.clickForTesting(at: (text.string as NSString).range(of: "After table").location)
+        settle()
+        try expect(layout.markdownTableRowHeightForTesting(at: row) == before,
+                   "an equal-length URL edit lost the table row's height")
+        let emphasis = (text.string as NSString).range(of: "*hello*")
+        pane.clickForTesting(at: emphasis.location)
+        text.setSelectedRange(emphasis)
+        pane.insertTextForTesting("_hello_")
+        settle()
+        pane.clickForTesting(at: (text.string as NSString).range(of: "After table").location)
+        settle()
+        for location in [emphasis.location, NSMaxRange(emphasis) - 1] {
+            try expect(layout.isCharacterHidden(at: location)
+                       && layout.propertyForGlyph(at: layout.glyphIndexForCharacter(at: location))
+                        .contains(.null),
+                       "equivalent markup replacement left a delimiter visible")
+        }
     }
 
     private static func testFindMatchesAreComplete() throws {

@@ -326,7 +326,7 @@ final class SyntaxHighlighter {
     /// Base font/foreground/paragraph are assumed already applied by the caller.
     @discardableResult
     func highlight(text: String, storage: NSTextStorage,
-                   fullRange: NSRange) -> [JSXTagMatch] {
+                   fullRange: NSRange, parseOwner: NSTextStorage? = nil) -> [JSXTagMatch] {
         let byteCount = text.utf8.count
         guard byteCount > 0, byteCount <= 500_000 else {
             discardParseTree()
@@ -339,7 +339,8 @@ final class SyntaxHighlighter {
             cstr.withMemoryRebound(to: UInt8.self, capacity: byteCount) { raw in
                 let bytes = UnsafeBufferPointer(start: raw, count: byteCount)
                 tagMatches = highlight(text: text, bytes: bytes, cstr: cstr,
-                                       storage: storage, fullRange: fullRange)
+                                       storage: storage, fullRange: fullRange,
+                                       parseOwner: parseOwner ?? storage)
             }
         }
         return tagMatches
@@ -348,9 +349,10 @@ final class SyntaxHighlighter {
     private func highlight(text: String, bytes: UnsafeBufferPointer<UInt8>,
                            cstr: UnsafePointer<CChar>,
                            storage: NSTextStorage,
-                           fullRange: NSRange) -> [JSXTagMatch] {
+                           fullRange: NSRange,
+                           parseOwner: NSTextStorage) -> [JSXTagMatch] {
         let byteCount = bytes.count
-        guard let tree = parse(bytes: bytes, cstr: cstr, storage: storage) else { return [] }
+        guard let tree = parse(bytes: bytes, cstr: cstr, storage: parseOwner) else { return [] }
         let rootNode = ts_tree_root_node(tree)
 
         // byte-offset -> UTF-16 offset mapping (identity fast-path for ASCII).

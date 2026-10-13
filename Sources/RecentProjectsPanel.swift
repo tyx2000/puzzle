@@ -186,7 +186,7 @@ final class RecentProjectsPanel: NSPanel {
     /// dimmed. It fades in, the card growing the last few percent to its size.
     func present(over parent: NSWindow) {
         if closing { finishClosing() }
-        reload()
+        reload(resetChecks: true)
         center(over: parent)
         if let content = parent.contentView {
             scrim.frame = content.bounds
@@ -329,8 +329,8 @@ final class RecentProjectsPanel: NSPanel {
 
     override func cancelOperation(_ sender: Any?) { dismiss() }
 
-    private func reload() {
-        list.reload()
+    private func reload(resetChecks: Bool = false) {
+        list.reload(resetChecks: resetChecks)
         empty.isHidden = !list.arrangedSubviews.isEmpty
         list.layoutSubtreeIfNeeded()
         listHeight.constant = min(Self.maximumListHeight,

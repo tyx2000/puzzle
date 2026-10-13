@@ -85,6 +85,10 @@ enum Theme {
     static let diffRemovedText = hex(0xf26d78)
     static let diffAddedBackground = hex(0x18251b)
     static let diffRemovedBackground = hex(0x2a1a1d)
+    /// The words that changed inside a changed line: the line's colour, a
+    /// third of the way from its band to its text.
+    static let diffAddedWordBackground = hex(0x375b30)
+    static let diffRemovedWordBackground = hex(0x70373d)
 
     // Accent hues. These name a *hue*: the panels use them for git status,
     // links and markers.

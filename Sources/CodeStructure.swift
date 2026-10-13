@@ -323,6 +323,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     private var markdownGlyphReplacements: [MarkdownGlyphReplacement] = []
     private var revealedMarkdownRange: NSRange?
     private var markdownTableRowMetrics: [MarkdownTableRowMetric] = []
+    private(set) var markdownTableMetricsNeedRefresh = false
 
     var foldedBlockIdentities: Set<Int> { foldedBlockStarts }
 
@@ -347,6 +348,234 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         invalidateFoldedGlyphs()
     }
 
+    // MARK: Invalidating no more than changed
+    //
+    // Every edit used to throw away the glyphs and layout of the whole
+    // document: the hidden Markdown, the folds and the table rows arrived
+    // again, every range after the edit moved, and anything different was
+    // taken to mean everything was. Measured on an 1,800-line document, one
+    // keystroke regenerated every glyph — 1.4s. What this layout manager holds
+    // is now moved with each edit, as TextKit moves the glyphs themselves, so
+    // what arrives next differs only where something really changed, and only
+    // the lines there are laid out again.
+
+    /// How many glyphs have been generated, for a test to tell a keystroke
+    /// that laid out its own lines from one that redid the document.
+    var glyphsGeneratedForTesting = 0
+
+    /// Hidden state needs working out from scratch: the layout manager has
+    /// been given another document, whose glyphs it knows nothing about.
+    private var hiddenStateIsStale = true
+
+    override var textStorage: NSTextStorage? {
+        didSet {
+            hiddenStateIsStale = true
+            // Attaching lays the new document out from scratch; its folds are
+            // whatever is restored next.
+            appliedFoldedRanges = []
+        }
+    }
+
+    /// The folds whose glyphs are hidden now, to tell what a change to them
+    /// changed.
+    private var appliedFoldedRanges: [NSRange] = []
+
+    /// `ranges` after an edit that replaced `old` and changed the length by
+    /// `delta`: those before it as they were, those after it moved, and what
+    /// the edit replaced cut out of any that spanned it.
+    static func shifted(_ ranges: [NSRange], replacing old: NSRange, delta: Int) -> [NSRange] {
+        guard !ranges.isEmpty else { return ranges }
+        let oldEnd = NSMaxRange(old)
+        var result: [NSRange] = []
+        result.reserveCapacity(ranges.count + 1)
+        for range in ranges {
+            let end = NSMaxRange(range)
+            if end <= old.location {
+                result.append(range)
+            } else if range.location >= oldEnd {
+                result.append(NSRange(location: range.location + delta, length: range.length))
+            } else {
+                if range.location < old.location {
+                    result.append(NSRange(location: range.location,
+                                          length: old.location - range.location))
+                }
+                if end > oldEnd {
+                    result.append(NSRange(location: oldEnd + delta, length: end - oldEnd))
+                }
+            }
+        }
+        return result
+    }
+
+    /// A range the edit moved — or nil, when the edit reached into it and
+    /// whatever it stood for is to be worked out again.
+    static func moved(_ range: NSRange, replacing old: NSRange, delta: Int) -> NSRange? {
+        if NSMaxRange(range) <= old.location { return range }
+        if range.location >= NSMaxRange(old) {
+            return NSRange(location: range.location + delta, length: range.length)
+        }
+        return nil
+    }
+
+    /// One range after the edit: grown or shrunk by an edit inside it, moved
+    /// by one before it.
+    static func shifted(_ range: NSRange?, replacing old: NSRange, delta: Int) -> NSRange? {
+        guard let range else { return nil }
+        let oldEnd = NSMaxRange(old)
+        if old.location >= range.location, oldEnd <= NSMaxRange(range) {
+            return NSRange(location: range.location, length: max(0, range.length + delta))
+        }
+        if oldEnd <= range.location {
+            return NSRange(location: range.location + delta, length: range.length)
+        }
+        if old.location >= NSMaxRange(range) { return range }
+        let start = min(range.location, old.location)
+        return NSRange(location: start,
+                       length: max(0, max(NSMaxRange(range), oldEnd) + delta - start))
+    }
+
+    /// Where two sorted lists of ranges cover different characters. Runs of
+    /// equal entries at either end — after an edit, nearly all of them — are
+    /// skipped without being looked at.
+    static func changedRegions(_ a: [NSRange], _ b: [NSRange]) -> [NSRange] {
+        guard a != b else { return [] }
+        var head = 0
+        while head < a.count, head < b.count, a[head] == b[head] { head += 1 }
+        var tailA = a.count, tailB = b.count
+        while tailA > head, tailB > head, a[tailA - 1] == b[tailB - 1] {
+            tailA -= 1
+            tailB -= 1
+        }
+        let restA = Array(a[head..<tailA]), restB = Array(b[head..<tailB])
+        var points: [Int] = []
+        for range in restA + restB {
+            points.append(range.location)
+            points.append(NSMaxRange(range))
+        }
+        points = Array(Set(points)).sorted()
+        func covers(_ list: [NSRange], _ location: Int) -> Bool {
+            var lower = 0, upper = list.count
+            while lower < upper {
+                let middle = (lower + upper) / 2
+                if location < list[middle].location {
+                    upper = middle
+                } else if location >= NSMaxRange(list[middle]) {
+                    lower = middle + 1
+                } else {
+                    return true
+                }
+            }
+            return false
+        }
+        var regions: [NSRange] = []
+        for (start, end) in zip(points, points.dropFirst())
+        where covers(restA, start) != covers(restB, start) {
+            if let last = regions.last, NSMaxRange(last) == start {
+                regions[regions.count - 1].length += end - start
+            } else {
+                regions.append(NSRange(location: start, length: end - start))
+            }
+        }
+        // Equal coverage but different pieces — a range split in two — still
+        // changes nothing on screen.
+        return regions
+    }
+
+    /// Lay out again the lines `regions` touch — and the line before each:
+    /// characters hidden at the start of a line are laid out with the line
+    /// above it — regenerating their glyphs when what is hidden changed.
+    private func invalidate(lines regions: [NSRange], glyphs: Bool) {
+        guard let storage = textStorage, storage.length > 0, !regions.isEmpty else { return }
+        let source = storage.string as NSString
+        var spans: [NSRange] = []
+        for region in regions.sorted(by: { $0.location < $1.location }) {
+            let start = min(max(0, region.location), source.length)
+            let end = min(max(start, NSMaxRange(region)), source.length)
+            let first = source.lineRange(for: NSRange(location: start, length: 0))
+            var before = first.location > 0
+                ? source.lineRange(for: NSRange(location: first.location - 1, length: 0)) : first
+            // From a line that is drawn: a line that draws nothing — a table's
+            // divider, a fence — is laid out joined to its neighbours, and
+            // laying out again from inside it broke the lines differently from
+            // laying the document out whole: the row under a divider came out
+            // a point high.
+            var steps = 0
+            while before.location > 0, steps < 64, drawsNothing(before, in: source) {
+                before = source.lineRange(for: NSRange(location: before.location - 1, length: 0))
+                steps += 1
+            }
+            let last = source.lineRange(for: NSRange(location: max(start, end - 1), length: 0))
+            let span = NSUnionRange(before, last)
+            if let previous = spans.last, NSMaxRange(previous) >= span.location {
+                spans[spans.count - 1] = NSUnionRange(previous, span)
+            } else {
+                spans.append(span)
+            }
+        }
+        for span in spans {
+            if glyphs {
+                invalidateGlyphs(forCharacterRange: span, changeInLength: 0,
+                                 actualCharacterRange: nil)
+            }
+            invalidateLayout(forCharacterRange: span, actualCharacterRange: nil)
+        }
+    }
+
+    private func drawsNothing(_ line: NSRange, in source: NSString) -> Bool {
+        var index = line.location
+        let end = min(NSMaxRange(line), source.length)
+        while index < end {
+            let character = source.character(at: index)
+            if character != 0x0A, character != 0x0D,
+               !isMarkdownSyntaxHidden(at: index), !isMarkdownControlLineCollapsed(at: index) {
+                return false
+            }
+            index += 1
+        }
+        return true
+    }
+
+    /// Hidden state that came in in one go — a new document, or the first
+    /// time — is applied to all of it.
+    private func invalidateHiddenState(_ regions: [NSRange]) {
+        if hiddenStateIsStale {
+            hiddenStateIsStale = false
+            invalidateHiddenGlyphs()
+        } else {
+            invalidate(lines: regions, glyphs: true)
+        }
+    }
+
+    private static func replacementRegions(_ a: [MarkdownGlyphReplacement],
+                                           _ b: [MarkdownGlyphReplacement]) -> [NSRange] {
+        guard a != b else { return [] }
+        var head = 0
+        while head < a.count, head < b.count, a[head] == b[head] { head += 1 }
+        var tailA = a.count, tailB = b.count
+        while tailA > head, tailB > head, a[tailA - 1] == b[tailB - 1] {
+            tailA -= 1
+            tailB -= 1
+        }
+        return a[head..<tailA].map(\.sourceRange) + b[head..<tailB].map(\.sourceRange)
+    }
+
+    private static func revealRegions(_ old: NSRange?, _ new: NSRange?) -> [NSRange] {
+        guard old != new else { return [] }
+        return [old, new].compactMap { $0 }
+    }
+
+    private static func normalizedFolds(_ ranges: [NSRange]) -> [NSRange] {
+        var merged: [NSRange] = []
+        for range in ranges.sorted(by: { $0.location < $1.location }) where range.length > 0 {
+            if let last = merged.last, NSMaxRange(last) >= range.location {
+                merged[merged.count - 1] = NSUnionRange(last, range)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
     func isFolded(_ block: CodeBlock) -> Bool {
         foldedBlockStarts.contains(block.identity)
     }
@@ -367,19 +596,26 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
                                     replacements: [MarkdownGlyphReplacement] = [],
                                     revealing range: NSRange?,
                                     revealingLead lead: NSRange? = nil) {
-        guard ranges != markdownSyntaxRanges
+        guard hiddenStateIsStale
+                || ranges != markdownSyntaxRanges
                 || leads != markdownLeadRanges
                 || collapsedLines != markdownCollapsedLineRanges
                 || replacements != markdownGlyphReplacements
                 || range != revealedMarkdownRange
                 || lead != revealedLeadRange else { return }
+        let changed = Self.changedRegions(markdownSyntaxRanges, ranges)
+            + Self.changedRegions(markdownLeadRanges, leads)
+            + Self.changedRegions(markdownCollapsedLineRanges, collapsedLines)
+            + Self.replacementRegions(markdownGlyphReplacements, replacements)
+            + Self.revealRegions(revealedMarkdownRange, range)
+            + Self.revealRegions(revealedLeadRange, lead)
         markdownSyntaxRanges = ranges
         markdownLeadRanges = leads
         markdownCollapsedLineRanges = collapsedLines
         markdownGlyphReplacements = replacements
         revealedMarkdownRange = range
         revealedLeadRange = lead
-        invalidateHiddenGlyphs()
+        invalidateHiddenState(changed)
     }
 
     /// Show the source of `range` — the line being edited, or a line that
@@ -388,18 +624,28 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     @discardableResult
     func revealMarkdownSyntax(in range: NSRange?, lead: NSRange? = nil) -> Bool {
         guard range != revealedMarkdownRange || lead != revealedLeadRange else { return false }
+        let changed = Self.revealRegions(revealedMarkdownRange, range)
+            + Self.revealRegions(revealedLeadRange, lead)
         revealedMarkdownRange = range
         revealedLeadRange = lead
-        invalidateHiddenGlyphs()
+        invalidateHiddenState(changed)
         return true
     }
 
     func updateMarkdownTableRowMetrics(_ metrics: [MarkdownTableRowMetric]) {
+        markdownTableMetricsNeedRefresh = false
         guard metrics != markdownTableRowMetrics else { return }
+        let old = markdownTableRowMetrics
         markdownTableRowMetrics = metrics
-        guard let storage = textStorage else { return }
-        invalidateLayout(forCharacterRange: NSRange(location: 0, length: storage.length),
-                         actualCharacterRange: nil)
+        var head = 0
+        while head < old.count, head < metrics.count, old[head] == metrics[head] { head += 1 }
+        var tailOld = old.count, tailNew = metrics.count
+        while tailOld > head, tailNew > head, old[tailOld - 1] == metrics[tailNew - 1] {
+            tailOld -= 1
+            tailNew -= 1
+        }
+        invalidate(lines: old[head..<tailOld].map(\.range) + metrics[head..<tailNew].map(\.range),
+                   glyphs: false)
     }
 
     func markdownTableRowHeightForTesting(at location: Int) -> CGFloat? {
@@ -421,6 +667,37 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
                                  range newCharRange: NSRange,
                                  changeInLength delta: Int,
                                  invalidatedRange invalidatedCharRange: NSRange) {
+        // Moved before TextKit hears of the edit: it can generate the edited
+        // lines' glyphs straight away, and against the old positions it hid
+        // the wrong characters — a list item's `-` drawn after a line above it
+        // lost its `##`.
+        if editMask.contains(.editedCharacters) {
+            // What was replaced, in the text as it was.
+            let old = NSRange(location: newCharRange.location,
+                              length: max(0, newCharRange.length - delta))
+            markdownSyntaxRanges = Self.shifted(markdownSyntaxRanges, replacing: old, delta: delta)
+            markdownLeadRanges = Self.shifted(markdownLeadRanges, replacing: old, delta: delta)
+            markdownCollapsedLineRanges = Self.shifted(markdownCollapsedLineRanges,
+                                                       replacing: old, delta: delta)
+            markdownGlyphReplacements = markdownGlyphReplacements.compactMap { replacement in
+                Self.moved(replacement.sourceRange, replacing: old, delta: delta).map {
+                    MarkdownGlyphReplacement(sourceRange: $0, character: replacement.character)
+                }
+            }
+            revealedMarkdownRange = Self.shifted(revealedMarkdownRange, replacing: old, delta: delta)
+            revealedLeadRange = Self.shifted(revealedLeadRange, replacing: old, delta: delta)
+            let previousMetricCount = markdownTableRowMetrics.count
+            markdownTableRowMetrics = markdownTableRowMetrics.compactMap { metric in
+                Self.moved(metric.range, replacing: old, delta: delta).map {
+                    MarkdownTableRowMetric(range: $0, height: metric.height,
+                                           isImage: metric.isImage)
+                }
+            }
+            if markdownTableRowMetrics.count != previousMetricCount {
+                markdownTableMetricsNeedRefresh = true
+            }
+            appliedFoldedRanges = Self.shifted(appliedFoldedRanges, replacing: old, delta: delta)
+        }
         super.processEditing(for: textStorage, edited: editMask, range: newCharRange,
                              changeInLength: delta,
                              invalidatedRange: invalidatedCharRange)
@@ -454,8 +731,13 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         blocks.compactMap { foldedBlockStarts.contains($0.identity) ? $0.hiddenRange : nil }
     }
 
+    /// Only the folds that opened or closed — usually none: the blocks arrive
+    /// again after every edit, and nothing folded is the common case.
     private func invalidateFoldedGlyphs() {
-        invalidateHiddenGlyphs()
+        let now = Self.normalizedFolds(foldedRanges)
+        let changed = Self.changedRegions(appliedFoldedRanges, now)
+        appliedFoldedRanges = now
+        invalidate(lines: changed, glyphs: true)
     }
 
     private func invalidateHiddenGlyphs() {
@@ -474,6 +756,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         font aFont: NSFont,
         forGlyphRange glyphRange: NSRange
     ) -> Int {
+        glyphsGeneratedForTesting += glyphRange.length
         let folded = foldedRanges
         guard !folded.isEmpty || !markdownSyntaxRanges.isEmpty || !markdownLeadRanges.isEmpty
                 || !markdownGlyphReplacements.isEmpty else { return 0 }

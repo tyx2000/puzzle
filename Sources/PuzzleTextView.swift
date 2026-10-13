@@ -158,6 +158,7 @@ final class PuzzleTextView: NSTextView {
     /// A block's lead the caret is inside, shown in the text itself.
     private var markdownRevealedLead: NSRange?
     private var measuredMarkdownTableWidth: CGFloat = -1
+    private var measuredMarkdownTableFont: NSFont?
 
     func updateMarkdownDecorations(codeBlocks: [MarkdownCodeBlockDecoration],
                                    tables: [MarkdownTableDecoration],
@@ -172,7 +173,10 @@ final class PuzzleTextView: NSTextView {
             markdownLinks = links
             hideLinkPopover()
         }
-        guard codeBlocks != markdownCodeBlocks || tables != markdownTables
+        let measured = tables != markdownTables || images != markdownImages
+            || foldingManager?.markdownTableMetricsNeedRefresh == true
+            || measuredMarkdownTableFont != Theme.markdownFont()
+        guard measured || codeBlocks != markdownCodeBlocks || tables != markdownTables
                 || tasks != markdownTasks
                 || lineMarkers != markdownLineMarkers
                 || rules != markdownRules
@@ -189,8 +193,13 @@ final class PuzzleTextView: NSTextView {
         markdownImageCache = markdownImageCache.filter { retainedURLs.contains($0.key) }
         markdownActiveSourceRange = activeSourceRange
         markdownRevealedLead = revealedLead
-        measuredMarkdownTableWidth = -1
-        updateMarkdownTableRowMetrics()
+        // Rows are measured again only when a table or a picture changed —
+        // not for every move of the caret, which re-measured every cell of
+        // every table.
+        if measured {
+            measuredMarkdownTableWidth = -1
+            updateMarkdownTableRowMetrics()
+        }
         needsDisplay = true
     }
 
@@ -206,15 +215,19 @@ final class PuzzleTextView: NSTextView {
 
     private func updateMarkdownTableRowMetrics() {
         let width = bounds.width
-        guard abs(width - measuredMarkdownTableWidth) > 0.5 else { return }
+        guard abs(width - measuredMarkdownTableWidth) > 0.5
+                || measuredMarkdownTableFont != Theme.markdownFont() else { return }
         measuredMarkdownTableWidth = width
+        measuredMarkdownTableFont = Theme.markdownFont()
         guard width > 0, !markdownTables.isEmpty || !markdownImages.isEmpty else {
             foldingManager?.updateMarkdownTableRowMetrics([])
             return
         }
         var metrics: [MarkdownTableRowMetric] = []
+        var measuredNow: [TableMeasureKey: TableMeasure] = [:]
         for table in markdownTables {
-            let widths = markdownTableColumnWidths(for: table)
+            let measure = tableMeasure(for: table)
+            measuredNow[TableMeasureKey(table, width: bounds.width)] = measure
             for (index, row) in table.rows.enumerated() {
                 // The metric covers the row's characters, not its line: a
                 // hidden line's terminator floats into the *next* fragment, and
@@ -224,7 +237,7 @@ final class PuzzleTextView: NSTextView {
                     ? Theme.markdownBlankLineHeight() : 0
                 metrics.append(MarkdownTableRowMetric(
                     range: row.sourceRange,
-                    height: markdownTableRowHeight(row, widths: widths) + leading))
+                    height: measure.heights[index] + leading))
             }
             // The last row's terminator has no row after it to float into, so
             // it forms a fragment of its own and would read as a blank line the
@@ -235,6 +248,7 @@ final class PuzzleTextView: NSTextView {
                     height: 1))
             }
         }
+        tableMeasures = measuredNow
         for image in markdownImages {
             metrics.append(MarkdownTableRowMetric(
                 range: image.lineRange,
@@ -243,6 +257,39 @@ final class PuzzleTextView: NSTextView {
         foldingManager?.updateMarkdownTableRowMetrics(metrics)
         needsDisplay = true
         enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
+    /// A table's column widths and row heights, by what it holds and the
+    /// width it is set in. An edit anywhere moves every table's ranges, and
+    /// measuring every cell again for that — and on every draw — was a large
+    /// part of a keystroke in a long document.
+    private struct TableMeasureKey: Hashable {
+        let cells: [[String]]
+        let headers: [Bool]
+        let width: CGFloat
+        /// The type is set in: measured again when the font size changes.
+        let font = Theme.markdownFont()
+        init(_ table: MarkdownTableDecoration, width: CGFloat) {
+            cells = table.rows.map(\.cells)
+            headers = table.rows.map(\.isHeader)
+            self.width = width
+        }
+    }
+    private struct TableMeasure {
+        let widths: [CGFloat]
+        let heights: [CGFloat]
+    }
+    private var tableMeasures: [TableMeasureKey: TableMeasure] = [:]
+
+    private func tableMeasure(for table: MarkdownTableDecoration) -> TableMeasure {
+        let key = TableMeasureKey(table, width: bounds.width)
+        if let known = tableMeasures[key] { return known }
+        let widths = markdownTableColumnWidths(for: table)
+        let measure = TableMeasure(widths: widths, heights: table.rows.map {
+            markdownTableRowHeight($0, widths: widths)
+        })
+        tableMeasures[key] = measure
+        return measure
     }
 
     private func markdownTableAttributes(header: Bool)
@@ -708,9 +755,18 @@ final class PuzzleTextView: NSTextView {
 
     private func drawMarkdownCodeBlocks(in dirtyRect: NSRect) {
         guard !markdownCodeBlocks.isEmpty,
-              let layoutManager, textContainer != nil else { return }
+              let layoutManager, let container = textContainer else { return }
         let inset = textContainerInset
-        for block in markdownCodeBlocks {
+        // Only the blocks being drawn: walking the lines of every block in the
+        // document, on every draw, was as long as restyling it.
+        let reach = dirtyRect.insetBy(dx: 0, dy: -Theme.markdownCodePaddingY * 2)
+            .offsetBy(dx: -inset.width, dy: -inset.height)
+        let shown = layoutManager.characterRange(
+            forGlyphRange: layoutManager.glyphRange(forBoundingRect: reach, in: container),
+            actualGlyphRange: nil)
+        for block in markdownCodeBlocks
+        where NSIntersectionRange(block.range, shown).length > 0
+            || NSLocationInRange(shown.location, block.range) {
             // Inside a list the first line starts with the item's hidden
             // indent, which TextKit keeps with the line above.
             let start = firstDrawnCharacter(from: block.range.location)
@@ -771,15 +827,22 @@ final class PuzzleTextView: NSTextView {
     }
 
     private func drawMarkdownTables(in dirtyRect: NSRect) {
-        guard !markdownTables.isEmpty, let layoutManager else { return }
+        guard !markdownTables.isEmpty, let layoutManager,
+              let container = textContainer else { return }
         let inset = textContainerInset
+        let shown = layoutManager.characterRange(
+            forGlyphRange: layoutManager.glyphRange(
+                forBoundingRect: dirtyRect.offsetBy(dx: -inset.width, dy: -inset.height),
+                in: container),
+            actualGlyphRange: nil)
 
-        for table in markdownTables {
-            let widths = markdownTableColumnWidths(for: table)
+        for table in markdownTables where NSIntersectionRange(table.sourceRange, shown).length > 0 {
+            let measure = tableMeasure(for: table)
             let tableWidth = min(max(80, bounds.width - inset.width * 2),
-                                 widths.reduce(0, +))
+                                 measure.widths.reduce(0, +))
+            let widths = measure.widths
 
-            for row in table.rows {
+            for (rowIndex, row) in table.rows.enumerated() {
                 if let active = markdownActiveSourceRange,
                    NSIntersectionRange(active, row.sourceRange).length > 0 {
                     continue
@@ -797,8 +860,7 @@ final class PuzzleTextView: NSTextView {
                                                                effectiveRange: nil)
                 // The fragment can be taller than the row when it also carries
                 // the blank line above the table. The row occupies its bottom.
-                let rowHeight = min(fragment.height,
-                                    markdownTableRowHeight(row, widths: widths))
+                let rowHeight = min(fragment.height, measure.heights[rowIndex])
                 let rowRect = NSRect(x: inset.width,
                                      y: fragment.maxY - rowHeight + inset.height,
                                      width: tableWidth, height: rowHeight)

@@ -166,17 +166,15 @@ private final class SideBySideRowCell: DrawnSidebarCell {
         // empty rather than blank-filled, so the eye can see which side gained
         // or lost the line.
         drawSide(NSRect(x: 0, y: 0, width: half, height: bounds.height),
-                 number: row.leftNumber, text: row.leftText, font: font, gutter: gutter,
+                 number: row.leftNumber, text: row.attributedText(onLeft: true, font: font),
+                 font: font, gutter: gutter,
                  background: row.kind == .change && row.leftText != nil
-                     ? Theme.diffRemovedBackground : nil,
-                 ink: row.kind == .change && row.leftText != nil
-                     ? Theme.diffRemovedText : Theme.foreground)
+                     ? Theme.diffRemovedBackground : nil)
         drawSide(NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height),
-                 number: row.rightNumber, text: row.rightText, font: font, gutter: gutter,
+                 number: row.rightNumber, text: row.attributedText(onLeft: false, font: font),
+                 font: font, gutter: gutter,
                  background: row.kind == .change && row.rightText != nil
-                     ? Theme.diffAddedBackground : nil,
-                 ink: row.kind == .change && row.rightText != nil
-                     ? Theme.diffAddedText : Theme.foreground)
+                     ? Theme.diffAddedBackground : nil)
 
         Theme.border.setFill()
         NSRect(x: half, y: 0, width: 1, height: bounds.height).fill()
@@ -188,8 +186,8 @@ private final class SideBySideRowCell: DrawnSidebarCell {
         NSRect(x: half + 1, y: 0, width: 3, height: bounds.height).fill()
     }
 
-    private func drawSide(_ rect: NSRect, number: Int?, text: String?, font: NSFont,
-                          gutter: CGFloat, background: NSColor?, ink: NSColor) {
+    private func drawSide(_ rect: NSRect, number: Int?, text: NSAttributedString?, font: NSFont,
+                          gutter: CGFloat, background: NSColor?) {
         if let background {
             background.setFill()
             rect.fill()
@@ -201,9 +199,8 @@ private final class SideBySideRowCell: DrawnSidebarCell {
                                     alignment: .right)
         }
         guard let text else { return }
-        SidebarCellDrawing.text(text, font: font, color: ink,
-                                in: NSRect(x: rect.minX + gutter, y: 0,
-                                           width: max(0, rect.width - gutter - 6),
-                                           height: rect.height))
+        SidebarCellDrawing.attributedText(text,
+            in: NSRect(x: rect.minX + gutter, y: 0,
+                       width: max(0, rect.width - gutter - 6), height: rect.height))
     }
 }

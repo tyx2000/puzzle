@@ -163,11 +163,12 @@ final class RecentProjectsListView: NSStackView {
     /// Everything the store keeps, up to what it shows — the same list the
     /// Dock menu has: a list that hides half of them sends the reader to the
     /// menu to find the rest.
-    func reload() {
+    func reload(resetChecks: Bool = false) {
         arrangedSubviews.forEach { $0.removeFromSuperview() }
         let recents = RecentProjects.shared.urls
         // A project that has left the list cannot stay ticked.
         let before = checked
+        if resetChecks { checked.removeAll() }
         checked.formIntersection(recents)
         for url in recents.prefix(RecentProjects.displayLimit) {
             addArrangedSubview(RecentRowView(

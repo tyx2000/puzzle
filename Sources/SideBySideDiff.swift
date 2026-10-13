@@ -15,14 +15,22 @@ enum SideBySideDiff {
         let rightText: String?
         /// Set for `.hunk`, which spans both columns.
         let header: String?
+        var leftChangedRanges: [NSRange] = []
+        var rightChangedRanges: [NSRange] = []
 
         static func context(_ left: Int, _ right: Int, _ text: String) -> Row {
             Row(kind: .context, leftNumber: left, leftText: text,
                 rightNumber: right, rightText: text, header: nil)
         }
         static func change(left: (Int, String)?, right: (Int, String)?) -> Row {
-            Row(kind: .change, leftNumber: left?.0, leftText: left?.1,
-                rightNumber: right?.0, rightText: right?.1, header: nil)
+            var row = Row(kind: .change, leftNumber: left?.0, leftText: left?.1,
+                          rightNumber: right?.0, rightText: right?.1, header: nil)
+            if let left, let right,
+               let words = DiffHighlighter.changedWords(removed: left.1, added: right.1) {
+                row.leftChangedRanges = words.removed
+                row.rightChangedRanges = words.added
+            }
+            return row
         }
         static func hunk(_ header: String) -> Row {
             Row(kind: .hunk, leftNumber: nil, leftText: nil,
@@ -30,6 +38,23 @@ enum SideBySideDiff {
         }
 
         var isChange: Bool { kind == .change }
+
+        func attributedText(onLeft: Bool, font: NSFont) -> NSAttributedString? {
+            guard let text = onLeft ? leftText : rightText else { return nil }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingTail
+            let color = isChange
+                ? (onLeft ? Theme.diffRemovedText : Theme.diffAddedText) : Theme.foreground
+            let styled = NSMutableAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: color, .paragraphStyle: paragraph])
+            for range in onLeft ? leftChangedRanges : rightChangedRanges {
+                styled.addAttribute(.backgroundColor,
+                                    value: onLeft ? Theme.diffRemovedWordBackground
+                                        : Theme.diffAddedWordBackground,
+                                    range: range)
+            }
+            return styled
+        }
     }
 
     static func rows(from diff: String) -> [Row] {

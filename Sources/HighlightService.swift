@@ -27,17 +27,19 @@ final class HighlightService {
             return
         }
         let full = NSRange(location: 0, length: storage.length)
-        storage.setAttributes(Theme.textAttributes(color: Theme.foreground), range: full)
+        let plain = Theme.textAttributes(color: Theme.foreground)
 
         // Check size and skip-conditions BEFORE materialising the grammar, so a
         // huge (or unsupported) file never pages in parser tables it won't use.
         guard let spec = doc.languageSpec, !doc.isUnsupported else {
+            storage.setAttributes(plain, range: full)
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
         let text = storage.string
         guard text.utf8.count <= maxBytes else {
+            storage.setAttributes(plain, range: full)
             cache[spec.name]?.discardParseTree()
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
@@ -50,26 +52,78 @@ final class HighlightService {
         if spec.name == "markdown",
            MarkdownSyntaxTree.containerDepth(of: storage.string)
             > MarkdownSyntaxTree.maxContainerDepth {
+            storage.setAttributes(plain, range: full)
             cache[spec.name]?.discardParseTree()
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
             return
         }
+        // Painted on a copy, then written back only where it differs. Painting
+        // the buffer itself rewrote every character's attributes on every
+        // keystroke, and TextKit regenerated the glyphs and layout of the
+        // whole document for it — the most of a second a keystroke took in a
+        // long Markdown file. A copy no layout manager holds costs nothing to
+        // paint.
+        let painted = NSTextStorage(string: text)
+        painted.setAttributes(plain, range: full)
         let tags: [JSXTagMatch]
         if let lang = SyntaxHighlighter.definition(for: spec),
            let hl = highlighter(for: lang) {
-            tags = hl.highlight(text: text, storage: storage, fullRange: full)
+            tags = hl.highlight(text: text, storage: painted, fullRange: full,
+                                parseOwner: storage)
         } else {
             tags = []
         }
-        if spec.name == "markdown" {
-            doc.updateMarkdownPresentation(
-                MarkdownLiveStyler.apply(text: text, to: storage,
-                                         documentURL: doc.url))
-        } else {
-            doc.updateMarkdownPresentation(MarkdownPresentation())
-        }
+        let presentation = spec.name == "markdown"
+            ? MarkdownLiveStyler.apply(text: text, to: painted, documentURL: doc.url)
+            : MarkdownPresentation()
+        Self.copyAttributes(from: painted, to: storage)
+        // Character edits shift or remove pane-local hidden ranges and metrics,
+        // even when the newly parsed presentation is equal to the old one.
+        doc.updateMarkdownPresentation(presentation, synchronize: spec.name == "markdown")
         doc.updateJSXTagMatches(tags)
+    }
+
+    func parseCountsForTesting(language: String) -> (full: Int, incremental: Int)? {
+        cache[language].map { ($0.fullParseCount, $0.incrementalParseCount) }
+    }
+
+    /// Make `storage`'s attributes `painted`'s, setting only the runs that
+    /// differ — so TextKit lays out again only where something changed.
+    ///
+    /// Compared through Core Foundation: bridging each run's attributes into
+    /// a Swift dictionary, and back into one to compare, cost more than the
+    /// painting did.
+    static func copyAttributes(from painted: NSAttributedString, to storage: NSTextStorage) {
+        let length = storage.length
+        guard painted.length == length else { return }
+        let wantedText = painted as CFAttributedString
+        let currentText = storage as CFAttributedString
+        var changes: [(range: NSRange, attributes: CFDictionary)] = []
+        var location = 0
+        while location < length {
+            var wantedRun = CFRange(), currentRun = CFRange()
+            let wanted = CFAttributedStringGetAttributes(wantedText, location, &wantedRun)
+            let current = CFAttributedStringGetAttributes(currentText, location, &currentRun)
+            let end = min(wantedRun.location + wantedRun.length,
+                          currentRun.location + currentRun.length)
+            if let wanted, !(current.map { CFEqual(wanted, $0) } ?? false) {
+                if let last = changes.last, NSMaxRange(last.range) == location,
+                   CFEqual(last.attributes, wanted) {
+                    changes[changes.count - 1].range.length += end - location
+                } else {
+                    changes.append((NSRange(location: location, length: end - location), wanted))
+                }
+            }
+            location = max(end, location + 1)
+        }
+        guard !changes.isEmpty else { return }
+        storage.beginEditing()
+        for change in changes {
+            storage.setAttributes(change.attributes as? [NSAttributedString.Key: Any],
+                                  range: change.range)
+        }
+        storage.endEditing()
     }
 
     /// Memory pressure can discard incremental state without changing text.

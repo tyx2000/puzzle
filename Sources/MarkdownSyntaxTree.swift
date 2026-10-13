@@ -45,6 +45,9 @@ enum MarkdownSyntaxTree {
     private static let lock = NSLock()
     private static var blockParser: OpaquePointer?
     private static var inlineParser: OpaquePointer?
+    /// The last parse's inline spans, by their text. Under `lock`, as the
+    /// parsers are.
+    private static var inlineCache: [String: [MarkdownNode]] = [:]
 
     /// How deeply containers may nest before the document is left as plain text.
     ///
@@ -83,6 +86,11 @@ enum MarkdownSyntaxTree {
 
     static func parse(_ text: String) -> Document {
         guard !text.isEmpty else { return Document(blocks: [], inlines: []) }
+        // The buffer's text arrives bridged from UTF-16; the parser reads
+        // UTF-8. Converted once here rather than on the slow path inside
+        // every read of it.
+        var text = text
+        text.makeContiguousUTF8()
         // Checked before the parser sees the text: past this the grammar does
         // not fail, it aborts.
         guard containerDepth(of: text) <= maxContainerDepth else {
@@ -101,14 +109,24 @@ enum MarkdownSyntaxTree {
         // parser a set of included ranges: an `inline` node is self-contained,
         // so the result is the same, and the parser never has to be told about
         // the block structure around it.
+        //
+        // A span's nodes depend on nothing but its text, so they are kept from
+        // one parse to the next by that text: between two keystrokes nearly
+        // every paragraph is the same, and parsing them all again was most of
+        // a parse. Only the last parse's spans are kept.
         var inlines: [MarkdownNode] = []
         if let inlineParser {
             let source = text as NSString
+            var kept: [String: [MarkdownNode]] = [:]
             for span in inlineSpans(in: blocks) {
-                let fragment = source.substring(with: span)
-                let parsed = nodes(of: fragment, using: inlineParser)
+                var fragment = source.substring(with: span)
+                fragment.makeContiguousUTF8()
+                let parsed = kept[fragment] ?? inlineCache[fragment]
+                    ?? nodes(of: fragment, using: inlineParser)
+                kept[fragment] = parsed
                 inlines.append(contentsOf: parsed.map { shift($0, by: span.location) })
             }
+            inlineCache = kept
         }
         return Document(blocks: blocks, inlines: inlines)
     }
