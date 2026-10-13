@@ -1,24 +1,38 @@
 import AppKit
 
-/// What the R button opens: a dialog over the window listing the recent
-/// projects as the start page lists them — a click ticks one, a double click
-/// opens it, the cross on a hovered row takes it off the list — with Open
-/// Checked alone in the bottom right corner. Esc closes it, and so does a
-/// click anywhere outside it — in the window under it, another of the app's
-/// windows, or another app.
+/// What the R button opens: a dialog over the window, "Opened Recently",
+/// listing the recent projects as the start page lists them — a click ticks
+/// one, a double click opens it, the cross on a hovered row takes it off the
+/// list — with Open Checked at the top right and Clear All along the bottom.
+/// Esc closes it, and so does a click anywhere outside it — in the window
+/// under it, another of the app's windows, or another app.
 ///
 /// A panel like the ⌘P palette rather than a popover: a dialog of its own,
-/// not a balloon hanging off the button.
+/// not a balloon hanging off the button. It is the colour of the window under
+/// it, so a border and a shadow of its own set it off.
 final class RecentProjectsPanel: NSPanel {
     /// The projects to open: one double-clicked, or every ticked one.
     var onOpen: (([URL]) -> Void)?
 
-    static let width: CGFloat = 520
-    static let padding: CGFloat = 12
+    static let width: CGFloat = 640
+    static let padding: CGFloat = 18
+    /// Room around the card for its shadow, inside the panel's own window.
+    static let shadowMargin: CGFloat = 32
+    static let minimumListHeight: CGFloat = 240
+    static let maximumListHeight: CGFloat = 440
+    static let title = "Opened Recently"
 
-    private let list = RecentProjectsListView()
+    private let backdrop = DialogBackdropView()
+    private let card = NSView()
+    private let titleLabel = NSTextField(labelWithString: RecentProjectsPanel.title)
     private let openChecked = NSButton()
+    private let separator = FlatView()
+    private let footerRule = FlatView()
+    private let scroll = NSScrollView()
+    private let list = RecentProjectsListView()
     private let empty = NSTextField(labelWithString: "No Recent Projects")
+    private let clearAll = DialogRowButton(title: "Clear All")
+    private var listHeight: NSLayoutConstraint!
     private var recentsObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var resignObserver: NSObjectProtocol?
@@ -26,7 +40,8 @@ final class RecentProjectsPanel: NSPanel {
     init() {
         // Borderless: a titled panel keeps its title bar, invisible or not,
         // over the top of the content, where it took the first row's clicks.
-        super.init(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 120),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: Self.width + Self.shadowMargin * 2,
+                                       height: 400),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         // Gone for good when the app is left, not hidden to come back with it.
@@ -35,24 +50,14 @@ final class RecentProjectsPanel: NSPanel {
         level = .floating
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        // The shadow is drawn: the window's own is a faint line on a dark
+        // window, and did not tell the dialog from what is under it.
+        hasShadow = false
         isReleasedWhenClosed = false
 
-        let content = FlatView()
-        content.fillColor = Theme.panelBackground
-        content.wantsLayer = true
-        content.layer?.cornerRadius = 10
-        content.layer?.masksToBounds = true
-        content.layer?.borderWidth = 1
-        content.layer?.borderColor = Theme.border.cgColor
-
-        list.translatesAutoresizingMaskIntoConstraints = false
-        list.onOpen = { [weak self] url in self?.open([url]) }
-        list.onCheckedChange = { [weak self] in self?.updateOpenChecked() }
-
-        empty.font = Theme.uiFont(12)
-        empty.textColor = Theme.dimText
-        empty.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = NSFontManager.shared.convert(Theme.uiFont(13), toHaveTrait: .boldFontMask)
+        titleLabel.textColor = Theme.foreground
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         openChecked.title = "Open Checked"
         openChecked.bezelStyle = .rounded
@@ -62,29 +67,90 @@ final class RecentProjectsPanel: NSPanel {
         openChecked.isEnabled = false
         openChecked.translatesAutoresizingMaskIntoConstraints = false
 
-        content.addSubview(list)
-        content.addSubview(empty)
-        content.addSubview(openChecked)
+        separator.fillColor = Theme.border
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        footerRule.fillColor = Theme.border
+        footerRule.translatesAutoresizingMaskIntoConstraints = false
+
+        list.translatesAutoresizingMaskIntoConstraints = false
+        list.onOpen = { [weak self] url in self?.open([url]) }
+        list.onCheckedChange = { [weak self] in self?.updateButtons() }
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(list)
+        PuzzleScroller.adopt(scroll)
+        scroll.documentView = document
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        empty.font = Theme.uiFont(12)
+        empty.textColor = Theme.dimText
+        empty.translatesAutoresizingMaskIntoConstraints = false
+
+        clearAll.onClick = { RecentProjects.shared.clear() }
+        clearAll.translatesAutoresizingMaskIntoConstraints = false
+
+        card.translatesAutoresizingMaskIntoConstraints = false
+        for view in [titleLabel, openChecked, separator, scroll, empty, footerRule,
+                     clearAll] as [NSView] {
+            card.addSubview(view)
+        }
+        backdrop.addSubview(card)
         let padding = Self.padding
+        let margin = Self.shadowMargin
+        listHeight = scroll.heightAnchor.constraint(equalToConstant: Self.minimumListHeight)
         NSLayoutConstraint.activate([
-            content.widthAnchor.constraint(equalToConstant: Self.width),
-            list.topAnchor.constraint(equalTo: content.topAnchor, constant: padding),
-            list.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: padding),
-            list.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -padding),
-            empty.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            empty.topAnchor.constraint(equalTo: content.topAnchor, constant: padding * 2),
-            // Only the one button, and only in the corner: the list above is
-            // where everything else happens.
-            openChecked.topAnchor.constraint(
-                greaterThanOrEqualTo: list.bottomAnchor, constant: padding),
-            openChecked.topAnchor.constraint(
-                greaterThanOrEqualTo: empty.bottomAnchor, constant: padding * 2),
-            openChecked.trailingAnchor.constraint(equalTo: content.trailingAnchor,
+            card.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor, constant: margin),
+            card.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor, constant: -margin),
+            card.topAnchor.constraint(equalTo: backdrop.topAnchor, constant: margin),
+            card.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor, constant: -margin),
+            card.widthAnchor.constraint(equalToConstant: Self.width),
+
+            // What it is, top left; the one thing to do with what is ticked,
+            // top right.
+            titleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: padding),
+            titleLabel.centerYAnchor.constraint(equalTo: openChecked.centerYAnchor),
+            openChecked.topAnchor.constraint(equalTo: card.topAnchor, constant: padding - 4),
+            openChecked.trailingAnchor.constraint(equalTo: card.trailingAnchor,
                                                   constant: -padding),
-            openChecked.bottomAnchor.constraint(equalTo: content.bottomAnchor,
-                                                constant: -padding),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: openChecked.leadingAnchor,
+                                                 constant: -12),
+
+            separator.topAnchor.constraint(equalTo: openChecked.bottomAnchor, constant: 10),
+            separator.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: padding),
+            separator.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -padding),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+
+            scroll.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: padding - 6),
+            scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -(padding - 6)),
+            listHeight,
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            list.topAnchor.constraint(equalTo: document.topAnchor),
+            list.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            list.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            list.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+
+            empty.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            empty.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+
+            // The list's last row, the whole width of it, under a rule that
+            // ties it to the list however few projects are above it.
+            footerRule.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 6),
+            footerRule.leadingAnchor.constraint(equalTo: separator.leadingAnchor),
+            footerRule.trailingAnchor.constraint(equalTo: separator.trailingAnchor),
+            footerRule.heightAnchor.constraint(equalToConstant: 1),
+            clearAll.topAnchor.constraint(equalTo: footerRule.bottomAnchor, constant: 6),
+            clearAll.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            clearAll.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            clearAll.heightAnchor.constraint(equalToConstant: DialogRowButton.height),
+            clearAll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -padding),
         ])
-        contentView = content
+        contentView = backdrop
         recentsObserver = NotificationCenter.default.addObserver(
             forName: RecentProjects.didChange, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.isVisible else { return }
@@ -137,6 +203,15 @@ final class RecentProjectsPanel: NSPanel {
         dismissByClickOutside()
     }
 
+    /// A click on the R button while the dialog is up closes it on the way
+    /// down — it is a click outside — and would open it again on the way up.
+    /// That click was meant to close it. Only a close of that kind counts:
+    /// one the dialog did itself, opening a project, leaves R free to open it.
+    private var closedByClickAt: Date?
+    var justClosed: Bool {
+        closedByClickAt.map { Date().timeIntervalSince($0) < 0.5 } ?? false
+    }
+
     /// And in case the dialog never had the keyboard to lose: the app's own
     /// clicks and keys while it is up, and the app being left.
     private func startWatching() {
@@ -159,8 +234,9 @@ final class RecentProjectsPanel: NSPanel {
         resignObserver = nil
     }
 
-    /// A click outside closes it and still lands where it was aimed; Esc
-    /// closes it and goes no further; anything else passes.
+    /// A click outside closes it and still lands where it was aimed — the
+    /// shadow round the card is outside too; Esc closes it and goes no
+    /// further; anything else passes.
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard isVisible else { return event }
         if event.type == .keyDown {
@@ -168,17 +244,13 @@ final class RecentProjectsPanel: NSPanel {
             dismiss()
             return nil
         }
-        if event.window !== self { dismissByClickOutside() }
+        if event.window !== self {
+            dismissByClickOutside()
+        } else if !card.frame.contains(backdrop.convert(event.locationInWindow, from: nil)) {
+            dismissByClickOutside()
+            return nil
+        }
         return event
-    }
-
-    /// A click on the R button while the dialog is up closes it on the way
-    /// down — it is a click outside — and would open it again on the way up.
-    /// That click was meant to close it. Only a close of that kind counts:
-    /// one the dialog did itself, opening a project, leaves R free to open it.
-    private var closedByClickAt: Date?
-    var justClosed: Bool {
-        closedByClickAt.map { Date().timeIntervalSince($0) < 0.5 } ?? false
     }
 
     override func keyDown(with event: NSEvent) {
@@ -194,17 +266,21 @@ final class RecentProjectsPanel: NSPanel {
     private func reload() {
         list.reload()
         empty.isHidden = !list.arrangedSubviews.isEmpty
-        updateOpenChecked()
-        contentView?.layoutSubtreeIfNeeded()
-        let size = contentView?.fittingSize ?? frame.size
+        list.layoutSubtreeIfNeeded()
+        listHeight.constant = min(Self.maximumListHeight,
+                                  max(Self.minimumListHeight, list.fittingSize.height))
+        updateButtons()
+        backdrop.layoutSubtreeIfNeeded()
+        let size = backdrop.fittingSize
         var frame = self.frame
         frame.origin.y += frame.height - size.height
-        frame.size = NSSize(width: Self.width, height: size.height)
+        frame.size = size
         setFrame(frame, display: isVisible)
     }
 
-    private func updateOpenChecked() {
+    private func updateButtons() {
         openChecked.isEnabled = !list.checkedURLs.isEmpty
+        clearAll.isEnabled = !list.arrangedSubviews.isEmpty
     }
 
     @objc private func openCheckedClicked() {
@@ -221,8 +297,18 @@ final class RecentProjectsPanel: NSPanel {
     var listForTesting: RecentProjectsListView { list }
     var openCheckedEnabledForTesting: Bool { openChecked.isEnabled }
     func openCheckedForTesting() { openCheckedClicked() }
-    var openCheckedFrameForTesting: NSRect { openChecked.frame }
     var isEmptyNoteShownForTesting: Bool { !empty.isHidden }
+    var clearAllEnabledForTesting: Bool { clearAll.isEnabled }
+    func clearAllForTesting() { clearAll.clickForTesting() }
+    var titleForTesting: String { titleLabel.stringValue }
+    /// Where things are in the card, its bottom left corner the origin.
+    var cardForTesting: NSView { card }
+    var titleFrameForTesting: NSRect { titleLabel.frame }
+    var openCheckedFrameForTesting: NSRect { openChecked.frame }
+    var clearAllFrameForTesting: NSRect { clearAll.frame }
+    var listAreaFrameForTesting: NSRect { scroll.frame }
+    var backdropForTesting: NSView { backdrop }
+    var isWatchingForTesting: Bool { eventMonitor != nil }
     /// A key, as the app's event stream sees it: whether it went on.
     func pressKeyForTesting(code: UInt16, characters: String) -> Bool {
         guard let event = NSEvent.keyEvent(
@@ -232,14 +318,131 @@ final class RecentProjectsPanel: NSPanel {
         else { return true }
         return handle(event) != nil
     }
-    /// A click in `window` — or in the dialog itself when nil.
-    func clickForTesting(in window: NSWindow?) -> Bool {
+    /// A click in `window` — or in the dialog itself when nil, at `point` in
+    /// its window's coordinates, the card's middle by default.
+    func clickForTesting(in window: NSWindow?, at point: NSPoint? = nil) -> Bool {
         let target = window ?? self
+        let location = point ?? (window == nil
+            ? NSPoint(x: card.frame.midX, y: card.frame.midY) : NSPoint(x: 10, y: 10))
         guard let event = NSEvent.mouseEvent(
-            with: .leftMouseDown, location: NSPoint(x: 10, y: 10), modifierFlags: [],
+            with: .leftMouseDown, location: location, modifierFlags: [],
             timestamp: 0, windowNumber: target.windowNumber, context: nil,
             eventNumber: 0, clickCount: 1, pressure: 1) else { return true }
         return handle(event) != nil
     }
-    var isWatchingForTesting: Bool { eventMonitor != nil }
+}
+
+/// The panel's whole window: clear, but for the card's shadow, fill and
+/// border, which it draws behind the card's content.
+private final class DialogBackdropView: NSView {
+    static let cornerRadius: CGFloat = 12
+
+    override func layout() {
+        super.layout()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let cardFrame = subviews.first?.frame, !cardFrame.isEmpty else { return }
+        let shape = NSBezierPath(roundedRect: cardFrame, xRadius: Self.cornerRadius,
+                                 yRadius: Self.cornerRadius)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.6)
+        shadow.shadowBlurRadius = 24
+        shadow.shadowOffset = NSSize(width: 0, height: -8)
+        shadow.set()
+        Theme.panelBackground.setFill()
+        shape.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        // Lighter than the window's own borders: the dialog is the same
+        // colour as what is under it, so its edge has to read on that.
+        Theme.gutter.setStroke()
+        let edge = NSBezierPath(roundedRect: cardFrame.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+        edge.lineWidth = 1
+        edge.stroke()
+    }
+}
+
+/// Lays the list out from the top.
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// A button the width of a list, as a row of it: the text in the middle,
+/// the row lit under the pointer.
+final class DialogRowButton: NSView {
+    static let height: CGFloat = 30
+    var onClick: (() -> Void)?
+    var isEnabled = true {
+        didSet {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    private let title: String
+    private var hovered = false { didSet { needsDisplay = true } }
+    private var tracking: NSTrackingArea?
+
+    init(title: String) {
+        self.title = title
+        super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: PointerCursor.trackingOptions,
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        if isEnabled { PointerCursor.enter() }
+    }
+    override func mouseMoved(with event: NSEvent) { if isEnabled { PointerCursor.enter() } }
+    override func cursorUpdate(with event: NSEvent) {
+        if isEnabled { PointerCursor.enter() } else { NSCursor.arrow.set() }
+    }
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        PointerCursor.leave(self, event: event)
+    }
+    override func resetCursorRects() {
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isEnabled, bounds.contains(convert(event.locationInWindow, from: nil)) else {
+            return
+        }
+        onClick?()
+    }
+    override func mouseDown(with event: NSEvent) {}
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovered, isEnabled {
+            Theme.activeRow.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Theme.uiFont(12),
+            .foregroundColor: isEnabled ? Theme.red : Theme.gutter,
+        ]
+        let text = title as NSString
+        let size = text.size(withAttributes: attributes)
+        text.draw(at: NSPoint(x: ((bounds.width - size.width) / 2).rounded(),
+                              y: ((bounds.height - size.height) / 2).rounded()),
+                  withAttributes: attributes)
+    }
+
+    func clickForTesting() { if isEnabled { onClick?() } }
 }

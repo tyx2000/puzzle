@@ -4535,6 +4535,18 @@ enum RegressionTests {
     /// The R button opens a dialog over the window listing the recents the
     /// way the start page does, and doing what the start page's list does.
     private static func testRecentProjectsDialog() throws {
+        // The list is the app's own, shared with this process: Clear All below
+        // must give the real one back.
+        let recentsKey = "PuzzleRecentProjects"
+        let saved = UserDefaults.standard.stringArray(forKey: recentsKey)
+        defer {
+            if let saved {
+                UserDefaults.standard.set(saved, forKey: recentsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: recentsKey)
+            }
+            NotificationCenter.default.post(name: RecentProjects.didChange, object: nil)
+        }
         let root = try temporaryDirectory("recent-dialog")
         defer { try? FileManager.default.removeItem(at: root) }
         var projects: [URL] = []
@@ -4615,21 +4627,71 @@ enum RegressionTests {
                     && list.arrangedSubviews.count == before - 1,
                    "removing a row did not take it off the list")
 
-        // Open Checked alone, in the bottom right corner.
-        if let content = dialog.contentView {
-            content.layoutSubtreeIfNeeded()
-            let frame = dialog.openCheckedFrameForTesting
-            let bottom = content.isFlipped ? content.bounds.maxY - frame.maxY : frame.minY
-            try expect(abs(content.bounds.maxX - frame.maxX - RecentProjectsPanel.padding) <= 1
-                        && abs(bottom - RecentProjectsPanel.padding) <= 1,
-                       "Open Checked is not in the bottom right corner: \(frame) in "
-                         + "\(content.bounds)")
+        // What it is, top left; Open Checked, top right; Clear All, the whole
+        // width of the list, along its bottom.
+        let card = dialog.cardForTesting
+        card.superview?.layoutSubtreeIfNeeded()
+        let padding = RecentProjectsPanel.padding
+        let titleFrame = dialog.titleFrameForTesting
+        let openFrame = dialog.openCheckedFrameForTesting
+        let clearFrame = dialog.clearAllFrameForTesting
+        let listFrame = dialog.listAreaFrameForTesting
+        try expect(dialog.titleForTesting == "Opened Recently"
+                    && abs(titleFrame.minX - padding) <= 3
+                    && card.bounds.maxY - titleFrame.maxY <= padding + 8,
+                   "the dialog does not say what it is at its top left: \(titleFrame)")
+        try expect(abs(card.bounds.maxX - openFrame.maxX - padding) <= 1
+                    && card.bounds.maxY - openFrame.maxY <= padding
+                    && abs(openFrame.midY - titleFrame.midY) <= 1,
+                   "Open Checked is not at the top right: \(openFrame) in \(card.bounds)")
+        try expect(clearFrame.width == listFrame.width && clearFrame.maxY < listFrame.minY
+                    && abs(clearFrame.minY - padding) <= 1,
+                   "Clear All is not a row the width of the list at its bottom: "
+                     + "\(clearFrame), list \(listFrame)")
+        // Room enough: wider than it was, and a list taller than a few rows.
+        try expect(card.bounds.width >= 600 && listFrame.height >= 200,
+                   "the dialog is cramped: \(card.bounds.size), list \(listFrame.height)pt")
+        // Set off from the window under it, which is its own colour: a drawn
+        // shadow round the card, and an edge lighter than the card.
+        let backdrop = dialog.backdropForTesting
+        if let pixels = backdrop.bitmapImageRepForCachingDisplay(in: backdrop.bounds) {
+            backdrop.cacheDisplay(in: backdrop.bounds, to: pixels)
+            let scale = CGFloat(pixels.pixelsWide) / backdrop.bounds.width
+            func pixel(_ point: NSPoint) -> NSColor? {
+                // Bitmap rows run from the top.
+                pixels.colorAt(x: Int(point.x * scale),
+                               y: Int((backdrop.bounds.height - point.y) * scale))
+            }
+            let cardFrame = card.frame
+            let underCard = pixel(NSPoint(x: cardFrame.midX, y: cardFrame.minY - 8))
+            let edge = pixel(NSPoint(x: cardFrame.minX + 0.5, y: cardFrame.midY))
+            let inside = pixel(NSPoint(x: cardFrame.minX + 6, y: cardFrame.midY))
+            try expect((underCard?.alphaComponent ?? 0) > 0.1,
+                       "there is no shadow under the dialog")
+            try expect(edge != nil && inside != nil && edge != inside,
+                       "the dialog's edge is not drawn")
+        }
+
+        // Clear All empties the list and leaves the dialog up, empty.
+        try expect(dialog.clearAllEnabledForTesting, "Clear All is unavailable with recents")
+        dialog.clearAllForTesting()
+        try expect(RecentProjects.shared.urls.isEmpty && list.arrangedSubviews.isEmpty
+                    && dialog.isEmptyNoteShownForTesting && dialog.isShown
+                    && !dialog.clearAllEnabledForTesting && !dialog.openCheckedEnabledForTesting,
+                   "Clear All did not empty the list, or left something to do")
+        for project in projects.reversed() where FileManager.default.fileExists(
+            atPath: project.path) {
+            RecentProjects.shared.add(project)
         }
 
         // Inside it, a click is the dialog's; outside it, it closes the dialog
-        // and still lands where it was aimed.
+        // and still lands where it was aimed. The shadow is outside.
         try expect(dialog.clickForTesting(in: nil) && dialog.isShown,
                    "a click inside the dialog closed it")
+        _ = dialog.clickForTesting(in: nil, at: NSPoint(x: 4, y: 4))
+        try expect(!dialog.isShown, "a click on the dialog's shadow did not close it")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        workspace.showRecentProjectsForTesting()
         try expect(dialog.clickForTesting(in: window) && !dialog.isShown,
                    "a click outside the dialog did not close it, or was swallowed")
         // That click, on R, closes it rather than opening it once more.
