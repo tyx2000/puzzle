@@ -43,10 +43,14 @@ final class SidebarViewController: NSViewController {
     /// open a project, go back to a recent one, get a shell in this one. They
     /// were on the menu bar, where macOS would not let them act on one click —
     /// a top-level item with no submenu is never drawn at all.
-    private let openButton = TitleLetterButton(letter: "O", word: "Open")
-    private let recentButton = TitleLetterButton(letter: "R", word: "Recent")
-    private let terminalButton = TitleLetterButton(letter: "T", word: "Terminal")
-    private let windowButton = TitleLetterButton(letter: "W", word: "Window")
+    private let openButton = TitleLetterButton(letter: "O", word: "Open",
+                                               hint: "Open Project", shortcut: "⌘O")
+    private let recentButton = TitleLetterButton(letter: "R", word: "Recent",
+                                                 hint: "Recent Projects")
+    private let terminalButton = TitleLetterButton(letter: "T", word: "Terminal",
+                                                   hint: "Open in Terminal")
+    private let windowButton = TitleLetterButton(letter: "W", word: "Window",
+                                                 hint: "New Window", shortcut: "⌘N")
     private var titleButtons: [TitleLetterButton] {
         [openButton, recentButton, terminalButton, windowButton]
     }
@@ -377,9 +381,13 @@ final class SidebarViewController: NSViewController {
 ///
 /// Letters rather than glyphs because these four are not obviously pictureable
 /// — opening a project, the recents, a terminal and a new window all reach for
-/// the same folder-ish and window-ish symbols. The hover background is what
-/// makes a letter read as a target rather than a label, so it is drawn a good
-/// deal larger than the glyph needs.
+/// the same folder-ish and window-ish symbols.
+///
+/// At rest each is outlined, in the band's own border colour: enough to make
+/// four letters read as four buttons — a dim letter on the bare band went
+/// unnoticed — without the filled squares that stood out from the band.
+/// Under the pointer the square fills. Resting on one names it, with its
+/// shortcut, in a card under it: the letter alone did not say what it does.
 final class TitleLetterButton: NSButton {
     /// The hit area, which is deliberately wider than the letter: a 22pt box
     /// around an 11pt character was a poke rather than a button.
@@ -387,21 +395,36 @@ final class TitleLetterButton: NSButton {
     /// Gap between neighbours, so four of them read as four targets instead of
     /// one strip of letters.
     static let gap: CGFloat = 3
+    /// The cap inside the hit area.
+    static let capInset: CGFloat = 2
+    /// How long the pointer rests before the name shows: long enough that
+    /// passing over the band shows nothing.
+    static let hintDelay: TimeInterval = 0.4
 
     private let letter: String
+    /// What it does, said in full, and its shortcut.
+    let hint: String
+    let shortcut: String?
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
+    private var hintWork: DispatchWorkItem?
+    /// One card for all four: only one is ever under the pointer.
+    private static let hintCard = TitleButtonHintCard()
 
-    init(letter: String, word: String) {
+    init(letter: String, word: String, hint: String, shortcut: String? = nil) {
         self.letter = letter
+        self.hint = hint
+        self.shortcut = shortcut
         super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
         isBordered = false
         bezelStyle = .regularSquare
         title = ""
         setAccessibilityRole(.button)
-        // No tooltip: the name lives here, for VoiceOver, and nothing pops up
-        // over the band a second after the pointer arrives.
+        // No tooltip: the card under the button names it, sooner and in the
+        // app's own look. The accessibility label carries the name for
+        // VoiceOver.
         setAccessibilityLabel(word)
+        setAccessibilityHelp(hint)
         translatesAutoresizingMaskIntoConstraints = false
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -410,6 +433,7 @@ final class TitleLetterButton: NSButton {
         didSet {
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
+            if !isEnabled { setHovered(false) }
         }
     }
 
@@ -426,8 +450,7 @@ final class TitleLetterButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
-        isHovered = true
-        needsDisplay = true
+        setHovered(true)
         PointerCursor.enter()
     }
 
@@ -440,22 +463,66 @@ final class TitleLetterButton: NSButton {
     }
 
     override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        needsDisplay = true
+        setHovered(false)
         PointerCursor.leave(self, event: event)
+    }
+
+    /// Clicking is past needing the name.
+    override func mouseDown(with event: NSEvent) {
+        hideHint()
+        super.mouseDown(with: event)
     }
 
     override func resetCursorRects() {
         if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
 
+    private func setHovered(_ hovered: Bool) {
+        guard hovered != isHovered else { return }
+        isHovered = hovered
+        needsDisplay = true
+        hintWork?.cancel()
+        hintWork = nil
+        guard hovered else {
+            hideHint()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in self?.showHint() }
+        hintWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hintDelay, execute: work)
+    }
+
+    private func showHint() {
+        guard isHovered, isEnabled, let window else { return }
+        let onScreen = window.convertToScreen(convert(bounds, to: nil))
+        Self.hintCard.show(hint, shortcut: shortcut, below: onScreen, in: window, owner: self)
+    }
+
+    private func hideHint() {
+        hintWork?.cancel()
+        hintWork = nil
+        Self.hintCard.hide(owner: self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { setHovered(false) }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        if isHovered, isEnabled {
-            Theme.hover.setFill()
-            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        let capRect = bounds.insetBy(dx: Self.capInset, dy: Self.capInset)
+        if isEnabled, isHovered {
+            Theme.selectedControl.setFill()
+            NSBezierPath(roundedRect: capRect, xRadius: 5, yRadius: 5).fill()
+        } else if isEnabled {
+            let ring = NSBezierPath(roundedRect: capRect.insetBy(dx: 0.5, dy: 0.5),
+                                    xRadius: 4.5, yRadius: 4.5)
+            ring.lineWidth = 1
+            Theme.border.setStroke()
+            ring.stroke()
         }
         let colour: NSColor = !isEnabled ? Theme.gutter
-            : (isHovered ? Theme.foreground : Theme.dimText)
+            : (isHovered ? Theme.foreground : Theme.punct)
         let attributes: [NSAttributedString.Key: Any] = [.font: Theme.uiFont(11.5),
                                                          .foregroundColor: colour]
         let text = letter as NSString
@@ -473,10 +540,102 @@ final class TitleLetterButton: NSButton {
     func refreshFonts() { needsDisplay = true }
 
     var isHoveredForTesting: Bool { isHovered }
-    func setHoveredForTesting(_ hovered: Bool) {
-        isHovered = hovered
-        needsDisplay = true
-    }
+    /// The pointer arriving or leaving, as the tracking area reports it.
+    func setHoveredForTesting(_ hovered: Bool) { setHovered(hovered) }
     var letterForTesting: String { letter }
     var wordForTesting: String { accessibilityLabel() ?? "" }
+    static var hintCardForTesting: TitleButtonHintCard { hintCard }
+}
+
+/// The card under a title-band button that names it: what it does, and its
+/// shortcut, dimmer, after it. A window of its own so the band's edge does not
+/// cut it off, and one the pointer passes through. Not a child of the window
+/// it names a button in: it is gone as soon as the pointer leaves the button,
+/// so it never has to move with the window.
+final class TitleButtonHintCard {
+    private let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+    private let label = HintLabelView()
+    private weak var owner: NSView?
+    static let gap: CGFloat = 6
+
+    init() {
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = true
+        panel.contentView = label
+    }
+
+    var isVisible: Bool { panel.isVisible }
+    var screenFrame: NSRect { panel.frame }
+    var textForTesting: String { label.text + (label.shortcut.map { "  " + $0 } ?? "") }
+
+    /// Centred under `anchor`, in screen coordinates — and kept inside the
+    /// window, which W, at the band's end, would otherwise run out of.
+    func show(_ text: String, shortcut: String?, below anchor: NSRect, in parent: NSWindow,
+              owner: NSView) {
+        self.owner = owner
+        label.text = text
+        label.shortcut = shortcut
+        let size = label.fittingCardSize
+        var origin = NSPoint(x: (anchor.midX - size.width / 2).rounded(),
+                             y: anchor.minY - Self.gap - size.height)
+        let bounds = parent.frame.insetBy(dx: 6, dy: 0)
+        origin.x = min(max(bounds.minX, origin.x), bounds.maxX - size.width)
+        panel.setFrame(NSRect(origin: origin, size: size), display: false)
+        panel.orderFront(nil)
+        label.needsDisplay = true
+    }
+
+    /// Only the button that showed it takes it down: the next one along may
+    /// already have put its own name up.
+    func hide(owner: NSView) {
+        guard self.owner === owner else { return }
+        self.owner = nil
+        panel.orderOut(nil)
+    }
+}
+
+private final class HintLabelView: NSView {
+    var text = ""
+    var shortcut: String?
+    static let padding = NSSize(width: 8, height: 4)
+
+    override var isFlipped: Bool { true }
+
+    private var textAttributes: [NSAttributedString.Key: Any] {
+        [.font: Theme.uiFont(11), .foregroundColor: Theme.foreground]
+    }
+    private var shortcutAttributes: [NSAttributedString.Key: Any] {
+        [.font: Theme.uiFont(11), .foregroundColor: Theme.dimText]
+    }
+    private var shortcutText: String? { shortcut.map { "  " + $0 } }
+
+    var fittingCardSize: NSSize {
+        let main = (text as NSString).size(withAttributes: textAttributes)
+        let extra = shortcutText.map { ($0 as NSString).size(withAttributes: shortcutAttributes) }
+        return NSSize(width: ceil(main.width + (extra?.width ?? 0)) + Self.padding.width * 2,
+                      height: ceil(main.height) + Self.padding.height * 2)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 5, yRadius: 5)
+        Theme.panelBackground.setFill()
+        body.fill()
+        Theme.border.setStroke()
+        body.lineWidth = 1
+        body.stroke()
+        let main = text as NSString
+        let origin = NSPoint(x: Self.padding.width, y: Self.padding.height)
+        main.draw(at: origin, withAttributes: textAttributes)
+        if let shortcutText {
+            let width = main.size(withAttributes: textAttributes).width
+            (shortcutText as NSString).draw(at: NSPoint(x: origin.x + width, y: origin.y),
+                                            withAttributes: shortcutAttributes)
+        }
+    }
 }

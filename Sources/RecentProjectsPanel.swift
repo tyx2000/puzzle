@@ -1,6 +1,6 @@
 import AppKit
 
-/// What the R button opens: a dialog over the window, "Opened Recently",
+/// What the R button opens: a dialog over the window, "Recent Projects",
 /// listing the recent projects as the start page lists them — a click ticks
 /// one, a double click opens it, the cross on a hovered row takes it off the
 /// list — with Open Checked at the top right and Clear All along the bottom.
@@ -21,7 +21,7 @@ final class RecentProjectsPanel: NSPanel {
     static let shadowMargin: CGFloat = 32
     static let minimumListHeight: CGFloat = 240
     static let maximumListHeight: CGFloat = 440
-    static let title = "Opened Recently"
+    static let title = "Recent Projects"
 
     private let backdrop = DialogBackdropView()
     /// Over the window under the dialog while it is up. A view in that

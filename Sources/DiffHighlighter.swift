@@ -47,6 +47,11 @@ enum DiffHighlighter {
         return .context
     }
 
+    /// The room after a line's marker: one column of the code's own face.
+    static var markerGap: CGFloat {
+        (" " as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
+    }
+
     /// Paint a whole diff buffer, returning the full-width line bands the text
     /// view should draw (see `PuzzleTextView.diffBands`).
     @discardableResult
@@ -65,6 +70,14 @@ enum DiffHighlighter {
             let kind = kind(of: line)
 
             storage.addAttribute(.foregroundColor, value: kind.foreground, range: lineRange)
+            // A line's `+`, `-` or leading space stands a column apart from
+            // the code after it, which it ran straight into. The gap is
+            // kerning, so the text is the diff as Git wrote it.
+            if [.added, .removed, .context].contains(kind),
+               let first = line.unicodeScalars.first, "+- ".unicodeScalars.contains(first) {
+                storage.addAttribute(.kern, value: Self.markerGap,
+                                     range: NSRange(location: lineRange.location, length: 1))
+            }
             if let bg = kind.background {
                 // Recorded, not applied as an attribute — the text view paints
                 // these full-width so every changed line reads as a solid block.

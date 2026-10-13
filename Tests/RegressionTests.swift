@@ -61,6 +61,7 @@ enum RegressionTests {
         try testMarkdownEditingKeys()
         try testRecentProjectsDialog()
         try testGutterRibbonRunsUnbroken()
+        try testDiffMarkersStandApart()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
@@ -1989,6 +1990,30 @@ enum RegressionTests {
                        "a title-band button has no name for VoiceOver")
         }
 
+        // At rest each is outlined — a dim letter on the bare band went
+        // unnoticed — but not filled, which stood out from the band; a dead T
+        // is not outlined either.
+        func capPixels(_ button: TitleLetterButton)
+            -> (ring: NSColor?, inside: NSColor?, outside: NSColor?) {
+            guard let pixels = button.bitmapImageRepForCachingDisplay(in: button.bounds)
+            else { return (nil, nil, nil) }
+            button.cacheDisplay(in: button.bounds, to: pixels)
+            let scale = CGFloat(pixels.pixelsWide) / button.bounds.width
+            let middle = Int(button.bounds.height / 2 * scale)
+            let ring = TitleLetterButton.capInset + 0.5
+            return (pixels.colorAt(x: Int(ring * scale), y: middle),
+                    pixels.colorAt(x: Int(5 * scale), y: middle),
+                    pixels.colorAt(x: Int(0.5 * scale), y: middle))
+        }
+        let resting = capPixels(buttons[0])
+        try expect((resting.ring?.alphaComponent ?? 0) > 0.5
+                    && (resting.outside?.alphaComponent ?? 1) < 0.1,
+                   "a title-band button is not outlined at rest")
+        try expect((resting.inside?.alphaComponent ?? 1) < 0.1,
+                   "a title-band button is filled at rest, standing out from the band")
+        try expect((capPixels(buttons[2]).ring?.alphaComponent ?? 1) < 0.1,
+                   "a dead button is drawn as live")
+
         // A terminal needs a directory, so T is dead until a project is open.
         try expect(buttons[2].isEnabled == false,
                    "T is live with no project to open a shell in")
@@ -2001,8 +2026,42 @@ enum RegressionTests {
         try expect(!open.isHoveredForTesting, "a button starts out hovered")
         open.setHoveredForTesting(true)
         try expect(open.isHoveredForTesting, "the button does not track hover")
+        try expect((capPixels(open).inside?.alphaComponent ?? 0) > 0.5,
+                   "the button does not fill under the pointer")
         open.setHoveredForTesting(false)
         try expect(!open.isHoveredForTesting, "the button stayed hovered")
+
+        // Resting on one names it, with its shortcut, under it and inside the
+        // window — W at the band's end too. Passing over shows nothing.
+        let card = TitleLetterButton.hintCardForTesting
+        try expect(buttons.map(\.hint) == ["Open Project", "Recent Projects",
+                                            "Open in Terminal", "New Window"]
+                    && buttons[0].shortcut == "⌘O" && buttons[3].shortcut == "⌘N",
+                   "the buttons are not named for what they do: \(buttons.map(\.hint))")
+        open.setHoveredForTesting(true)
+        open.setHoveredForTesting(false)
+        RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
+        try expect(!card.isVisible, "passing over a button put its name up")
+        for button in [buttons[0], buttons[3]] {
+            button.setHoveredForTesting(true)
+            try expect(!card.isVisible, "the name came up before the pointer had rested")
+            RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
+            guard let window = button.window else {
+                throw Failure(description: "the button is not in a window")
+            }
+            let below = window.convertToScreen(button.convert(button.bounds, to: nil))
+            try expect(card.isVisible
+                        && card.textForTesting == button.hint + "  " + (button.shortcut ?? ""),
+                       "resting on \(button.letterForTesting) did not name it: "
+                         + "'\(card.textForTesting)'")
+            try expect(card.screenFrame.maxY <= below.minY
+                        && card.screenFrame.minX >= window.frame.minX
+                        && card.screenFrame.maxX <= window.frame.maxX,
+                       "\(button.letterForTesting)'s name is not under it, in the window: "
+                         + "\(card.screenFrame) for \(below) in \(window.frame)")
+            button.setHoveredForTesting(false)
+            try expect(!card.isVisible, "the name stayed after the pointer left")
+        }
 
         // The hit area is bigger than the glyph, and the four do not run
         // together into one strip of letters.
@@ -4649,7 +4708,7 @@ enum RegressionTests {
         let openFrame = dialog.openCheckedFrameForTesting
         let clearFrame = dialog.clearAllFrameForTesting
         let listFrame = dialog.listAreaFrameForTesting
-        try expect(dialog.titleForTesting == "Opened Recently"
+        try expect(dialog.titleForTesting == "Recent Projects"
                     && abs(titleFrame.minX - padding) <= 3
                     && card.bounds.maxY - titleFrame.maxY <= padding + 8,
                    "the dialog does not say what it is at its top left: \(titleFrame)")
@@ -4903,6 +4962,45 @@ enum RegressionTests {
         }
         try expect(painted == 0,
                    "the blank line above a heading opening with code is painted: \(painted)px")
+    }
+
+    /// A diff line's `+`, `-` or leading space stands a column apart from the
+    /// code after it — and only a line of a hunk's: headers keep their text
+    /// together. The gap is kerning, so the text is the diff as written.
+    private static func testDiffMarkersStandApart() throws {
+        let diff = """
+            diff --git a/a.swift b/a.swift
+            --- a/a.swift
+            +++ b/a.swift
+            @@ -1,3 +1,3 @@
+             let a = 1
+            -let b = 2
+            +let b = 3
+             let c = 4
+            \\ No newline at end of file
+
+            """
+        let storage = NSTextStorage(string: diff)
+        DiffHighlighter.apply(to: storage)
+        try expect(storage.string == diff, "painting the diff changed its text")
+        let text = diff as NSString
+        func kern(at needle: String) -> CGFloat {
+            (storage.attribute(.kern, at: text.range(of: needle).location,
+                               effectiveRange: nil) as? CGFloat) ?? 0
+        }
+        let gap = DiffHighlighter.markerGap
+        try expect(gap > 4, "the marker gap is too small to see: \(gap)pt")
+        for line in ["-let b", "+let b", " let a", " let c"] {
+            try expect(kern(at: "\n" + line) == 0 && kern(at: line) == gap,
+                       "'\(line)' does not stand a column apart from its marker")
+        }
+        for line in ["diff --git", "--- a/", "+++ b/", "@@ -1", "\\ No newline"] {
+            try expect(kern(at: line) == 0, "the header '\(line)' was spaced as a change")
+        }
+        // Only the marker: the code keeps its own spacing.
+        let code = text.range(of: "+let b").location + 1
+        try expect(storage.attribute(.kern, at: code, effectiveRange: nil) == nil,
+                   "the code after a marker was spaced out as well")
     }
 
     private static func testFindMatchesAreComplete() throws {
