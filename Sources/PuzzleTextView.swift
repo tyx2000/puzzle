@@ -1296,6 +1296,12 @@ final class PuzzleTextView: NSTextView {
         let ns = string as NSString
         let location = min(resultLocation ?? selectedRange().location, ns.length)
 
+        // Source documents lay out on demand. In particular, an edit at EOF
+        // invalidates the extra fragment, so make the caret's layout current
+        // before reading either its ordinary or trailing-empty-line geometry.
+        layoutManager.ensureLayout(forCharacterRange: NSRange(
+            location: location, length: location < ns.length ? 1 : 0))
+
         // Caret past the final newline => the extra (empty) line fragment.
         if layoutManager.extraLineFragmentTextContainer === container,
            location == ns.length,
@@ -1330,9 +1336,13 @@ final class PuzzleTextView: NSTextView {
                   selectedRanges.count == 1, selectedRange().length == 0 else { return nil }
         }
         guard let fragment = caretLineFragment(at: searchResultLineLocation) else { return nil }
-        return NSRect(x: 0,
-                      y: fragment.minY + textContainerInset.height,
-                      width: max(bounds.width, textContainer?.size.width ?? bounds.width),
+        // The no-wrap container's width is an unbounded layout sentinel, not
+        // drawable geometry. Feeding it to a fill loses the row's position and
+        // height in Core Graphics. Paint the finite document canvas instead;
+        // that covers the viewport after horizontal scrolling as well.
+        return NSRect(x: bounds.minX,
+                      y: fragment.minY + textContainerOrigin.y,
+                      width: max(bounds.width, visibleRect.maxX - bounds.minX),
                       height: fragment.height)
     }
 

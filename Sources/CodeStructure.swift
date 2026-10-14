@@ -313,6 +313,19 @@ struct MarkdownTableRowMetric: Equatable {
 }
 
 final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
+    override func setExtraLineFragmentRect(_ fragmentRect: NSRect, usedRect: NSRect,
+                                          textContainer: NSTextContainer) {
+        // The empty row after a final newline bypasses the ordinary fragment
+        // delegate. Give it the same code row height as its caret and siblings.
+        var fragment = fragmentRect
+        var used = usedRect
+        if (textContainer.textView as? PuzzleTextView)?.rendersMarkdown != true {
+            fragment.size.height = Theme.lineMetrics().target
+            used.size.height = fragment.height
+        }
+        super.setExtraLineFragmentRect(fragment, usedRect: used, textContainer: textContainer)
+    }
+
     private var blocks: [CodeBlock] = []
     private(set) var foldedBlockStarts = Set<Int>()
     private var markdownSyntaxRanges: [NSRange] = []

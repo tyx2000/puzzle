@@ -7,11 +7,8 @@ final class GitChangePopoverController: NSViewController {
     private let textView = NSTextView()
     private let scroll = NSScrollView()
     private let revert = NSButton()
-    /// NSPopover sizes itself from the content view's fitting size whenever
-    /// that view uses Auto Layout, and ignores `contentSize` when it does. The
-    /// scroll view has no intrinsic size of its own, so without these the
-    /// popover collapses to whatever the Revert button alone needs — which is
-    /// how the diff came to open as an empty sliver.
+    /// The scroll view has no intrinsic size; explicit constraints keep the
+    /// diff content and its containing panel at the same dimensions.
     private var widthConstraint: NSLayoutConstraint!
     private var heightConstraint: NSLayoutConstraint!
 
@@ -152,22 +149,26 @@ final class GitChangePopoverController: NSViewController {
     /// The answer is also written into the view's own constraints: it is the
     /// fitting size that NSPopover actually obeys.
     var preferredSize: NSSize {
+        preferredSize(forWidth: 320)
+    }
+
+    /// Match the visible code area, independent of the changed line's length.
+    /// Long lines retain their horizontal scrollbar inside this fixed width.
+    func preferredSize(forWidth width: CGFloat, maximumHeight: CGFloat = 320) -> NSSize {
         _ = view
         guard let container = textView.textContainer,
               let layoutManager = textView.layoutManager else {
-            return NSSize(width: 320, height: 80)
+            return NSSize(width: width, height: min(80, maximumHeight))
         }
-        // Keep hard line breaks when sizing too: the popover is capped in
-        // width, while the document extends horizontally to the last glyph.
         let inset = textView.textContainerInset.width * 2
         layoutManager.ensureLayout(for: container)
         let natural = layoutManager.usedRect(for: container)
-        let width = min(max(Self.minimumWidth, ceil(natural.width) + inset + 4), 720)
         // The text view's insets are the top and bottom padding, so the content
         // height is the text plus exactly those: any slack on top of it shows
         // as a gap that the top edge does not have.
-        let size = NSSize(width: width,
-                          height: min(ceil(natural.height) + inset, 320) + footerHeight)
+        let size = NSSize(width: max(1, width),
+                          height: max(1, min(ceil(natural.height) + inset + footerHeight,
+                                            maximumHeight)))
         widthConstraint.constant = size.width
         heightConstraint.constant = size.height
         preferredContentSize = size
@@ -178,4 +179,82 @@ final class GitChangePopoverController: NSViewController {
     var textViewForTesting: NSTextView { textView }
     var scrollViewForTesting: NSScrollView { scroll }
     var revertButtonForTesting: NSButton { revert }
+}
+
+/// A square child panel avoids NSPopover's compulsory arrow and rounded frame.
+/// It can become key for text selection without taking the editor's main window.
+final class GitChangePanel: NSPanel {
+    private var eventMonitor: Any?
+    private var observers: [NSObjectProtocol] = []
+
+    init(controller: GitChangePopoverController) {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        isOpaque = true
+        backgroundColor = Theme.editorBackground
+        hasShadow = true
+        hidesOnDeactivate = true
+        becomesKeyOnlyIfNeeded = true
+        contentViewController = controller
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    func show(below anchor: NSRect, codeArea: NSRect, in owner: NSWindow) {
+        guard let controller = contentViewController as? GitChangePopoverController,
+              codeArea.width > 0, codeArea.height > 0 else { return }
+        let size = controller.preferredSize(forWidth: codeArea.width,
+                                            maximumHeight: min(320, codeArea.height))
+        var y = anchor.minY - size.height
+        if y < codeArea.minY { y = anchor.maxY }
+        y = min(max(y, codeArea.minY), codeArea.maxY - size.height)
+        setFrame(NSRect(x: codeArea.minX, y: y, width: size.width, height: size.height),
+                 display: false)
+        owner.addChildWindow(self, ordered: .above)
+        orderFront(nil)
+        contentView?.layoutSubtreeIfNeeded()
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]
+        ) { [weak self] event in
+            guard let self else { return event }
+            if event.type == .keyDown {
+                if event.keyCode == 53 {
+                    self.close()
+                    return nil
+                }
+            } else if event.window !== self {
+                self.close()
+            }
+            return event
+        }
+        let center = NotificationCenter.default
+        for name in [NSWindow.willCloseNotification, NSWindow.didResizeNotification] {
+            observers.append(center.addObserver(forName: name, object: owner, queue: .main) {
+                [weak self] _ in self?.close()
+            })
+        }
+        observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification,
+                                             object: nil, queue: .main) {
+            [weak self] _ in self?.close()
+        })
+    }
+
+    override func cancelOperation(_ sender: Any?) { close() }
+
+    override func close() {
+        stopMonitoring()
+        parent?.removeChildWindow(self)
+        orderOut(nil)
+    }
+
+    private func stopMonitoring() {
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        eventMonitor = nil
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+    }
+
+    deinit { stopMonitoring() }
 }

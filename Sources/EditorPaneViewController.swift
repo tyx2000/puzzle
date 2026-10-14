@@ -483,21 +483,33 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func showGitChange(_ change: GitLineChanges.Change, from rect: NSRect) {
-        guard let ruler = scrollView.verticalRulerView else { return }
+        guard let ruler = scrollView.verticalRulerView, let window = view.window else { return }
         gitChangePopover?.close()
+        let sourceURL = currentURL
         let controller = GitChangePopoverController(change: change)
         controller.canRevert = currentDocument.map { !$0.isReadOnly } ?? false
         controller.onRevert = { [weak self] in
-            self?.gitChangePopover?.close()
-            self?.revertGitChange(change)
+            guard let self, self.currentURL == sourceURL else { return }
+            self.gitChangePopover?.close()
+            self.revertGitChange(change)
         }
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = controller
-        _ = controller.view
-        popover.contentSize = controller.preferredSize
-        popover.show(relativeTo: rect, of: ruler, preferredEdge: .maxX)
+        let popover = GitChangePanel(controller: controller)
+        let anchor = window.convertToScreen(ruler.convert(rect, to: nil))
+        popover.show(below: anchor, codeArea: visibleCodeAreaOnScreen, in: window)
         gitChangePopover = popover
+    }
+
+    /// The clip includes the ruler in its content insets. Subtract those,
+    /// rather than using the text document's potentially very wide frame.
+    private var visibleCodeAreaOnScreen: NSRect {
+        guard let window = view.window else { return .zero }
+        let clip = scrollView.contentView
+        let insets = clip.contentInsets
+        let rect = NSRect(x: clip.bounds.minX + insets.left,
+                          y: clip.bounds.minY + insets.top,
+                          width: max(0, clip.bounds.width - insets.left - insets.right),
+                          height: max(0, clip.bounds.height - insets.top - insets.bottom))
+        return window.convertToScreen(clip.convert(rect, to: nil))
     }
 
     // MARK: - Diff header
@@ -609,7 +621,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     // MARK: - Regression-test surface
 
     var gitLineChangesForTesting: [GitLineChanges.Change] { gitLineChanges }
-    var gitChangePopoverSizeForTesting: NSSize? { gitChangePopover?.contentSize }
+    var gitChangePopoverSizeForTesting: NSSize? { gitChangePopover?.frame.size }
+    var gitChangePanelForTesting: NSPanel? { gitChangePopover }
+    var gitChangeCodeAreaForTesting: NSRect { visibleCodeAreaOnScreen }
     var gitChangePopoverControllerForTesting: GitChangePopoverController? {
         gitChangePopover?.contentViewController as? GitChangePopoverController
     }
@@ -1045,10 +1059,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             textView.minSize = NSSize(width: width, height: 0)
             textView.sizeToFit()
         }
+        if let panel = gitChangePopover, panel.isVisible,
+           abs(panel.frame.width - visibleCodeAreaOnScreen.width) > 0.5 {
+            panel.close()
+        }
     }
 
     func activate(index: Int) {
         guard openURLs.indices.contains(index) else { return }
+        gitChangePopover?.close()
         saveFindState()
         // These character offsets belong to the outgoing storage only.
         findBar.clearHighlights()
@@ -1215,6 +1234,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard openURLs.indices.contains(index) else { return }
         let url = openURLs[index]
         guard confirmClose(urls: [url]) else { return }
+        gitChangePopover?.close()
         openURLs.remove(at: index)
         if url.isFileURL {
             closedURLs.removeAll { $0 == url }
@@ -1492,6 +1512,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Tear down asynchronous/cached state and surrender this pane's tab
     /// ownership. Callers must run confirmClose(urls:) first.
     func prepareForClose() {
+        gitChangePopover?.close()
         clearDefinitionHover()
         blameGeneration += 1
         blameWork?.cancel()
@@ -1631,6 +1652,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard let doc = currentDocument else { return }
         guard !doc.isApplyingExternalChange else { return }
+        gitChangePopover?.close()
         clearDefinitionHover()
         if let url = currentURL { lineActivatedURLs.insert(url) }
         textView.showsCurrentLineBand = doc.languageSpec?.name != "markdown"
@@ -1744,6 +1766,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
               openURLs.contains(document.url) else { return }
         reloadTabs()
         guard document.url == currentURL else { return }
+        gitChangePopover?.close()
 
         let location = min(textView.selectedRange().location, document.storage.length)
         suppressSelectionSideEffects = true
@@ -2089,6 +2112,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// is out of sight, with the view moved by as much, so nothing on screen
     /// moves.
     @objc private func clipViewScrolled(_ notification: Notification) {
+        gitChangePopover?.close()
         let slack = textView.topSlack
         let clip = scrollView.contentView
         guard slack > 0, clip.bounds.minY >= slack else { return }
@@ -2107,7 +2131,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Uncommitted changes for the file on screen, per line.
     private var gitLineChanges: [GitLineChanges.Change] = []
     private var gitLineChangesURL: URL?
-    private var gitChangePopover: NSPopover?
+    private var gitChangePopover: GitChangePanel?
     private var gitLineChangeGeneration = 0
     /// Stops a baseline lookup that is already running, which the generation
     /// counter alone cannot: it only decides whether to keep the answer.

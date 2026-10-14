@@ -16,6 +16,14 @@ enum RegressionTests {
         // As the app does, so every test that parses runs on it.
         TreeSitterAllocator.install()
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--line-popup-regressions") {
+            try testActiveLineStaysInFiniteDocument()
+            try testActiveLineSpansTheGutter()
+            try testGutterMarksUncommittedChanges()
+            try testGitChangePopoverKeepsHardLines()
+            print("Active-line and Git panel regression tests passed (4)")
+            return
+        }
         if CommandLine.arguments.contains("--wrapping-regressions") {
             try testCodeAndDiffKeepHardLines()
             try testGutterRibbonRunsUnbroken()
@@ -188,6 +196,7 @@ enum RegressionTests {
         try testGutterWidthFollowsLineCount()
         try testSideBySideDiff()
         try testActiveLineSpansTheGutter()
+        try testActiveLineStaysInFiniteDocument()
         try testFileOpensRouteToTheirProjectWindow()
         print("Regression tests passed")
     }
@@ -6998,6 +7007,67 @@ enum RegressionTests {
                    "opening a file did not switch to the project that owns it")
     }
 
+    private static func testActiveLineStaysInFiniteDocument() throws {
+        let root = try temporaryDirectory("finite-active-line")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("wide.swift")
+        let long = "let wide = \"" + String(repeating: "wide text ", count: 60) + "\"\n"
+        let source = "let first = 1\n" + long
+            + (0..<100).map { "let value\($0) = \($0)\n" }.joined()
+        try Data(source.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 350),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { pane.prepareForClose(); window.close() }
+        window.makeKeyAndOrderFront(nil)
+        pane.open(url: url)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager, let container = text.textContainer else {
+            throw Failure(description: "active line fixture has no layout")
+        }
+        try expect(container.size.width > 1_000_000,
+                   "active line fixture does not use an unbounded no-wrap container")
+        func checkBand() throws {
+            guard let band = pane.currentLineBandRectForTesting else {
+                throw Failure(description: "active line disappeared")
+            }
+            let caret = text.selectedRange().location
+            let length = (text.string as NSString).length
+            let fragment: NSRect
+            if caret == length && text.string.hasSuffix("\n") {
+                fragment = layout.extraLineFragmentRect
+            } else {
+                fragment = layout.lineFragmentRect(
+                    forGlyphAt: layout.glyphIndexForCharacter(at: caret), effectiveRange: nil)
+            }
+            try expect(band.width.isFinite && band.width <= text.bounds.width + 1,
+                       "active row uses the unbounded text container as drawable width: \(band)")
+            try expect(abs(band.minY - fragment.minY - text.textContainerOrigin.y) < 0.5,
+                       "active row is not on the caret's text fragment: \(band) vs \(fragment)")
+            try expect(abs(band.height - fragment.height) < 0.5
+                        && abs(band.height - Theme.lineMetrics().target) < 0.5,
+                       "active row has the wrong height: \(band.height), fragment \(fragment.height), target \(Theme.lineMetrics().target), caret \(caret)/\(length)")
+            try expect(band.minX <= text.visibleRect.minX
+                        && band.maxX >= text.visibleRect.maxX,
+                       "active row no longer covers the horizontally scrolled viewport")
+        }
+        pane.jumpToLine(2)
+        try checkBand()
+        let clip = pane.scrollViewForTesting.contentView
+        clip.scroll(to: NSPoint(x: 500, y: 0))
+        pane.scrollViewForTesting.reflectScrolledClipView(clip)
+        try checkBand()
+        pane.jumpToLine(65)
+        try checkBand()
+        pane.insertTextForTesting("edited ")
+        try checkBand()
+        pane.setCaretForTesting((text.string as NSString).length)
+        pane.insertTextForTesting("\n")
+        try checkBand()
+    }
+
     private static func testActiveLineSpansTheGutter() throws {
         let directory = try temporaryDirectory("active-line")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -7521,6 +7591,25 @@ enum RegressionTests {
         try expect(!ruler.clickChangeForTesting(at: 1),
                    "an unchanged line offered a change to open")
 
+        guard let panel = pane.gitChangePanelForTesting else {
+            throw Failure(description: "the gutter did not open its diff panel")
+        }
+        let codeArea = pane.gitChangeCodeAreaForTesting
+        try expect(panel.isVisible && !panel.styleMask.contains(.titled),
+                   "the gutter diff is not a visible borderless panel")
+        try expect(abs(panel.frame.width - codeArea.width) < 0.5
+                    && abs(panel.frame.minX - codeArea.minX) < 0.5,
+                   "the diff panel does not match the visible code area: \(panel.frame) vs \(codeArea)")
+        try expect((panel.contentView?.layer?.cornerRadius ?? 0) == 0,
+                   "the diff panel content still has rounded corners")
+        panel.cancelOperation(nil)
+        try expect(!panel.isVisible, "Escape did not dismiss the Git diff panel")
+        try expect(ruler.clickChangeForTesting(at: modified.lines.lowerBound),
+                   "the Git diff panel cannot reopen after dismissal")
+        pane.activate(index: pane.activeTabIndex!)
+        try expect(pane.gitChangePanelForTesting?.isVisible == false,
+                   "tab activation kept a stale Git diff panel open")
+
         // The popover shows what HEAD had and what is there now.
         let popover = GitChangePopoverController(change: modified)
         popover.canRevert = true
@@ -7535,23 +7624,19 @@ enum RegressionTests {
         // top edge has no twin for. Lines are separated, not terminated.
         try expect(!popover.contentForTesting.hasSuffix("\n"),
                    "the popover ends on an empty line, so its padding is lopsided")
-        // NSPopover obeys the content view's own layout, not `contentSize`,
-        // whenever that view uses Auto Layout. A scroll view has no intrinsic
-        // size and the Revert button is 44pt wide, so a content view that does
-        // not state its size opens as an empty sliver beside the gutter.
+        // The panel and its Auto Layout content must agree on a fixed size.
         let fresh = GitChangePopoverController(change: modified)
         fresh.canRevert = true
         _ = fresh.view
         let bare = fresh.view.fittingSize
         try expect(bare.width >= GitChangePopoverController.minimumWidth && bare.height >= 60,
                    "the popover lays out at \(bare) before it is measured")
-        let wanted = fresh.preferredSize
+        let wanted = fresh.preferredSize(forWidth: codeArea.width)
         let fitting = fresh.view.fittingSize
         try expect(abs(fitting.width - wanted.width) < 1
                     && abs(fitting.height - wanted.height) < 1,
                    "the popover wants \(wanted) but lays out at \(fitting)")
-        // The width follows the content: a one-word change must not open the
-        // same box a long line does.
+        // Short and long changes fill exactly the same editor width.
         let short = GitChangePopoverController(change: GitLineChanges.Change(
             kind: .modified, lines: 2...2, removed: ["a"], added: ["b"]))
         short.canRevert = true
@@ -7562,12 +7647,12 @@ enum RegressionTests {
             added: [String(repeating: "wider ", count: 40)]))
         long.canRevert = true
         _ = long.view
-        try expect(short.preferredSize.width < long.preferredSize.width,
-                   "every change opens at \(short.preferredSize.width)pt regardless of content")
-        try expect(short.preferredSize.width == GitChangePopoverController.minimumWidth,
-                   "a one-word change opens at \(short.preferredSize.width)pt")
-        try expect(long.preferredSize.width <= 720,
-                   "a long line opened a \(long.preferredSize.width)pt popover")
+        for width: CGFloat in [280, 1_100] {
+            let shortSize = short.preferredSize(forWidth: width)
+            let longSize = long.preferredSize(forWidth: width)
+            try expect(shortSize.width == width && longSize.width == width,
+                       "the diff panel width followed its content rather than the editor")
+        }
         // Pressing Return while editing adds a line with nothing on it. A lone
         // "+" in the popover reads as one that failed to load, so the line is
         // named instead.
