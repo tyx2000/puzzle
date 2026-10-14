@@ -36,15 +36,22 @@ final class GitChangePopoverController: NSViewController {
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: Self.padding, height: Self.padding)
         textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
+        textView.isHorizontallyResizable = true
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                 height: CGFloat.greatestFiniteMagnitude)
         textView.autoresizingMask = [.width]
 
         PuzzleScroller.adopt(scroll)
         scroll.documentView = textView
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scroll)
 
@@ -146,38 +153,21 @@ final class GitChangePopoverController: NSViewController {
     /// fitting size that NSPopover actually obeys.
     var preferredSize: NSSize {
         _ = view
-        guard textView.textContainer != nil, textView.layoutManager != nil else {
+        guard let container = textView.textContainer,
+              let layoutManager = textView.layoutManager else {
             return NSSize(width: 320, height: 80)
         }
-        // The width comes from the text itself, not from the layout manager:
-        // the container tracks the text view, so `usedRect` would report
-        // whatever width the view happens to have rather than what the lines
-        // need. A one-word change gets a one-word popover; only a genuinely
-        // long line pushes out to the cap.
+        // Keep hard line breaks when sizing too: the popover is capped in
+        // width, while the document extends horizontally to the last glyph.
         let inset = textView.textContainerInset.width * 2
-        let natural = textView.attributedString().boundingRect(
-            with: NSSize(width: 10_000, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        layoutManager.ensureLayout(for: container)
+        let natural = layoutManager.usedRect(for: container)
         let width = min(max(Self.minimumWidth, ceil(natural.width) + inset + 4), 720)
-        // Height is asked of the layout manager that will do the drawing, with
-        // the container held at the chosen width. `boundingRect` answers a few
-        // points taller than the text view lays the same string out, and that
-        // difference shows up as a gap above the button that the top edge does
-        // not have. Width tracking is off for the measurement only: it would
-        // otherwise snap the container back to the unsized text view.
-        let container = textView.textContainer!
-        let tracking = container.widthTracksTextView
-        container.widthTracksTextView = false
-        container.size = NSSize(width: width - inset, height: CGFloat.greatestFiniteMagnitude)
-        textView.layoutManager?.ensureLayout(for: container)
-        let wrapped = textView.layoutManager?.usedRect(for: container)
-            ?? NSRect(x: 0, y: 0, width: width, height: 40)
-        container.widthTracksTextView = tracking
         // The text view's insets are the top and bottom padding, so the content
         // height is the text plus exactly those: any slack on top of it shows
         // as a gap that the top edge does not have.
         let size = NSSize(width: width,
-                          height: min(ceil(wrapped.height) + inset, 320) + footerHeight)
+                          height: min(ceil(natural.height) + inset, 320) + footerHeight)
         widthConstraint.constant = size.width
         heightConstraint.constant = size.height
         preferredContentSize = size
@@ -185,5 +175,7 @@ final class GitChangePopoverController: NSViewController {
     }
 
     var contentForTesting: String { textView.string }
+    var textViewForTesting: NSTextView { textView }
+    var scrollViewForTesting: NSScrollView { scroll }
     var revertButtonForTesting: NSButton { revert }
 }

@@ -42,7 +42,7 @@ enum SideBySideDiff {
         func attributedText(onLeft: Bool, font: NSFont) -> NSAttributedString? {
             guard let text = onLeft ? leftText : rightText else { return nil }
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byTruncatingTail
+            paragraph.lineBreakMode = .byClipping
             let color = isChange
                 ? (onLeft ? Theme.diffRemovedText : Theme.diffAddedText) : Theme.foreground
             let styled = NSMutableAttributedString(string: text, attributes: [

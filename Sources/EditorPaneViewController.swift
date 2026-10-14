@@ -130,8 +130,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         container.fillColor = Theme.editorBackground
 
         blankStorage.addLayoutManager(layoutManager)
-        let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        textContainer.widthTracksTextView = true
+        let textContainer = NSTextContainer(size: NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = false
         layoutManager.addTextContainer(textContainer)
 
         textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 400),
@@ -155,7 +156,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.rememberBaseInset()
         // Required for the text view to grow with content (otherwise no scrolling).
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
+        textView.isHorizontallyResizable = true
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                   height: CGFloat.greatestFiniteMagnitude)
@@ -204,7 +205,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         PuzzleScroller.adopt(scrollView)
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
+        scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.hasVerticalRuler = true
         scrollView.drawsBackground = true
@@ -1007,6 +1008,45 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
     }
 
+    /// Source and diffs keep their hard line breaks. Only rendered Markdown
+    /// follows the reading column; a wide source tab must not leave that
+    /// column (or the next short file) with a stale document width.
+    private func configureLineWrapping(for document: Document) {
+        guard let container = textView.textContainer else { return }
+        let wraps = document.languageSpec?.name == "markdown"
+        scrollView.rulersVisible = !wraps
+        scrollView.hasHorizontalScroller = !wraps
+        textView.isHorizontallyResizable = !wraps
+        container.widthTracksTextView = wraps
+        textView.readingColumn = wraps ? Theme.markdownColumn() : nil
+        scrollView.tile()
+        let clip = scrollView.contentView
+        let width = max(0, clip.bounds.width - clip.contentInsets.left - clip.contentInsets.right)
+        textView.minSize = NSSize(width: width, height: 0)
+        textView.setFrameSize(NSSize(width: width, height: textView.frame.height))
+        container.containerSize = NSSize(
+            width: wraps ? max(0, width - 2 * textView.textContainerInset.width)
+                : CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude)
+        textView.sizeToFit()
+        clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: clip.bounds.minY))
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let scrollView, let textView else { return }
+        let clip = scrollView.contentView
+        let width = max(0, clip.bounds.width - clip.contentInsets.left - clip.contentInsets.right)
+        // NSTextView otherwise shrinks a short source buffer to its last
+        // glyph. Refit only when the viewport width changes, never on typing
+        // or ordinary layout passes.
+        if abs(textView.minSize.width - width) > 0.5 {
+            textView.minSize = NSSize(width: width, height: 0)
+            textView.sizeToFit()
+        }
+    }
+
     func activate(index: Int) {
         guard openURLs.indices.contains(index) else { return }
         saveFindState()
@@ -1046,6 +1086,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             doc.storage.addLayoutManager(layoutManager)
         }
+
+        configureLineWrapping(for: doc)
 
         // Undo records hold the replaced text, so an unbounded stack grows with
         // every edit for as long as the window lives.
@@ -1157,12 +1199,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 scrollTopBelowSVGPreview?.isActive = true
                 refreshSVGPreview(for: doc)
             }
-            // Rendered Markdown reads like a document, not a source listing:
-            // no gutter, and a column of readable width instead of the full
-            // pane.
-            let isMarkdown = doc.languageSpec?.name == "markdown"
-            scrollView.rulersVisible = !isMarkdown
-            textView.readingColumn = isMarkdown ? Theme.markdownColumn() : nil
             showDiffHeader(for: doc.diffLineNumbers.isEmpty ? nil : url)
         }
 

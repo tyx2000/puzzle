@@ -16,6 +16,14 @@ enum RegressionTests {
         // As the app does, so every test that parses runs on it.
         TreeSitterAllocator.install()
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--wrapping-regressions") {
+            try testCodeAndDiffKeepHardLines()
+            try testGutterRibbonRunsUnbroken()
+            try testGitChangePopoverKeepsHardLines()
+            try testSideBySideDiffScrollsLongLines()
+            print("Wrapping regression tests passed (4)")
+            return
+        }
         if CommandLine.arguments.contains("--editor-regressions") {
             try testIncrementalParsing()
             try testHighlightServiceKeepsParseOwner()
@@ -83,6 +91,9 @@ enum RegressionTests {
         try testMarkdownRevealsOnEdit()
         try testMarkdownEditingKeys()
         try testRecentProjectsDialog()
+        try testCodeAndDiffKeepHardLines()
+        try testGitChangePopoverKeepsHardLines()
+        try testSideBySideDiffScrollsLongLines()
         try testGutterRibbonRunsUnbroken()
         try testDiffMarkersStandApart()
         try testDiffInlineChanges()
@@ -4880,8 +4891,268 @@ enum RegressionTests {
         }
     }
 
+    /// A long source line stays one visual row, and its end remains reachable
+    /// after resizing or switching between code, diff and Markdown tabs.
+    private static func testCodeAndDiffKeepHardLines() throws {
+        let directory = try temporaryDirectory("hard-line-wrapping")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let codeURL = directory.appendingPathComponent("wide.swift")
+        let shortURL = directory.appendingPathComponent("short.swift")
+        let markdownURL = directory.appendingPathComponent("reading.md")
+        let longCode = "let message = \"" + String(repeating: "a wide source line ", count: 35)
+            + "SOURCE_END\""
+        let code = "let first = 1\n\(longCode)\nlet third = 3\nlet fourth = 4\n"
+        let prose = String(repeating: "A paragraph follows the Markdown reading column. ",
+                           count: 25)
+        try Data(code.utf8).write(to: codeURL)
+        try Data("let x = 1\n".utf8).write(to: shortURL)
+        try Data(("# Reading\n\n" + prose + "\n").utf8).write(to: markdownURL)
+        let diffURL = URL(string: "puzzle-diff:///\(directory.path)/wide.swift")!
+        let removed = "-" + longCode
+        let added = "+" + longCode.replacingOccurrences(of: "SOURCE_END", with: "CHANGED_END")
+        DocumentStore.shared.setVirtualDocument(url: diffURL, text: """
+            diff --git a/wide.swift b/wide.swift
+            --- a/wide.swift
+            +++ b/wide.swift
+            @@ -1,3 +1,3 @@
+             let first = 1
+            \(removed)
+            \(added)
+             let third = 3
+
+            """, displayName: "wide.swift (diff)")
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 450),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        window.makeKeyAndOrderFront(nil)
+        func settle(width: CGFloat = 620) {
+            window.setContentSize(NSSize(width: width, height: 450))
+            window.contentView?.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        func fragments(of value: String) throws -> [NSRect] {
+            let text = pane.textViewForTesting
+            guard let layout = text.layoutManager, let container = text.textContainer else {
+                throw Failure(description: "the wrapping test has no text layout")
+            }
+            layout.ensureLayout(for: container)
+            let range = (text.string as NSString).range(of: value)
+            try expect(range.location != NSNotFound, "missing wrapping fixture \(value.prefix(30))")
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var result: [NSRect] = []
+            layout.enumerateLineFragments(forGlyphRange: glyphs) { rect, _, _, _, _ in
+                result.append(rect)
+            }
+            return result
+        }
+        func expectSingleFragment(_ value: String, _ message: String) throws {
+            let rows = try fragments(of: value)
+            try expect(rows.count == 1, message)
+        }
+        func scrollToEnd(of value: String) throws {
+            let text = pane.textViewForTesting
+            let scroll = pane.scrollViewForTesting
+            guard let layout = text.layoutManager, let container = text.textContainer else {
+                throw Failure(description: "the wrapping test lost its text layout")
+            }
+            let range = (text.string as NSString).range(of: value)
+            let last = NSRange(location: NSMaxRange(range) - 1, length: 1)
+            let glyphs = layout.glyphRange(forCharacterRange: last, actualCharacterRange: nil)
+            let end = layout.boundingRect(forGlyphRange: glyphs, in: container)
+                .offsetBy(dx: text.textContainerOrigin.x, dy: text.textContainerOrigin.y)
+            let clip = scroll.contentView
+            try expect(text.frame.width > clip.bounds.width + 100,
+                       "long source text did not widen the scrollable document")
+            try expect(scroll.hasHorizontalScroller && scroll.horizontalScroller != nil,
+                       "long source text has no horizontal scrollbar")
+            clip.scroll(to: NSPoint(x: text.bounds.maxX - clip.bounds.width, y: 0))
+            scroll.reflectScrolledClipView(clip)
+            try expect(clip.bounds.minX > 100,
+                       "the source view cannot actually scroll horizontally")
+            try expect(end.minX >= text.visibleRect.minX - 1
+                        && end.maxX <= text.visibleRect.maxX + 1,
+                       "the long line's final glyph is unreachable: \(end) in \(text.visibleRect)")
+        }
+
+        pane.open(url: codeURL)
+        settle()
+        for width: CGFloat in [620, 360, 1_100] {
+            settle(width: width)
+            try expectSingleFragment(longCode, "Swift source wrapped at \(width)pt")
+            try scrollToEnd(of: longCode)
+        }
+
+        // Short neighbouring lines still occupy the same gutter rows when
+        // their entire text lies to the left of the horizontal viewport.
+        guard let ruler = pane.lineNumberRulerForTesting else {
+            throw Failure(description: "source view has no line-number gutter")
+        }
+        let clip = pane.scrollViewForTesting.contentView
+        clip.scroll(to: .zero)
+        pane.scrollViewForTesting.reflectScrolledClipView(clip)
+        ruler.gitChanges = [GitLineChanges.Change(kind: .modified, lines: 1...4,
+                                                  removed: [], added: [])]
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        let beforeBars = ruler.changeMarkBarsForTesting
+        let beforeNumbers = ruler.drawnLineNumbersForTesting
+        try expect(beforeBars.count == 1, "source fixture did not draw one gutter ribbon")
+        try expect(beforeNumbers == [1, 2, 3, 4], "source fixture lost gutter line numbers")
+        try scrollToEnd(of: longCode)
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        try expect(ruler.changeMarkBarsForTesting == beforeBars,
+                   "horizontal scrolling hid or moved the short lines' gutter marks")
+        try expect(ruler.drawnLineNumbersForTesting == beforeNumbers,
+                   "horizontal scrolling hid the short lines' gutter numbers")
+
+        let longWidth = pane.textViewForTesting.frame.width
+        pane.open(url: shortURL)
+        for width: CGFloat in [360, 1_100] {
+            settle(width: width)
+            let text = pane.textViewForTesting
+            let clip = pane.scrollViewForTesting.contentView
+            let viewport = clip.bounds
+            // AppKit reserves the ruler inside the clip view's contentInsets;
+            // the leftmost scroll origin is therefore -rulerWidth, not zero.
+            let availableWidth = viewport.width - clip.contentInsets.left - clip.contentInsets.right
+            try expect(text.frame.width >= availableWidth - 0.5,
+                       "a short code document does not fill the resized viewport: \(viewport), document \(text.frame)")
+            try expect(text.frame.width <= availableWidth + 1 && text.frame.width < longWidth,
+                       "a short code tab kept the previous long document's width")
+            try expect(abs(viewport.minX + clip.contentInsets.left) < 0.5,
+                       "a short code tab kept a horizontal offset: \(viewport), document \(text.frame)")
+        }
+
+        pane.open(url: diffURL)
+        for width: CGFloat in [620, 360, 1_100] {
+            settle(width: width)
+            try expectSingleFragment(removed, "the removed diff line wrapped at \(width)pt")
+            try expectSingleFragment(added, "the added diff line wrapped at \(width)pt")
+            try scrollToEnd(of: added)
+        }
+
+        pane.open(url: markdownURL)
+        settle(width: 620)
+        let proseFragments = try fragments(of: prose)
+        try expect(proseFragments.count > 1,
+                   "Markdown prose stopped wrapping inside its reading column")
+        try expect(abs(pane.scrollViewForTesting.contentView.bounds.minX) < 0.5,
+                   "switching to Markdown retained the source tab's horizontal offset")
+        try expect(!pane.scrollViewForTesting.hasHorizontalScroller,
+                   "Markdown prose acquired a horizontal scrollbar")
+        pane.open(url: codeURL)
+        settle(width: 360)
+        try expectSingleFragment(longCode, "returning from Markdown made source code wrap")
+        try scrollToEnd(of: longCode)
+    }
+
+    private static func testGitChangePopoverKeepsHardLines() throws {
+        let removed = "let old = \"" + String(repeating: "old value ", count: 70) + "OLD_END\""
+        let added = "let new = \"" + String(repeating: "new value ", count: 70) + "NEW_END\""
+        let controller = GitChangePopoverController(change: GitLineChanges.Change(
+            kind: .modified, lines: 1...1, removed: [removed], added: [added]))
+        let size = controller.preferredSize
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        window.setContentSize(size)
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let text = controller.textViewForTesting
+        let scroll = controller.scrollViewForTesting
+        guard let layout = text.layoutManager, let container = text.textContainer else {
+            throw Failure(description: "Git change popover has no text layout")
+        }
+        layout.ensureLayout(for: container)
+        for value in [removed, added] {
+            let range = (text.string as NSString).range(of: value)
+            try expect(range.location != NSNotFound, "Git change popover lost a source line")
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var fragments = 0
+            layout.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, _, _ in
+                fragments += 1
+            }
+            try expect(fragments == 1, "Git change popover wrapped a long source line")
+        }
+        let clip = scroll.contentView
+        try expect(scroll.hasHorizontalScroller && text.frame.width > clip.bounds.width,
+                   "Git change popover has no horizontal overflow")
+        clip.scroll(to: NSPoint(x: text.bounds.maxX - clip.bounds.width, y: 0))
+        scroll.reflectScrolledClipView(clip)
+        let end = (text.string as NSString).range(of: "NEW_END\"")
+        let glyphs = layout.glyphRange(forCharacterRange: end, actualCharacterRange: nil)
+        let box = layout.boundingRect(forGlyphRange: glyphs, in: container)
+            .offsetBy(dx: text.textContainerOrigin.x, dy: text.textContainerOrigin.y)
+        try expect(clip.bounds.minX > 0 && box.minX >= text.visibleRect.minX - 1
+                    && box.maxX <= text.visibleRect.maxX + 1,
+                   "Git change popover cannot scroll to the final source text")
+    }
+
+    private static func testSideBySideDiffScrollsLongLines() throws {
+        let view = SideBySideDiffView()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 320),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        let long = String(repeating: "long source with tabs\t中文 😀 ", count: 30)
+        view.configure(diff: "@@ -1 +1 @@\n-\(long)OLD_END\n+\(long)NEW_END\n")
+        func settle() {
+            window.contentView?.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        settle()
+        let start = view.horizontalGeometryForTesting
+        try expect(start.scrollerVisible && start.maximumOffset > 100,
+                   "wide side-by-side source has no horizontal scrollbar")
+        guard let scroll = view.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let table = scroll.documentView as? NSTableView,
+              let scroller = view.subviews.compactMap({ $0 as? NSScroller }).first else {
+            throw Failure(description: "side-by-side diff lost its table or scrollbar")
+        }
+        let tableWidth = table.frame.width
+        let knob = scroller.rect(for: .knob)
+        try expect(scroller.isEnabled && knob.width > knob.height,
+                   "side-by-side diff does not have an enabled horizontal scrollbar: \(knob)")
+        // Exercise the scrollbar's real target/action rather than only its
+        // testing setter, then confirm both sides remain inside the viewport.
+        scroller.doubleValue = 1
+        if let action = scroller.action {
+            _ = NSApp.sendAction(action, to: scroller.target, from: scroller)
+        }
+        settle()
+        let end = view.horizontalGeometryForTesting
+        try expect(abs(end.offset - end.maximumOffset) < 0.5,
+                   "the side-by-side scrollbar cannot reach the final source text")
+        try expect(end.textWidth - end.offset <= end.viewportWidth + 0.5,
+                   "the final source text is beyond the horizontal scrolling range")
+        try expect(abs(table.frame.width - tableWidth) < 0.5
+                    && table.frame.width <= scroll.contentView.bounds.width + 1,
+                   "horizontal scrolling pushed the right-hand diff column out of view")
+        view.step(forward: true)
+        try expect(abs(view.horizontalGeometryForTesting.offset - end.offset) < 0.5,
+                   "stepping to a change discarded the horizontal scroll position")
+        window.setContentSize(NSSize(width: 440, height: 320))
+        settle()
+        try expect(view.horizontalGeometryForTesting.maximumOffset > start.maximumOffset,
+                   "resizing did not update the side-by-side scrolling range")
+        view.configure(diff: "@@ -1 +1 @@\n-a\n+b\n")
+        settle()
+        let short = view.horizontalGeometryForTesting
+        try expect(short.offset == 0 && short.maximumOffset == 0 && !short.scrollerVisible,
+                   "a short diff retained the preceding long diff's scroll range")
+    }
+
     /// Changed lines next to each other, of one kind, are one ribbon in the
-    /// gutter, and a wrapped line's runs down all of its rows.
+    /// gutter, even when a long line extends beyond the horizontal viewport.
     private static func testGutterRibbonRunsUnbroken() throws {
         let directory = try temporaryDirectory("gutter-ribbon")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -4909,7 +5180,7 @@ enum RegressionTests {
             -> GitLineChanges.Change {
             GitLineChanges.Change(kind: kind, lines: lines, removed: [], added: [])
         }
-        // Two modifications and the wrapped line after them, then an addition.
+        // Two modifications and the long line after them, then an addition.
         ruler.gitChanges = [change(.modified, 2...2), change(.modified, 3...3),
                             change(.modified, 4...5), change(.added, 6...7)]
         ruler.needsDisplay = true
@@ -4924,14 +5195,14 @@ enum RegressionTests {
         let longEnd = layout.lineFragmentRect(
             forGlyphAt: layout.glyphIndexForCharacter(
                 at: NSMaxRange(text.range(of: long)) - 1), effectiveRange: nil)
-        try expect(longEnd.minY > row("let long").minY,
-                   "the long line did not wrap, so the test proves nothing")
+        try expect(abs(longEnd.minY - row("let long").minY) < 0.5,
+                   "a long source line wrapped in the gutter ribbon fixture")
         try expect(bars.count == 2,
                    "the ribbon is drawn in \(bars.count) pieces, not one per run: \(bars)")
         if bars.count == 2 {
             try expect(abs(bars[0].height - (longEnd.maxY - row("two").minY)) < 0.5,
-                       "the modified run is not one ribbon down to the wrapped line's last "
-                         + "row: \(bars[0].height)pt")
+                       "the modified run is not one ribbon through the long line: "
+                         + "\(bars[0].height)pt")
             try expect(abs(bars[1].height - (row("seven").maxY - row("six").minY)) < 0.5,
                        "the added run is not one ribbon: \(bars[1].height)pt")
         }

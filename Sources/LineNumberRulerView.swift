@@ -336,6 +336,7 @@ final class LineNumberRulerView: NSRulerView {
         foldableRowRects.removeAll(keepingCapacity: true)
         changeMarkRects.removeAll(keepingCapacity: true)
         changeMarkBars.removeAll(keepingCapacity: true)
+        drawnLineNumbersForTesting.removeAll(keepingCapacity: true)
 
         let content = textView.string as NSString
         let inset = textView.textContainerInset.height
@@ -357,7 +358,11 @@ final class LineNumberRulerView: NSRulerView {
         let caretLine = index.line(at: min(textView.selectedRange().location, content.length))
 
         let visibleRect = textView.visibleRect
-        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
+        // The gutter follows vertical scrolling only. Horizontal scrolling
+        // past a short line's last glyph must not hide its number or Git mark.
+        let rulerRect = NSRect(x: 0, y: visibleRect.minY,
+                               width: textView.bounds.width, height: visibleRect.height)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: rulerRect, in: container)
 
 
         let diffNumbers = textView.diffLineNumbers
@@ -417,6 +422,7 @@ final class LineNumberRulerView: NSRulerView {
                 shown = lineNo <= diffNumbers.count ? diffNumbers[lineNo - 1] : nil
             }
             if let shown {
+                self.drawnLineNumbersForTesting.append(shown)
                 let value = "\(shown)" as NSString
                 let isActive = lineNo == caretLine
                 let attributes = isActive ? active : normal
@@ -500,6 +506,7 @@ final class LineNumberRulerView: NSRulerView {
     /// What the last draw put under the caret's line number, so the mark can be
     /// checked without reading pixels out of a bitmap.
     private(set) var drawnActiveMarkForTesting: NSRect?
+    private(set) var drawnLineNumbersForTesting: [Int] = []
 
     /// The rule under the caret's line number: as wide as the digits, right
     /// aligned with them so it does not shift as the caret moves between lines
