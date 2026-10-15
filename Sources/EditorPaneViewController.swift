@@ -497,6 +497,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let anchor = window.convertToScreen(ruler.convert(rect, to: nil))
         popover.show(below: anchor, codeArea: visibleCodeAreaOnScreen, in: window)
         gitChangePopover = popover
+        // The gutter joins the clicked mark to the panel while it is up.
+        let gutter = ruler as? LineNumberRulerView
+        gutter?.linkChange(change, to: popover)
+        popover.onClose = { [weak gutter] in gutter?.linkChange(nil, to: nil) }
     }
 
     /// The clip includes the ruler in its content insets. Subtract those,

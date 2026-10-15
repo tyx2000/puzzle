@@ -21,7 +21,8 @@ enum RegressionTests {
             try testActiveLineSpansTheGutter()
             try testGutterMarksUncommittedChanges()
             try testGitChangePopoverKeepsHardLines()
-            print("Active-line and Git panel regression tests passed (4)")
+            try testGutterLinksMarkToItsDiff()
+            print("Active-line and Git panel regression tests passed (5)")
             return
         }
         if CommandLine.arguments.contains("--wrapping-regressions") {
@@ -107,6 +108,7 @@ enum RegressionTests {
         try testDiffInlineChanges()
         try testMarkdownLayoutStaysWhole()
         try testMarkdownKeystrokeStaysLocal()
+        try testGutterLinksMarkToItsDiff()
         try testMarkdownEquivalentEditsRestoreLayout()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
@@ -5679,6 +5681,93 @@ enum RegressionTests {
         }
     }
 
+    /// While a change's diff panel is open the gutter joins the change's
+    /// mark to the panel, in the change's colour, and the panel opens past
+    /// the whole change rather than over the rest of it.
+    private static func testGutterLinksMarkToItsDiff() throws {
+        let root = try temporaryDirectory("gutter-link")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "T"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        let file = root.appendingPathComponent("sample.swift")
+        let lines = (1...30).map { "let value\($0) = \($0)" }
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.commit("base", in: root)
+        var changed = lines
+        changed[4] = "let value5 = 50"
+        changed[5] = "let value6 = 60"
+        try Data((changed.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 460),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        pane.repositoryRoot = root
+        pane.open(url: file)
+        window.setContentSize(NSSize(width: 800, height: 460))
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let deadline = Date().addingTimeInterval(5)
+        while pane.gitLineChangesForTesting.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        guard let ruler = pane.lineNumberRulerForTesting,
+              let change = GitLineChanges.change(at: 5, in: ruler.gitChanges),
+              change.lines == 5...6 else {
+            throw Failure(description: "the fixture's two-line change is not marked")
+        }
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        try expect(ruler.changeLinkForTesting == nil, "a join is drawn with no panel open")
+        try expect(ruler.clickChangeForTesting(at: 5), "clicking the mark did nothing")
+        guard let panel = pane.gitChangePanelForTesting, panel.isVisible else {
+            throw Failure(description: "the mark did not open its diff")
+        }
+        // Past the whole change: under its last line, not over it.
+        let text = pane.textViewForTesting
+        let source = text.string as NSString
+        let sixth = source.range(of: "let value6").location
+        guard let layout = text.layoutManager else { return }
+        var row = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: sixth),
+                                          effectiveRange: nil)
+        row.origin.y += text.textContainerOrigin.y
+        let rowOnScreen = window.convertToScreen(text.convert(row, to: nil))
+        try expect(panel.frame.maxY <= rowOnScreen.minY + 0.5,
+                   "the diff opened over the change's own last line: \(panel.frame) "
+                     + "against \(rowOnScreen)")
+        // The join: from the mark to the gutter's edge, over both, in the
+        // change's colour and light enough to read the numbers through.
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        guard let link = ruler.changeLinkForTesting else {
+            throw Failure(description: "the gutter does not join the mark to its diff")
+        }
+        let panelInRuler = ruler.convert(window.convertFromScreen(panel.frame), from: nil)
+        try expect(abs(link.bounds.minX - LineNumberRulerView.dividerReach) < 0.5
+                    && abs(link.bounds.maxX - ruler.bounds.maxX) < 0.5,
+                   "the join does not run from the mark to the diff's edge: \(link.bounds)")
+        try expect(link.bounds.minY <= min(panelInRuler.minY, panelInRuler.maxY) + 0.5
+                    && link.bounds.maxY >= max(panelInRuler.minY, panelInRuler.maxY) - 0.5,
+                   "the join does not reach the whole of the diff's edge: \(link.bounds) "
+                     + "for \(panelInRuler)")
+        try expect((0.15...0.4).contains(link.colour.alphaComponent)
+                    && sameColor(link.colour.withAlphaComponent(1), change.colour),
+                   "the join is not the change's colour, lightly: \(link.colour)")
+        // It goes with the panel, and the gutter is drawn again without it.
+        panel.cancelOperation(nil)
+        // Not drawn again by hand: the close itself has to ask for it.
+        ruler.displayIfNeeded()
+        try expect(ruler.changeLinkForTesting == nil,
+                   "closing the diff left its join drawn in the gutter")
+    }
+
     private static func testFindMatchesAreComplete() throws {
         let textView = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         textView.string = "payload and payload"
@@ -7602,6 +7691,41 @@ enum RegressionTests {
                    "the diff panel does not match the visible code area: \(panel.frame) vs \(codeArea)")
         try expect((panel.contentView?.layer?.cornerRadius ?? 0) == 0,
                    "the diff panel content still has rounded corners")
+        // Laid edge to edge over the code, it has to read as on top of it: a
+        // lighter surface than the code, an edge where it meets the code, and
+        // the clicked mark's colour down its left.
+        if let surface = panel.contentView as? GitChangeSurfaceView,
+           let pixels = surface.bitmapImageRepForCachingDisplay(in: surface.bounds),
+           let code = pane.textViewForTesting.bitmapImageRepForCachingDisplay(
+            in: NSRect(x: pane.textViewForTesting.bounds.maxX - 6,
+                       y: pane.textViewForTesting.visibleRect.maxY - 6, width: 2, height: 2)) {
+            surface.cacheDisplay(in: surface.bounds, to: pixels)
+            pane.textViewForTesting.cacheDisplay(
+                in: NSRect(x: pane.textViewForTesting.bounds.maxX - 6,
+                           y: pane.textViewForTesting.visibleRect.maxY - 6, width: 2, height: 2),
+                to: code)
+            let scale = CGFloat(pixels.pixelsWide) / surface.bounds.width
+            func pixel(_ x: CGFloat, _ y: CGFloat) -> NSColor? {
+                pixels.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB)
+            }
+            let inside = pixel(surface.bounds.width - 6, surface.bounds.height - 6)
+            let edge = pixel(surface.bounds.width - 6, 0.5)
+            let stripe = pixel(1, surface.bounds.midY)
+            let codeColour = code.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB)
+            func near(_ a: NSColor?, _ b: NSColor?) -> Bool {
+                guard let a, let b else { return false }
+                return abs(a.redComponent - b.redComponent) < 0.02
+                    && abs(a.greenComponent - b.greenComponent) < 0.02
+                    && abs(a.blueComponent - b.blueComponent) < 0.02
+            }
+            try expect(!near(inside, codeColour),
+                       "the diff panel is the code's own colour: \(String(describing: inside))")
+            try expect(!near(edge, inside), "the diff panel has no edge where it meets the code")
+            try expect(surface.accent == modified.colour && !near(stripe, inside),
+                       "the diff panel does not carry the clicked change's colour")
+        } else {
+            throw Failure(description: "the diff panel is not drawn on its own surface")
+        }
         panel.cancelOperation(nil)
         try expect(!panel.isVisible, "Escape did not dismiss the Git diff panel")
         try expect(ruler.clickChangeForTesting(at: modified.lines.lowerBound),

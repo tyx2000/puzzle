@@ -11,6 +11,25 @@ final class LineNumberRulerView: NSRulerView {
     }
     /// Asked to explain the change on a line the user clicked.
     var onChangeClicked: ((GitLineChanges.Change, NSRect) -> Void)?
+
+    /// The change whose diff panel is open, and the panel: while it is up the
+    /// gutter joins the change's mark to the panel's edge, in the change's
+    /// colour — the panel opens below the lines, a little way from the mark
+    /// that was clicked, and nothing said the two belonged together.
+    private var linkedChange: GitLineChanges.Change?
+    private weak var linkedPanel: NSWindow?
+    /// How strongly the join is filled: enough to see the two are one, light
+    /// enough that the line numbers under it still read.
+    static let changeLinkAlpha: CGFloat = 0.28
+
+    func linkChange(_ change: GitLineChanges.Change?, to panel: NSWindow?) {
+        linkedChange = change
+        linkedPanel = panel
+        needsDisplay = true
+    }
+
+    /// What the last draw joined: the shape's bounds, and its colour.
+    private(set) var changeLinkForTesting: (bounds: NSRect, colour: NSColor)?
     /// Gutter columns, outer edge inward:
     ///
     ///     [ divider reach ][ ribbon ][ line numbers ][ fold arrow ]
@@ -304,7 +323,7 @@ final class LineNumberRulerView: NSRulerView {
         // The fold arrow wins where they overlap; it is the smaller target.
         if !arrowHitRects.contains(where: { $0.value.insetBy(dx: -3, dy: -3).contains(point) }),
            let hit = changeMarkRects.first(where: { $0.rect.contains(point) }) {
-            onChangeClicked?(hit.change, hit.rect)
+            onChangeClicked?(hit.change, rows(of: hit.change) ?? hit.rect)
             return
         }
         guard let identity = arrowHitRects.first(where: {
@@ -501,6 +520,41 @@ final class LineNumberRulerView: NSRulerView {
             }
         }
         flushRibbon()
+        drawChangeLink()
+    }
+
+    /// From the right of the change's mark, top and bottom, curving to the
+    /// panel's left edge, top and bottom — wherever the panel opened, below
+    /// the lines or above them.
+    private func drawChangeLink() {
+        changeLinkForTesting = nil
+        guard let change = linkedChange, let panel = linkedPanel, panel.isVisible,
+              let window else { return }
+        guard let span = rows(of: change) else { return }
+        // A deletion's mark is the seam at the top of its line.
+        let top = span.minY
+        let bottom = change.kind == .deleted ? span.minY + 3 : span.maxY
+        let edge = convert(window.convertFromScreen(panel.frame), from: nil)
+        let left = Self.dividerReach
+        let right = left + markWidth(for: change)
+        let gutter = bounds.maxX
+        let middle = (right + gutter) / 2
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: left, y: top))
+        path.line(to: NSPoint(x: right, y: top))
+        path.curve(to: NSPoint(x: gutter, y: edge.minY),
+                   controlPoint1: NSPoint(x: middle, y: top),
+                   controlPoint2: NSPoint(x: middle, y: edge.minY))
+        path.line(to: NSPoint(x: gutter, y: edge.maxY))
+        path.curve(to: NSPoint(x: right, y: bottom),
+                   controlPoint1: NSPoint(x: middle, y: edge.maxY),
+                   controlPoint2: NSPoint(x: middle, y: bottom))
+        path.line(to: NSPoint(x: left, y: bottom))
+        path.close()
+        let colour = change.colour.withAlphaComponent(Self.changeLinkAlpha)
+        colour.setFill()
+        path.fill()
+        changeLinkForTesting = (path.bounds, colour)
     }
 
     /// What the last draw put under the caret's line number, so the mark can be
@@ -558,10 +612,31 @@ final class LineNumberRulerView: NSRulerView {
         needsDisplay = true
     }
     var changeMarkBarsForTesting: [NSRect] { changeMarkBars }
+    /// A click on the change's mark — on its row as last drawn, as a click
+    /// would land, or a stand-in row when it has not been drawn.
     func clickChangeForTesting(at line: Int) -> Bool {
         guard let change = GitLineChanges.change(at: line, in: gitChanges) else { return false }
+        // Through the click itself when the mark is on screen.
+        if let row = changeMarkRects.first(where: { $0.change == change })?.rect,
+           let window,
+           let click = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: convert(NSPoint(x: row.midX, y: row.midY), to: nil),
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1) {
+            mouseDown(with: click)
+            return true
+        }
         onChangeClicked?(change, NSRect(x: 0, y: 0, width: ruleThickness, height: 20))
         return true
+    }
+
+    /// Every row of a change as last drawn, as one rectangle: the panel opens
+    /// past the whole change, not under whichever of its rows was clicked —
+    /// under the first, it covered the rest.
+    private func rows(of change: GitLineChanges.Change) -> NSRect? {
+        let rows = changeMarkRects.filter { $0.change == change }.map(\.rect)
+        guard let first = rows.first else { return nil }
+        return rows.dropFirst().reduce(first) { $0.union($1) }
     }
 
     /// Asked for on each draw rather than handed over once: the document's

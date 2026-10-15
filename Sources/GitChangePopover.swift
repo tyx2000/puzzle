@@ -25,8 +25,8 @@ final class GitChangePopoverController: NSViewController {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        let container = FlatView()
-        container.fillColor = Theme.editorBackground
+        let container = GitChangeSurfaceView()
+        container.accent = change.colour
 
         textView.isEditable = false
         textView.isSelectable = true
@@ -65,14 +65,16 @@ final class GitChangePopoverController: NSViewController {
 
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            // Right of the stripe, so text scrolled sideways never runs over it.
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                            constant: GitChangeSurfaceView.accentWidth),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: canRevert
                 ? revert.topAnchor : container.bottomAnchor),
             // Under the first character of the diff, not off in the corner:
             // the button belongs to the lines above it. Its margins are the
             // text's own inset, so the padding is the same on all four sides.
-            revert.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+            revert.leadingAnchor.constraint(equalTo: scroll.leadingAnchor,
                                             constant: Self.padding),
             revert.bottomAnchor.constraint(equalTo: container.bottomAnchor,
                                            constant: -Self.padding),
@@ -181,9 +183,32 @@ final class GitChangePopoverController: NSViewController {
     var revertButtonForTesting: NSButton { revert }
 }
 
+/// The diff's surface: a step lighter than the code it is laid over, an edge
+/// along the top and bottom where it meets the code, and down the left the
+/// colour of the change — the mark that was clicked to open it. Laid edge to
+/// edge over the code in the code's own colour, it read as more code.
+final class GitChangeSurfaceView: NSView {
+    var accent: NSColor = Theme.raisedEdge { didSet { needsDisplay = true } }
+    static let accentWidth: CGFloat = 3
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.raisedSurface.setFill()
+        bounds.fill()
+        accent.setFill()
+        NSRect(x: 0, y: 0, width: Self.accentWidth, height: bounds.height).fill()
+        Theme.raisedEdge.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+}
+
 /// A square child panel avoids NSPopover's compulsory arrow and rounded frame.
 /// It can become key for text selection without taking the editor's main window.
 final class GitChangePanel: NSPanel {
+    /// Told when the panel goes, whatever closed it.
+    var onClose: (() -> Void)?
     private var eventMonitor: Any?
     private var observers: [NSObjectProtocol] = []
 
@@ -192,7 +217,7 @@ final class GitChangePanel: NSPanel {
                    backing: .buffered, defer: false)
         isReleasedWhenClosed = false
         isOpaque = true
-        backgroundColor = Theme.editorBackground
+        backgroundColor = Theme.raisedSurface
         hasShadow = true
         hidesOnDeactivate = true
         becomesKeyOnlyIfNeeded = true
@@ -247,6 +272,9 @@ final class GitChangePanel: NSPanel {
         stopMonitoring()
         parent?.removeChildWindow(self)
         orderOut(nil)
+        let closed = onClose
+        onClose = nil
+        closed?()
     }
 
     private func stopMonitoring() {

@@ -83,6 +83,11 @@ enum Theme {
     // down to sit under code without drowning it.
     static let diffAddedText = hex(0x70bf56)
     static let diffRemovedText = hex(0xf26d78)
+    /// A panel laid over the code — the gutter's diff — a step lighter than
+    /// the code, so it reads as on top of it rather than part of it.
+    static let raisedSurface = hex(0x161b24)
+    /// That panel's edge: light enough to show against the code either side.
+    static let raisedEdge = hex(0x2d3442)
     static let diffAddedBackground = hex(0x18251b)
     static let diffRemovedBackground = hex(0x2a1a1d)
     /// The words that changed inside a changed line: the line's colour, a
