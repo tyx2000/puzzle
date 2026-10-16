@@ -125,11 +125,13 @@ final class Document {
     /// an offset into a line number goes through this.
     var lineIndex: LineIndex {
         if let cached = cachedLineIndex, cached.length == storage.length { return cached }
+        lineIndexBuildsForTesting += 1
         let built = LineIndex(storage.string)
         cachedLineIndex = built
         return built
     }
     private var cachedLineIndex: LineIndex?
+    private(set) var lineIndexBuildsForTesting = 0
 
     /// Called wherever the text changes wholesale. The length check above is a
     /// backstop: an edit that keeps the length can still move a newline.
@@ -700,7 +702,9 @@ final class Document {
     }
 
     func markLocalEdit(at date: Date = Date()) {
-        invalidateLineIndex()
+        // The line index is not dropped here: the storage observer has already
+        // folded this edit into it, and a rebuild cost ~17ms a keystroke in an
+        // 800 KB file.
         guard !isApplyingExternalChange else { return }
         if lastLocalEditAt.map({ date > $0 }) ?? true { lastLocalEditAt = date }
         isModified = true

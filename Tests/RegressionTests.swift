@@ -121,6 +121,7 @@ enum RegressionTests {
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
+        try testBracketMatchingReadsLittle()
         try testCommentToggleRules()
         try testToggleCommentInTheEditor()
         try testCodeBlockAnalysisAndFolding()
@@ -150,6 +151,7 @@ enum RegressionTests {
         try testExceptionLogKeepsTheReason()
         try testSubdirectoryProjectGutterBaseline()
         try testLineIndexTracksEdits()
+        try testTypingKeepsTheLineIndex()
         try testMinifiedFilesOpenBounded()
         try testMinifiedJSONOpensFormatted()
         try testFileTreeSurvivesReentrantReload()
@@ -497,6 +499,83 @@ enum RegressionTests {
         try expect((textView.string as NSString).substring(
                         with: NSRange(location: textView.selectedRange().location, length: 1)) == "c",
                    "the caret did not stay in front of the text it was on")
+    }
+
+    /// A string that counts how often it is asked for its characters.
+    /// It keeps NSString's own initializers: Swift will not let a subclass
+    /// declare its own.
+    private final class CountingString: NSString {
+        var base: NSString = ""
+        private(set) var reads = 0
+
+        override var length: Int { base.length }
+
+        override func character(at index: Int) -> unichar {
+            reads += 1
+            return base.character(at: index)
+        }
+
+        override func getCharacters(_ buffer: UnsafeMutablePointer<unichar>, range: NSRange) {
+            reads += 1
+            base.getCharacters(buffer, range: range)
+        }
+
+        func resetReads() { reads = 0 }
+    }
+
+    /// Bracket matching runs after every keystroke and every caret move. Beside
+    /// anything but a bracket there is no pair to find, and otherwise the text
+    /// is read a chunk at a time: asking for one character at a time cost
+    /// ~27ms a walk, twice a keystroke, in an 800 KB file.
+    private static func testBracketMatchingReadsLittle() throws {
+        // Strays inside a string and a comment on every line, so a walk that
+        // lost track of either across a chunk would pair the wrong brackets.
+        let line = "    let value = call(\"a)\", [1, 2]) { $0 } // done)\n"
+        let lineLength = (line as NSString).length
+        let text = CountingString()
+        text.base = ("func f() {\n" + String(repeating: line, count: 20_000) + "}\n") as NSString
+        let middle = 11 + 10_000 * lineLength
+
+        text.resetReads()
+        try expect(BracketMatcher.ranges(in: text, caret: middle + 6).isEmpty,
+                   "a caret between two letters matched a pair")
+        try expect(text.reads <= 2,
+                   "a caret beside no bracket read the text \(text.reads) times")
+
+        let call = middle + (line as NSString).range(of: "(").location
+        let close = middle + (line as NSString).range(of: ")", options: .backwards,
+                                                      range: NSRange(location: 0, length: 36)).location
+        text.resetReads()
+        let inner = BracketMatcher.ranges(in: text, caret: call + 1)
+        try expect(inner.map(\.location) == [call, close],
+                   "the call's parentheses matched \(inner), not [\(call), \(close)]")
+        try expect(text.reads < text.length / 1_000,
+                   "matching beside a bracket read the text \(text.reads) times "
+                    + "for \(text.length) characters")
+
+        // The outer block closes on the last line: the whole text is walked.
+        text.resetReads()
+        let outer = BracketMatcher.ranges(in: text, caret: 10)
+        try expect(outer.map(\.location) == [9, text.length - 2],
+                   "the outer block matched \(outer), not its own closing brace")
+        try expect(text.reads < text.length / 1_000,
+                   "walking the whole text read it \(text.reads) times")
+
+        // Comments that open where one chunk of the text ends and the next
+        // begins still hide what is inside them.
+        let filler = String(repeating: "x", count: 8_190)
+        let straddling = ("(" + filler + "/* ) */)") as NSString
+        try expect(BracketMatcher.ranges(in: straddling, caret: 1).map(\.location)
+                    == [0, straddling.length - 1],
+                   "a block comment split across chunks did not hide its bracket")
+        let hashed = ("(" + filler + " #)\n)") as NSString
+        try expect(BracketMatcher.ranges(in: hashed, caret: 1).map(\.location)
+                    == [0, hashed.length - 1],
+                   "a # comment at a chunk's start did not hide its bracket")
+        // A bracket in a string is not code, however far the walk goes.
+        let quoted = ("\"(" + filler + ")\"") as NSString
+        try expect(BracketMatcher.ranges(in: quoted, caret: 2).isEmpty,
+                   "a bracket inside a string was matched")
     }
 
     private static func testBracketMatchingAndDeleteLine() throws {
@@ -6274,6 +6353,47 @@ enum RegressionTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         try expect(document.lineIndex.starts == LineIndex(document.storage.string).starts,
                    "the document's index did not follow an edit to its storage")
+    }
+
+
+    /// Typing folds each keystroke into the line index the storage keeps in
+    /// step. Dropping the index on every edit made the gutter rebuild it from
+    /// the whole text: ~17ms a keystroke in an 800 KB file.
+    private static func testTypingKeepsTheLineIndex() throws {
+        let directory = try temporaryDirectory("typing-line-index")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("lines.swift")
+        try Data((1...200).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: file)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 600, height: 300))
+        let document = DocumentStore.shared.document(for: file)
+        defer {
+            pane.prepareForClose()
+            window.close()
+            document.isModified = false
+            DocumentStore.shared.release(file, stillOpen: false)
+        }
+        pane.open(url: file)
+        window.contentView?.layoutSubtreeIfNeeded()
+        _ = document.lineIndex
+        let builds = document.lineIndexBuildsForTesting
+
+        pane.setCaretForTesting(LineIndex(document.storage.string).start(ofLine: 100) + 3)
+        for typed in ["x", "\n", "y", "\n\n", "z"] { pane.insertTextForTesting(typed) }
+        pane.textViewForTesting.deleteBackward(nil)
+        pane.textViewForTesting.deleteBackward(nil)
+        guard let index = pane.lineNumberRulerForTesting?.lineIndexProvider?() else {
+            throw Failure(description: "the gutter has no line index")
+        }
+        try expect(document.lineIndexBuildsForTesting == builds,
+                   "typing rebuilt the line index "
+                    + "\(document.lineIndexBuildsForTesting - builds) times instead of updating it")
+        try expect(index.starts == LineIndex(document.storage.string).starts,
+                   "the line index drifted from the text typed into")
+        try expect(index.lineCount == 203, "the gutter counts \(index.lineCount) lines, not 203")
     }
 
     /// A minified file (a bundle, a source map) is one line of megabytes, which
