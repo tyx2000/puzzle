@@ -3,10 +3,10 @@ import AppKit
 /// The little diff that opens when a gutter mark is clicked: what the lines
 /// were, what they are now, in the colours the diff tabs use.
 final class GitChangePopoverController: NSViewController {
-    private let change: GitLineChanges.Change
+    let change: GitLineChanges.Change
     private let textView = NSTextView()
     private let scroll = NSScrollView()
-    private let revert = NSButton()
+    private let revert = PointerButton()
     /// The scroll view has no intrinsic size; explicit constraints keep the
     /// diff content and its containing panel at the same dimensions.
     private var widthConstraint: NSLayoutConstraint!
@@ -69,8 +69,11 @@ final class GitChangePopoverController: NSViewController {
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor,
                                             constant: GitChangeSurfaceView.accentWidth),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            // The button keeps clear of the last line of the diff: under the
+            // text's own inset alone it sat against the code it acts on.
             scroll.bottomAnchor.constraint(equalTo: canRevert
-                ? revert.topAnchor : container.bottomAnchor),
+                ? revert.topAnchor : container.bottomAnchor,
+                constant: canRevert ? -Self.buttonGap : 0),
             // Under the first character of the diff, not off in the corner:
             // the button belongs to the lines above it. Its margins are the
             // text's own inset, so the padding is the same on all four sides.
@@ -88,12 +91,15 @@ final class GitChangePopoverController: NSViewController {
 
     @objc private func revertClicked() { onRevert?() }
 
-    /// Room for the button under the diff, when there is one: the button plus
-    /// the margin below it. The gap *above* it is the text view's own bottom
-    /// inset, which is the same `padding` again.
+    /// Room for the button under the diff, when there is one: the button, the
+    /// margin below it, and `buttonGap` above it — on top of the text view's
+    /// own bottom inset, which is the same `padding` again.
     private var footerHeight: CGFloat {
-        canRevert ? ceil(revert.fittingSize.height) + Self.padding : 0
+        canRevert ? ceil(revert.fittingSize.height) + Self.padding + Self.buttonGap : 0
     }
+
+    /// Between the diff and the button, beyond the text's own inset.
+    static let buttonGap: CGFloat = 6
 
     /// One number for every edge: the text's inset, the button's margins, and
     /// the gap between them.
@@ -206,13 +212,38 @@ final class GitChangeSurfaceView: NSView {
 
 /// A square child panel avoids NSPopover's compulsory arrow and rounded frame.
 /// It can become key for text selection without taking the editor's main window.
+///
+/// It moves rather than blinks: it unfolds from the edge beside the change it
+/// shows, folds back there when put away, and when another change in the file
+/// is clicked it flows to that one, growing or shrinking to its height, as the
+/// one panel. The gutter's join follows it frame by frame.
 final class GitChangePanel: NSPanel {
-    /// Told when the panel goes, whatever closed it.
+    /// Told when the panel goes, whatever put it away.
     var onClose: (() -> Void)?
+    /// Told on every frame of a transition, for whatever is drawn against
+    /// the panel's position — the gutter's join.
+    var onFrameChange: (() -> Void)?
+    /// A click the panel should not take as a click outside it: one on
+    /// another change's mark, which moves the panel there instead.
+    var ignoresClick: ((NSEvent) -> Bool)?
+
+    private(set) var controller: GitChangePopoverController
+    private let clip = GitChangeClipView()
     private var eventMonitor: Any?
     private var observers: [NSObjectProtocol] = []
+    private var ticker: Timer?
+    /// Folding away: still on screen, already gone as far as anything asks.
+    private(set) var isClosing = false
+    /// Below the change, or above it when there was no room below — the
+    /// edge it unfolds from and folds back to.
+    private var opensDownward = true
+
+    static let appearDuration: TimeInterval = 0.18
+    static let moveDuration: TimeInterval = 0.22
+    static let disappearDuration: TimeInterval = 0.14
 
     init(controller: GitChangePopoverController) {
+        self.controller = controller
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isReleasedWhenClosed = false
@@ -221,36 +252,167 @@ final class GitChangePanel: NSPanel {
         hasShadow = true
         hidesOnDeactivate = true
         becomesKeyOnlyIfNeeded = true
-        contentViewController = controller
+        // The diff sits in a clip the window's frame can animate freely: its
+        // own layout keeps it at full size, and the clip shows as much of it
+        // as the window has unfolded.
+        contentView = clip
+        clip.show(controller.view)
     }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    var isShown: Bool { isVisible && !isClosing }
+
+    /// Where the diff for `anchor` goes: across the code, under the change
+    /// or, without room there, over it.
+    private func target(for anchor: NSRect, codeArea: NSRect,
+                        size: NSSize) -> (frame: NSRect, downward: Bool) {
+        var y = anchor.minY - size.height
+        var downward = true
+        if y < codeArea.minY {
+            y = anchor.maxY
+            downward = false
+        }
+        y = min(max(y, codeArea.minY), codeArea.maxY - size.height)
+        return (NSRect(x: codeArea.minX, y: y, width: size.width, height: size.height), downward)
+    }
+
+    /// The frame folded flat against the edge nearest the change.
+    private func folded(_ frame: NSRect) -> NSRect {
+        NSRect(x: frame.minX, y: opensDownward ? frame.maxY : frame.minY,
+               width: frame.width, height: 0)
+    }
+
+    private static var reducesMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     func show(below anchor: NSRect, codeArea: NSRect, in owner: NSWindow) {
-        guard let controller = contentViewController as? GitChangePopoverController,
-              codeArea.width > 0, codeArea.height > 0 else { return }
+        guard codeArea.width > 0, codeArea.height > 0 else { return }
         let size = controller.preferredSize(forWidth: codeArea.width,
                                             maximumHeight: min(320, codeArea.height))
-        var y = anchor.minY - size.height
-        if y < codeArea.minY { y = anchor.maxY }
-        y = min(max(y, codeArea.minY), codeArea.maxY - size.height)
-        setFrame(NSRect(x: codeArea.minX, y: y, width: size.width, height: size.height),
-                 display: false)
+        let placed = target(for: anchor, codeArea: codeArea, size: size)
+        opensDownward = placed.downward
+        clip.anchorsToBottom = !placed.downward
+        clip.contentSize = size
+        isClosing = false
+        let reduce = Self.reducesMotion
+        setFrame(reduce ? placed.frame : folded(placed.frame), display: false)
+        alphaValue = 0
         owner.addChildWindow(self, ordered: .above)
         orderFront(nil)
-        contentView?.layoutSubtreeIfNeeded()
+        startMonitoring(owner)
+        animate(duration: Self.appearDuration) {
+            if !reduce { self.animator().setFrame(placed.frame, display: true) }
+            self.animator().alphaValue = 1
+        }
+    }
+
+    /// Another change of the same file: the same panel flows there, its
+    /// height going to the new diff's.
+    func move(to controller: GitChangePopoverController, below anchor: NSRect, codeArea: NSRect) {
+        guard codeArea.width > 0, codeArea.height > 0 else { return }
+        self.controller = controller
+        let size = controller.preferredSize(forWidth: codeArea.width,
+                                            maximumHeight: min(320, codeArea.height))
+        let placed = target(for: anchor, codeArea: codeArea, size: size)
+        opensDownward = placed.downward
+        clip.anchorsToBottom = !placed.downward
+        clip.contentSize = size
+        clip.show(controller.view)
+        isClosing = false
+        if Self.reducesMotion {
+            setFrame(placed.frame, display: true)
+            onFrameChange?()
+            animate(duration: Self.appearDuration) { self.animator().alphaValue = 1 }
+            return
+        }
+        animate(duration: Self.moveDuration) {
+            self.animator().setFrame(placed.frame, display: true)
+            self.animator().alphaValue = 1
+        }
+    }
+
+    /// Put away by the reader — Esc, a click elsewhere: folded back to the
+    /// change and faded, then gone.
+    func dismiss() {
+        guard isVisible, !isClosing else { return }
+        isClosing = true
+        stopMonitoring()
+        let reduce = Self.reducesMotion
+        let flat = folded(frame)
+        animate(duration: Self.disappearDuration, completion: { [weak self] in
+            guard let self, self.isClosing else { return }
+            self.finish()
+        }) {
+            if !reduce { self.animator().setFrame(flat, display: true) }
+            self.animator().alphaValue = 0
+        }
+    }
+
+    override func cancelOperation(_ sender: Any?) { dismiss() }
+
+    /// Gone at once — the document changed, or scrolled out from under it.
+    override func close() {
+        isClosing = true
+        finish()
+    }
+
+    private func finish() {
+        stopTicking()
+        stopMonitoring()
+        parent?.removeChildWindow(self)
+        orderOut(nil)
+        alphaValue = 1
+        isClosing = false
+        let closed = onClose
+        onClose = nil
+        closed?()
+    }
+
+    private func animate(duration: TimeInterval, completion: (() -> Void)? = nil,
+                         _ changes: @escaping () -> Void) {
+        startTicking(for: duration)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            changes()
+        }, completionHandler: completion)
+    }
+
+    /// What is drawn against the panel follows it on every frame of a
+    /// transition, and once more when it ends.
+    private func startTicking(for duration: TimeInterval) {
+        stopTicking()
+        let ends = Date().addingTimeInterval(duration + 0.05)
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.onFrameChange?()
+            if Date() >= ends { timer.invalidate() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        ticker = timer
+        onFrameChange?()
+    }
+
+    private func stopTicking() {
+        ticker?.invalidate()
+        ticker = nil
+    }
+
+    private func startMonitoring(_ owner: NSWindow) {
+        stopMonitoring()
         eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]
         ) { [weak self] event in
             guard let self else { return event }
             if event.type == .keyDown {
                 if event.keyCode == 53 {
-                    self.close()
+                    self.dismiss()
                     return nil
                 }
-            } else if event.window !== self {
-                self.close()
+            } else if event.window !== self, self.ignoresClick?(event) != true {
+                self.dismiss()
             }
             return event
         }
@@ -266,17 +428,6 @@ final class GitChangePanel: NSPanel {
         })
     }
 
-    override func cancelOperation(_ sender: Any?) { close() }
-
-    override func close() {
-        stopMonitoring()
-        parent?.removeChildWindow(self)
-        orderOut(nil)
-        let closed = onClose
-        onClose = nil
-        closed?()
-    }
-
     private func stopMonitoring() {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
@@ -284,5 +435,83 @@ final class GitChangePanel: NSPanel {
         observers.removeAll()
     }
 
-    deinit { stopMonitoring() }
+    deinit {
+        stopMonitoring()
+        ticker?.invalidate()
+    }
+}
+
+/// The panel's content view: the diff at its own full size, shown as far as
+/// the window has unfolded — from the top when the panel opens downward,
+/// from the bottom when it opens upward, so what shows first is the side
+/// nearest the change.
+final class GitChangeClipView: NSView {
+    var contentSize: NSSize = .zero { didSet { needsLayout = true } }
+    var anchorsToBottom = false { didSet { needsLayout = true } }
+    private weak var shown: NSView?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
+
+    func show(_ view: NSView) {
+        if shown !== view {
+            shown?.removeFromSuperview()
+            view.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(view)
+            shown = view
+        }
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    override func layout() {
+        super.layout()
+        guard let shown else { return }
+        let size = contentSize == .zero ? bounds.size : contentSize
+        shown.frame = NSRect(x: 0, y: anchorsToBottom ? bounds.height - size.height : 0,
+                             width: size.width, height: size.height)
+    }
+}
+
+/// A borderless button that shows the hand under the pointer — which a
+/// borderless button otherwise does not, leaving nothing to say it can be
+/// clicked but its colour.
+final class PointerButton: NSButton {
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: PointerCursor.trackingOptions,
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    var trackingOptionsForTesting: NSTrackingArea.Options? { tracking?.options }
+
+    override func resetCursorRects() {
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+    override func cursorUpdate(with event: NSEvent) {
+        if isEnabled { PointerCursor.enter() } else { super.cursorUpdate(with: event) }
+    }
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        if isEnabled { PointerCursor.enter() }
+    }
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        if isEnabled { PointerCursor.enter() }
+    }
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        PointerCursor.leave(self, event: event)
+    }
 }

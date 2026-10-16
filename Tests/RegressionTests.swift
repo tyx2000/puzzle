@@ -22,7 +22,8 @@ enum RegressionTests {
             try testGutterMarksUncommittedChanges()
             try testGitChangePopoverKeepsHardLines()
             try testGutterLinksMarkToItsDiff()
-            print("Active-line and Git panel regression tests passed (5)")
+            try testGitChangePanelFlows()
+            print("Active-line and Git panel regression tests passed (6)")
             return
         }
         if CommandLine.arguments.contains("--wrapping-regressions") {
@@ -109,6 +110,7 @@ enum RegressionTests {
         try testMarkdownLayoutStaysWhole()
         try testMarkdownKeystrokeStaysLocal()
         try testGutterLinksMarkToItsDiff()
+        try testGitChangePanelFlows()
         try testMarkdownEquivalentEditsRestoreLayout()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
@@ -5730,6 +5732,7 @@ enum RegressionTests {
         guard let panel = pane.gitChangePanelForTesting, panel.isVisible else {
             throw Failure(description: "the mark did not open its diff")
         }
+        RunLoop.main.run(until: Date().addingTimeInterval(GitChangePanel.appearDuration + 0.2))
         // Past the whole change: under its last line, not over it.
         let text = pane.textViewForTesting
         let source = text.string as NSString
@@ -5762,10 +5765,159 @@ enum RegressionTests {
                    "the join is not the change's colour, lightly: \(link.colour)")
         // It goes with the panel, and the gutter is drawn again without it.
         panel.cancelOperation(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(GitChangePanel.disappearDuration + 0.2))
         // Not drawn again by hand: the close itself has to ask for it.
         ruler.displayIfNeeded()
         try expect(ruler.changeLinkForTesting == nil,
                    "closing the diff left its join drawn in the gutter")
+    }
+
+    /// The diff panel moves rather than blinks: it unfolds from the change,
+    /// flows — the same panel — to another change of the file when that
+    /// one's mark is clicked, growing or shrinking to its diff, its join
+    /// sliding from the old mark to the new; and it folds away.
+    private static func testGitChangePanelFlows() throws {
+        let root = try temporaryDirectory("gutter-flow")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "T"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        let file = root.appendingPathComponent("sample.swift")
+        let lines = (1...40).map { "let value\($0) = \($0)" }
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.commit("base", in: root)
+        var changed = lines
+        changed[2] = "let value3 = 30"
+        changed[3] = "let value4 = 40"
+        changed[4] = "let value5 = 50"
+        changed.insert("let extra = 1", at: 10)
+        try Data((changed.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        pane.repositoryRoot = root
+        pane.open(url: file)
+        window.setContentSize(NSSize(width: 800, height: 600))
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let deadline = Date().addingTimeInterval(5)
+        while pane.gitLineChangesForTesting.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        guard let ruler = pane.lineNumberRulerForTesting,
+              let first = GitLineChanges.change(at: 3, in: ruler.gitChanges),
+              let second = GitLineChanges.change(at: 11, in: ruler.gitChanges),
+              first != second else {
+            throw Failure(description: "the fixture's two changes are not marked")
+        }
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        func settle(_ duration: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(duration + 0.2))
+        }
+
+        // It unfolds: at first flat and clear, then whole.
+        try expect(ruler.clickChangeForTesting(at: 3), "the first mark did nothing")
+        guard let panel = pane.gitChangePanelForTesting as? GitChangePanel else {
+            throw Failure(description: "the mark did not open its diff")
+        }
+        func expectedSize() -> NSSize {
+            pane.gitChangePopoverControllerForTesting?.preferredSize(forWidth: panel.frame.width)
+                ?? .zero
+        }
+        let firstSize = expectedSize()
+        try expect(panel.alphaValue < 1 && panel.frame.height < firstSize.height,
+                   "the diff appeared whole at once: \(panel.frame), alpha \(panel.alphaValue)")
+        settle(GitChangePanel.appearDuration)
+        let firstFrame = panel.frame
+        try expect(panel.alphaValue == 1 && abs(firstFrame.height - firstSize.height) < 0.5,
+                   "the diff did not finish unfolding: \(firstFrame), alpha \(panel.alphaValue)")
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        let firstLink = ruler.changeLinkForTesting
+
+        // Another mark: the same panel flows there, to the new diff's height.
+        let click = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+            pressure: 1)
+        try expect(click.map { !ruler.isChangeMark($0) } ?? false,
+                   "a click away from the marks is taken as a click on one")
+        // A click on another mark is not a click outside the panel: it moves it.
+        if let row = ruler.changeMarkTargetsForTesting.last,
+           let onMark = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: ruler.convert(NSPoint(x: row.midX, y: row.midY), to: nil),
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1) {
+            try expect(panel.ignoresClick?(onMark) == true,
+                       "a click on another mark would put the panel away instead of moving it")
+        }
+        let drawsBefore = ruler.drawsForTesting
+        try expect(ruler.clickChangeForTesting(at: 11), "the second mark did nothing")
+        try expect(pane.gitChangePanelForTesting === panel && panel.isShown,
+                   "another mark opened a second panel instead of moving the first")
+        try expect(pane.gitChangePopoverControllerForTesting?.change == second,
+                   "the moved panel does not show the second change")
+        try expect(abs(panel.frame.minY - firstFrame.minY) < 2
+                    && abs(panel.frame.height - firstFrame.height) < 2,
+                   "the panel jumped to the second change instead of flowing there: "
+                     + "\(panel.frame) from \(firstFrame)")
+        // The join starts from the old mark and slides.
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        if let start = ruler.changeLinkForTesting, let firstLink {
+            try expect(abs(start.bounds.minY - firstLink.bounds.minY) < 4
+                        || abs(start.bounds.maxY - firstLink.bounds.maxY) < 4,
+                       "the join jumped to the new mark: \(start.bounds) from \(firstLink.bounds)")
+        }
+        settle(GitChangePanel.moveDuration)
+        // Drawn again frame by frame as the panel moved, not only at the end.
+        try expect(ruler.drawsForTesting - drawsBefore >= 4,
+                   "the join did not follow the moving panel: the gutter drew "
+                     + "\(ruler.drawsForTesting - drawsBefore) times")
+        let secondSize = expectedSize()
+        try expect(abs(panel.frame.height - secondSize.height) < 0.5
+                    && panel.frame.minY != firstFrame.minY,
+                   "the panel did not flow to the second change's place and height: "
+                     + "\(panel.frame) from \(firstFrame)")
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        if let link = ruler.changeLinkForTesting {
+            try expect(sameColor(link.colour.withAlphaComponent(1), second.colour),
+                       "the join did not end in the second change's colour")
+        } else {
+            throw Failure(description: "the join was lost moving to the second change")
+        }
+
+        // The open change's own mark puts it away: folded, then gone.
+        try expect(ruler.clickChangeForTesting(at: 11), "the open mark did nothing")
+        try expect(!panel.isShown, "clicking the open change's mark did not put it away")
+        try expect(panel.isVisible, "the panel vanished instead of folding away")
+        settle(GitChangePanel.disappearDuration)
+        try expect(!panel.isVisible, "the panel did not finish folding away")
+        ruler.displayIfNeeded()
+        try expect(ruler.changeLinkForTesting == nil, "the join stayed after the panel went")
+
+        // Esc folds it away too.
+        try expect(ruler.clickChangeForTesting(at: 3), "the first mark did nothing")
+        settle(GitChangePanel.appearDuration)
+        guard let reopened = pane.gitChangePanelForTesting as? GitChangePanel,
+              reopened.isShown else {
+            throw Failure(description: "the first mark did not open its diff again")
+        }
+        reopened.cancelOperation(nil)
+        try expect(!reopened.isShown && reopened.isVisible,
+                   "Esc made the panel vanish instead of fold")
+        settle(GitChangePanel.disappearDuration)
+        try expect(!reopened.isVisible, "Esc did not put the panel away")
     }
 
     private static func testFindMatchesAreComplete() throws {
@@ -7694,7 +7846,7 @@ enum RegressionTests {
         // Laid edge to edge over the code, it has to read as on top of it: a
         // lighter surface than the code, an edge where it meets the code, and
         // the clicked mark's colour down its left.
-        if let surface = panel.contentView as? GitChangeSurfaceView,
+        if let surface = pane.gitChangePopoverControllerForTesting?.view as? GitChangeSurfaceView,
            let pixels = surface.bitmapImageRepForCachingDisplay(in: surface.bounds),
            let code = pane.textViewForTesting.bitmapImageRepForCachingDisplay(
             in: NSRect(x: pane.textViewForTesting.bounds.maxX - 6,
@@ -7727,6 +7879,8 @@ enum RegressionTests {
             throw Failure(description: "the diff panel is not drawn on its own surface")
         }
         panel.cancelOperation(nil)
+        // It folds away rather than vanishing.
+        RunLoop.main.run(until: Date().addingTimeInterval(GitChangePanel.disappearDuration + 0.2))
         try expect(!panel.isVisible, "Escape did not dismiss the Git diff panel")
         try expect(ruler.clickChangeForTesting(at: modified.lines.lowerBound),
                    "the Git diff panel cannot reopen after dismissal")
@@ -7743,6 +7897,38 @@ enum RegressionTests {
                    "the popover does not show both sides: \(popover.contentForTesting)")
         try expect(popover.revertButtonForTesting.isHidden == false,
                    "the popover offers no way to put the change back")
+        // Revert keeps clear of the diff it acts on, and says it can be
+        // clicked.
+        _ = popover.preferredSize(forWidth: codeArea.width)
+        popover.view.layoutSubtreeIfNeeded()
+        if let layout = popover.textViewForTesting.layoutManager,
+           let container = popover.textViewForTesting.textContainer {
+            layout.ensureLayout(for: container)
+            var used = layout.usedRect(for: container)
+            used.origin.y += popover.textViewForTesting.textContainerOrigin.y
+            let textBottom = popover.textViewForTesting.convert(used, to: popover.view).maxY
+            let buttonTop = popover.revertButtonForTesting.frame.minY
+            let gap = popover.view.isFlipped ? buttonTop - textBottom
+                : popover.textViewForTesting.convert(used, to: popover.view).minY
+                    - popover.revertButtonForTesting.frame.maxY
+            // The text's own 8pt inset, and room beyond it.
+            try expect(gap >= 13,
+                       "Revert sits \(gap)pt under the diff, against the code it acts on")
+        }
+        if let revert = popover.revertButtonForTesting as? PointerButton {
+            revert.updateTrackingAreas()
+            try expect(revert.trackingOptionsForTesting?.contains(.cursorUpdate) == true,
+                       "Revert does not follow the pointer for its cursor")
+            NSCursor.iBeam.set()
+            if let update = NSEvent.enterExitEvent(
+                with: .cursorUpdate, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+                revert.cursorUpdate(with: update)
+            }
+            try expect(NSCursor.current == .pointingHand, "Revert does not show the hand")
+        } else {
+            throw Failure(description: "Revert is a button with no hand under the pointer")
+        }
         // A trailing newline gives the layout manager an empty last line to
         // place, and the popover grows a blank row above the button that the
         // top edge has no twin for. Lines are separated, not terminated.

@@ -23,10 +23,36 @@ final class LineNumberRulerView: NSRulerView {
     static let changeLinkAlpha: CGFloat = 0.28
 
     func linkChange(_ change: GitLineChanges.Change?, to panel: NSWindow?) {
+        // From one change to another: the mark's end of the join slides from
+        // the old mark to the new one, in step with the panel moving.
+        if let drawn = lastLink, let change, linkedChange != nil, linkedChange != change {
+            linkTransition = (drawn.span, drawn.colour, CACurrentMediaTime(),
+                              GitChangePanel.moveDuration)
+        } else {
+            linkTransition = nil
+        }
         linkedChange = change
         linkedPanel = panel
         needsDisplay = true
     }
+
+    /// The join as last drawn, to slide from.
+    private var lastLink: (span: ClosedRange<CGFloat>, colour: NSColor)?
+    private var linkTransition: (span: ClosedRange<CGFloat>, colour: NSColor,
+                                 start: CFTimeInterval, duration: CFTimeInterval)?
+
+    /// Whether `event` is a click on a change's mark — which moves the open
+    /// diff there rather than putting it away.
+    func isChangeMark(_ event: NSEvent) -> Bool {
+        guard event.window === window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        return changeMarkRects.contains { $0.rect.contains(point) }
+            && !arrowHitRects.contains { $0.value.insetBy(dx: -3, dy: -3).contains(point) }
+    }
+
+    /// How many times the gutter has drawn, for a test to tell a join that
+    /// followed the panel frame by frame from one drawn only at the ends.
+    private(set) var drawsForTesting = 0
 
     /// What the last draw joined: the shape's bounds, and its colour.
     private(set) var changeLinkForTesting: (bounds: NSRect, colour: NSColor)?
@@ -349,6 +375,7 @@ final class LineNumberRulerView: NSRulerView {
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer else { return }
 
+        drawsForTesting += 1
         Theme.editorBackground.setFill()
         bounds.fill()
         arrowHitRects.removeAll(keepingCapacity: true)
@@ -529,11 +556,26 @@ final class LineNumberRulerView: NSRulerView {
     private func drawChangeLink() {
         changeLinkForTesting = nil
         guard let change = linkedChange, let panel = linkedPanel, panel.isVisible,
-              let window else { return }
+              let window else {
+            lastLink = nil
+            return
+        }
         guard let span = rows(of: change) else { return }
         // A deletion's mark is the seam at the top of its line.
-        let top = span.minY
-        let bottom = change.kind == .deleted ? span.minY + 3 : span.maxY
+        var top = span.minY
+        var bottom = change.kind == .deleted ? span.minY + 3 : span.maxY
+        var hue = change.colour
+        if let transition = linkTransition {
+            let elapsed = (CACurrentMediaTime() - transition.start) / transition.duration
+            let t = CGFloat(min(1, max(0, elapsed)))
+            // Eased in and out, as the panel's own move is.
+            let eased = t * t * (3 - 2 * t)
+            top = transition.span.lowerBound + (top - transition.span.lowerBound) * eased
+            bottom = transition.span.upperBound + (bottom - transition.span.upperBound) * eased
+            hue = transition.colour.blended(withFraction: eased, of: change.colour) ?? change.colour
+            if t >= 1 { linkTransition = nil }
+        }
+        lastLink = (top...bottom, hue)
         let edge = convert(window.convertFromScreen(panel.frame), from: nil)
         let left = Self.dividerReach
         let right = left + markWidth(for: change)
@@ -551,7 +593,8 @@ final class LineNumberRulerView: NSRulerView {
                    controlPoint2: NSPoint(x: middle, y: bottom))
         path.line(to: NSPoint(x: left, y: bottom))
         path.close()
-        let colour = change.colour.withAlphaComponent(Self.changeLinkAlpha)
+        // And it fades with the panel as it comes and goes.
+        let colour = hue.withAlphaComponent(Self.changeLinkAlpha * panel.alphaValue)
         colour.setFill()
         path.fill()
         changeLinkForTesting = (path.bounds, colour)

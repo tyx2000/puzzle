@@ -484,7 +484,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     private func showGitChange(_ change: GitLineChanges.Change, from rect: NSRect) {
         guard let ruler = scrollView.verticalRulerView, let window = view.window else { return }
-        gitChangePopover?.close()
+        let gutter = ruler as? LineNumberRulerView
+        // The mark of the change already showing puts it away again.
+        if let open = gitChangePopover, open.isShown, open.controller.change == change {
+            open.dismiss()
+            return
+        }
         let sourceURL = currentURL
         let controller = GitChangePopoverController(change: change)
         controller.canRevert = currentDocument.map { !$0.isReadOnly } ?? false
@@ -493,12 +498,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             self.gitChangePopover?.close()
             self.revertGitChange(change)
         }
-        let popover = GitChangePanel(controller: controller)
         let anchor = window.convertToScreen(ruler.convert(rect, to: nil))
+        // Another change while one is showing: the same panel flows there.
+        if let open = gitChangePopover, open.isVisible, open.parent === window {
+            open.move(to: controller, below: anchor, codeArea: visibleCodeAreaOnScreen)
+            gutter?.linkChange(change, to: open)
+            return
+        }
+        gitChangePopover?.close()
+        let popover = GitChangePanel(controller: controller)
+        popover.onFrameChange = { [weak gutter] in gutter?.needsDisplay = true }
+        popover.ignoresClick = { [weak gutter] event in gutter?.isChangeMark(event) ?? false }
         popover.show(below: anchor, codeArea: visibleCodeAreaOnScreen, in: window)
         gitChangePopover = popover
         // The gutter joins the clicked mark to the panel while it is up.
-        let gutter = ruler as? LineNumberRulerView
         gutter?.linkChange(change, to: popover)
         popover.onClose = { [weak gutter] in gutter?.linkChange(nil, to: nil) }
     }
@@ -629,11 +642,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var gitChangePanelForTesting: NSPanel? { gitChangePopover }
     var gitChangeCodeAreaForTesting: NSRect { visibleCodeAreaOnScreen }
     var gitChangePopoverControllerForTesting: GitChangePopoverController? {
-        gitChangePopover?.contentViewController as? GitChangePopoverController
+        gitChangePopover?.controller
     }
     var gitChangePopoverContentForTesting: String? {
-        (gitChangePopover?.contentViewController as? GitChangePopoverController)?
-            .contentForTesting
+        gitChangePopover?.controller.contentForTesting
     }
     var placeholderForTesting: PlaceholderView? { placeholder }
     var textIsHiddenForTesting: Bool { scrollView.isHidden }
