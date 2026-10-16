@@ -37,6 +37,9 @@ enum RegressionTests {
         if CommandLine.arguments.contains("--editor-regressions") {
             try testIncrementalParsing()
             try testHighlightServiceKeepsParseOwner()
+            try testByteMapperRoundTrips()
+            try testHighlightingColoursOnlyWhatChanged()
+            try testLongFileHighlightsOffTheMainThread()
             try testMarkdownLiveEditing()
             try testMarkdownReading()
             try testMarkdownRevealsOnEdit()
@@ -53,7 +56,7 @@ enum RegressionTests {
             try testDiffHeaderStepsThroughChanges()
             try testSideBySideDiff()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (18)")
+            print("Editor regression tests passed (21)")
             return
         }
         try testProcessDrain()
@@ -94,6 +97,9 @@ enum RegressionTests {
         try testPDFPreview()
         try testIncrementalParsing()
         try testHighlightServiceKeepsParseOwner()
+        try testByteMapperRoundTrips()
+        try testHighlightingColoursOnlyWhatChanged()
+        try testLongFileHighlightsOffTheMainThread()
         try testImageDownsampling()
         try testEPUBReading()
         try testMarkdownLiveEditing()
@@ -2950,6 +2956,230 @@ enum RegressionTests {
         try expect(incremental.fullParseCount == 3, "a different buffer reused the old tree")
         incremental.discardParseTree()
         try expect(incremental.treeDescriptionForTesting == nil, "memory pressure retained a tree")
+    }
+
+    /// The first character, if any, where `a` and `b` are not the same colour.
+    private static func firstColourDifference(_ a: NSAttributedString,
+                                              _ b: NSAttributedString) -> Int? {
+        guard a.length == b.length else { return 0 }
+        var index = 0
+        while index < a.length {
+            var left = NSRange(), right = NSRange()
+            let one = a.attribute(.foregroundColor, at: index, effectiveRange: &left) as? NSColor
+            let other = b.attribute(.foregroundColor, at: index, effectiveRange: &right) as? NSColor
+            if one != other { return index }
+            index = min(NSMaxRange(left), NSMaxRange(right))
+        }
+        return nil
+    }
+
+    /// `document` is coloured as it would be coloured from scratch, all at
+    /// once — the way it was before highlighting went a part at a time.
+    private static func expectColouredWhole(_ document: Document, _ label: String) throws {
+        let expected = NSTextStorage(string: document.text,
+                                     attributes: Theme.textAttributes(color: Theme.foreground))
+        guard let spec = document.languageSpec,
+              let definition = SyntaxHighlighter.definition(for: spec),
+              let fresh = SyntaxHighlighter(definition: definition) else {
+            throw Failure(description: "no grammar for \(document.url.lastPathComponent)")
+        }
+        fresh.highlight(text: expected.string, storage: expected,
+                        fullRange: NSRange(location: 0, length: expected.length))
+        if let at = firstColourDifference(document.storage, expected) {
+            let text = document.text as NSString
+            let start = max(0, at - 20)
+            let around = text.substring(with: NSRange(location: start,
+                                                      length: min(40, text.length - start)))
+            throw Failure(description:
+                "after \(label), the colour at \(at) is not a whole highlight's: \(around.debugDescription)")
+        }
+    }
+
+    private static func testByteMapperRoundTrips() throws {
+        let text = "a名😀b\u{301}c\n🎉x"
+        var copy = text
+        let mapper = copy.withUTF8 { ByteMapper(bytes: $0) }
+        var byte = 0, utf16 = 0
+        for scalar in text.unicodeScalars {
+            try expect(mapper.utf16(forByte: byte) == utf16, "byte \(byte) is not UTF-16 \(utf16)")
+            try expect(mapper.byte(forUTF16: utf16) == byte, "UTF-16 \(utf16) is not byte \(byte)")
+            for inside in 1..<UTF8.width(scalar) {
+                try expect(mapper.utf16(forByte: byte + inside) == nil,
+                           "byte \(byte + inside), inside a character, was given an offset")
+            }
+            byte += UTF8.width(scalar)
+            utf16 += UTF16.width(scalar)
+        }
+        try expect(mapper.utf16(forByte: byte) == utf16 && mapper.byte(forUTF16: utf16) == byte,
+                   "the end of the text does not map to the end")
+        // Inside the emoji's surrogate pair: where the pair starts.
+        try expect(mapper.byte(forUTF16: 3) == 4, "half a surrogate pair mapped inside the emoji")
+    }
+
+    private static func testHighlightingColoursOnlyWhatChanged() throws {
+        let directory = try temporaryDirectory("partial-highlight")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Longer than one pass, with text outside ASCII and every kind of
+        // token, so passes, offsets and captures all come into it.
+        var source = ""
+        for index in 0..<900 {
+            if index == 400 { source += "let size = list.count\n" }
+            source += "let value\(index) = \"名前 \(index) 😀\" // note \(index)\n"
+            source += "func f\(index)() -> Int { return \(index) }\n"
+        }
+        let file = directory.appendingPathComponent("long.swift")
+        try Data(source.utf8).write(to: file)
+        let document = Document(url: file)
+        let service = HighlightService()
+        defer { service.cancelPending(for: document.url) }
+        func settle() {
+            let deadline = Date().addingTimeInterval(10)
+            while !document.unhighlighted.isEmpty && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+
+        service.highlight(document)
+        try expect(!document.unhighlighted.isEmpty,
+                   "\(document.storage.length) characters were coloured in one pass")
+        settle()
+        try expectColouredWhole(document, "the first colouring")
+        // Inside a capture, the smaller capture is the one that shows: the
+        // number in a template string is a number, not more of the string.
+        let nested = directory.appendingPathComponent("nested.ts")
+        try Data("const s = `a ${42} b`;\n".utf8).write(to: nested)
+        let script = Document(url: nested)
+        service.highlight(script)
+        let number = (script.text as NSString).range(of: "42").location
+        try expect(sameColor(script.storage.attribute(.foregroundColor, at: number,
+                                                      effectiveRange: nil) as? NSColor,
+                             Theme.syntaxConstant),
+                   "the template string's colour covered the number inside it")
+
+        let text = document.storage.mutableString
+        func edit(_ range: NSRange, _ replacement: String) {
+            document.storage.replaceCharacters(in: range, with: replacement)
+            let before = service.passCountForTesting
+            service.scheduleHighlight(document)
+            let deadline = Date().addingTimeInterval(5)
+            while service.passCountForTesting == before && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        func line(_ prefix: String) -> Int { text.range(of: prefix).location }
+
+        // A keystroke colours its own line, not the file.
+        edit(NSRange(location: line("func f450") + 4, length: 0), "x")
+        let painted = service.lastPaintedForTesting.reduce(0) { $0 + $1.length }
+        try expect(painted < 200, "one keystroke recoloured \(painted) characters")
+        settle()
+        try expectColouredWhole(document, "a keystroke")
+
+        // A keyword spelled out of being one changes colour as a whole word,
+        // not only where the character was typed.
+        edit(NSRange(location: line("return 300") + 2, length: 1), "x")
+        settle()
+        try expectColouredWhole(document, "a keyword respelled")
+
+        // A name that becomes a type's by its first letter alone: the tree is
+        // the same shape, and only the whole word's colour says it changed.
+        edit(NSRange(location: line("list.count"), length: 1), "L")
+        settle()
+        try expectColouredWhole(document, "a name capitalised")
+
+        // A comment opened near the top runs to the end of the file, far past
+        // the two characters typed; closing it brings the code back.
+        edit(NSRange(location: line("func f1()"), length: 0), "/*")
+        settle()
+        try expectColouredWhole(document, "a comment opened")
+        edit(NSRange(location: line("func f5()"), length: 0), "*/")
+        settle()
+        try expectColouredWhole(document, "the comment closed")
+
+        // A string opened and left open.
+        edit(NSRange(location: line("func f700()"), length: 0), "\"")
+        settle()
+        try expectColouredWhole(document, "an unclosed string")
+
+        // Lines deleted, and text outside ASCII typed in.
+        let from = line("let value100 "), to = line("let value103 ")
+        edit(NSRange(location: from, length: to - from), "")
+        settle()
+        try expectColouredWhole(document, "lines deleted")
+        edit(NSRange(location: line("func f200()"), length: 0), "let 変数 = \"🎉\"\n")
+        settle()
+        try expectColouredWhole(document, "text outside ASCII typed")
+
+        // What is waiting moves with the text an edit moves. (An edit may
+        // report its whole paragraph as edited, so only the edit itself and
+        // what lies well past it are exact.)
+        document.markHighlighted(NSRange(location: 0, length: document.storage.length))
+        document.markUnhighlighted(NSRange(location: 100, length: 10))
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "abc")
+        var waiting = document.unhighlighted
+        try expect(waiting.contains(integersIn: 0..<3) && waiting.contains(integersIn: 103..<113)
+                    && waiting.intersection(IndexSet(integersIn: 113..<400)).isEmpty
+                    && !waiting.contains(integersIn: 100..<103),
+                   "an insertion left \(Array(waiting.rangeView)) waiting")
+        document.storage.replaceCharacters(in: NSRange(location: 50, length: 20), with: "")
+        waiting = document.unhighlighted
+        try expect(waiting.contains(50) && waiting.contains(integersIn: 83..<93)
+                    && waiting.intersection(IndexSet(integersIn: 93..<400)).isEmpty,
+                   "a deletion left \(Array(waiting.rangeView)) waiting")
+    }
+
+    private static func testLongFileHighlightsOffTheMainThread() throws {
+        let directory = try temporaryDirectory("long-highlight")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Past the 500 KB where highlighting used to stop.
+        var source = ""
+        var count = 0
+        while source.utf8.count < 600_000 {
+            source += "let value\(count) = \"text \(count)\" // note\n"
+            count += 1
+        }
+        let file = directory.appendingPathComponent("long.swift")
+        try Data(source.utf8).write(to: file)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 800, height: 600))
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        let service = HighlightService.shared
+        let passes = service.passCountForTesting
+        pane.open(url: file)
+        let document = DocumentStore.shared.document(for: file)
+        try expect(service.isParsingDetachedForTesting(document.url),
+                   "a long file was parsed while its window waited")
+
+        // What is on screen is coloured first.
+        let middle = (document.text as NSString).range(of: "let value\(count / 2) ").location
+        pane.textViewForTesting.scrollRangeToVisible(NSRange(location: middle, length: 0))
+        let deadline = Date().addingTimeInterval(10)
+        while service.isParsingDetachedForTesting(document.url) && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.001))
+        }
+        let first = service.lastPaintedForTesting
+        try expect(service.passCountForTesting > passes, "the parse arrived and nothing was coloured")
+        try expect(first.contains { NSLocationInRange(middle, $0) },
+                   "the first pass coloured \(first), not what is on screen at \(middle)")
+        try expect(!first.contains { NSLocationInRange(0, $0) },
+                   "the first pass coloured the top of the file before what is on screen")
+
+        // An edit while the rest waits: what waits moves with the text.
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "// added\n")
+        while !document.unhighlighted.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
+        try expect(document.unhighlighted.isEmpty, "the file was never coloured to the end")
+        try expect(service.passCountForTesting - passes > 2, "a long file was coloured in one pass")
+        try expectColouredWhole(document, "colouring a long file")
+        document.isModified = false
     }
 
     private static func testHighlightServiceKeepsParseOwner() throws {

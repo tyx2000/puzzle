@@ -147,6 +147,7 @@ final class Document {
     /// Every edit to the buffer, wherever it came from — typing, a paste, a
     /// refreshed diff — reaches the index through here.
     private func observeStorageEdits() {
+        markUnhighlighted()
         storageObserver = NotificationCenter.default.addObserver(
             forName: NSTextStorage.didProcessEditingNotification,
             object: storage, queue: .main) { [weak self] notification in
@@ -155,9 +156,54 @@ final class Document {
                   storage.editedMask.contains(.editedCharacters) else { return }
             self.lineIndexApply(editedRange: storage.editedRange,
                                 delta: storage.changeInLength)
+            self.noteEdit(storage.editedRange, delta: storage.changeInLength)
         }
     }
     private var storageObserver: NSObjectProtocol?
+
+    /// Bumped by every edit to the characters.
+    private(set) var textRevision = 0
+
+    /// What of the buffer the highlighter has still to colour, in its offsets
+    /// now: all of it to begin with, then whatever each edit touched, until a
+    /// pass colours it. Only edits put text here — nothing but the highlighter
+    /// sets this buffer's attributes once it is built.
+    private(set) var unhighlighted = IndexSet()
+
+    /// All of the buffer, or `range` of it, to be coloured again.
+    func markUnhighlighted(_ range: NSRange? = nil) {
+        let length = storage.length
+        guard let range else {
+            unhighlighted = IndexSet(integersIn: 0..<length)
+            return
+        }
+        let start = min(max(range.location, 0), length)
+        let end = min(max(NSMaxRange(range), start), length)
+        unhighlighted.insert(integersIn: start..<end)
+    }
+
+    func markHighlighted(_ range: NSRange) {
+        guard range.length > 0 else { return }
+        unhighlighted.remove(integersIn: range.location..<NSMaxRange(range))
+    }
+
+    /// Move what is waiting to be coloured with the text an edit moved, and
+    /// add what it touched: the new text, or for a deletion the character
+    /// where the text closed up.
+    private func noteEdit(_ editedRange: NSRange, delta: Int) {
+        textRevision += 1
+        let length = storage.length
+        let oldEnd = NSMaxRange(editedRange) - delta
+        if delta != 0 { unhighlighted.shift(startingAt: oldEnd, by: delta) }
+        if unhighlighted.last.map({ $0 >= length }) == true {
+            unhighlighted.remove(integersIn: length..<Int.max)
+        }
+        if editedRange.length > 0 {
+            markUnhighlighted(editedRange)
+        } else if length > 0 {
+            markUnhighlighted(NSRange(location: min(editedRange.location, length - 1), length: 1))
+        }
+    }
 
     /// Full-width line tints for a diff buffer (empty for normal files).
     var diffBands: [(range: NSRange, color: NSColor)] = []
@@ -532,7 +578,15 @@ final class Document {
         jsxTagMatches.removeAll(keepingCapacity: false)
     }
 
+    /// `refreshCodeBlocks`, unless the text is the one it last read.
+    func refreshCodeBlocksIfEdited() {
+        guard codeBlocksRevision != textRevision else { return }
+        refreshCodeBlocks()
+    }
+    private var codeBlocksRevision = -1
+
     func refreshCodeBlocks() {
+        codeBlocksRevision = textRevision
         let refreshed: [CodeBlock]
         if isVirtual || isUnsupported || isPreviewOnly {
             refreshed = []

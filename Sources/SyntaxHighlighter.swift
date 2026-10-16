@@ -192,15 +192,53 @@ final class SyntaxHighlighter {
     private var previousTree: OpaquePointer?
     private var previousBytes: [UInt8] = []
     private weak var previousStorage: NSTextStorage?
+    /// The offsets of `previousBytes`, kept with them: a pass that colours a
+    /// part of the text would otherwise map all of it again to find the part.
+    private var previousMapper: ByteMapper?
     private(set) var incrementalParseCount = 0
     private(set) var fullParseCount = 0
     private(set) var lastParseDuration: TimeInterval = 0
+
+    /// Code longer than this is shown as plain text. Highlighting colours what
+    /// an edit changed rather than the whole text, so the limit is what one
+    /// parse of the whole may cost, not one pass.
+    static let maximumBytes = 2_000_000
 
     func discardParseTree() {
         if let previousTree { ts_tree_delete(previousTree) }
         previousTree = nil
         previousBytes = []
         previousStorage = nil
+        previousMapper = nil
+    }
+
+    /// Whether the tree held now is `storage`'s, so its next parse is an edit.
+    func holdsTree(for storage: NSTextStorage) -> Bool {
+        previousTree != nil && previousStorage === storage
+    }
+
+    /// Parse `bytes` with a parser of its own, on whatever thread calls this:
+    /// a long text's first parse, which the reader should not wait on. The
+    /// tree comes back to its highlighter through `adopt`.
+    static func parseDetached(_ bytes: [UInt8], language: OpaquePointer) -> OpaquePointer? {
+        guard !bytes.isEmpty, let parser = ts_parser_new() else { return nil }
+        defer { ts_parser_delete(parser) }
+        guard ts_parser_set_language(parser, language) else { return nil }
+        return bytes.withUnsafeBufferPointer { buffer in
+            buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) {
+                ts_parser_parse_string(parser, nil, $0, UInt32(buffer.count))
+            }
+        }
+    }
+
+    /// Take `tree`, parsed from `bytes` for `storage` by `parseDetached`, as
+    /// this highlighter's own: the next parse of `storage` edits it.
+    func adopt(_ tree: OpaquePointer, bytes: [UInt8], for storage: NSTextStorage) {
+        discardParseTree()
+        previousTree = tree
+        previousBytes = bytes
+        previousStorage = storage
+        fullParseCount += 1
     }
 
     func discardUnownedParseTree() {
@@ -217,11 +255,22 @@ final class SyntaxHighlighter {
         return TSPoint(row: row, column: column)
     }
 
-    private func parse(bytes: UnsafeBufferPointer<UInt8>, cstr: UnsafePointer<CChar>,
-                       storage: NSTextStorage) -> OpaquePointer? {
+    /// The tree for `bytes`, and where it differs from the tree before it, as
+    /// byte ranges: the edit, and whatever tree-sitter reparsed differently
+    /// around it — a quote that opened a string runs to the end of the file.
+    /// Nil for those when there was no tree before to differ from.
+    private func parse(_ nextBytes: [UInt8],
+                       storage: NSTextStorage) -> (tree: OpaquePointer, changed: [Range<Int>]?)? {
         if previousStorage !== storage { discardParseTree() }
-        if let previousTree, previousBytes.elementsEqual(bytes) { return previousTree }
-        let nextBytes = Array(bytes)
+        if let previousTree, previousBytes.count == nextBytes.count,
+           previousBytes.withUnsafeBytes({ old in
+               nextBytes.withUnsafeBytes { new in
+                   memcmp(old.baseAddress!, new.baseAddress!, old.count) == 0
+               }
+           }) {
+            return (previousTree, [])
+        }
+        var edited: Range<Int>?
         if let previousTree {
             var start = 0
             let sharedCount = min(previousBytes.count, nextBytes.count)
@@ -243,18 +292,36 @@ final class SyntaxHighlighter {
                 old_end_point: Self.point(in: previousBytes, at: oldEnd),
                 new_end_point: Self.point(in: nextBytes, at: newEnd))
             ts_tree_edit(previousTree, &edit)
+            edited = start..<newEnd
             incrementalParseCount += 1
         } else {
             fullParseCount += 1
         }
         let started = CFAbsoluteTimeGetCurrent()
-        let tree = ts_parser_parse_string(parser, previousTree, cstr, UInt32(bytes.count))
+        let tree = nextBytes.withUnsafeBufferPointer { buffer in
+            buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) {
+                ts_parser_parse_string(parser, previousTree, $0, UInt32(buffer.count))
+            }
+        }
         lastParseDuration = CFAbsoluteTimeGetCurrent() - started
+        var changed: [Range<Int>]?
+        if let previousTree, let tree, let edited {
+            var ranges = [edited]
+            var count: UInt32 = 0
+            if let reparsed = ts_tree_get_changed_ranges(previousTree, tree, &count) {
+                for range in UnsafeBufferPointer(start: reparsed, count: Int(count)) {
+                    ranges.append(Int(range.start_byte)..<Int(range.end_byte))
+                }
+                TreeSitterAllocator.free(reparsed)
+            }
+            changed = ranges
+        }
         if let previousTree { ts_tree_delete(previousTree) }
         previousTree = tree
         previousBytes = tree == nil ? [] : nextBytes
         previousStorage = tree == nil ? nil : storage
-        return tree
+        previousMapper = nil
+        return tree.map { ($0, changed) }
     }
 
     var treeDescriptionForTesting: String? {
@@ -272,8 +339,12 @@ final class SyntaxHighlighter {
     /// Swift String from the capture name — and counting its dots — once for
     /// *every capture in the file*. Capture ids are fixed when the query is
     /// compiled, so both are resolved here, once.
-    private var captureColors: [[NSColor?]] = []
+    /// The colour is a place in `palette`, every colour the queries can give
+    /// once each, and 0 for none: a pass paints these small numbers, not the
+    /// colours themselves.
+    private var capturePalette: [[UInt8]] = []
     private var captureSpecificity: [[Int]] = []
+    private var palette: [NSColor] = [Theme.foreground]
 
     init?(definition: LanguageDefinition) {
         guard let p = ts_parser_new() else { return nil }
@@ -302,8 +373,14 @@ final class SyntaxHighlighter {
                         colors.append(Self.color(for: name))
                         specificity.append(name.reduce(0) { $1 == "." ? $0 + 1 : $0 })
                     }
-                    captureColors.append(colors)
                     captureSpecificity.append(specificity)
+                    capturePalette.append(colors.map { color in
+                        guard let color else { return 0 }
+                        if let index = palette.firstIndex(of: color) { return UInt8(index) }
+                        guard palette.count < Int(UInt8.max) else { return 0 }
+                        palette.append(color)
+                        return UInt8(palette.count - 1)
+                    })
                 } else {
                     FileHandle.standardError.write(Data(
                         "puzzle: query compile failed for \(definition.name) at \(errOffset) (err \(errType.rawValue))\n".utf8))
@@ -322,90 +399,172 @@ final class SyntaxHighlighter {
 
     // MARK: Highlighting
 
+    /// A text brought up to date for colouring.
+    struct Parse {
+        /// Where the parse changed anything, in UTF-16 offsets: the edit, and
+        /// whatever was reparsed differently around it. Nil when there was no
+        /// tree before to compare with, which leaves everything in question.
+        let changed: [NSRange]?
+        let tagMatches: [JSXTagMatch]
+    }
+
+    /// Parse `text`, as an edit of the tree for `owner` when this holds it.
+    /// Nil for an empty text, or one past `maximumBytes`, which has no tree.
+    func parse(text: String, owner: NSTextStorage) -> Parse? {
+        let bytes = Self.utf8(text)
+        guard !bytes.isEmpty, bytes.count <= Self.maximumBytes else {
+            discardParseTree()
+            return nil
+        }
+        guard let parsed = parse(bytes, storage: owner) else { return nil }
+        return bytes.withUnsafeBufferPointer { bytes in
+            let mapper = previousMapper ?? ByteMapper(bytes: bytes)
+            previousMapper = mapper
+            let changed = parsed.changed?.map { range in
+                let start = mapper.utf16(atOrBefore: range.lowerBound)
+                let end = mapper.utf16(atOrAfter: range.upperBound)
+                return NSRange(location: start, length: max(0, end - start))
+            }
+            let tagMatches = definition.name == "tsx"
+                ? JSXTagMatcher.matches(in: ts_tree_root_node(parsed.tree),
+                                        bytes: bytes, mapper: mapper)
+                : []
+            return Parse(changed: changed, tagMatches: tagMatches)
+        }
+    }
+
+    /// `text` as UTF-8. A buffer's text is an `NSString` under the `String`,
+    /// and Swift's own conversion of one cost a long file 18 ms a pass, nine
+    /// times what Core Foundation's does.
+    static func utf8(_ text: String) -> [UInt8] {
+        if let bytes = text.utf8.withContiguousStorageIfAvailable({ Array($0) }) {
+            return bytes
+        }
+        let string = text as NSString as CFString
+        let whole = CFRange(location: 0, length: CFStringGetLength(string))
+        let encoding = CFStringBuiltInEncodings.UTF8.rawValue
+        var count: CFIndex = 0
+        CFStringGetBytes(string, whole, encoding, 0, false, nil, 0, &count)
+        var bytes = [UInt8](repeating: 0, count: count)
+        CFStringGetBytes(string, whole, encoding, 0, false, &bytes, count, nil)
+        return bytes
+    }
+
+    /// The colours over each of `ranges` — UTF-16 offsets of the text last
+    /// parsed, in order, not overlapping — as runs in order that do not
+    /// overlap either. Where no run is, the text has no colour of its own.
+    ///
+    /// Only the captures that reach into a range are asked for, so colouring
+    /// a few lines of a long file costs a few lines. A capture that reaches
+    /// out of the range is cut to it; whichever capture wins at a character is
+    /// the one that would have won had the whole text been coloured.
+    func colours(in ranges: [NSRange]) -> [(range: NSRange, color: NSColor)] {
+        guard let tree = previousTree, let mapper = previousMapper else { return [] }
+        let root = ts_tree_root_node(tree)
+        var runs: [(range: NSRange, color: NSColor)] = []
+        previousBytes.withUnsafeBufferPointer { bytes in
+            for range in ranges where range.length > 0 {
+                let low = range.location, high = NSMaxRange(range)
+                let lowByte = mapper.byte(forUTF16: low)
+                let highByte = mapper.byte(forUTF16: high)
+                guard highByte > lowByte else { continue }
+                var spans: [Span] = []
+                for (queryIndex, query) in queries.enumerated() {
+                    guard let cursor = ts_query_cursor_new() else { continue }
+                    defer { ts_query_cursor_delete(cursor) }
+                    ts_query_cursor_set_byte_range(cursor, UInt32(lowByte), UInt32(highByte))
+                    ts_query_cursor_exec(cursor, query, root)
+                    var match = TSQueryMatch()
+                    while ts_query_cursor_next_match(cursor, &match) {
+                        if !predicatesPass(query: query, match: match, bytes: bytes) { continue }
+                        let captures = UnsafeBufferPointer(start: match.captures,
+                                                           count: Int(match.capture_count))
+                        for capture in captures {
+                            let id = Int(capture.index)
+                            guard id < capturePalette[queryIndex].count else { continue }
+                            let colour = capturePalette[queryIndex][id]
+                            guard colour != 0 else { continue }
+                            let startByte = Int(ts_node_start_byte(capture.node))
+                            let endByte = Int(ts_node_end_byte(capture.node))
+                            guard endByte > startByte,
+                                  let u0 = mapper.utf16(forByte: startByte),
+                                  let u1 = mapper.utf16(forByte: endByte) else { continue }
+                            let start = max(u0, low), end = min(u1, high)
+                            guard end > start else { continue }
+                            spans.append(Span(
+                                start: start, end: end, colour: colour,
+                                length: endByte - startByte,
+                                specificity: captureSpecificity[queryIndex][id],
+                                rank: queryIndex * 100_000 + Int(match.pattern_index)))
+                        }
+                    }
+                }
+                Self.paint(spans, from: low, to: high, palette: palette, into: &runs)
+            }
+        }
+        return runs
+    }
+
+    /// A capture as it lands in a range being coloured.
+    private struct Span {
+        let start: Int, end: Int
+        let colour: UInt8
+        /// The whole capture's length in bytes, not just its part in the range:
+        /// the bigger capture is painted first, under the smaller.
+        let length: Int
+        let specificity: Int
+        let rank: Int
+    }
+
+    /// Lay `spans` over `low..<high` so the winner at each character lands
+    /// last — largest first; for equal ranges the more specific capture, then
+    /// the later query pattern — and append the result as runs.
+    private static func paint(_ spans: [Span], from low: Int, to high: Int,
+                              palette: [NSColor],
+                              into runs: inout [(range: NSRange, color: NSColor)]) {
+        guard !spans.isEmpty else { return }
+        let ordered = spans.sorted { a, b in
+            if a.length != b.length { return a.length > b.length }
+            if a.specificity != b.specificity { return a.specificity < b.specificity }
+            return a.rank < b.rank
+        }
+        var canvas = [UInt8](repeating: 0, count: high - low)
+        canvas.withUnsafeMutableBufferPointer { cells in
+            guard let base = cells.baseAddress else { return }
+            for span in ordered {
+                memset(base + (span.start - low), Int32(span.colour), span.end - span.start)
+            }
+            var index = 0
+            while index < cells.count {
+                let colour = cells[index]
+                var end = index + 1
+                while end < cells.count && cells[end] == colour { end += 1 }
+                if colour != 0 {
+                    runs.append((NSRange(location: low + index, length: end - index),
+                                 palette[Int(colour)]))
+                }
+                index = end
+            }
+        }
+    }
+
     /// Parse `text` and paint colors onto `storage` over `fullRange`.
     /// Base font/foreground/paragraph are assumed already applied by the caller.
     @discardableResult
     func highlight(text: String, storage: NSTextStorage,
                    fullRange: NSRange, parseOwner: NSTextStorage? = nil) -> [JSXTagMatch] {
-        let byteCount = text.utf8.count
-        guard byteCount > 0, byteCount <= 500_000 else {
-            discardParseTree()
-            return []
-        }
-        var tagMatches: [JSXTagMatch] = []
-        // Queries share the parser's UTF-8 buffer. Only the last parsed source
-        // is retained, bounded by the highlighting limit, for the next edit.
-        text.withCString { cstr in
-            cstr.withMemoryRebound(to: UInt8.self, capacity: byteCount) { raw in
-                let bytes = UnsafeBufferPointer(start: raw, count: byteCount)
-                tagMatches = highlight(text: text, bytes: bytes, cstr: cstr,
-                                       storage: storage, fullRange: fullRange,
-                                       parseOwner: parseOwner ?? storage)
-            }
-        }
-        return tagMatches
-    }
-
-    private func highlight(text: String, bytes: UnsafeBufferPointer<UInt8>,
-                           cstr: UnsafePointer<CChar>,
-                           storage: NSTextStorage,
-                           fullRange: NSRange,
-                           parseOwner: NSTextStorage) -> [JSXTagMatch] {
-        let byteCount = bytes.count
-        guard let tree = parse(bytes: bytes, cstr: cstr, storage: parseOwner) else { return [] }
-        let rootNode = ts_tree_root_node(tree)
-
-        // byte-offset -> UTF-16 offset mapping (identity fast-path for ASCII).
-        let mapper = ByteMapper(text: text, utf8Count: byteCount)
-        let tagMatches = definition.name == "tsx"
-            ? JSXTagMatcher.matches(in: rootNode, bytes: bytes, mapper: mapper)
-            : []
-
-        // Collect spans, then apply so the winning capture ends up on top.
-        var spans: [(range: NSRange, color: NSColor, len: Int, spec: Int, rank: Int)] = []
-
-        for (queryIndex, query) in queries.enumerated() {
-            guard let cursor = ts_query_cursor_new() else { continue }
-            defer { ts_query_cursor_delete(cursor) }
-            ts_query_cursor_exec(cursor, query, rootNode)
-
-            var match = TSQueryMatch()
-            while ts_query_cursor_next_match(cursor, &match) {
-                if !predicatesPass(query: query, match: match, bytes: bytes) { continue }
-                let captures = UnsafeBufferPointer(start: match.captures, count: Int(match.capture_count))
-                for cap in captures {
-                    let node = cap.node
-                    let startByte = Int(ts_node_start_byte(node))
-                    let endByte = Int(ts_node_end_byte(node))
-                    guard endByte > startByte else { continue }
-                    let id = Int(cap.index)
-                    guard id < captureColors[queryIndex].count,
-                          let color = captureColors[queryIndex][id] else { continue }
-                    guard let u0 = mapper.utf16(forByte: startByte),
-                          let u1 = mapper.utf16(forByte: endByte) else { continue }
-                    let r = NSRange(location: u0, length: u1 - u0)
-                    if NSMaxRange(r) <= fullRange.length {
-                        let spec = captureSpecificity[queryIndex][id]
-                        let rank = queryIndex * 100_000 + Int(match.pattern_index)
-                        spans.append((r, color, endByte - startByte, spec, rank))
-                    }
-                }
-            }
-        }
-
-        // Apply so the winner lands last: largest range first; for equal ranges,
-        // the more specific capture (then the later query pattern) wins.
-        spans.sort { a, b in
-            if a.len != b.len { return a.len > b.len }      // bigger first
-            if a.spec != b.spec { return a.spec < b.spec }  // more specific later
-            return a.rank < b.rank                          // later pattern later
-        }
+        guard let parsed = parse(text: text, owner: parseOwner ?? storage) else { return [] }
+        let runs = colours(in: [NSRange(location: 0,
+                                        length: min(fullRange.length, text.utf16.count))])
+        // In order and apart, so each lands at the end of what is set so far:
+        // painted biggest first, every capture split a run somewhere in the
+        // middle, and a long file took most of a second to paint.
         storage.beginEditing()
-        for span in spans {
-            storage.addAttribute(.foregroundColor, value: span.color, range: span.range)
+        for run in runs {
+            storage.addAttribute(.foregroundColor, value: run.color, range: run.range)
         }
         storage.endEditing()
-        return tagMatches
+        return parsed.tagMatches
     }
 
     // MARK: Predicate evaluation (#eq? #match? #any-of? and negations)
@@ -562,34 +721,85 @@ final class SyntaxHighlighter {
     }
 }
 
-/// Maps UTF-8 byte offsets to UTF-16 offsets. Identity for ASCII/BMP-ASCII text.
+/// Maps UTF-8 byte offsets to UTF-16 offsets, and back.
+///
+/// Only the characters outside ASCII are recorded — where each starts and
+/// ends, and the UTF-16 count at its end — since between two of them both
+/// counts move together. Source that is ASCII but for a few names and comments
+/// costs a few entries, not a table as long as the text.
 struct ByteMapper {
-    private let identity: Bool
-    /// A dense Int32 table is substantially smaller than a Swift Dictionary
-    /// entry per Unicode scalar. Non-boundary byte positions remain `-1`.
-    private var table: [Int32] = []
+    /// Each non-ASCII character's first byte, in order.
+    private var starts: [Int32] = []
+    /// The byte just past it.
+    private var ends: [Int32] = []
+    /// The UTF-16 offset just past it.
+    private var utf16Ends: [Int32] = []
+    private let byteCount: Int
 
-    init(text: String, utf8Count: Int) {
-        // If UTF-8 length equals UTF-16 length, the text is pure ASCII and
-        // byte offset == UTF-16 offset.
-        if utf8Count == text.utf16.count {
-            identity = true
-            return
+    init(bytes: UnsafeBufferPointer<UInt8>) {
+        byteCount = bytes.count
+        var byte = 0, utf16 = 0
+        while byte < bytes.count {
+            let lead = bytes[byte]
+            if lead < 0x80 {
+                byte += 1
+                utf16 += 1
+                continue
+            }
+            let width = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1
+            starts.append(Int32(byte))
+            byte = min(byte + width, bytes.count)
+            utf16 += width == 4 ? 2 : 1
+            ends.append(Int32(byte))
+            utf16Ends.append(Int32(utf16))
         }
-        identity = false
-        var byte = 0, u16 = 0
-        table = [Int32](repeating: -1, count: utf8Count + 1)
-        for scalar in text.unicodeScalars {
-            table[byte] = Int32(u16)
-            byte += UTF8.width(scalar)
-            u16 += UTF16.width(scalar)
-        }
-        table[byte] = Int32(u16)
     }
 
+    init(text: String, utf8Count: Int) {
+        var text = text
+        self = text.withUTF8 { ByteMapper(bytes: $0) }
+    }
+
+    /// Nil for a byte inside a character rather than at its start.
     func utf16(forByte b: Int) -> Int? {
-        if identity { return b }
-        guard table.indices.contains(b), table[b] >= 0 else { return nil }
-        return Int(table[b])
+        guard b >= 0, b <= byteCount else { return nil }
+        // The last non-ASCII character that starts before `b`.
+        var low = 0, high = starts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Int(starts[mid]) < b { low = mid + 1 } else { high = mid }
+        }
+        guard low > 0 else { return b }
+        let end = Int(ends[low - 1])
+        guard b >= end else { return nil }
+        return Int(utf16Ends[low - 1]) + (b - end)
+    }
+
+    /// The character boundary at or before `b`, in UTF-16.
+    func utf16(atOrBefore b: Int) -> Int {
+        var b = min(max(b, 0), byteCount)
+        while b > 0, utf16(forByte: b) == nil { b -= 1 }
+        return utf16(forByte: b) ?? 0
+    }
+
+    /// The character boundary at or after `b`, in UTF-16.
+    func utf16(atOrAfter b: Int) -> Int {
+        var b = min(max(b, 0), byteCount)
+        while b < byteCount, utf16(forByte: b) == nil { b += 1 }
+        return utf16(forByte: b) ?? b
+    }
+
+    /// The byte where the character at UTF-16 offset `u` starts — for an
+    /// offset inside a surrogate pair, where the pair starts.
+    func byte(forUTF16 u: Int) -> Int {
+        // The last non-ASCII character that ends at or before `u`.
+        var low = 0, high = utf16Ends.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Int(utf16Ends[mid]) <= u { low = mid + 1 } else { high = mid }
+        }
+        let byte = low > 0 ? Int(ends[low - 1]) + (u - Int(utf16Ends[low - 1])) : u
+        if low < starts.count { return min(byte, Int(starts[low]), byteCount) }
+        return min(byte, byteCount)
     }
 }

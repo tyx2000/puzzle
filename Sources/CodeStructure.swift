@@ -38,6 +38,10 @@ enum CodeBlockAnalyzer {
         case lineComment, blockComment
     }
 
+    private struct Span: Hashable {
+        let opener: Int, end: Int
+    }
+
     private struct Opening {
         let character: unichar
         let location: Int
@@ -72,10 +76,10 @@ enum CodeBlockAnalyzer {
 
         var nested: [CodeBlock] = []
         var stack: [CodeBlock] = []
-        var seen = Set<String>()
+        var seen = Set<Span>()
         for block in blocks {
-            let key = "\(block.openerLocation):\(block.endLocation)"
-            guard seen.insert(key).inserted else { continue }
+            guard seen.insert(Span(opener: block.openerLocation, end: block.endLocation))
+                .inserted else { continue }
             while let parent = stack.last, parent.endLocation < block.endLocation {
                 stack.removeLast()
             }
@@ -97,11 +101,16 @@ enum CodeBlockAnalyzer {
             || language == "bash" || language == "dockerfile"
             || language == "gitignore"
 
+        // Read once, not a message per character — three of them per
+        // character, the most of the time a long file's structure took.
+        let length = source.length
+        var characters = [unichar](repeating: 0, count: length + 2)
+        source.getCharacters(&characters, range: NSRange(location: 0, length: length))
         var index = 0
-        while index < source.length {
-            let char = source.character(at: index)
-            let next = index + 1 < source.length ? source.character(at: index + 1) : 0
-            let nextTwo = index + 2 < source.length ? source.character(at: index + 2) : 0
+        while index < length {
+            let char = characters[index]
+            let next = characters[index + 1]
+            let nextTwo = characters[index + 2]
 
             if char == 0x0A {
                 if mode == .lineComment { mode = .normal }
@@ -156,8 +165,8 @@ enum CodeBlockAnalyzer {
             }
             if hashComments, char == 0x23,
                index == lineStart
-                || source.character(at: index - 1) == 0x20
-                || source.character(at: index - 1) == 0x09 {
+                || characters[index - 1] == 0x20
+                || characters[index - 1] == 0x09 {
                 mode = .lineComment
                 index += 1
                 continue
