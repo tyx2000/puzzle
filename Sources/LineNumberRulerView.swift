@@ -24,8 +24,10 @@ final class LineNumberRulerView: NSRulerView {
 
     func linkChange(_ change: GitLineChanges.Change?, to panel: NSWindow?) {
         // From one change to another: the mark's end of the join slides from
-        // the old mark to the new one, in step with the panel moving.
-        if let drawn = lastLink, let change, linkedChange != nil, linkedChange != change {
+        // the old mark to the new one, in step with the panel moving — or,
+        // with Reduce Motion on, jumps there as the panel does.
+        if let drawn = lastLink, let change, linkedChange != nil, linkedChange != change,
+           !GitChangePanel.reducesMotion {
             linkTransition = (drawn.span, drawn.colour, CACurrentMediaTime(),
                               GitChangePanel.moveDuration)
         } else {

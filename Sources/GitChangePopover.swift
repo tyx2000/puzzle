@@ -284,7 +284,7 @@ final class GitChangePanel: NSPanel {
                width: frame.width, height: 0)
     }
 
-    private static var reducesMotion: Bool {
+    static var reducesMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
