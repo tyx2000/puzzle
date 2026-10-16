@@ -147,6 +147,7 @@ enum RegressionTests {
         try testMinifiedFilesOpenBounded()
         try testMinifiedJSONOpensFormatted()
         try testFileTreeSurvivesReentrantReload()
+        try testActiveTreeRowStaysLitThroughReload()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
@@ -6251,6 +6252,61 @@ enum RegressionTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         try expect(tree.reloadCountForTesting > before,
                    "the deferred reload never happened")
+    }
+
+    private static func testActiveTreeRowStaysLitThroughReload() throws {
+        let directory = try temporaryDirectory("tree-active-reload")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = directory.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for index in 1...5 {
+            try Data("x\n".utf8).write(to: folder.appendingPathComponent("file\(index).txt"))
+        }
+        let active = folder.appendingPathComponent("file3.txt")
+
+        let tree = FileTreeViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = tree
+        window.setContentSize(NSSize(width: 340, height: 420))
+        defer { window.close() }
+        tree.setRoot(directory)
+        window.makeKeyAndOrderFront(nil)
+        tree.view.layoutSubtreeIfNeeded()
+        tree.selectFile(active)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        // Whatever AppKit puts behind a row it paints in the row's own colour:
+        // the list hands it the list's background, and the row keeps its own.
+        let probe = TreeRowView()
+        probe.isActiveFile = true
+        probe.backgroundColor = Theme.panelBackground
+        try expect(sameColor(probe.backgroundColor, Theme.activeRow),
+                   "the active row reports \(probe.backgroundColor) as its background")
+
+        // A save in the folder reloads its rows. Every frame of that, nothing
+        // over the active row may show any colour but the active one — AppKit
+        // lays one of its own over each row it has just put back.
+        try Data("y\n".utf8).write(to: active)
+        tree.refresh(changedURLs: [active])
+        var frames = 0
+        let ends = Date().addingTimeInterval(0.4)
+        while Date() < ends {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.004))
+            guard let row = tree.activeHighlightedRow,
+                  let view = tree.outlineViewForTesting.rowView(atRow: row, makeIfNecessary: false),
+                  let layer = view.layer else { continue }
+            frames += 1
+            let covering = [layer] + (layer.sublayers ?? []).filter {
+                $0.frame.width >= view.bounds.width - 1 && $0.backgroundColor != nil
+            }
+            for cover in covering {
+                let colour = cover.backgroundColor.flatMap { NSColor(cgColor: $0) }
+                try expect(sameColor(colour, Theme.activeRow),
+                           "a layer over the active row showed \(String(describing: colour)) during the reload")
+            }
+        }
+        try expect(frames > 0, "the active row was never on screen")
     }
 
     private static func testFileTreeContextEditing() throws {

@@ -359,6 +359,15 @@ class FlatRowView: NSTableRowView {
 
     override var wantsUpdateLayer: Bool { true }
 
+    /// AppKit paints this colour itself, in a layer of its own over ours, for
+    /// a few frames under rows it has just put back — every row of a folder
+    /// reloaded after a save. The list sets it to its own background, which
+    /// blinked the active file's row out while it stood there.
+    override var backgroundColor: NSColor {
+        get { ground }
+        set { }
+    }
+
     override func updateLayer() {
         layer?.backgroundColor = ground.cgColor
     }
