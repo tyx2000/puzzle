@@ -182,6 +182,7 @@ enum RegressionTests {
         try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
         try testThemeSetting()
+        try testLightThemesReadClearly()
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
         try testGitLineChangeMarks()
@@ -7483,6 +7484,9 @@ enum RegressionTests {
         }
 
         // The setting takes a known name and keeps the current one otherwise.
+        // The palette is read from the setting the first time Theme is used:
+        // read it now, so the names tried below cannot become the run's.
+        let painted = Theme.palette.id
         let settings = Settings.shared
         let saved = settings.theme
         defer { settings.theme = saved }
@@ -7517,6 +7521,63 @@ enum RegressionTests {
         try expect(sameColor(SyntaxHighlighter.color(for: "string"), Theme.syntaxString)
                     && sameColor(SyntaxHighlighter.color(for: "property"), Theme.syntaxProperty),
                    "strings or properties do not take their syntax roles")
+        // Setting a name is not saving the file: nothing repainted.
+        try expect(Theme.palette.id == painted,
+                   "changing the setting repainted without a save: \(Theme.palette.id)")
+    }
+
+    /// Every light palette's code reads clearly: thin dark strokes on white read
+    /// lighter than the same contrast on black, and Ayu Light's own colours sat
+    /// at 2:1 or less, a haze over the code. Each colour code is painted in —
+    /// the syntax roles and the hues the colour table also uses — meets the
+    /// palettes' own `minimumContrast` against the code area, comments and
+    /// line numbers their lower bars, and diff text the band it sits on.
+    private static func testLightThemesReadClearly() throws {
+        func contrast(_ a: UInt32, _ b: UInt32) -> Double {
+            func luminance(_ v: UInt32) -> Double {
+                let channels = [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff].map { c -> Double in
+                    let x = Double(c) / 255
+                    return x <= 0.03928 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+                }
+                return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+            }
+            let (l1, l2) = (luminance(a), luminance(b))
+            return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+        }
+        let minimum = ThemePalette.minimumContrast
+        let code: [(String, KeyPath<ThemePalette, UInt32>)] = [
+            ("keyword", \.syntaxKeyword), ("function", \.syntaxFunction), ("type", \.syntaxType),
+            ("constant", \.syntaxConstant), ("string", \.syntaxString),
+            ("property", \.syntaxProperty), ("operator/escape", \.cyan),
+            ("tag/label", \.red), ("attribute/title", \.yellow), ("orange", \.orange),
+            ("link", \.blue), ("purple", \.purple), ("green", \.green),
+            ("punctuation", \.punct),
+        ]
+        let light = ThemePalette.all.filter { !$0.isDark }
+        try expect(light.count == 5, "the light palettes changed: \(light.map(\.id))")
+        for palette in light {
+            let ground = palette.editorBackground
+            for (role, path) in code {
+                let ratio = contrast(palette[keyPath: path], ground)
+                try expect(ratio >= minimum.code,
+                           "\(palette.id)'s \(role) reads at \(String(format: "%.2f", ratio)):1")
+            }
+            let checks: [(String, Double, Double)] = [
+                ("comments", contrast(palette.comment, ground), minimum.comment),
+                ("text", contrast(palette.foreground, ground), minimum.text),
+                ("line numbers", contrast(palette.gutter, ground), minimum.gutter),
+                ("added lines", contrast(palette.diffAddedText, palette.diffAddedBackground),
+                 minimum.diffText),
+                ("removed lines", contrast(palette.diffRemovedText, palette.diffRemovedBackground),
+                 minimum.diffText),
+            ]
+            for (what, ratio, bar) in checks {
+                try expect(ratio >= bar,
+                           "\(palette.id)'s \(what) read at \(String(format: "%.2f", ratio)):1, under \(bar)")
+            }
+        }
+        // Comments stay a step back from the code they annotate.
+        try expect(minimum.comment < minimum.code, "comments are asked to read as loud as code")
     }
 
     /// A theme saved into settings.json is painted at once. Views built before

@@ -74,6 +74,12 @@ struct ThemePalette {
     let syntaxString: UInt32
     let syntaxProperty: UInt32
 
+    /// What every light palette's code reads at against its code area, as WCAG
+    /// contrast ratios. Thin dark strokes on white read lighter than the same
+    /// contrast does on black, and code is read for hours: syntax colours meet
+    /// AAA, comments stay a step back from the code, line numbers further.
+    static let minimumContrast = (code: 7.0, comment: 5.5, text: 10.0, gutter: 3.0, diffText: 4.5)
+
     /// Every palette, in the order the settings file lists them.
     static let all: [ThemePalette] = [.ayuDark, .ayuLight, .githubLight,
                                       .materialTeal, .materialIndigo, .materialYou]
@@ -110,28 +116,31 @@ extension ThemePalette {
         syntaxFunction: 0xffb454, syntaxKeyword: 0xff8f40, syntaxConstant: 0xd2a6ff,
         syntaxString: 0xaad94c, syntaxProperty: 0xf07178)
 
-    /// Ayu Light, from the same source: Ayu Dark's hues on a near-white surface,
-    /// flat like it — the panel is the code area's colour.
+    /// Ayu Light, from the same source: Ayu's hues on a near-white surface, flat
+    /// like Ayu Dark — the panel is the code area's colour. Ayu's own light
+    /// colours read at 2:1 or less on white; each is darkened, its hue kept,
+    /// to the contrast every light palette meets (see `minimumContrast`).
     static let ayuLight = ThemePalette(
-        id: "ayu-light", summary: "light, soft and flat", isDark: false,
+        id: "ayu-light", summary: "light, Ayu's warm hues, flat", isDark: false,
         editorBackground: 0xfcfcfc, panelBackground: 0xfcfcfc, barBackground: 0xfcfcfc,
         activityBar: 0xfcfcfc, scrollerKnob: 0xcdd1d6, scrollerSlot: 0xf0f1f3, border: 0xe6e8eb,
         selection: 0xd3e1f5, lineHighlight: 0xeceff2, activeTab: 0xf1f3f5,
         selectedControl: 0xeceff2, selectedControlText: 0x33373c, inactiveTab: 0xfcfcfc,
-        hover: 0xf0f2f4, stripedRow: 0xf7f8f9, activeRow: 0xeceff2, foreground: 0x5c6166,
-        dimText: 0x8a9199, gutter: 0xc5c9ce, gutterActive: 0x8a9199, cursor: 0xffaa33,
+        hover: 0xf0f2f4, stripedRow: 0xf7f8f9, activeRow: 0xeceff2, foreground: 0x3c4045,
+        dimText: 0x8a9199, gutter: 0x8f9297, gutterActive: 0x8a9199, cursor: 0xffaa33,
         folderClosed: 0x8a9199, inputBackground: 0xf3f4f6, inputBorder: 0xe3e6e9,
-        inputBorderFocused: 0x8a9199, toggleActiveBackground: 0xeceff2, diffAddedText: 0x6cbf43,
-        diffRemovedText: 0xff7383, raisedSurface: 0xffffff, raisedEdge: 0xd8dce1,
+        inputBorderFocused: 0x8a9199, toggleActiveBackground: 0xeceff2, diffAddedText: 0x377c02,
+        diffRemovedText: 0xc13a50, raisedSurface: 0xffffff, raisedEdge: 0xd8dce1,
         diffAddedBackground: 0xe9f5e1, diffRemovedBackground: 0xfdebed,
-        diffAddedWordBackground: 0xc6e6b2, diffRemovedWordBackground: 0xf9c8cd, red: 0xf07171,
-        green: 0x86b300, yellow: 0xf2ae49, orange: 0xfa8d3e, blue: 0x399ee6, purple: 0xa37acc,
-        cyan: 0x4cbf99, comment: 0xadaeb1, punct: 0x8d9196, syntaxType: 0x399ee6,
-        syntaxFunction: 0xf2ae49, syntaxKeyword: 0xfa8d3e, syntaxConstant: 0xa37acc,
-        syntaxString: 0x86b300, syntaxProperty: 0xf07171)
+        diffAddedWordBackground: 0xc6e6b2, diffRemovedWordBackground: 0xf9c8cd, red: 0xa22831,
+        green: 0x465f00, yellow: 0x774e04, orange: 0x894303, blue: 0x035b8f, purple: 0x6d4592,
+        cyan: 0x03634a, comment: 0x656669, punct: 0x53575c, syntaxType: 0x035b8f,
+        syntaxFunction: 0x774e04, syntaxKeyword: 0x894303, syntaxConstant: 0x6d4592,
+        syntaxString: 0x465f00, syntaxProperty: 0xa22831)
 
     /// GitHub Light, after GitHub's Primer colours: a white code area on a pale
-    /// grey panel, at high contrast.
+    /// grey panel. Primer's hues are deepened where they fell short of the
+    /// light palettes' contrast.
     static let githubLight = ThemePalette(
         id: "github-light", summary: "light, a white editor, high contrast", isDark: false,
         editorBackground: 0xffffff, panelBackground: 0xf6f8fa, barBackground: 0xf6f8fa,
@@ -144,10 +153,10 @@ extension ThemePalette {
         inputBorderFocused: 0x0969da, toggleActiveBackground: 0xe6eaef, diffAddedText: 0x1a7f37,
         diffRemovedText: 0xcf222e, raisedSurface: 0xffffff, raisedEdge: 0xd0d7de,
         diffAddedBackground: 0xe6ffec, diffRemovedBackground: 0xffebe9,
-        diffAddedWordBackground: 0xabf2bc, diffRemovedWordBackground: 0xffcecb, red: 0xcf222e,
-        green: 0x1a7f37, yellow: 0x9a6700, orange: 0xbc4c00, blue: 0x0969da, purple: 0x8250df,
-        cyan: 0x1b7c83, comment: 0x6e7781, punct: 0x57606a, syntaxType: 0x953800,
-        syntaxFunction: 0x8250df, syntaxKeyword: 0xcf222e, syntaxConstant: 0x0550ae,
+        diffAddedWordBackground: 0xabf2bc, diffRemovedWordBackground: 0xffcecb, red: 0xb5001d,
+        green: 0x006726, yellow: 0x785002, orange: 0x963c03, blue: 0x0254b4, purple: 0x6c35c4,
+        cyan: 0x05636a, comment: 0x606972, punct: 0x515a64, syntaxType: 0x953800,
+        syntaxFunction: 0x6c35c4, syntaxKeyword: 0xb5001d, syntaxConstant: 0x0550ae,
         syntaxString: 0x0a3069, syntaxProperty: 0x0550ae)
 
     /// Material Teal: Material Design's colours on a faint mint surface, teal
@@ -159,16 +168,16 @@ extension ThemePalette {
         selection: 0xc6e9e5, lineHighlight: 0xecf6f4, activeTab: 0xfbfefd,
         selectedControl: 0xd4ece9, selectedControlText: 0x1c2b2a, inactiveTab: 0xeef6f5,
         hover: 0xe2efed, stripedRow: 0xf5faf9, activeRow: 0xd4ece9, foreground: 0x263238,
-        dimText: 0x6d8086, gutter: 0xa9babd, gutterActive: 0x37474f, cursor: 0x00897b,
+        dimText: 0x6d8086, gutter: 0x869699, gutterActive: 0x37474f, cursor: 0x00897b,
         folderClosed: 0x6d8086, inputBackground: 0xffffff, inputBorder: 0xcfdfdc,
         inputBorderFocused: 0x00897b, toggleActiveBackground: 0xd4ece9, diffAddedText: 0x2e7d32,
         diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xcbdcd9,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xe53935,
-        green: 0x43a047, yellow: 0xf9a825, orange: 0xfb8c00, blue: 0x1e88e5, purple: 0x8e24aa,
-        cyan: 0x0097a7, comment: 0x7f949b, punct: 0x607d8b, syntaxType: 0x5e35b1,
-        syntaxFunction: 0x1e88e5, syntaxKeyword: 0x00897b, syntaxConstant: 0xf4511e,
-        syntaxString: 0x43a047, syntaxProperty: 0xc2185b)
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb40011,
+        green: 0x016613, yellow: 0x7a4e01, orange: 0x854700, blue: 0x00599e, purple: 0x8c22a8,
+        cyan: 0x03606b, comment: 0x576b71, punct: 0x405c69, syntaxType: 0x5e35b1,
+        syntaxFunction: 0x00599e, syntaxKeyword: 0x056359, syntaxConstant: 0xa42d02,
+        syntaxString: 0x016613, syntaxProperty: 0xaf044f)
 
     /// Material Indigo: the classic Material pairing — indigo, with pink for
     /// keywords — on a white code area. Original to Puzzle.
@@ -179,16 +188,16 @@ extension ThemePalette {
         selection: 0xd6daf2, lineHighlight: 0xf3f4fb, activeTab: 0xffffff,
         selectedControl: 0xe3e6f6, selectedControlText: 0x1a1c2e, inactiveTab: 0xf4f5fa,
         hover: 0xeaecf7, stripedRow: 0xf9f9fd, activeRow: 0xe3e6f6, foreground: 0x212121,
-        dimText: 0x737a8c, gutter: 0xb0b5c6, gutterActive: 0x3f51b5, cursor: 0x3f51b5,
+        dimText: 0x737a8c, gutter: 0x9094a5, gutterActive: 0x3f51b5, cursor: 0x3f51b5,
         folderClosed: 0x737a8c, inputBackground: 0xffffff, inputBorder: 0xd5d9e8,
         inputBorderFocused: 0x3f51b5, toggleActiveBackground: 0xe3e6f6, diffAddedText: 0x2e7d32,
         diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xd0d4e6,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xe53935,
-        green: 0x43a047, yellow: 0xf9a825, orange: 0xfb8c00, blue: 0x1e88e5, purple: 0x5e35b1,
-        cyan: 0x00838f, comment: 0x8a94a6, punct: 0x616161, syntaxType: 0x3949ab,
-        syntaxFunction: 0x00897b, syntaxKeyword: 0xd81b60, syntaxConstant: 0xef6c00,
-        syntaxString: 0x388e3c, syntaxProperty: 0x5e35b1)
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb60011,
+        green: 0x016813, yellow: 0x7b4f03, orange: 0x874902, blue: 0x035a9f, purple: 0x5e35b1,
+        cyan: 0x00626b, comment: 0x60697a, punct: 0x595959, syntaxType: 0x3949ab,
+        syntaxFunction: 0x056359, syntaxKeyword: 0xb2004b, syntaxConstant: 0x934001,
+        syntaxString: 0x016813, syntaxProperty: 0x5e35b1)
 
     /// Material You: Material 3's baseline scheme — tonal lavender surfaces and
     /// a purple primary. Original to Puzzle.
@@ -199,14 +208,14 @@ extension ThemePalette {
         selection: 0xeaddff, lineHighlight: 0xf6f1fa, activeTab: 0xfffbff,
         selectedControl: 0xe8def8, selectedControlText: 0x1d192b, inactiveTab: 0xf3edf7,
         hover: 0xece5f3, stripedRow: 0xf9f5fb, activeRow: 0xe8def8, foreground: 0x1d1b20,
-        dimText: 0x79747e, gutter: 0xb8b1c1, gutterActive: 0x49454f, cursor: 0x6750a4,
+        dimText: 0x79747e, gutter: 0x968f9e, gutterActive: 0x49454f, cursor: 0x6750a4,
         folderClosed: 0x79747e, inputBackground: 0xffffff, inputBorder: 0xdcd4e3,
         inputBorderFocused: 0x6750a4, toggleActiveBackground: 0xe8def8, diffAddedText: 0x386a20,
         diffRemovedText: 0xb3261e, raisedSurface: 0xffffff, raisedEdge: 0xd6cedf,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb3261e,
-        green: 0x386a20, yellow: 0x8b5000, orange: 0xc25f00, blue: 0x0061a4, purple: 0x6750a4,
-        cyan: 0x006a6a, comment: 0x938f99, punct: 0x625b71, syntaxType: 0x8b5000,
-        syntaxFunction: 0x0061a4, syntaxKeyword: 0x6750a4, syntaxConstant: 0x984061,
-        syntaxString: 0x386a20, syntaxProperty: 0x7d5260)
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xaa1b15,
+        green: 0x306116, yellow: 0x814a01, orange: 0x8a4202, blue: 0x025a98, purple: 0x5f479a,
+        cyan: 0x036060, comment: 0x68646e, punct: 0x5b546a, syntaxType: 0x814a01,
+        syntaxFunction: 0x025a98, syntaxKeyword: 0x5f479a, syntaxConstant: 0x90395a,
+        syntaxString: 0x306116, syntaxProperty: 0x754b59)
 }
