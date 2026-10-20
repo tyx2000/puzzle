@@ -53,6 +53,7 @@ enum RegressionTests {
         try testCommitNeedsChangesAndAMessage()
         try testStatusMatchesPorcelainV1()
         try testSideBySideDiff()
+        try testDiffInlineChanges()
         try testOpenDiffRefreshesCoalesce()
         try testDiffTabs()
         try testTabBodiesStayWithinBudget()
@@ -4418,6 +4419,104 @@ enum RegressionTests {
         try expect(pushable.hasUpstream && pushable.ahead == 1,
                    "ahead/behind did not come from the branch header: "
                     + "\(pushable.hasUpstream) \(pushable.ahead)")
+    }
+
+    /// Inside a removed line and the added line that replaces it, the words
+    /// that changed are marked — in both modes, across the "No newline"
+    /// marker, and by UTF-16 offsets that emoji and Han text do not shift.
+    private static func testDiffInlineChanges() throws {
+        func marked(_ text: NSAttributedString?) -> [String] {
+            guard let text else { return [] }
+            var result: [String] = []
+            text.enumerateAttribute(.backgroundColor,
+                                    in: NSRange(location: 0, length: text.length)) { value, range, _ in
+                if value != nil { result.append((text.string as NSString).substring(with: range)) }
+            }
+            return result
+        }
+        let view = DiffView(frame: NSRect(x: 0, y: 0, width: 800, height: 300))
+        let changes = [("let count = 1", "let count = 2", "1", "2"),
+                       ("let status = \"😀\"", "let status = \"😎\"", "😀", "😎"),
+                       ("let status = \"👩‍💻\"", "let status = \"👨‍💻\"", "👩‍💻", "👨‍💻"),
+                       ("let value = \"𠀀\"", "let value = \"𠀁\"", "𠀀", "𠀁"),
+                       ("这是原来的文字", "这是后来的文字", "原", "后")]
+        for (old, new, removed, added) in changes {
+            for (oldEOF, newEOF) in [(false, false), (true, true), (true, false), (false, true)] {
+                let marker = "\\ No newline at end of file\n"
+                let diff = "@@ -1 +1 @@\n-\(old)\n" + (oldEOF ? marker : "")
+                    + "+\(new)\n" + (newEOF ? marker : "")
+                view.configure(diff: diff)
+                if view.mode != .unified { view.setMode(.unified) }
+                let unified = [1, 2].map { marked(view.cellForTesting($0)?.styledTextsForTesting.first ?? nil) }
+                try expect(unified == [[removed], [added]],
+                           "unified diff marked \(unified) for \(old) -> \(new)")
+                view.setMode(.sideBySide)
+                try expect(view.rowsForTesting.filter(\.isChange).count == 1,
+                           "EOF metadata split a replacement row")
+                let sides = view.cellForTesting(1)?.styledTextsForTesting ?? []
+                try expect(sides.map(marked) == [[removed], [added]],
+                           "side-by-side diff marked \(sides.map(marked)) for \(old) -> \(new)")
+                view.setMode(.unified)
+            }
+        }
+
+        // The marker and its space come before the line in the unified row;
+        // the marks are the line's, not shifted onto them.
+        view.configure(diff: "@@ -1 +1 @@\n-let a = 1\n+let a = 22\n")
+        try expect(view.cellForTesting(2)?.styledTextsForTesting.first??.string == "+ let a = 22"
+                    && marked(view.cellForTesting(2)?.styledTextsForTesting.first ?? nil) == ["22"],
+                   "the unified row's marks are off its words")
+
+        // Two removed against one added: the first pair is compared, the
+        // extra line is left whole, and so is a context line.
+        view.configure(diff: "@@ -1,3 +1,2 @@\n ctx\n-let a = 1\n-let b = 2\n+let a = 3\n")
+        func unifiedMarks(_ row: Int) -> [String] {
+            marked(view.cellForTesting(row)?.styledTextsForTesting.first ?? nil)
+        }
+        try expect(unifiedMarks(2) == ["1"] && unifiedMarks(4) == ["3"],
+                   "the first removed line was not paired with the first added one: "
+                     + "\(unifiedMarks(2)) \(unifiedMarks(4))")
+        try expect(unifiedMarks(3).isEmpty && unifiedMarks(1).isEmpty,
+                   "a line with no twin, or a context line, was marked")
+        // A pair too unlike to be one line edited is left whole on both sides.
+        view.configure(diff: "@@ -1 +1 @@\n-let b = 2\n+brand new line\n")
+        try expect(unifiedMarks(1).isEmpty && unifiedMarks(2).isEmpty,
+                   "an unlike pair was marked: \(unifiedMarks(1)) \(unifiedMarks(2))")
+        view.setMode(.sideBySide)
+        try expect(view.cellForTesting(1)?.styledTextsForTesting.map(marked) == [[], []],
+                   "an unlike side-by-side pair was marked")
+        view.setMode(.unified)
+
+        // Lines too unlike to be one line edited are left whole.
+        try expect(DiffWords.changedWords(removed: "return render(page, into: frame)",
+                                          added: "throw Failure.timeout") == nil,
+                   "two unrelated lines were compared word by word")
+        let unicode = DiffWords.changedWords(removed: "😀 let count = 1", added: "😀 let count = 2")
+        try expect(unicode?.removed == [NSRange(location: 15, length: 1)]
+                    && unicode?.added == [NSRange(location: 15, length: 1)],
+                   "UTF-16 offsets after emoji drifted: \(String(describing: unicode))")
+        let pairs = DiffRows.unifiedPairs(DiffRows.unified(
+            from: "@@ -1,2 +1,2 @@\n-a\n-b\n+c\n ctx\n-d\n+e\n+f\n").rows)
+        try expect(pairs == [1: 3, 3: 1, 5: 6, 6: 5],
+                   "removed and added runs were not paired in order: \(pairs)")
+
+        // Worked out as rows come on screen: a long diff of rewritten lines
+        // does not compare every pair when it is read.
+        var long = "@@ -1,3000 +1,3000 @@\n"
+        for index in 1...3000 { long += "-let value\(index) = old\n" }
+        for index in 1...3000 { long += "+let value\(index) = new\n" }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let host = DiffView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        window.contentView = host
+        defer { window.close() }
+        host.configure(diff: long)
+        host.layoutSubtreeIfNeeded()
+        try expect(host.markedRowCountForTesting < 200,
+                   "reading the diff compared \(host.markedRowCountForTesting) rows up front")
+        try expect(marked(host.cellForTesting(1)?.styledTextsForTesting.first ?? nil) == ["old"],
+                   "a row on screen was not marked: "
+                     + "\(marked(host.cellForTesting(1)?.styledTextsForTesting.first ?? nil))")
     }
 
     private static func testSideBySideDiff() throws {

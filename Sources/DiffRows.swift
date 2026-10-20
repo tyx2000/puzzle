@@ -184,6 +184,34 @@ enum DiffRows {
         return (old, new)
     }
 
+    /// Which removed line each added line replaces, in the unified rows: a
+    /// run of removed lines followed by a run of added ones is one edit, and
+    /// its lines are paired in order, as Git lists them. Keyed both ways; a
+    /// line with no twin — the extra lines of the longer run — is absent.
+    /// The side-by-side rows need none of this: a paired row is both lines.
+    static func unifiedPairs(_ rows: [Row]) -> [Int: Int] {
+        var pairs: [Int: Int] = [:]
+        var index = 0
+        while index < rows.count {
+            guard rows[index].isChange, rows[index].leftText != nil else {
+                index += 1
+                continue
+            }
+            var removedEnd = index
+            while removedEnd < rows.count, rows[removedEnd].isChange,
+                  rows[removedEnd].leftText != nil { removedEnd += 1 }
+            var addedEnd = removedEnd
+            while addedEnd < rows.count, rows[addedEnd].isChange,
+                  rows[addedEnd].rightText != nil { addedEnd += 1 }
+            for offset in 0..<min(removedEnd - index, addedEnd - removedEnd) {
+                pairs[index + offset] = removedEnd + offset
+                pairs[removedEnd + offset] = index + offset
+            }
+            index = max(removedEnd, addedEnd)
+        }
+        return pairs
+    }
+
     /// Indices where a run of changed rows begins — what the ↑↓ buttons step
     /// between, so both diff modes move by the same notion of "a change".
     static func changeBlockStarts(_ rows: [Row]) -> [Int] {

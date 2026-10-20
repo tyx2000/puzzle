@@ -48,14 +48,29 @@ enum SidebarCellDrawing {
             .foregroundColor: color,
             .paragraphStyle: paragraph,
         ]
-        let lineRect = NSRect(x: rect.minX,
-                              y: floor(baseline - font.ascender),
-                              width: rect.width,
-                              height: ceil(font.ascender - font.descender + font.leading) + 2)
         (string as NSString).draw(
-            with: lineRect,
+            with: lineRect(font: font, baseline: baseline, in: rect),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
             attributes: attributes)
+    }
+
+    /// The line `text` sets a string on: from the font's ascender above the
+    /// baseline, as tall as one line of it.
+    static func lineRect(font: NSFont, baseline: CGFloat, in rect: NSRect) -> NSRect {
+        NSRect(x: rect.minX,
+               y: floor(baseline - font.ascender),
+               width: rect.width,
+               height: ceil(font.ascender - font.descender + font.leading) + 2)
+    }
+
+    /// `text`, for a string that carries its own attributes — set on the same
+    /// line, so a styled row sits on the baseline a plain one does.
+    static func attributedText(_ string: NSAttributedString, font: NSFont, in rect: NSRect) {
+        guard rect.width > 0, rect.height > 0, string.length > 0 else { return }
+        string.draw(with: lineRect(font: font,
+                                   baseline: centeredBaseline(for: font, in: rect), in: rect),
+                    options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                    context: nil)
     }
 
     static func text(_ string: String, font: NSFont, color: NSColor,
