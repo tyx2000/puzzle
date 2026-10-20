@@ -87,6 +87,7 @@ enum RegressionTests {
         try testReplacedContentSettlesIn()
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
+        try testInlineBlameStaysOnItsLine()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -2531,6 +2532,54 @@ enum RegressionTests {
         let converted = String(data: try Data(contentsOf: latinURL), encoding: .utf8)
         try expect(converted == "café ☕",
                    "unrepresentable edits did not fall back to UTF-8")
+    }
+
+    /// A click moves the caret and draws at once; the selection change — and
+    /// with it the blame for the new line — arrives only when the mouse is let
+    /// go. The annotation read for the line the caret left was drawn against
+    /// the line just clicked in between, then taken away, then drawn again:
+    /// shown twice. It is drawn only on the line it was read for.
+    private static func testInlineBlameStaysOnItsLine() throws {
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.string = "first line\nsecond line\nthird line\n"
+        let ns = text.string as NSString
+        let second = ns.range(of: "second").location
+        /// What one full draw of the view puts down. Off screen, AppKit makes
+        /// a view's layer only at the next commit.
+        func drawn() -> NSRect? {
+            CATransaction.flush()
+            text.display()
+            return text.drawnInlineBlameRectForTesting
+        }
+        func row(of location: Int) -> NSRect? {
+            guard let layout = text.layoutManager else { return nil }
+            return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
+                                           effectiveRange: nil)
+                .offsetBy(dx: text.textContainerInset.width, dy: text.textContainerInset.height)
+        }
+        text.setSelectedRange(NSRange(location: 3, length: 0))
+        text.inlineBlame = .init(text: "First Author · now · first",
+                                 lineStart: text.inlineBlameLineStart(at: 3))
+        guard let onFirst = drawn(), let firstRow = row(of: 0) else {
+            throw Failure(description: "the blame read for the caret's line was not drawn")
+        }
+        try expect(abs(onFirst.midY - firstRow.midY) < firstRow.height / 2,
+                   "the blame is not on its line: \(onFirst) vs \(firstRow)")
+        // The caret moves; nothing has read the new line's blame yet.
+        text.setSelectedRange(NSRange(location: second + 2, length: 0))
+        try expect(drawn() == nil,
+                   "the previous line's blame was drawn on the line the caret moved to")
+        // Back on its line, it shows again.
+        text.setSelectedRange(NSRange(location: 1, length: 0))
+        try expect(drawn() != nil, "the blame did not come back on its own line")
+        // At the end of a file that ends in a newline, blame is the last
+        // text line's — the line the annotation is drawn on there.
+        try expect(text.inlineBlameLineStart(at: ns.length) == ns.range(of: "third").location,
+                   "the end of the file is not read as its last line")
     }
 
     private static func testEditorManualSave() throws {

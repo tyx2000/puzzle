@@ -1798,7 +1798,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
     var hasActiveLineForTesting: Bool { textView.showsCurrentLineBand }
-    var inlineBlameForTesting: String? { textView.inlineBlame }
+    var inlineBlameForTesting: String? { textView.inlineBlame?.text }
     var markdownDecorationCountsForTesting: (codeBlocks: Int, tables: Int) {
         textView.markdownDecorationCountsForTesting
     }
@@ -2276,6 +2276,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         let line = caretLine()
         let key = "\(url.path):\(line)"
+        // The annotation is drawn only while the caret is on the line it was
+        // read for, which the text view knows by where that line starts.
+        let lineStart = textView.inlineBlameLineStart(at: textView.selectedRange().location)
         if let hit = blameCache[key] {
             if requestedBlameKey != key {
                 blameGeneration += 1
@@ -2285,7 +2288,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             }
             blameOrder.removeAll { $0 == key }
             blameOrder.append(key)
-            let visible = hit.isEmpty ? nil : hit
+            let visible = hit.isEmpty
+                ? nil : PuzzleTextView.InlineBlame(text: hit, lineStart: lineStart)
             let visibleKey = hit.isEmpty ? nil : key
             if displayedBlameKey != visibleKey || textView.inlineBlame != visible {
                 displayedBlameKey = visibleKey
@@ -2321,7 +2325,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                 self.cacheBlame(text, for: key)
                 self.blameWork = nil
                 self.displayedBlameKey = text.isEmpty ? nil : key
-                self.textView.inlineBlame = text.isEmpty ? nil : text
+                self.textView.inlineBlame = text.isEmpty
+                    ? nil : PuzzleTextView.InlineBlame(text: text, lineStart: lineStart)
             }
         }
         blameWork = work

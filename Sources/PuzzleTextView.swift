@@ -426,25 +426,54 @@ final class PuzzleTextView: NSTextView {
         enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
 
-    /// Blame annotation for the caret's line, drawn past the end of the text.
+    /// A blame annotation, and the line it was read for, by where that line
+    /// starts.
+    struct InlineBlame: Equatable {
+        var text: String
+        var lineStart: Int
+    }
+
+    /// Blame annotation for one line, drawn past the end of its text while the
+    /// caret is on it — and only then.
+    ///
+    /// A click moves the caret and draws at once; the selection change reaches
+    /// whoever reads blame only when the mouse is let go. Drawn for "the
+    /// caret's line", the previous line's author showed against the line just
+    /// clicked, went away when the change arrived, and came back when the new
+    /// line's had been read: one annotation shown twice.
     ///
     /// Deliberately drawn rather than inserted into the text storage: the
     /// storage is the document, shared across split panes, and putting
     /// decoration in it would dirty the buffer and land in saved files.
-    var inlineBlame: String? {
+    var inlineBlame: InlineBlame? {
         didSet { if inlineBlame != oldValue { needsDisplay = true } }
     }
 
-    private func drawInlineBlame() {
-        guard let blame = inlineBlame, !blame.isEmpty,
-              let layoutManager, textContainer != nil else { return }
+    /// Where the line that blame is drawn on for `caret` starts. At the end of
+    /// a file that ends in a newline, that is the last line with text.
+    func inlineBlameLineStart(at caret: Int) -> Int {
         let ns = string as NSString
-        guard ns.length > 0 || !blame.isEmpty else { return }
+        return ns.lineRange(for: NSRange(location: min(caret, max(ns.length - 1, 0)),
+                                         length: 0)).location
+    }
+
+    /// Where the last draw put the annotation; nil when it drew none.
+    private(set) var drawnInlineBlameRectForTesting: NSRect?
+
+    private func drawInlineBlame() {
+        drawnInlineBlameRectForTesting = nil
+        guard let inlineBlame, !inlineBlame.text.isEmpty,
+              let layoutManager, textContainer != nil else { return }
+        let blame = inlineBlame.text
+        let ns = string as NSString
 
         let caret = selectedRange().location
         guard caret <= ns.length else { return }
         let lineRange = ns.lineRange(for: NSRange(location: min(caret, max(ns.length - 1, 0)),
                                                   length: 0))
+        // Read for another line: the caret has moved and the new line's has
+        // not been asked for yet.
+        guard lineRange.location == inlineBlame.lineStart else { return }
         // End of the line's text, excluding the newline itself.
         var end = NSMaxRange(lineRange)
         while end > lineRange.location {
@@ -497,9 +526,9 @@ final class PuzzleTextView: NSTextView {
         guard available >= minimumUseful else { return }
 
         let width = min(size.width, available)
-        text.draw(in: NSRect(x: originX, y: y + inset.height,
-                             width: width, height: size.height),
-                  withAttributes: attributes)
+        let drawn = NSRect(x: originX, y: y + inset.height, width: width, height: size.height)
+        text.draw(in: drawn, withAttributes: attributes)
+        drawnInlineBlameRectForTesting = drawn
     }
 
     // Blame sits on top of the glyphs, so it goes here rather than in
