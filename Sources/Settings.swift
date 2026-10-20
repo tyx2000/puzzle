@@ -7,8 +7,8 @@ final class Settings {
     static let shared = Settings()
     static let didChange = Notification.Name("PuzzleSettingsDidChange")
 
-    /// The palette to paint, by `ThemePalette.id`. Read at launch: a change
-    /// saved while Puzzle runs takes effect when it next starts.
+    /// The palette to paint, by `ThemePalette.id`. Saved while Puzzle runs,
+    /// it is painted at once, like the fonts.
     var theme = ThemePalette.default.id
 
     // Editor (buffer) font
@@ -67,8 +67,8 @@ final class Settings {
 
           // ── Appearance ─────────────────────────────────────────────────────────
 
-          // Colour theme for the whole window and the code. Takes effect the next
-          // time Puzzle starts. One of:
+          // Colour theme for the whole window and the code. Applies as soon as
+          // this file is saved. One of:
         \(themes)
           "theme": "\(theme)",
 

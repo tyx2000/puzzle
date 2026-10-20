@@ -1,17 +1,85 @@
 import AppKit
 
 /// The colours the app paints, from the palette settings.json's "theme" names
-/// — Ayu Dark unless it names another (see `ThemePalette`). The palette is read
-/// once, at launch: every colour is one fixed value for the life of the
-/// process and nothing follows the system appearance, so a token means the
-/// same thing everywhere it is read and views may cache what they are built
-/// with. Font and exact row heights still come from settings.json.
+/// — Ayu Dark unless it names another (see `ThemePalette`). Nothing follows the
+/// system appearance. Font and exact row heights also come from settings.json.
+///
+/// A token is one NSColor for the life of the process, whose value is the
+/// palette's: a view may keep the colour it was built with, and when another
+/// theme is saved it paints in that one the next time it draws, without being
+/// told what it holds. Resolving a token returns a colour made when the
+/// palette was chosen, so a draw call never allocates one.
 enum Theme {
-    /// The palette this run paints, chosen by the settings loaded at launch.
-    static let palette = ThemePalette.named(Settings.shared.theme) ?? .default
+    /// The palette being painted: the one settings.json named at launch, or
+    /// the one `apply(_:)` switched to since.
+    private(set) static var palette = ThemePalette.named(Settings.shared.theme) ?? .default
 
-    /// Colours are stored, not computed: one NSColor per token for the life of
-    /// the process, so a draw call never allocates one.
+    /// One token's colour in the palette being painted.
+    private final class Swatch {
+        let path: KeyPath<ThemePalette, UInt32>
+        var colour: NSColor
+        init(path: KeyPath<ThemePalette, UInt32>, colour: NSColor) {
+            self.path = path
+            self.colour = colour
+        }
+    }
+    /// Every token made so far. Tokens are made on first use, which can be
+    /// off the main thread — a highlighter compiling its colour table.
+    private static var swatches: [Swatch] = []
+    private static let swatchLock = NSLock()
+
+    private static func token(_ path: KeyPath<ThemePalette, UInt32>) -> NSColor {
+        let swatch = Swatch(path: path, colour: hex(palette[keyPath: path]))
+        swatchLock.lock()
+        swatches.append(swatch)
+        swatchLock.unlock()
+        return NSColor(name: nil) { _ in swatch.colour }
+    }
+
+    /// Paint `newPalette` from now on: every token takes its colour, AppKit's
+    /// chrome its side. What has already drawn has to draw again — see
+    /// `repaintAllWindows()`. False when it is the palette already painted.
+    @discardableResult
+    static func apply(_ newPalette: ThemePalette) -> Bool {
+        guard newPalette.id != palette.id else { return false }
+        palette = newPalette
+        swatchLock.lock()
+        let all = swatches
+        swatchLock.unlock()
+        for swatch in all { swatch.colour = hex(newPalette[keyPath: swatch.path]) }
+        applyAppearance()
+        invalidateCaches()
+        return true
+    }
+
+    /// Switch to the theme settings.json names, if it is not the one painted,
+    /// and draw every window again in it. True when it switched.
+    @discardableResult
+    static func followSettings() -> Bool {
+        guard let named = ThemePalette.named(Settings.shared.theme), apply(named) else {
+            return false
+        }
+        repaintAllWindows()
+        return true
+    }
+
+    /// Ask every view in every window to draw again. A view keeps its token,
+    /// not a resolved colour, so drawing again is all a new palette needs —
+    /// layer-backed views included, which take the colour in `updateLayer()`.
+    static func repaintAllWindows() {
+        for window in NSApp.windows {
+            if let root = window.contentView?.superview ?? window.contentView {
+                repaint(root)
+            }
+            window.invalidateShadow()
+        }
+    }
+
+    private static func repaint(_ view: NSView) {
+        view.needsDisplay = true
+        view.subviews.forEach(repaint)
+    }
+
     private static func hex(_ v: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((v >> 16) & 0xff) / 255.0,
                 green: CGFloat((v >> 8) & 0xff) / 255.0,
@@ -25,21 +93,21 @@ enum Theme {
     }
 
     // Surfaces
-    static let editorBackground = hex(palette.editorBackground)
-    static let panelBackground = hex(palette.panelBackground)
-    static let barBackground = hex(palette.barBackground)
-    static let activityBar = hex(palette.activityBar)
+    static let editorBackground = token(\.editorBackground)
+    static let panelBackground = token(\.panelBackground)
+    static let barBackground = token(\.barBackground)
+    static let activityBar = token(\.activityBar)
     /// Scrollbars. AppKit's dark knob is a fixed light grey, which near-black
     /// surfaces turn into the brightest thing on screen.
-    static let scrollerKnob = hex(palette.scrollerKnob)
-    static let scrollerSlot = hex(palette.scrollerSlot)
-    static let border = hex(palette.border)
-    static let selection = hex(palette.selection)
-    static let lineHighlight = hex(palette.lineHighlight)
+    static let scrollerKnob = token(\.scrollerKnob)
+    static let scrollerSlot = token(\.scrollerSlot)
+    static let border = token(\.border)
+    static let selection = token(\.selection)
+    static let lineHighlight = token(\.lineHighlight)
     // The code area matches the panel, so the active tab cannot also match the
     // editor without vanishing into the tab strip: it keeps the surface one step
     // lighter, which is the only thing marking which tab is open.
-    static let activeTab = hex(palette.activeTab)
+    static let activeTab = token(\.activeTab)
     /// Behind whatever is selected in a strip of controls: the panel tab, the
     /// activity-bar button, the open file's tab. One token so the three read as
     /// the same state, and far enough from the bar behind them to be seen —
@@ -47,16 +115,16 @@ enum Theme {
     /// barely a shadow.
     /// Kept in the same family as `activeRow`, the tone the file tree already
     /// selects with, rather than a brighter one of its own.
-    static let selectedControl = hex(palette.selectedControl)
-    static let selectedControlText = hex(palette.selectedControlText)
-    static let inactiveTab = hex(palette.inactiveTab)
-    static let hover = hex(palette.hover)
+    static let selectedControl = token(\.selectedControl)
+    static let selectedControlText = token(\.selectedControlText)
+    static let inactiveTab = token(\.inactiveTab)
+    static let hover = token(\.hover)
     /// Every other row of a list read across — branches, commits — so the eye
     /// keeps its line over a wide row. A step off the panel, well short of
     /// `hover`, so a stripe is never mistaken for the row under the pointer.
-    static let stripedRow = hex(palette.stripedRow)
+    static let stripedRow = token(\.stripedRow)
     /// active file in the tree
-    static let activeRow = hex(palette.activeRow)
+    static let activeRow = token(\.activeRow)
     /// A match, wherever it is found, is underlined — never boxed and never
     /// washed. An outline steals a couple of points on every side of the text
     /// and a background competes with both the syntax colours over it and the
@@ -69,63 +137,63 @@ enum Theme {
     static let matchUnderlineOffset: CGFloat = 2
 
     // Text
-    static let foreground = hex(palette.foreground)
-    static let dimText = hex(palette.dimText)
-    static let gutter = hex(palette.gutter)
-    static let gutterActive = hex(palette.gutterActive)
-    static let cursor = hex(palette.cursor)
+    static let foreground = token(\.foreground)
+    static let dimText = token(\.dimText)
+    static let gutter = token(\.gutter)
+    static let gutterActive = token(\.gutterActive)
+    static let cursor = token(\.cursor)
     /// collapsed folder icon
-    static let folderClosed = hex(palette.folderClosed)
+    static let folderClosed = token(\.folderClosed)
 
     // Search / find input
-    static let inputBackground = hex(palette.inputBackground)
-    static let inputBorder = hex(palette.inputBorder)
-    static let inputBorderFocused = hex(palette.inputBorderFocused)
-    static let toggleActiveBackground = hex(palette.toggleActiveBackground)
+    static let inputBackground = token(\.inputBackground)
+    static let inputBorder = token(\.inputBorder)
+    static let inputBorderFocused = token(\.inputBorderFocused)
+    static let toggleActiveBackground = token(\.toggleActiveBackground)
     // Git diff: Ayu's markup.inserted / markup.deleted, with backgrounds mixed
     // down to sit under code without drowning it.
-    static let diffAddedText = hex(palette.diffAddedText)
-    static let diffRemovedText = hex(palette.diffRemovedText)
+    static let diffAddedText = token(\.diffAddedText)
+    static let diffRemovedText = token(\.diffRemovedText)
     /// A panel laid over the code — the gutter's diff — a step lighter than
     /// the code, so it reads as on top of it rather than part of it.
-    static let raisedSurface = hex(palette.raisedSurface)
+    static let raisedSurface = token(\.raisedSurface)
     /// That panel's edge: light enough to show against the code either side.
-    static let raisedEdge = hex(palette.raisedEdge)
-    static let diffAddedBackground = hex(palette.diffAddedBackground)
-    static let diffRemovedBackground = hex(palette.diffRemovedBackground)
+    static let raisedEdge = token(\.raisedEdge)
+    static let diffAddedBackground = token(\.diffAddedBackground)
+    static let diffRemovedBackground = token(\.diffRemovedBackground)
     /// The words that changed inside a changed line: the line's colour, a
     /// third of the way from its band to its text.
-    static let diffAddedWordBackground = hex(palette.diffAddedWordBackground)
-    static let diffRemovedWordBackground = hex(palette.diffRemovedWordBackground)
+    static let diffAddedWordBackground = token(\.diffAddedWordBackground)
+    static let diffRemovedWordBackground = token(\.diffRemovedWordBackground)
 
     // Accent hues. These name a *hue*: the panels use them for git status,
     // links and markers.
-    static let red = hex(palette.red)
-    static let green = hex(palette.green)
-    static let yellow = hex(palette.yellow)
+    static let red = token(\.red)
+    static let green = token(\.green)
+    static let yellow = token(\.yellow)
     /// The palette's orange — Ayu paints keywords in it — named here as a hue
     /// so a panel can ask for it without asking for "keyword".
-    static let orange = hex(palette.orange)
-    static let blue = hex(palette.blue)
-    static let purple = hex(palette.purple)
+    static let orange = token(\.orange)
+    static let blue = token(\.blue)
+    static let purple = token(\.purple)
     /// Shared with Gift's graph: colours identify ancestry tracks, not status.
     static let gitGraphColors: [NSColor] = [blue, purple, green, yellow, red, orange]
-    static let cyan = hex(palette.cyan)
-    static let comment = hex(palette.comment)
-    static let punct = hex(palette.punct)
+    static let cyan = token(\.cyan)
+    static let comment = token(\.comment)
+    static let punct = token(\.punct)
 
     // Syntax roles are named for the role, not the hue: Ayu paints types blue
     // and calls yellow, which is the reverse of most palettes, and code that
     // asked for `blue` would have to know that.
-    static let syntaxType = hex(palette.syntaxType)
-    static let syntaxFunction = hex(palette.syntaxFunction)
-    static let syntaxKeyword = hex(palette.syntaxKeyword)
-    static let syntaxConstant = hex(palette.syntaxConstant)
+    static let syntaxType = token(\.syntaxType)
+    static let syntaxFunction = token(\.syntaxFunction)
+    static let syntaxKeyword = token(\.syntaxKeyword)
+    static let syntaxConstant = token(\.syntaxConstant)
     /// Strings and properties have roles of their own because not every
     /// palette paints them in a hue: GitHub's strings are navy and its
     /// properties blue, where Ayu's are its green and its red.
-    static let syntaxString = hex(palette.syntaxString)
-    static let syntaxProperty = hex(palette.syntaxProperty)
+    static let syntaxString = token(\.syntaxString)
+    static let syntaxProperty = token(\.syntaxProperty)
 
     // Font + exact row metrics come from settings.json.
 

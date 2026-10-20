@@ -636,6 +636,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func clearRecents() { recentProjects.clear() }
 
     @objc private func settingsChanged() {
+        // A theme saved into the file is painted at once: every view holds
+        // tokens, which take the new palette's colours, and draws again.
+        Theme.followSettings()
         // Fonts and metrics are baked into each cached highlighter's attribute
         // table, so the cache cannot survive a settings change.
         HighlightService.shared.evictUnused(keeping: [])

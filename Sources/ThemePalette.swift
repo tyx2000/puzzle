@@ -1,12 +1,9 @@
 import AppKit
 
-/// The palettes Puzzle can paint, one chosen by settings.json's "theme" when
-/// the app starts. A palette is every colour token `Theme` hands out, so a
-/// theme cannot leave one undefined: the compiler asks for each.
-///
-/// The choice holds for the life of the process. Views cache the colours they
-/// are built with, and a colour that changed under them would leave half a
-/// window in the old theme; a new theme takes effect at the next launch.
+/// The palettes Puzzle can paint, one chosen by settings.json's "theme" — at
+/// launch, and again whenever the file is saved with another. A palette is
+/// every colour token `Theme` hands out, so a theme cannot leave one
+/// undefined: the compiler asks for each.
 struct ThemePalette {
     /// The value settings.json names it by.
     let id: String

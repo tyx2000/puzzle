@@ -180,6 +180,7 @@ enum RegressionTests {
         try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
         try testThemeSetting()
+        try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
         try testGitLineChangeMarks()
         try testThemeIsReadyBeforeAnyView()
@@ -7388,6 +7389,96 @@ enum RegressionTests {
         try expect(sameColor(SyntaxHighlighter.color(for: "string"), Theme.syntaxString)
                     && sameColor(SyntaxHighlighter.color(for: "property"), Theme.syntaxProperty),
                    "strings or properties do not take their syntax roles")
+    }
+
+    /// A theme saved into settings.json is painted at once. Views built before
+    /// the save keep their tokens, which take the new palette's colours, so the
+    /// window that was already open repaints in it — layers and text included.
+    private static func testSavedThemeAppliesAtOnce() throws {
+        let settings = Settings.shared
+        let savedTheme = settings.theme
+        defer {
+            settings.theme = savedTheme
+            Theme.followSettings()
+        }
+        func rgb(_ colour: NSColor?) -> UInt32? {
+            guard let c = colour?.usingColorSpace(.sRGB) else { return nil }
+            func byte(_ v: CGFloat) -> UInt32 { UInt32((v * 255).rounded()) }
+            return byte(c.redComponent) << 16 | byte(c.greenComponent) << 8 | byte(c.blueComponent)
+        }
+        func rgb(_ colour: CGColor?) -> UInt32? { rgb(colour.flatMap { NSColor(cgColor: $0) }) }
+
+        // Built in Ayu Dark: a layer-backed surface, a text attribute, a window.
+        try expect(Theme.palette.id == "ayu-dark", "the test did not start in Ayu Dark")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        host.wantsLayer = true
+        window.contentView = host
+        let surface = FlatView(frame: host.bounds)
+        surface.fillColor = Theme.panelBackground
+        host.addSubview(surface)
+        /// Says whether it was asked to draw again: a layer-backed view's own
+        /// `needsDisplay` does not, and off screen AppKit refreshes a layer
+        /// whether or not anyone asked.
+        final class Probe: NSView {
+            var asked = false
+            override var needsDisplay: Bool {
+                get { super.needsDisplay }
+                set {
+                    if newValue { asked = true }
+                    super.needsDisplay = newValue
+                }
+            }
+        }
+        let probe = Probe(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        surface.addSubview(probe)
+        // Off screen, AppKit makes a view's layer only at the next commit.
+        CATransaction.flush()
+        surface.needsDisplay = true
+        surface.displayIfNeeded()
+        try expect(rgb(surface.layer?.backgroundColor) == ThemePalette.ayuDark.panelBackground,
+                   "the surface did not start in Ayu Dark: \(String(describing: rgb(surface.layer?.backgroundColor)))")
+        let keyword = Theme.textAttributes(color: Theme.syntaxKeyword)[.foregroundColor] as? NSColor
+
+        // Saved as GitHub Light: the same objects now paint GitHub Light.
+        settings.apply(["theme": "github-light"])
+        try expect(Theme.followSettings(), "saving another theme did not switch to it")
+        try expect(Theme.palette.id == "github-light"
+                    && rgb(Theme.editorBackground) == ThemePalette.githubLight.editorBackground,
+                   "the tokens did not take the new palette")
+        try expect(NSApp.appearance?.name == .aqua, "AppKit's chrome stayed dark under a light theme")
+        try expect(rgb(keyword) == ThemePalette.githubLight.syntaxKeyword,
+                   "a colour kept from before the save still paints the old theme")
+        // Only what was asked to draw again draws here: the switch has to have
+        // asked. (A layer-backed view's `needsDisplay` does not say.)
+        surface.displayIfNeeded()
+        try expect(rgb(surface.layer?.backgroundColor) == ThemePalette.githubLight.panelBackground,
+                   "the open window's surface did not repaint in the new theme: "
+                     + "\(String(describing: rgb(surface.layer?.backgroundColor)))")
+
+        // Saving the same theme again changes nothing.
+        try expect(!Theme.followSettings(), "saving the theme already painted repainted anyway")
+
+        // Light to light: AppKit's appearance stays light, so the switch itself
+        // has to ask every view — however deep — to draw again.
+        probe.asked = false
+        settings.apply(["theme": "ayu-light"])
+        try expect(Theme.followSettings(), "switching between two light themes did nothing")
+        try expect(probe.asked, "a view in the open window was not asked to draw again")
+        surface.displayIfNeeded()
+        try expect(rgb(surface.layer?.backgroundColor) == ThemePalette.ayuLight.panelBackground,
+                   "between two light themes the open window kept the old colours: "
+                     + "\(String(describing: rgb(surface.layer?.backgroundColor)))")
+
+        // And back: dark chrome, dark surface.
+        settings.apply(["theme": "ayu-dark"])
+        try expect(Theme.followSettings() && NSApp.appearance?.name == .darkAqua,
+                   "switching back did not bring Ayu Dark and its dark chrome")
+        surface.displayIfNeeded()
+        try expect(rgb(surface.layer?.backgroundColor) == ThemePalette.ayuDark.panelBackground,
+                   "the surface did not come back to Ayu Dark")
     }
 
     private static func hexColor(_ value: UInt32) -> NSColor {
