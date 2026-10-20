@@ -7318,15 +7318,17 @@ enum RegressionTests {
     /// things the compiler cannot check.
     private static func testThemeSetting() throws {
         let ids = ThemePalette.all.map(\.id)
-        try expect(ids == ["ayu-dark", "ayu-light", "github-light"] && ThemePalette.default.id == "ayu-dark",
+        try expect(ids == ["ayu-dark", "ayu-light", "github-light",
+                           "material-teal", "material-indigo", "material-you"]
+                    && ThemePalette.default.id == "ayu-dark",
                    "the palettes on offer changed: \(ids)")
         try expect(Set(ids).count == ids.count, "two palettes share an id")
-        try expect(ThemePalette.ayuDark.isDark && !ThemePalette.ayuLight.isDark
-                    && !ThemePalette.githubLight.isDark,
+        try expect(ThemePalette.all.filter(\.isDark).map(\.id) == ["ayu-dark"],
                    "a palette asks AppKit for the wrong side")
         // The way Zed writes a theme's name works too.
         for (written, id) in [("ayu-light", "ayu-light"), ("Ayu Light", "ayu-light"),
-                              ("GITHUB_LIGHT", "github-light"), (" github light ", "github-light")] {
+                              ("GITHUB_LIGHT", "github-light"), (" github light ", "github-light"),
+                              ("Material You", "material-you")] {
             try expect(ThemePalette.named(written)?.id == id,
                        "\"\(written)\" did not name \(id)")
         }

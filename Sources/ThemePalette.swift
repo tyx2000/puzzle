@@ -78,7 +78,8 @@ struct ThemePalette {
     let syntaxProperty: UInt32
 
     /// Every palette, in the order the settings file lists them.
-    static let all: [ThemePalette] = [.ayuDark, .ayuLight, .githubLight]
+    static let all: [ThemePalette] = [.ayuDark, .ayuLight, .githubLight,
+                                      .materialTeal, .materialIndigo, .materialYou]
     static let `default` = ThemePalette.ayuDark
 
     /// The palette a settings value names: "ayu-light", or "Ayu Light" the
@@ -133,7 +134,7 @@ extension ThemePalette {
         syntaxString: 0x86b300, syntaxProperty: 0xf07171)
 
     /// GitHub Light, after GitHub's Primer colours: a white code area on a pale
-    /// grey panel, and the highest contrast of the three.
+    /// grey panel, at high contrast.
     static let githubLight = ThemePalette(
         id: "github-light", summary: "light, a white editor, high contrast", isDark: false,
         editorBackground: 0xffffff, panelBackground: 0xf6f8fa, barBackground: 0xf6f8fa,
@@ -151,4 +152,64 @@ extension ThemePalette {
         cyan: 0x1b7c83, comment: 0x6e7781, punct: 0x57606a, syntaxType: 0x953800,
         syntaxFunction: 0x8250df, syntaxKeyword: 0xcf222e, syntaxConstant: 0x0550ae,
         syntaxString: 0x0a3069, syntaxProperty: 0x0550ae)
+
+    /// Material Teal: Material Design's colours on a faint mint surface, teal
+    /// keywords and a teal caret. Original to Puzzle, not a port.
+    static let materialTeal = ThemePalette(
+        id: "material-teal", summary: "light, mint surfaces, teal accents", isDark: false,
+        editorBackground: 0xfbfefd, panelBackground: 0xeef6f5, barBackground: 0xeef6f5,
+        activityBar: 0xeef6f5, scrollerKnob: 0xb9cdca, scrollerSlot: 0xe6f0ee, border: 0xd9e6e4,
+        selection: 0xc6e9e5, lineHighlight: 0xecf6f4, activeTab: 0xfbfefd,
+        selectedControl: 0xd4ece9, selectedControlText: 0x1c2b2a, inactiveTab: 0xeef6f5,
+        hover: 0xe2efed, stripedRow: 0xf5faf9, activeRow: 0xd4ece9, foreground: 0x263238,
+        dimText: 0x6d8086, gutter: 0xa9babd, gutterActive: 0x37474f, cursor: 0x00897b,
+        folderClosed: 0x6d8086, inputBackground: 0xffffff, inputBorder: 0xcfdfdc,
+        inputBorderFocused: 0x00897b, toggleActiveBackground: 0xd4ece9, diffAddedText: 0x2e7d32,
+        diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xcbdcd9,
+        diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xe53935,
+        green: 0x43a047, yellow: 0xf9a825, orange: 0xfb8c00, blue: 0x1e88e5, purple: 0x8e24aa,
+        cyan: 0x0097a7, comment: 0x7f949b, punct: 0x607d8b, syntaxType: 0x5e35b1,
+        syntaxFunction: 0x1e88e5, syntaxKeyword: 0x00897b, syntaxConstant: 0xf4511e,
+        syntaxString: 0x43a047, syntaxProperty: 0xc2185b)
+
+    /// Material Indigo: the classic Material pairing — indigo, with pink for
+    /// keywords — on a white code area. Original to Puzzle.
+    static let materialIndigo = ThemePalette(
+        id: "material-indigo", summary: "light, a white editor, indigo and pink", isDark: false,
+        editorBackground: 0xffffff, panelBackground: 0xf4f5fa, barBackground: 0xf4f5fa,
+        activityBar: 0xf4f5fa, scrollerKnob: 0xc3c8dc, scrollerSlot: 0xeceef6, border: 0xdfe2ee,
+        selection: 0xd6daf2, lineHighlight: 0xf3f4fb, activeTab: 0xffffff,
+        selectedControl: 0xe3e6f6, selectedControlText: 0x1a1c2e, inactiveTab: 0xf4f5fa,
+        hover: 0xeaecf7, stripedRow: 0xf9f9fd, activeRow: 0xe3e6f6, foreground: 0x212121,
+        dimText: 0x737a8c, gutter: 0xb0b5c6, gutterActive: 0x3f51b5, cursor: 0x3f51b5,
+        folderClosed: 0x737a8c, inputBackground: 0xffffff, inputBorder: 0xd5d9e8,
+        inputBorderFocused: 0x3f51b5, toggleActiveBackground: 0xe3e6f6, diffAddedText: 0x2e7d32,
+        diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xd0d4e6,
+        diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xe53935,
+        green: 0x43a047, yellow: 0xf9a825, orange: 0xfb8c00, blue: 0x1e88e5, purple: 0x5e35b1,
+        cyan: 0x00838f, comment: 0x8a94a6, punct: 0x616161, syntaxType: 0x3949ab,
+        syntaxFunction: 0x00897b, syntaxKeyword: 0xd81b60, syntaxConstant: 0xef6c00,
+        syntaxString: 0x388e3c, syntaxProperty: 0x5e35b1)
+
+    /// Material You: Material 3's baseline scheme — tonal lavender surfaces and
+    /// a purple primary. Original to Puzzle.
+    static let materialYou = ThemePalette(
+        id: "material-you", summary: "light, lavender tones (Material 3)", isDark: false,
+        editorBackground: 0xfffbff, panelBackground: 0xf3edf7, barBackground: 0xf3edf7,
+        activityBar: 0xf3edf7, scrollerKnob: 0xcbc3d6, scrollerSlot: 0xece6f0, border: 0xe7e0ec,
+        selection: 0xeaddff, lineHighlight: 0xf6f1fa, activeTab: 0xfffbff,
+        selectedControl: 0xe8def8, selectedControlText: 0x1d192b, inactiveTab: 0xf3edf7,
+        hover: 0xece5f3, stripedRow: 0xf9f5fb, activeRow: 0xe8def8, foreground: 0x1d1b20,
+        dimText: 0x79747e, gutter: 0xb8b1c1, gutterActive: 0x49454f, cursor: 0x6750a4,
+        folderClosed: 0x79747e, inputBackground: 0xffffff, inputBorder: 0xdcd4e3,
+        inputBorderFocused: 0x6750a4, toggleActiveBackground: 0xe8def8, diffAddedText: 0x386a20,
+        diffRemovedText: 0xb3261e, raisedSurface: 0xffffff, raisedEdge: 0xd6cedf,
+        diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb3261e,
+        green: 0x386a20, yellow: 0x8b5000, orange: 0xc25f00, blue: 0x0061a4, purple: 0x6750a4,
+        cyan: 0x006a6a, comment: 0x938f99, punct: 0x625b71, syntaxType: 0x8b5000,
+        syntaxFunction: 0x0061a4, syntaxKeyword: 0x6750a4, syntaxConstant: 0x984061,
+        syntaxString: 0x386a20, syntaxProperty: 0x7d5260)
 }
