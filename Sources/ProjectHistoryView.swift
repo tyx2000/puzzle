@@ -27,6 +27,10 @@ final class ProjectHistoryViewController: NSViewController {
         var head = ""
         var ahead = 0
         var hasUpstream = false
+        /// The branch checked out — its copy on a remote is drawn as the
+        /// remote. A new branch at the same commit moves the refs the rows
+        /// show, so it reads the log again too.
+        var branch = ""
     }
     private var commits: [GitService.Commit] = []
     /// Short hashes not yet on the upstream branch — drawn with an ↑.
@@ -62,6 +66,7 @@ final class ProjectHistoryViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.onActivateRow = { [weak self] row in self?.act(on: row) }
         table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("commit"))
         column.resizingMask = .autoresizingMask
@@ -220,7 +225,8 @@ final class ProjectHistoryViewController: NSViewController {
         guard isViewLoaded else { return }
         if let column = table.tableColumns.first {
             let refsWidth = commits.reduce(CGFloat(0)) {
-                max($0, GitRefLabelsDrawing.width($1.refDecorations))
+                max($0, GitRefLabelsDrawing.width($1.refDecorations,
+                                                  currentBranch: state?.branch))
             }
             let fixedColumns = [columns.commitID,
                                 min(columns.author, GitCommitCell.minimumSqueezedWidth),
@@ -387,6 +393,13 @@ final class ProjectHistoryViewController: NSViewController {
         _ = view
         table.setHoveredRowForTesting(row)
     }
+    /// A key pressed in the list, and the row the keys have lit.
+    func pressKeyForTesting(_ keyCode: UInt16) {
+        _ = view
+        table.pressKeyForTesting(keyCode)
+    }
+    var litRowForTesting: Int { table.hoveredRow }
+    func refreshHoverForTesting() { table.refreshHoverState() }
     /// Wait for a load already in flight, the way a test has to.
     func settleForTesting(timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
@@ -426,7 +439,7 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
             cell.identifier = id
             cell.configure(commit: commit, pending: isUnpushed(commit.shortHash),
                            columns: columns, graphRow: graphRows[commit.graphID],
-                           graphWidth: graphWidth)
+                           graphWidth: graphWidth, currentBranch: state?.branch)
             return cell
         case .file(let file, let commit):
             let id = NSUserInterfaceItemIdentifier("project-history-file")

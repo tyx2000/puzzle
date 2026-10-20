@@ -59,6 +59,7 @@ enum RegressionTests {
         try testRefreshReadsOnlyTheTabOnScreen()
         try testFoldersRouteToTheirProjectWindow()
         try testClosedProjectLeavesNoSummary()
+        try testRemoteCopyPillAndListKeys()
         print("Regression tests passed")
     }
 
@@ -527,6 +528,104 @@ enum RegressionTests {
         workspace.applySummaryForTesting(branch: "late", changes: 9, for: first)
         try expect(!workspace.hasSummaryForTesting(for: first),
                    "a late sweep put a closed project's summary back")
+    }
+
+    /// The checked-out branch's copy on a remote says only the remote, and
+    /// the two Git lists take ↑↓ and Return the way a menu does.
+    private static func testRemoteCopyPillAndListKeys() throws {
+        let scratch = try temporaryDirectory("remote-pill-keys")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let remote = scratch.appendingPathComponent("remote.git")
+        let root = scratch.appendingPathComponent("work")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        @discardableResult
+        func git(_ args: [String], in directory: URL? = nil) throws -> String {
+            let result = GitService.run(args, in: directory ?? root)
+            try expect(result.code == 0, "fixture failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func commit(_ subject: String, file: String) throws {
+            try Data("\(subject)\n".utf8).write(to: root.appendingPathComponent(file))
+            try git(["add", "-A"])
+            try git(["commit", "-q", "-m", subject])
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        try git(["init", "-q", "--bare", "-b", "main"], in: remote)
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Pill Test"])
+        try git(["config", "user.email", "pill@example.invalid"])
+        try git(["remote", "add", "origin", remote.path])
+        try commit("base", file: "base.txt")
+        try git(["push", "-q", "-u", "origin", "main"])
+        try git(["checkout", "-q", "-b", "feature/font-seo"])
+        try commit("feature one", file: "feature.txt")
+        try git(["push", "-q", "-u", "origin", "feature/font-seo"])
+        try commit("feature two", file: "feature.txt")
+
+        let history = ProjectHistoryViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = history
+        window.setContentSize(NSSize(width: 420, height: 300))
+        defer { window.close() }
+        history.setSource(directory: root, state: .init(
+            head: try git(["rev-parse", "HEAD"]), ahead: 1, hasUpstream: true,
+            branch: "feature/font-seo"))
+        history.settleForTesting()
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(history.commitSubjectsForTesting == ["feature two", "feature one", "base"],
+                   "unexpected history: \(history.commitSubjectsForTesting)")
+        func pills(_ row: Int) -> [String] { history.rowCellForTesting(row)?.refTextsForTesting ?? [] }
+        try expect(pills(1) == ["origin"],
+                   "the branch's remote copy is not drawn as its remote: \(pills(1))")
+        try expect(pills(2).contains("origin/main"),
+                   "another branch's remote copy lost its branch name: \(pills(2))")
+
+        // ↓ lights the next row and keeps it through a layout, ↩ does to it
+        // what a click does, ↑ goes back.
+        history.pressKeyForTesting(125)
+        history.pressKeyForTesting(125)
+        try expect(history.litRowForTesting == 1, "↓↓ lit row \(history.litRowForTesting)")
+        history.refreshHoverForTesting()
+        try expect(history.litRowForTesting == 1,
+                   "a layout took the keys' row back to the pointer: \(history.litRowForTesting)")
+        history.pressKeyForTesting(36)
+        try expect(waitUntil { history.fileRowsForTesting == ["feature.txt"] },
+                   "↩ did not open the commit: \(history.fileRowsForTesting)")
+        history.pressKeyForTesting(36)
+        try expect(waitUntil { history.rowCountForTesting == 3 },
+                   "↩ again did not close it: \(history.rowCountForTesting) rows")
+        history.pressKeyForTesting(126)
+        try expect(history.litRowForTesting == 0, "↑ lit row \(history.litRowForTesting)")
+        history.pressKeyForTesting(126)
+        try expect(history.litRowForTesting == 0, "↑ past the top left the list")
+
+        // The changes: ↓ lights the first change, ↩ opens its diff.
+        try Data("edited\n".utf8).write(to: root.appendingPathComponent("base.txt"))
+        let changes = ProjectChangesViewController()
+        let changesWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 260),
+                                     styleMask: [.titled, .resizable], backing: .buffered,
+                                     defer: false)
+        changesWindow.contentViewController = changes
+        changesWindow.setContentSize(NSSize(width: 360, height: 260))
+        defer { changesWindow.close() }
+        var opened: [String] = []
+        changes.onOpenDiff = { entry, _ in opened.append(entry.path) }
+        changes.setEntries(GitService.status(in: root).entries, in: root)
+        changesWindow.contentView?.layoutSubtreeIfNeeded()
+        changes.pressKeyForTesting(36)
+        try expect(opened.isEmpty, "↩ with nothing lit opened a diff: \(opened)")
+        changes.pressKeyForTesting(125)
+        try expect(changes.litRowForTesting == 0, "↓ lit row \(changes.litRowForTesting)")
+        changes.pressKeyForTesting(36)
+        try expect(opened == ["base.txt"], "↩ did not open the lit change's diff: \(opened)")
     }
 
     private static func temporaryDirectory(_ label: String) throws -> URL {

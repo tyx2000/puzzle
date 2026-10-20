@@ -603,7 +603,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             status.isRepo ? status.entries : [], in: projectURL,
             state: status.isRepo
                 ? .init(head: status.head, ahead: status.ahead,
-                        hasUpstream: status.hasUpstream)
+                        hasUpstream: status.hasUpstream, branch: status.branch)
                 : .init())
         sidebar.setProjectTitle(project: projectURL.lastPathComponent,
                                 branch: status.isRepo ? status.branch : "")

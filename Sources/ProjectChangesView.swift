@@ -58,6 +58,7 @@ final class ProjectChangesViewController: NSViewController {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.onActivateRow = { [weak self] row in self?.activate(row: row) }
         table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("change"))
         column.resizingMask = .autoresizingMask
@@ -132,9 +133,12 @@ final class ProjectChangesViewController: NSViewController {
         field.stringValue = new.flatMap { drafts[$0] } ?? ""
     }
 
-    @objc private func rowClicked() {
-        guard let directory, entries.indices.contains(table.clickedRow) else { return }
-        onOpenDiff?(entries[table.clickedRow], directory)
+    @objc private func rowClicked() { activate(row: table.clickedRow) }
+
+    /// A click on a row, or Return on the row the keys lit.
+    private func activate(row: Int) {
+        guard let directory, entries.indices.contains(row) else { return }
+        onOpenDiff?(entries[row], directory)
     }
 
     func refreshFonts() {
@@ -423,6 +427,12 @@ final class ProjectChangesViewController: NSViewController {
         return commitBar
     }
     var isBusyForTesting: Bool { operation != nil }
+    /// A key pressed in the list, and the row the keys have lit.
+    func pressKeyForTesting(_ keyCode: UInt16) {
+        _ = view
+        table.pressKeyForTesting(keyCode)
+    }
+    var litRowForTesting: Int { table.hoveredRow }
     /// Where the commit line starts, measured from the window's top.
     var commitBarTopInsetInWindowForTesting: CGFloat? {
         _ = view

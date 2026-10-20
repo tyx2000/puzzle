@@ -19,6 +19,8 @@ final class GitCommitCell: DrawnSidebarCell {
     private var graphRow: GitHistoryGraph.Row?
     private var graphWidth: CGFloat = 0
     private var refDecorations: [GitService.Commit.RefLabel] = []
+    /// The branch checked out: its copy on a remote is drawn as the remote.
+    private var currentBranch: String?
     /// Between every column in the row.
     static let columnGap: CGFloat = 10
     /// What the message keeps before the author gives way, on a panel dragged
@@ -74,8 +76,10 @@ final class GitCommitCell: DrawnSidebarCell {
 
     /// `columns` is the list's; left out, the row measures its own.
     func configure(commit: GitService.Commit, pending: Bool, columns: Columns? = nil,
-                   graphRow: GitHistoryGraph.Row? = nil, graphWidth: CGFloat = 0) {
+                   graphRow: GitHistoryGraph.Row? = nil, graphWidth: CGFloat = 0,
+                   currentBranch: String? = nil) {
         self.columns = columns
+        self.currentBranch = currentBranch
         self.graphRow = graphRow
         self.graphWidth = graphWidth
         refDecorations = commit.refDecorations
@@ -139,13 +143,14 @@ final class GitCommitCell: DrawnSidebarCell {
                              width: max(0, bounds.width - 16 - graphWidth),
                              height: bounds.height)
         if !refDecorations.isEmpty, content.width > 0 {
-            let naturalWidth = GitRefLabelsDrawing.width(refDecorations)
+            let naturalWidth = GitRefLabelsDrawing.width(refDecorations,
+                                                         currentBranch: currentBranch)
             let available = min(naturalWidth, floor(content.width * 0.42))
             drawnRefRectsForTesting = GitRefLabelsDrawing.draw(
                 refDecorations,
                 in: NSRect(x: content.minX, y: content.minY,
                            width: available, height: content.height),
-                currentColor: Theme.accent)
+                currentColor: Theme.accent, currentBranch: currentBranch)
             if let last = drawnRefRectsForTesting.last {
                 let taken = last.maxX - content.minX + Self.columnGap
                 content = NSRect(x: content.minX + taken, y: content.minY,
@@ -181,6 +186,10 @@ final class GitCommitCell: DrawnSidebarCell {
     var graphWidthForTesting: CGFloat { graphWidth }
     var graphRowForTesting: GitHistoryGraph.Row? { graphRow }
     var refLabelsForTesting: [String] { refDecorations.map(\.name) }
+    /// What the pills say, which can be shorter than the refs they are.
+    var refTextsForTesting: [String] {
+        refDecorations.map { GitRefLabelsDrawing.text(for: $0, currentBranch: currentBranch) }
+    }
 }
 
 final class GitHistoryFileCell: DrawnSidebarCell {
@@ -339,12 +348,18 @@ final class GitProgressShimmerView: NSView {
     }
 }
 
-/// A Git list. Tracks the row under the pointer so rows can light up, and
-/// hands right-clicks to the list's controller.
+/// A Git list. Tracks the row under the pointer so rows can light up, takes
+/// ↑↓ and Return, and hands right-clicks to the list's controller.
 final class GitTableView: NSTableView {
     var contextMenuProvider: ((Int) -> NSMenu?)?
+    /// Return does to the lit row what a click on it does.
+    var onActivateRow: ((Int) -> Void)?
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoveredRow = -1
+    /// The lit row was put there by ↑↓, not by the pointer: it stays until
+    /// the pointer moves, rather than following wherever the pointer rests
+    /// each time the list lays out.
+    private var keysLitRow = false
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -357,9 +372,64 @@ final class GitTableView: NSTableView {
         hoverTrackingArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) { updateHoveredRow(with: event) }
-    override func mouseMoved(with event: NSEvent) { updateHoveredRow(with: event) }
-    override func mouseExited(with event: NSEvent) { setHoveredRow(-1) }
+    override func mouseEntered(with event: NSEvent) {
+        keysLitRow = false
+        updateHoveredRow(with: event)
+    }
+    override func mouseMoved(with event: NSEvent) {
+        keysLitRow = false
+        updateHoveredRow(with: event)
+    }
+    override func mouseExited(with event: NSEvent) {
+        guard !keysLitRow else { return }
+        setHoveredRow(-1)
+    }
+
+    // MARK: Keys
+    //
+    // One row is lit at a time, by the pointer or by the keys — as in a menu.
+    // ↑↓ move it, Return acts on it. A list that shows its selection moves
+    // the selection with it, so the two never light different rows.
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard modifiers.isEmpty else { return super.keyDown(with: event) }
+        switch event.keyCode {
+        case 125: moveLitRow(by: 1)        // ↓
+        case 126: moveLitRow(by: -1)       // ↑
+        case 36, 76:                       // Return, keypad Enter
+            let row = hoveredRow >= 0 ? hoveredRow : selectedRow
+            if row >= 0, row < numberOfRows, let onActivateRow {
+                onActivateRow(row)
+            } else {
+                super.keyDown(with: event)
+            }
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    private func moveLitRow(by step: Int) {
+        guard numberOfRows > 0 else { return }
+        let from = hoveredRow >= 0 ? hoveredRow : selectedRow
+        let next = from < 0
+            ? (step > 0 ? 0 : numberOfRows - 1)
+            : min(max(from + step, 0), numberOfRows - 1)
+        keysLitRow = true
+        setHoveredRow(next)
+        if selectionHighlightStyle != .none {
+            selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        }
+        scrollRowToVisible(next)
+    }
+
+    func pressKeyForTesting(_ keyCode: UInt16) {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                           timestamp: 0, windowNumber: window?.windowNumber ?? 0,
+                                           context: nil, characters: "", charactersIgnoringModifiers: "",
+                                           isARepeat: false, keyCode: keyCode) else { return }
+        keyDown(with: event)
+    }
 
     override func layout() {
         super.layout()
@@ -369,6 +439,12 @@ final class GitTableView: NSTableView {
     func refreshHoverState() {
         guard let window else {
             setHoveredRow(-1)
+            return
+        }
+        if keysLitRow {
+            // Rows may have come and gone under it; it stays where the keys
+            // put it, within the list.
+            setHoveredRow(min(hoveredRow, numberOfRows - 1))
             return
         }
         let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
