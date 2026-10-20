@@ -285,6 +285,10 @@ final class GitProgressShimmerView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        // The sweep deliberately starts and ends outside this view. AppKit
+        // views do not otherwise promise to clip custom drawing to their own
+        // bounds, so a narrow Changes region could paint into its neighbour.
+        clipsToBounds = true
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
     }
