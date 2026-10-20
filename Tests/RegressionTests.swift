@@ -58,6 +58,7 @@ enum RegressionTests {
         try testTabBodiesStayWithinBudget()
         try testRefreshReadsOnlyTheTabOnScreen()
         try testFoldersRouteToTheirProjectWindow()
+        try testClosedProjectLeavesNoSummary()
         print("Regression tests passed")
     }
 
@@ -496,6 +497,36 @@ enum RegressionTests {
     private static func expect(_ condition: @autoclosure () -> Bool,
                                _ message: String) throws {
         guard condition() else { throw Failure(description: message) }
+    }
+
+    /// A closed project's summary stayed behind — and the sweep reads only
+    /// projects with no summary, so the same folder added back later showed
+    /// the branch and count it had when it was closed. A sweep still out when
+    /// the project closed must not put it back either.
+    private static func testClosedProjectLeavesNoSummary() throws {
+        let first = try temporaryDirectory("summary-first")
+        let second = try temporaryDirectory("summary-second")
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(first)
+        workspace.openProject(second)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        workspace.applySummaryForTesting(branch: "old", changes: 5, for: first)
+        try expect(workspace.hasSummaryForTesting(for: first),
+                   "the fixture summary was not recorded")
+        workspace.closeProject(first)
+        try expect(!workspace.hasSummaryForTesting(for: first),
+                   "a closed project's summary was kept")
+
+        // A sweep that read it before it closed, arriving after.
+        workspace.applySummaryForTesting(branch: "late", changes: 9, for: first)
+        try expect(!workspace.hasSummaryForTesting(for: first),
+                   "a late sweep put a closed project's summary back")
     }
 
     private static func temporaryDirectory(_ label: String) throws -> URL {
