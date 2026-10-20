@@ -19,6 +19,27 @@ final class Settings {
     var codeLineHeight: CGFloat = 27
     var tabSize = 4
     var showInlineBlame = true
+    /// Every other code line on a faint band, so the eye keeps its row on the
+    /// way back from the end of a long line.
+    var zebraStripes = true
+    /// What marks a code line's leading indentation, if anything.
+    var indentMarkers = IndentMarkers.none
+
+    enum IndentMarkers: String, CaseIterable {
+        /// A thin line at each indent level, down through the block.
+        case guides
+        /// A faint dot for each leading space.
+        case dots
+        case none
+
+        var summary: String {
+            switch self {
+            case .guides: return "a thin line at each indent level"
+            case .dots: return "a faint dot for each leading space"
+            case .none: return "nothing — the default"
+            }
+        }
+    }
 
     // UI font — the left panel, tabs, git/search panels
     var uiFontFamily = "Monaco"
@@ -57,6 +78,12 @@ final class Settings {
             let padding = String(repeating: " ", count: width + 2 - quoted.count + 2)
             return "  //   \(quoted)\(padding)\(palette.summary)"
         }.joined(separator: "\n")
+        let markerWidth = IndentMarkers.allCases.map(\.rawValue.count).max() ?? 0
+        let markers = IndentMarkers.allCases.map { marker in
+            let quoted = "\"\(marker.rawValue)\""
+            let padding = String(repeating: " ", count: markerWidth + 2 - quoted.count + 2)
+            return "  //   \(quoted)\(padding)\(marker.summary)"
+        }.joined(separator: "\n")
         return """
         {
           // ───────────────────────────────────────────────────────────────────────
@@ -93,6 +120,14 @@ final class Settings {
           // Show git blame (author, time, subject) after the cursor's line.  Default: true
           "show_inline_blame": \(showInlineBlame),
 
+          // Every other code line on a faint band, so a long line's row is easy
+          // to keep.  Default: true
+          "zebra_stripes": \(zebraStripes),
+
+          // What marks each line's leading indentation. One of:
+        \(markers)
+          "indent_markers": "\(indentMarkers.rawValue)",
+
           // ── UI text: left panel (file tree, search, git), tabs ─────────────────
 
           // Font family for the left panel, tabs and panels.  Default: "Monaco"
@@ -118,7 +153,7 @@ final class Settings {
         "theme",
         "buffer_font_family", "buffer_font_size", "buffer_font_weight",
         "code_line_height",
-        "tab_size", "show_inline_blame",
+        "tab_size", "show_inline_blame", "zebra_stripes", "indent_markers",
         "ui_font_family", "ui_font_size", "ui_font_weight", "tree_line_height",
     ]
 
@@ -256,6 +291,15 @@ final class Settings {
         }
         if let v = number("tab_size"), v >= 1, v <= 16 { tabSize = Int(v) }
         if let v = json["show_inline_blame"] as? Bool { showInlineBlame = v }
+        if let v = json["zebra_stripes"] as? Bool { zebraStripes = v }
+        if let v = json["indent_markers"] as? String {
+            if let marker = IndentMarkers(rawValue: v.lowercased().trimmingCharacters(in: .whitespaces)) {
+                indentMarkers = marker
+            } else {
+                FileHandle.standardError.write(Data(
+                    "puzzle: indent_markers is guides, dots or none, not \"\(v)\"\n".utf8))
+            }
+        }
 
         if let v = json["ui_font_family"] as? String, !v.isEmpty { uiFontFamily = v }
         if let v = number("ui_font_size"), v >= 8, v <= 32 { uiFontSize = v }

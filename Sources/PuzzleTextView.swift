@@ -723,6 +723,7 @@ final class PuzzleTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        drawReadingAids(in: rect)
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
@@ -2620,4 +2621,173 @@ final class PuzzleTextView: NSTextView {
     override func setNeedsDisplay(_ rect: NSRect, avoidAdditionalLayout flag: Bool) {
         super.setNeedsDisplay(rect.insetBy(dx: -1, dy: -2), avoidAdditionalLayout: flag)
     }
+
+    // MARK: - Reading aids
+
+    /// Line numbers, for which rows the stripes go on, from the document's
+    /// index — counting newlines here would walk the file on every draw.
+    var lineIndexProvider: (() -> LineIndex?)?
+
+    /// The file's indent step, kept for the text it was worked out from.
+    private var indentUnitCache: (storage: ObjectIdentifier, length: Int, unit: Int)?
+
+    /// What the last background draw put down, for the tests.
+    private(set) var drawnReadingAidsForTesting = (stripes: [NSRect](), guides: [NSRect](),
+                                                   dots: [NSRect]())
+
+    /// Stripes on every other code line, and the leading indentation marked
+    /// with guides or dots, as settings.json asks. Under the text and the
+    /// current-line band; not in rendered Markdown, whose lines are prose of
+    /// many heights, nor in a diff, whose lines carry bands of their own.
+    private func drawReadingAids(in rect: NSRect) {
+        drawnReadingAidsForTesting = ([], [], [])
+        let settings = Settings.shared
+        let markers = settings.indentMarkers
+        guard settings.zebraStripes || markers != .none, !rendersMarkdown, diffBands.isEmpty,
+              let layoutManager, let container = textContainer else { return }
+        let text = string as NSString
+        guard text.length > 0 else { return }
+        let origin = textContainerOrigin
+        let glyphs = layoutManager.glyphRange(
+            forBoundingRect: rect.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
+        guard glyphs.length > 0 else { return }
+        let index = lineIndexProvider?() ?? LineIndex(text)
+        let tabSize = settings.tabSize
+        let unit = indentUnit(of: text, tabSize: tabSize)
+        let column = Theme.characterWidth()
+        let left = origin.x + container.lineFragmentPadding
+        let stripe = Theme.stripedRow
+        let guide = Theme.gutter.withAlphaComponent(0.55)
+        let dot = Theme.gutter.withAlphaComponent(0.8)
+        let dotSize = max(1.5, (column * 0.22).rounded())
+
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, glyphRange, _ in
+            let characters = layoutManager.characterRange(forGlyphRange: glyphRange,
+                                                          actualGlyphRange: nil)
+            let row = fragment.offsetBy(dx: origin.x, dy: origin.y)
+            let line = index.line(at: characters.location)
+            if settings.zebraStripes, line % 2 == 0 {
+                stripe.setFill()
+                let band = NSRect(x: self.bounds.minX, y: row.minY,
+                                  width: self.bounds.width, height: row.height)
+                band.fill()
+                self.drawnReadingAidsForTesting.stripes.append(band)
+            }
+            // Indentation is the line's own, on its first row only.
+            guard markers != .none, characters.location == index.start(ofLine: line) else { return }
+            let lead = Self.leadingColumns(of: text, line: line, index: index, tabSize: tabSize)
+            switch markers {
+            case .guides:
+                // A blank line inside a block keeps the block's guides; one
+                // between blocks takes the shallower of its neighbours, so a
+                // guide stops where its block does.
+                let indent = lead ?? min(
+                    Self.neighbourIndent(of: text, from: line, step: -1, index: index, tabSize: tabSize),
+                    Self.neighbourIndent(of: text, from: line, step: 1, index: index, tabSize: tabSize))
+                guard indent > 0 else { return }
+                guide.setFill()
+                var level = 0
+                while level * unit < indent {
+                    let mark = NSRect(x: floor(left + CGFloat(level * unit) * column), y: row.minY,
+                                      width: 1, height: row.height)
+                    mark.fill()
+                    self.drawnReadingAidsForTesting.guides.append(mark)
+                    level += 1
+                }
+            case .dots:
+                guard let lead, lead > 0 else { return }
+                dot.setFill()
+                for position in 0..<lead {
+                    let centre = left + (CGFloat(position) + 0.5) * column
+                    let mark = NSRect(x: centre - dotSize / 2, y: row.midY - dotSize / 2,
+                                      width: dotSize, height: dotSize)
+                    NSBezierPath(ovalIn: mark).fill()
+                    self.drawnReadingAidsForTesting.dots.append(mark)
+                }
+            case .none:
+                break
+            }
+        }
+    }
+
+    /// Columns of leading whitespace on a 1-based line, a tab reaching the
+    /// next tab stop; nil for a line that is only whitespace.
+    static func leadingColumns(of text: NSString, line: Int, index: LineIndex,
+                               tabSize: Int) -> Int? {
+        var location = index.start(ofLine: line)
+        var columns = 0
+        while location < text.length {
+            switch text.character(at: location) {
+            case 0x20: columns += 1
+            case 0x09: columns += tabSize - columns % max(1, tabSize)
+            case 0x0A, 0x0D: return nil
+            default: return columns
+            }
+            location += 1
+        }
+        return nil
+    }
+
+    /// The indentation of the nearest line with text above or below.
+    private static func neighbourIndent(of text: NSString, from line: Int, step: Int,
+                                        index: LineIndex, tabSize: Int) -> Int {
+        var other = line + step
+        var looked = 0
+        // Bounded: a run of blank lines longer than this draws no guides.
+        while other >= 1, other <= index.lineCount, looked < 200 {
+            if let lead = leadingColumns(of: text, line: other, index: index, tabSize: tabSize) {
+                return lead
+            }
+            other += step
+            looked += 1
+        }
+        return 0
+    }
+
+    /// The step the file indents by: the rise taken most often from one line
+    /// with text to the next, over its first thousand lines — continuation
+    /// lines aligned under a bracket rise by odd amounts, but less often.
+    /// The setting's tab size when nothing in the file is indented.
+    private func indentUnit(of text: NSString, tabSize: Int) -> Int {
+        let key = (ObjectIdentifier(textStorage ?? NSTextStorage()), text.length)
+        if let cached = indentUnitCache, cached.storage == key.0, cached.length == key.1 {
+            return cached.unit
+        }
+        let unit = Self.indentUnit(of: text, tabSize: tabSize)
+        indentUnitCache = (key.0, key.1, unit)
+        return unit
+    }
+
+    static func indentUnit(of text: NSString, tabSize: Int, sampleLines: Int = 1000) -> Int {
+        var rises: [Int: Int] = [:]
+        var previous: Int?
+        var location = 0
+        var lines = 0
+        while location < text.length, lines < sampleLines {
+            let range = text.lineRange(for: NSRange(location: location, length: 0))
+            var columns = 0
+            var blank = true
+            var cursor = range.location
+            scan: while cursor < NSMaxRange(range) {
+                switch text.character(at: cursor) {
+                case 0x20: columns += 1
+                case 0x09: columns += tabSize - columns % max(1, tabSize)
+                case 0x0A, 0x0D: break scan
+                default:
+                    blank = false
+                    break scan
+                }
+                cursor += 1
+            }
+            if !blank {
+                if let previous, columns > previous { rises[columns - previous, default: 0] += 1 }
+                previous = columns
+            }
+            location = NSMaxRange(range)
+            lines += 1
+        }
+        let step = rises.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key
+        return min(max(step ?? tabSize, 1), 16)
+    }
 }
+

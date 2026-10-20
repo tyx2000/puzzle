@@ -88,6 +88,7 @@ enum RegressionTests {
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
         try testInlineBlameStaysOnItsLine()
+        try testReadingAids()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -2540,6 +2541,113 @@ enum RegressionTests {
     /// go. The annotation read for the line the caret left was drawn against
     /// the line just clicked in between, then taken away, then drawn again:
     /// shown twice. It is drawn only on the line it was read for.
+    /// Every other code line on a faint band, on by default, and the leading
+    /// indentation marked with guides, dots or nothing, as settings.json says.
+    private static func testReadingAids() throws {
+        let settings = Settings.shared
+        let saved = (settings.zebraStripes, settings.indentMarkers)
+        defer { (settings.zebraStripes, settings.indentMarkers) = saved }
+
+        // The settings: stripes on and markers off unless the file says so,
+        // a value it does not know keeps the one in effect, and the file
+        // lists the markers above the field.
+        let defaults = Settings()
+        try expect(defaults.zebraStripes && defaults.indentMarkers == .none,
+                   "the reading aids do not default to stripes and no markers")
+        settings.apply(["zebra_stripes": false, "indent_markers": "Guides"])
+        try expect(!settings.zebraStripes && settings.indentMarkers == .guides,
+                   "the reading aid settings were not taken")
+        settings.apply(["indent_markers": "lines"])
+        try expect(settings.indentMarkers == .guides, "an unknown marker replaced the current one")
+        let written = settings.documentedContentsForTesting.components(separatedBy: "\n")
+        guard let field = written.firstIndex(where: { $0.contains("\"indent_markers\":") }) else {
+            throw Failure(description: "the settings file has no indent_markers field")
+        }
+        for (offset, marker) in Settings.IndentMarkers.allCases.reversed().enumerated() {
+            try expect(written[field - 1 - offset].contains("\"\(marker.rawValue)\""),
+                       "\(marker.rawValue) is not listed above indent_markers")
+        }
+        try expect(written.contains { $0.contains("\"zebra_stripes\": false") },
+                   "the settings file does not hold zebra_stripes")
+
+        // The indent step is the file's, not the tab size: the rise taken most
+        // often, so a continuation aligned under a bracket does not set it.
+        let source = "func a() {\n    let x = 1\n\n    if x {\n        call(x,\n             y)\n    }\n}\n\ntop\n"
+        try expect(PuzzleTextView.indentUnit(of: source as NSString, tabSize: 2) == 4,
+                   "the indent step is not the file's four")
+        try expect(PuzzleTextView.indentUnit(of: "a\n\tb\n\t\tc\n" as NSString, tabSize: 8) == 8,
+                   "a tab-indented file does not step by the tab size")
+        try expect(PuzzleTextView.indentUnit(of: "a\nb\n" as NSString, tabSize: 3) == 3,
+                   "a file with no indentation does not fall back to the tab size")
+
+        // The drawing.
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.font = Theme.editorFont()
+        text.string = source
+        let ns = text.string as NSString
+        func draw() -> (stripes: [NSRect], guides: [NSRect], dots: [NSRect]) {
+            CATransaction.flush()
+            text.display()
+            return text.drawnReadingAidsForTesting
+        }
+        func row(_ line: Int) -> NSRect {
+            var location = 0
+            for _ in 1..<line { location = NSMaxRange(ns.lineRange(for: NSRange(location: location, length: 0))) }
+            let layout = text.layoutManager!
+            return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location),
+                                           effectiveRange: nil)
+                .offsetBy(dx: text.textContainerOrigin.x, dy: text.textContainerOrigin.y)
+        }
+        let left = text.textContainerOrigin.x + (text.textContainer?.lineFragmentPadding ?? 0)
+        let column = Theme.characterWidth()
+
+        settings.zebraStripes = true
+        settings.indentMarkers = .none
+        var drawn = draw()
+        try expect(drawn.stripes.map(\.minY) == [2, 4, 6, 8, 10].map { row($0).minY },
+                   "the stripes are not on every other line: \(drawn.stripes.map(\.minY))")
+        try expect(drawn.stripes.allSatisfy { $0.minX <= 0 && $0.maxX >= text.bounds.width },
+                   "a stripe does not run the width of the code")
+        try expect(drawn.guides.isEmpty && drawn.dots.isEmpty, "markers were drawn with none set")
+
+        settings.zebraStripes = false
+        settings.indentMarkers = .guides
+        drawn = draw()
+        try expect(drawn.stripes.isEmpty, "stripes were drawn with them off")
+        func guides(on line: Int) -> [CGFloat] {
+            drawn.guides.filter { abs($0.midY - row(line).midY) < 0.5 }.map(\.minX)
+        }
+        func levels(_ count: Int) -> [CGFloat] { (0..<count).map { floor(left + CGFloat($0 * 4) * column) } }
+        try expect(guides(on: 1).isEmpty && guides(on: 8).isEmpty && guides(on: 10).isEmpty,
+                   "an unindented line carries guides")
+        try expect(guides(on: 2) == levels(1) && guides(on: 5) == levels(2),
+                   "the guides are not at the file's indent levels: \(guides(on: 2)) \(guides(on: 5))")
+        try expect(guides(on: 6) == levels(4), "a continuation line's guides are wrong: \(guides(on: 6))")
+        try expect(guides(on: 3) == levels(1),
+                   "a blank line inside the block broke its guide: \(guides(on: 3))")
+        try expect(guides(on: 9).isEmpty, "a blank line between blocks carried a guide")
+        try expect(drawn.guides.allSatisfy { $0.width == 1 }, "a guide is not a 1pt line")
+
+        settings.indentMarkers = .dots
+        drawn = draw()
+        try expect(drawn.guides.isEmpty && drawn.dots.count == 4 + 4 + 8 + 13 + 4,
+                   "the dots are not one per leading space: \(drawn.dots.count)")
+        let firstDot = drawn.dots.first { abs($0.midY - row(2).midY) < 0.5 }
+        try expect(firstDot.map { abs($0.midX - (left + column / 2)) < 0.5 } == true,
+                   "a dot is not centred in its column")
+
+        // Not in rendered Markdown or a diff, which lay their lines out their own way.
+        settings.zebraStripes = true
+        text.rendersMarkdown = true
+        drawn = draw()
+        try expect(drawn.stripes.isEmpty && drawn.dots.isEmpty, "rendered Markdown was striped")
+        text.rendersMarkdown = false
+    }
+
     private static func testInlineBlameStaysOnItsLine() throws {
         let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 200))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),

@@ -212,6 +212,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         scrollView.backgroundColor = Theme.editorBackground
         let ruler = LineNumberRulerView(textView: textView)
         ruler.lineIndexProvider = { [weak self] in self?.currentDocument?.lineIndex }
+        textView.lineIndexProvider = { [weak self] in self?.currentDocument?.lineIndex }
         ruler.onChangeClicked = { [weak self] change, rect in
             self?.showGitChange(change, from: rect)
         }
