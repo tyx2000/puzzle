@@ -2640,6 +2640,51 @@ enum RegressionTests {
         try expect(firstDot.map { abs($0.midX - (left + column / 2)) < 0.5 } == true,
                    "a dot is not centred in its column")
 
+        // On the line being read too. The active line's band and a selection
+        // both paint the leading whitespace; drawn under them, the marks
+        // vanished there. Colours are compared within one rendering, which
+        // is in the window's colour space rather than the tokens'.
+        func rendered() -> NSBitmapImageRep? {
+            CATransaction.flush()
+            guard let rep = text.bitmapImageRepForCachingDisplay(in: text.bounds) else { return nil }
+            text.cacheDisplay(in: text.bounds, to: rep)
+            return rep
+        }
+        func pixel(_ rep: NSBitmapImageRep, _ point: NSPoint) -> NSColor? {
+            let scale = CGFloat(rep.pixelsWide) / text.bounds.width
+            return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))
+        }
+        func apart(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent) > 0.04
+        }
+        settings.zebraStripes = false
+        text.showsCurrentLineBand = true
+        let fifth = (0..<4).reduce(0) { at, _ in NSMaxRange(ns.lineRange(for: NSRange(location: at, length: 0))) }
+        text.setSelectedRange(NSRange(location: fifth + 10, length: 0))
+        let onGuide = NSPoint(x: floor(left) + 0.5, y: row(5).midY)
+        let onDot = NSPoint(x: left + column / 2, y: row(5).midY)
+        let clear = NSPoint(x: text.bounds.width - 20, y: row(5).midY)
+        let plain = NSPoint(x: text.bounds.width - 20, y: row(1).midY)
+        for marker in [Settings.IndentMarkers.guides, .dots] {
+            settings.indentMarkers = marker
+            guard let rep = rendered() else { throw Failure(description: "no rendering") }
+            try expect(apart(pixel(rep, clear), pixel(rep, plain)),
+                       "the active line's band is not drawn, so it proves nothing")
+            try expect(apart(pixel(rep, marker == .guides ? onGuide : onDot), pixel(rep, clear)),
+                       "the active line's band covered its \(marker.rawValue)")
+        }
+        // A selection over the leading spaces leaves its dots showing.
+        text.setSelectedRange(NSRange(location: fifth, length: 6))
+        guard let selected = rendered() else { throw Failure(description: "no rendering") }
+        let betweenDots = NSPoint(x: left + column, y: row(5).midY)
+        try expect(apart(pixel(selected, betweenDots), pixel(selected, plain)),
+                   "the selection is not drawn over the leading spaces, so it proves nothing")
+        try expect(apart(pixel(selected, onDot), pixel(selected, betweenDots)),
+                   "a selection covered the dots under it")
+        text.setSelectedRange(NSRange(location: 0, length: 0))
+
         // Not in rendered Markdown or a diff, which lay their lines out their own way.
         settings.zebraStripes = true
         text.rendersMarkdown = true

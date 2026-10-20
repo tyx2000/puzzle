@@ -535,6 +535,10 @@ final class PuzzleTextView: NSTextView {
     // drawBackground alongside the bands.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        // Over the active line's band and any selection, which both paint the
+        // leading whitespace: under them, the marks vanished on the very line
+        // being read. They sit only in that whitespace, so no glyph is covered.
+        drawIndentMarkers(in: dirtyRect)
         // After the glyphs, not before: AppKit paints the selection background
         // over anything the view drew in `drawBackground`, which would swallow
         // the rule under whichever match the caret was left on.
@@ -723,7 +727,7 @@ final class PuzzleTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        drawReadingAids(in: rect)
+        drawZebraStripes(in: rect)
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
@@ -2635,46 +2639,63 @@ final class PuzzleTextView: NSTextView {
     private(set) var drawnReadingAidsForTesting = (stripes: [NSRect](), guides: [NSRect](),
                                                    dots: [NSRect]())
 
-    /// Stripes on every other code line, and the leading indentation marked
-    /// with guides or dots, as settings.json asks. Under the text and the
-    /// current-line band; not in rendered Markdown, whose lines are prose of
-    /// many heights, nor in a diff, whose lines carry bands of their own.
-    private func drawReadingAids(in rect: NSRect) {
-        drawnReadingAidsForTesting = ([], [], [])
-        let settings = Settings.shared
-        let markers = settings.indentMarkers
-        guard settings.zebraStripes || markers != .none, !rendersMarkdown, diffBands.isEmpty,
-              let layoutManager, let container = textContainer else { return }
+    /// The code rows a draw of `rect` covers, numbered from the document's
+    /// index — or nil where the reading aids are not drawn: rendered
+    /// Markdown, whose lines are prose of many heights, and diffs, whose
+    /// lines carry bands of their own.
+    private func readingAidRows(in rect: NSRect)
+        -> (text: NSString, index: LineIndex, rows: [(row: NSRect, line: Int, startsLine: Bool)])? {
+        guard !rendersMarkdown, diffBands.isEmpty,
+              let layoutManager, let container = textContainer else { return nil }
         let text = string as NSString
-        guard text.length > 0 else { return }
+        guard text.length > 0 else { return nil }
         let origin = textContainerOrigin
         let glyphs = layoutManager.glyphRange(
             forBoundingRect: rect.offsetBy(dx: -origin.x, dy: -origin.y), in: container)
-        guard glyphs.length > 0 else { return }
+        guard glyphs.length > 0 else { return nil }
         let index = lineIndexProvider?() ?? LineIndex(text)
-        let tabSize = settings.tabSize
-        let unit = indentUnit(of: text, tabSize: tabSize)
-        let column = Theme.characterWidth()
-        let left = origin.x + container.lineFragmentPadding
-        let stripe = Theme.stripedRow
-        let guide = Theme.gutter.withAlphaComponent(0.55)
-        let dot = Theme.gutter.withAlphaComponent(0.8)
-        let dotSize = max(1.5, (column * 0.22).rounded())
-
+        var rows: [(row: NSRect, line: Int, startsLine: Bool)] = []
         layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, glyphRange, _ in
             let characters = layoutManager.characterRange(forGlyphRange: glyphRange,
                                                           actualGlyphRange: nil)
-            let row = fragment.offsetBy(dx: origin.x, dy: origin.y)
             let line = index.line(at: characters.location)
-            if settings.zebraStripes, line % 2 == 0 {
-                stripe.setFill()
-                let band = NSRect(x: self.bounds.minX, y: row.minY,
-                                  width: self.bounds.width, height: row.height)
-                band.fill()
-                self.drawnReadingAidsForTesting.stripes.append(band)
-            }
-            // Indentation is the line's own, on its first row only.
-            guard markers != .none, characters.location == index.start(ofLine: line) else { return }
+            rows.append((fragment.offsetBy(dx: origin.x, dy: origin.y), line,
+                         characters.location == index.start(ofLine: line)))
+        }
+        return (text, index, rows)
+    }
+
+    /// Every other code line on a faint band, as settings.json asks — under
+    /// everything, the active line's band and the selection included.
+    private func drawZebraStripes(in rect: NSRect) {
+        drawnReadingAidsForTesting.stripes = []
+        guard Settings.shared.zebraStripes, let aid = readingAidRows(in: rect) else { return }
+        Theme.stripedRow.setFill()
+        for (row, line, _) in aid.rows where line % 2 == 0 {
+            let band = NSRect(x: bounds.minX, y: row.minY, width: bounds.width, height: row.height)
+            band.fill()
+            drawnReadingAidsForTesting.stripes.append(band)
+        }
+    }
+
+    /// The leading indentation marked with guides or dots, as settings.json
+    /// asks, on each line's first row.
+    private func drawIndentMarkers(in rect: NSRect) {
+        drawnReadingAidsForTesting.guides = []
+        drawnReadingAidsForTesting.dots = []
+        let settings = Settings.shared
+        let markers = settings.indentMarkers
+        guard markers != .none, let container = textContainer,
+              let aid = readingAidRows(in: rect) else { return }
+        let (text, index) = (aid.text, aid.index)
+        let tabSize = settings.tabSize
+        let unit = indentUnit(of: text, tabSize: tabSize)
+        let column = Theme.characterWidth()
+        let left = textContainerOrigin.x + container.lineFragmentPadding
+        let dotSize = max(1.5, (column * 0.22).rounded())
+        (markers == .guides ? Theme.gutter.withAlphaComponent(0.55)
+                            : Theme.gutter.withAlphaComponent(0.8)).setFill()
+        for (row, line, startsLine) in aid.rows where startsLine {
             let lead = Self.leadingColumns(of: text, line: line, index: index, tabSize: tabSize)
             switch markers {
             case .guides:
@@ -2684,25 +2705,22 @@ final class PuzzleTextView: NSTextView {
                 let indent = lead ?? min(
                     Self.neighbourIndent(of: text, from: line, step: -1, index: index, tabSize: tabSize),
                     Self.neighbourIndent(of: text, from: line, step: 1, index: index, tabSize: tabSize))
-                guard indent > 0 else { return }
-                guide.setFill()
                 var level = 0
                 while level * unit < indent {
                     let mark = NSRect(x: floor(left + CGFloat(level * unit) * column), y: row.minY,
                                       width: 1, height: row.height)
                     mark.fill()
-                    self.drawnReadingAidsForTesting.guides.append(mark)
+                    drawnReadingAidsForTesting.guides.append(mark)
                     level += 1
                 }
             case .dots:
-                guard let lead, lead > 0 else { return }
-                dot.setFill()
+                guard let lead, lead > 0 else { continue }
                 for position in 0..<lead {
                     let centre = left + (CGFloat(position) + 0.5) * column
                     let mark = NSRect(x: centre - dotSize / 2, y: row.midY - dotSize / 2,
                                       width: dotSize, height: dotSize)
                     NSBezierPath(ovalIn: mark).fill()
-                    self.drawnReadingAidsForTesting.dots.append(mark)
+                    drawnReadingAidsForTesting.dots.append(mark)
                 }
             case .none:
                 break
