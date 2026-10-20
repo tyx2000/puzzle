@@ -54,6 +54,7 @@ enum RegressionTests {
         try testStatusMatchesPorcelainV1()
         try testSideBySideDiff()
         try testDiffInlineChanges()
+        try testDiffScrollsLongLines()
         try testOpenDiffRefreshesCoalesce()
         try testDiffTabs()
         try testTabBodiesStayWithinBudget()
@@ -4517,6 +4518,85 @@ enum RegressionTests {
         try expect(marked(host.cellForTesting(1)?.styledTextsForTesting.first ?? nil) == ["old"],
                    "a row on screen was not marked: "
                      + "\(marked(host.cellForTesting(1)?.styledTextsForTesting.first ?? nil))")
+    }
+
+    /// A line longer than its column scrolls sideways under a scrollbar of its
+    /// own, in both modes, rather than being cut short with an ellipsis; the
+    /// table, its line numbers and the right-hand column stay where they are.
+    private static func testDiffScrollsLongLines() throws {
+        let view = DiffView(frame: NSRect(x: 0, y: 0, width: 700, height: 320))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 320),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.close() }
+        func settle() {
+            window.contentView?.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let long = String(repeating: "long source with tabs\t中文 😀 ", count: 30)
+        let diff = "@@ -1 +1 @@\n-\(long)OLD_END\n+\(long)NEW_END\n"
+        for mode in [DiffHeaderView.Mode.unified, .sideBySide] {
+            view.configure(diff: diff)
+            view.setMode(mode)
+            settle()
+            let start = view.horizontalGeometryForTesting
+            try expect(start.scrollerVisible && start.maximumOffset > 100,
+                       "a wide \(mode) diff has no horizontal scrollbar: \(start)")
+            let scroller = view.horizontalScrollerForTesting
+            let knob = scroller.rect(for: .knob)
+            try expect(scroller.isEnabled && knob.width > knob.height,
+                       "the \(mode) diff's horizontal scrollbar is not usable: \(knob)")
+            let tableWidth = view.tableWidthForTesting.table
+            // The scrollbar's real target and action, not only the setter.
+            scroller.doubleValue = 1
+            if let action = scroller.action {
+                _ = NSApp.sendAction(action, to: scroller.target, from: scroller)
+            }
+            settle()
+            let end = view.horizontalGeometryForTesting
+            try expect(abs(end.offset - end.maximumOffset) < 0.5,
+                       "the \(mode) scrollbar cannot reach the end of the line: \(end)")
+            try expect(view.cellForTesting(1)?.horizontalOffsetForTesting == end.offset,
+                       "a row drawn after the scroll does not follow it")
+            let widths = view.tableWidthForTesting
+            try expect(abs(widths.table - tableWidth) < 0.5 && widths.table <= widths.clip + 1,
+                       "scrolling sideways moved the table, not the text: \(widths)")
+            view.step(forward: true)
+            try expect(abs(view.horizontalGeometryForTesting.offset - end.offset) < 0.5,
+                       "stepping to a change lost the sideways position")
+            // A trackpad's sideways swipe moves the text the other way.
+            view.scrollSidewaysForTesting(by: 50)
+            try expect(abs(view.horizontalGeometryForTesting.offset - (end.offset - 50)) < 0.5,
+                       "a sideways swipe did not scroll the \(mode) text")
+            window.setContentSize(NSSize(width: 440, height: 320))
+            settle()
+            try expect(view.horizontalGeometryForTesting.maximumOffset > start.maximumOffset,
+                       "resizing did not update the \(mode) scrolling range")
+            window.setContentSize(NSSize(width: 700, height: 320))
+            settle()
+        }
+
+        // The same diff read again keeps its sideways place; another starts
+        // at the left.
+        view.setHorizontalOffsetForTesting(200)
+        view.configure(diff: diff, keepingPosition: true)
+        try expect(view.horizontalGeometryForTesting.offset == 200,
+                   "reading the same diff again lost the sideways position: "
+                     + "\(view.horizontalGeometryForTesting.offset)")
+        view.configure(diff: "@@ -1 +1 @@\n-a\n+b\n")
+        settle()
+        let short = view.horizontalGeometryForTesting
+        try expect(short.offset == 0 && short.maximumOffset == 0 && !short.scrollerVisible,
+                   "a short diff kept the long diff's scroll range: \(short)")
+
+        // The fast width of a plain ASCII line is the width it is drawn at.
+        let ascii = "let value = items.filter { $0.isShown }.count + 2"
+        let font = Theme.monoFont()
+        let measured = ceil(("+ " + ascii as NSString).size(withAttributes: [.font: font]).width)
+        let estimated = DiffView.widestText(DiffRows.unified(from: "@@ -1 +1 @@\n+\(ascii)\n").rows,
+                                            mode: .unified, font: font)
+        try expect(abs(estimated - measured) <= 1,
+                   "a plain line's width was estimated at \(estimated), drawn at \(measured)")
     }
 
     private static func testSideBySideDiff() throws {

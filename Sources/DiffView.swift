@@ -3,9 +3,24 @@ import AppKit
 /// A read-only diff, unified or side by side. Both are one table, so a long
 /// diff costs only the rows on screen, and rows are drawn rather than built
 /// from subviews, the same approach the Git lists take.
+///
+/// A line longer than its column is not cut short: the text scrolls sideways
+/// under a scrollbar of its own, both columns together, while the table stays
+/// as wide as the view — so the line numbers, the divider and the right-hand
+/// column stay where they are.
 final class DiffView: FlatView {
     private let table = NSTableView()
-    private let scroll = NSScrollView()
+    private let scroll = DiffScrollView()
+    private let horizontalScroller = GiftScroller(
+        frame: NSRect(x: 0, y: 0, width: 100, height: 15))
+    private var horizontalScrollerHeight: NSLayoutConstraint!
+    private var horizontalOffset: CGFloat = 0
+    /// The widest line's text, as drawn, and the room a column gives it.
+    private var maximumTextWidth: CGFloat = 0
+    private var textViewportWidth: CGFloat = 0
+    private var maximumHorizontalOffset: CGFloat {
+        max(0, maximumTextWidth - textViewportWidth)
+    }
     /// Shown instead of the table when the diff has no hunks to draw — a
     /// binary file, or a file whose change is only its mode.
     private let note = NSTextField(labelWithString: "")
@@ -37,6 +52,8 @@ final class DiffView: FlatView {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.autoresizingMask = [.width]
         table.headerView = nil
         // `.automatic` insets every row by 10pt on each side.
         table.style = .plain
@@ -50,10 +67,26 @@ final class DiffView: FlatView {
         GiftScroller.adopt(scroll)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
         scroll.drawsBackground = true
         scroll.backgroundColor = Theme.diffBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scroll)
+        scroll.onHorizontalScroll = { [weak self] delta in
+            guard let self else { return }
+            self.setHorizontalOffset(self.horizontalOffset - delta)
+        }
+        // Only the text inside the columns follows this scrollbar. A legacy
+        // bar, there only while a line is wider than its column: an overlay
+        // one shows only while it is being scrolled, and would hide the very
+        // thing it is there to say.
+        horizontalScroller.scrollerStyle = .legacy
+        horizontalScroller.target = self
+        horizontalScroller.action = #selector(scrollHorizontally(_:))
+        horizontalScroller.translatesAutoresizingMaskIntoConstraints = false
+        horizontalScroller.isHidden = true
+        addSubview(horizontalScroller)
+        horizontalScrollerHeight = horizontalScroller.heightAnchor.constraint(equalToConstant: 0)
 
         note.font = Theme.uiFont(12)
         note.textColor = Theme.dimText
@@ -68,7 +101,11 @@ final class DiffView: FlatView {
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: horizontalScroller.topAnchor),
+            horizontalScroller.leadingAnchor.constraint(equalTo: leadingAnchor),
+            horizontalScroller.trailingAnchor.constraint(equalTo: trailingAnchor),
+            horizontalScroller.bottomAnchor.constraint(equalTo: bottomAnchor),
+            horizontalScrollerHeight,
             note.centerXAnchor.constraint(equalTo: centerXAnchor),
             note.centerYAnchor.constraint(equalTo: centerYAnchor),
             note.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -40),
@@ -77,14 +114,23 @@ final class DiffView: FlatView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// Show a diff from the top. `keepingPosition` is for the same diff read
-    /// again — a working-tree file that changed while it was open — where
-    /// jumping back to the first line would lose the reader's place.
+    override func layout() {
+        super.layout()
+        updateHorizontalGeometry()
+    }
+
+    /// Show a diff from the top and the left. `keepingPosition` is for the
+    /// same diff read again — a working-tree file that changed while it was
+    /// open — where jumping back to the first line would lose the reader's
+    /// place.
     func configure(diff: String, keepingPosition: Bool = false) {
         let offset = scroll.contentView.bounds.origin
+        let sideways = horizontalOffset
         self.diff = diff
         rebuild()
         if keepingPosition {
+            // Sideways too, as far as the new text still reaches.
+            setHorizontalOffset(sideways)
             let maximum = max(0, table.bounds.height - scroll.contentView.bounds.height)
             scroll.contentView.scroll(to: NSPoint(x: offset.x, y: min(offset.y, maximum)))
         } else {
@@ -119,8 +165,90 @@ final class DiffView: FlatView {
         note.stringValue = rows.isEmpty ? Self.note(for: diff) : ""
         note.isHidden = !rows.isEmpty
         scroll.isHidden = rows.isEmpty
+        horizontalOffset = 0
+        maximumTextWidth = Self.widestText(rows, mode: mode, font: Theme.monoFont())
         table.reloadData()
         table.layoutSubtreeIfNeeded()
+        updateHorizontalGeometry()
+    }
+
+    // MARK: - Sideways
+
+    /// The widest line as the rows draw it — a unified line after its marker
+    /// and space. A line of printable ASCII in a fixed-pitch font is as wide as
+    /// its characters; only the others, the ones with tabs, Han text or emoji,
+    /// are measured: a 50,000-line diff is measured on every rebuild.
+    static func widestText(_ rows: [DiffRows.Row], mode: DiffHeaderView.Mode,
+                           font: NSFont) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let advance = ("M" as NSString).size(withAttributes: attributes).width
+        let prefix = mode == .unified ? "+ " : ""
+        func width(_ text: String) -> CGFloat {
+            let line = prefix + text
+            if line.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) {
+                return ceil(CGFloat(line.utf8.count) * advance)
+            }
+            return ceil((line as NSString).size(withAttributes: attributes).width)
+        }
+        var widest: CGFloat = 0
+        for row in rows where row.kind != .hunk {
+            if let left = row.leftText { widest = max(widest, width(left)) }
+            if let right = row.rightText, right != row.leftText {
+                widest = max(widest, width(right))
+            }
+        }
+        return widest
+    }
+
+    /// The room a column gives its text: everything after the line numbers —
+    /// two of them unified, one per side side by side, the narrower side when
+    /// the view is an odd number of points wide.
+    private var textColumnWidth: CGFloat {
+        let width = scroll.contentView.bounds.width
+        switch mode {
+        case .unified: return max(0, width - Self.gutterWidth * 2 - 6)
+        case .sideBySide: return max(0, floor(width / 2) - Self.gutterWidth - 6)
+        }
+    }
+
+    private func updateHorizontalGeometry() {
+        textViewportWidth = textColumnWidth
+        let visible = maximumHorizontalOffset > 0 && textViewportWidth > 0 && !rows.isEmpty
+        horizontalScroller.isHidden = !visible
+        horizontalScroller.isEnabled = visible
+        let height = visible
+            ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        if horizontalScrollerHeight.constant != height {
+            horizontalScrollerHeight.constant = height
+        }
+        horizontalScroller.knobProportion = maximumTextWidth > 0
+            ? min(1, textViewportWidth / maximumTextWidth) : 1
+        setHorizontalOffset(horizontalOffset, force: true)
+    }
+
+    private func setHorizontalOffset(_ offset: CGFloat, force: Bool = false) {
+        let clamped = min(max(0, offset), maximumHorizontalOffset)
+        horizontalScroller.doubleValue = maximumHorizontalOffset > 0
+            ? Double(clamped / maximumHorizontalOffset) : 0
+        guard force || horizontalOffset != clamped else { return }
+        horizontalOffset = clamped
+        let visibleRows = table.rows(in: table.visibleRect)
+        guard visibleRows.location != NSNotFound, visibleRows.length > 0 else { return }
+        for row in visibleRows.location..<NSMaxRange(visibleRows) {
+            (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? DiffRowCell)?
+                .setHorizontalOffset(clamped)
+        }
+    }
+
+    @objc private func scrollHorizontally(_ sender: NSScroller) {
+        let line = Theme.monoFont().maximumAdvancement.width * 3
+        switch sender.hitPart {
+        case .decrementLine: setHorizontalOffset(horizontalOffset - line)
+        case .incrementLine: setHorizontalOffset(horizontalOffset + line)
+        case .decrementPage: setHorizontalOffset(horizontalOffset - textViewportWidth)
+        case .incrementPage: setHorizontalOffset(horizontalOffset + textViewportWidth)
+        default: setHorizontalOffset(CGFloat(sender.doubleValue) * maximumHorizontalOffset)
+        }
     }
 
     /// How much of Git's own words the note repeats when it has nothing
@@ -208,6 +336,19 @@ final class DiffView: FlatView {
         (rows.count, table.frame.height, scroll.contentView.bounds.origin.y)
     }
     var currentBlockForTesting: Int { currentBlock }
+    var horizontalGeometryForTesting: (offset: CGFloat, maximumOffset: CGFloat,
+                                       textWidth: CGFloat, viewportWidth: CGFloat,
+                                       scrollerVisible: Bool) {
+        (horizontalOffset, maximumHorizontalOffset, maximumTextWidth, textViewportWidth,
+         !horizontalScroller.isHidden)
+    }
+    func setHorizontalOffsetForTesting(_ offset: CGFloat) { setHorizontalOffset(offset) }
+    /// A sideways scroll as the wheel or a trackpad sends it.
+    func scrollSidewaysForTesting(by delta: CGFloat) { scroll.onHorizontalScroll?(delta) }
+    var horizontalScrollerForTesting: NSScroller { horizontalScroller }
+    var tableWidthForTesting: (table: CGFloat, clip: CGFloat) {
+        (table.frame.width, scroll.contentView.bounds.width)
+    }
     /// How many rows have had their changed words worked out.
     var markedRowCountForTesting: Int { wordMarks.count }
     var verticalScrollerForTesting: NSScroller? { scroll.verticalScroller }
@@ -231,7 +372,7 @@ extension DiffView: NSTableViewDataSource, NSTableViewDelegate {
         cell.identifier = id
         guard rows.indices.contains(row) else { return cell }
         cell.configure(rows[row], mode: mode, isCurrent: row == currentRow,
-                       marks: marks(forRow: row))
+                       marks: marks(forRow: row), horizontalOffset: horizontalOffset)
         return cell
     }
 }
@@ -241,13 +382,17 @@ final class DiffRowCell: DrawnSidebarCell {
     private var mode: DiffHeaderView.Mode = .unified
     private var isCurrent = false
     private var marks = DiffWords.Marks()
+    /// How far the text is scrolled sideways. The line numbers stay put.
+    private var horizontalOffset: CGFloat = 0
 
     func configure(_ row: DiffRows.Row, mode: DiffHeaderView.Mode, isCurrent: Bool,
-                   marks: DiffWords.Marks = DiffWords.Marks()) {
+                   marks: DiffWords.Marks = DiffWords.Marks(),
+                   horizontalOffset: CGFloat = 0) {
         self.row = row
         self.mode = mode
         self.isCurrent = isCurrent
         self.marks = marks
+        self.horizontalOffset = horizontalOffset
         switch row.kind {
         case .hunk: exposeToAccessibility(row.header ?? "")
         case .context: exposeToAccessibility(row.leftText ?? "")
@@ -259,7 +404,14 @@ final class DiffRowCell: DrawnSidebarCell {
         needsDisplay = true
     }
 
+    func setHorizontalOffset(_ offset: CGFloat) {
+        guard offset != horizontalOffset else { return }
+        horizontalOffset = offset
+        needsDisplay = true
+    }
+
     var modeForTesting: DiffHeaderView.Mode { mode }
+    var horizontalOffsetForTesting: CGFloat { horizontalOffset }
     /// The text the row sets, styled as drawn: one string unified, the two
     /// sides (nil where a side is empty) side by side.
     var styledTextsForTesting: [NSAttributedString?] {
@@ -276,7 +428,7 @@ final class DiffRowCell: DrawnSidebarCell {
                                words: [NSRange], wordColor: NSColor,
                                offset: Int = 0) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
+        paragraph.lineBreakMode = .byClipping
         let styled = NSMutableAttributedString(string: text, attributes: [
             .font: font, .foregroundColor: ink, .paragraphStyle: paragraph])
         for range in words {
@@ -355,10 +507,10 @@ final class DiffRowCell: DrawnSidebarCell {
                                                height: bounds.height),
                                     alignment: .right)
         }
-        SidebarCellDrawing.attributedText(unifiedText(row, font: font), font: font,
-                                          in: NSRect(x: gutter * 2, y: 0,
-                                                     width: max(0, bounds.width - gutter * 2 - 6),
-                                                     height: bounds.height))
+        drawText(unifiedText(row, font: font), font: font,
+                 in: NSRect(x: gutter * 2, y: 0,
+                            width: max(0, bounds.width - gutter * 2 - 6),
+                            height: bounds.height))
         guard isCurrent else { return }
         Theme.accent.setFill()
         NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
@@ -403,9 +555,39 @@ final class DiffRowCell: DrawnSidebarCell {
                                     alignment: .right)
         }
         guard let text else { return }
-        SidebarCellDrawing.attributedText(text, font: font,
-                                          in: NSRect(x: rect.minX + gutter, y: 0,
-                                                     width: max(0, rect.width - gutter - 6),
-                                                     height: rect.height))
+        drawText(text, font: font,
+                 in: NSRect(x: rect.minX + gutter, y: 0,
+                            width: max(0, rect.width - gutter - 6), height: rect.height))
+    }
+
+    /// The whole line, on the baseline a plain label takes, moved left by the
+    /// sideways scroll and clipped to its column — not cut short with an
+    /// ellipsis, which hid the end of a long line for good.
+    private func drawText(_ text: NSAttributedString, font: NSFont, in rect: NSRect) {
+        guard rect.width > 0, rect.height > 0, text.length > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        rect.clip()
+        let line = SidebarCellDrawing.lineRect(
+            font: font, baseline: SidebarCellDrawing.centeredBaseline(for: font, in: rect),
+            in: rect)
+        text.draw(with: NSRect(x: rect.minX - horizontalOffset, y: line.minY,
+                               width: rect.width + horizontalOffset, height: line.height),
+                  options: [.usesLineFragmentOrigin], context: nil)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+/// The diff's scroll view, which hands sideways scrolling — a trackpad's, or
+/// the wheel with Shift held — to the view rather than moving the table.
+private final class DiffScrollView: NSScrollView {
+    var onHorizontalScroll: ((CGFloat) -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        let shiftVertical = event.modifierFlags.contains(.shift) && event.scrollingDeltaX == 0
+        let delta = shiftVertical ? event.scrollingDeltaY : event.scrollingDeltaX
+        if delta != 0 {
+            onHorizontalScroll?(delta * (event.hasPreciseScrollingDeltas ? 1 : 20))
+        }
+        if !shiftVertical { super.scrollWheel(with: event) }
     }
 }
