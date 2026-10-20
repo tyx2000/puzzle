@@ -68,10 +68,10 @@ final class LineNumberRulerView: NSRulerView {
     /// arrow. The ribbon and the numbers live between them, so all three
     /// targets are reachable without fighting each other.
     static let dividerReach: CGFloat = 8
-    static let changeMarkWidth: CGFloat = 3
-    /// Widened under the pointer. Stops short of the numbers, which keep their
-    /// column: the ribbon grows into the gap, it does not push anything.
-    static let changeMarkHoverWidth: CGFloat = 8
+    /// The ribbon's one width. It was 3pt and grew to this under the pointer;
+    /// it is this wide throughout now, so the target never has to be found
+    /// first. Stops short of the numbers, which keep their column.
+    static let changeMarkWidth: CGFloat = 8
     static let foldArrowColumn: CGFloat = 14
     /// Never narrower than this, however short the file: a one-digit column
     /// reads as a stray character rather than a gutter, and a file one line
@@ -81,9 +81,8 @@ final class LineNumberRulerView: NSRulerView {
     /// Where the line numbers start and end inside the gutter.
     static func numberColumn(digits: Int,
                              font: NSFont = Theme.editorFont()) -> (start: CGFloat, end: CGFloat) {
-        // Room for the ribbon at its hovered width, so growing it never runs
-        // under the widest line number.
-        (dividerReach + changeMarkHoverWidth + 2,
+        // Room for the ribbon, so it never runs under the widest line number.
+        (dividerReach + changeMarkWidth + 2,
          gutterWidth(for: font, digits: digits) - foldArrowColumn)
     }
 
@@ -95,7 +94,7 @@ final class LineNumberRulerView: NSRulerView {
                             digits: Int = 4) -> CGFloat {
         let sample = String(repeating: "8", count: max(digits, minimumDigits))
         let width = ceil((sample as NSString).size(withAttributes: [.font: font]).width)
-        return dividerReach + changeMarkHoverWidth + 2 + width + 4 + foldArrowColumn
+        return dividerReach + changeMarkWidth + 2 + width + 4 + foldArrowColumn
     }
 
     /// Digits needed to write the highest line number in the file.
@@ -110,77 +109,6 @@ final class LineNumberRulerView: NSRulerView {
     private var arrowHitRects: [Int: NSRect] = [:]
     private var foldableRowRects: [Int: NSRect] = [:]
     private var hoveredBlock: Int?
-    /// The change under the pointer, kept by its line range so it survives the
-    /// redraws that rebuild the mark rects.
-    private var hoveredChange: GitLineChanges.Change?
-    private var hoverProgress: CGFloat = 0
-    /// The one the pointer just left, so it shrinks back instead of snapping.
-    private var fadingChange: GitLineChanges.Change?
-    private var fadingProgress: CGFloat = 0
-    private var hoverTimer: Timer?
-
-    /// Long enough to read as movement, short enough not to lag the pointer.
-    static let hoverAnimationDuration: CGFloat = 0.12
-
-    /// Ribbon width at a point in the transition, eased so it starts fast and
-    /// settles rather than arriving at constant speed.
-    static func markWidth(progress: CGFloat) -> CGFloat {
-        let clamped = min(max(progress, 0), 1)
-        let eased = 1 - (1 - clamped) * (1 - clamped)
-        return changeMarkWidth + (changeMarkHoverWidth - changeMarkWidth) * eased
-    }
-
-    private func markWidth(for change: GitLineChanges.Change) -> CGFloat {
-        if change.lines == hoveredChange?.lines { return Self.markWidth(progress: hoverProgress) }
-        if change.lines == fadingChange?.lines { return Self.markWidth(progress: fadingProgress) }
-        return Self.changeMarkWidth
-    }
-
-    private func setHoveredChange(_ change: GitLineChanges.Change?) {
-        guard change?.lines != hoveredChange?.lines else { return }
-        // Whatever was growing starts shrinking from where it got to, so a
-        // pointer sweeping down the gutter leaves a trail that settles.
-        if let previous = hoveredChange {
-            fadingChange = previous
-            fadingProgress = hoverProgress
-        }
-        hoveredChange = change
-        hoverProgress = 0
-        needsDisplay = true
-        startHoverAnimation()
-    }
-
-    private func startHoverAnimation() {
-        hoverTimer?.invalidate()
-        guard window != nil else {
-            // Off screen there is nothing to animate; land on the end state.
-            hoverProgress = hoveredChange == nil ? 0 : 1
-            fadingChange = nil
-            fadingProgress = 0
-            return
-        }
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            let step = 1 / (Self.hoverAnimationDuration * 60)
-            if self.hoveredChange != nil {
-                self.hoverProgress = min(1, self.hoverProgress + step)
-            }
-            self.fadingProgress = max(0, self.fadingProgress - step)
-            if self.fadingProgress == 0 { self.fadingChange = nil }
-            self.needsDisplay = true
-            let growing = self.hoveredChange != nil && self.hoverProgress < 1
-            if !growing, self.fadingChange == nil {
-                timer.invalidate()
-                self.hoverTimer = nil
-            }
-        }
-        hoverTimer = timer
-        // Common mode: the ribbon keeps animating while the pointer is tracked.
-        RunLoop.main.add(timer, forMode: .common)
-    }
     /// Line count for rulers with no document index behind them (the history
     /// pane), rebuilt only when the text changes.
     private var cachedLineCount: (length: Int, lines: Int)?
@@ -213,7 +141,6 @@ final class LineNumberRulerView: NSRulerView {
     required init(coder: NSCoder) { fatalError("not used") }
 
     deinit {
-        hoverTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
         if let editorTrackingArea, let textView {
             textView.removeTrackingArea(editorTrackingArea)
@@ -302,11 +229,7 @@ final class LineNumberRulerView: NSRulerView {
         let overArrow = bounds.contains(point) && arrowHitRects.contains {
             $0.value.contains(point)
         }
-        // The ribbon is 3pt wide — enough to read, not enough to aim at. Under
-        // the pointer it grows to the right, into the space between it and the
-        // line number, so the thing you are about to click looks like a target.
         let change = overArrow ? nil : changeMarkRects.first { $0.rect.contains(point) }?.change
-        setHoveredChange(change)
         if overArrow || change != nil {
             NSCursor.pointingHand.set()
         } else if bounds.contains(point) {
@@ -341,7 +264,6 @@ final class LineNumberRulerView: NSRulerView {
             if insideGutter || insideEditor { return }
         }
         hoveredBlock = nil
-        setHoveredChange(nil)
         NSCursor.arrow.set()
         needsDisplay = true
     }
@@ -496,9 +418,8 @@ final class LineNumberRulerView: NSRulerView {
             // arrow and stole its clicks on any line that had changed.
             let change = GitLineChanges.change(at: lineNo, in: self.gitChanges)
             if let change {
-                let width = self.markWidth(for: change)
                 let markRect = NSRect(x: Self.dividerReach, y: y,
-                                      width: width, height: fragRect.height)
+                                      width: Self.changeMarkWidth, height: fragRect.height)
                 if change.kind == .deleted {
                     flushRibbon()
                     // Nothing occupies the line any more, so mark the seam
@@ -509,7 +430,7 @@ final class LineNumberRulerView: NSRulerView {
                     NSBezierPath(roundedRect: seam, xRadius: 1.5, yRadius: 1.5).fill()
                     self.changeMarkBars.append(markRect)
                 } else if let drawn = ribbon, drawn.change.kind == change.kind,
-                          drawn.rect.width == width, abs(drawn.rect.maxY - y) < 0.5 {
+                          abs(drawn.rect.maxY - y) < 0.5 {
                     ribbon?.rect.size.height += fragRect.height
                     ribbon?.line = lineNo
                     ribbon?.change = change
@@ -580,7 +501,7 @@ final class LineNumberRulerView: NSRulerView {
         lastLink = (top...bottom, hue)
         let edge = convert(window.convertFromScreen(panel.frame), from: nil)
         let left = Self.dividerReach
-        let right = left + markWidth(for: change)
+        let right = left + Self.changeMarkWidth
         let gutter = bounds.maxX
         let middle = (right + gutter) / 2
         let path = NSBezierPath()
@@ -643,19 +564,6 @@ final class LineNumberRulerView: NSRulerView {
 
     var clientViewVisibleRectForTesting: NSRect { textView?.visibleRect ?? .zero }
     var changeMarkTargetsForTesting: [NSRect] { changeMarkRects.map(\.rect) }
-    /// Pretend the pointer is on the change covering `line`.
-    func hoverChangeForTesting(at line: Int?) {
-        setHoveredChange(line.flatMap { GitLineChanges.change(at: $0, in: gitChanges) })
-    }
-    var hoverIsAnimatingForTesting: Bool { hoverTimer != nil }
-    func settleHoverForTesting() {
-        hoverTimer?.invalidate()
-        hoverTimer = nil
-        hoverProgress = hoveredChange == nil ? 0 : 1
-        fadingChange = nil
-        fadingProgress = 0
-        needsDisplay = true
-    }
     var changeMarkBarsForTesting: [NSRect] { changeMarkBars }
     /// A click on the change's mark — on its row as last drawn, as a click
     /// would land, or a stand-in row when it has not been drawn.

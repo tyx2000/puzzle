@@ -8268,47 +8268,18 @@ enum RegressionTests {
         try expect(ruler.changeMarkBarsForTesting.allSatisfy { $0.minX == dividerReach },
                    "the ribbon is not just past the divider handle: "
                     + "\(ruler.changeMarkBarsForTesting)")
-        // Under the pointer the ribbon grows to the right, into the gap it was
-        // given — never under the numbers.
-        try expect(LineNumberRulerView.changeMarkHoverWidth
-                    > LineNumberRulerView.changeMarkWidth,
-                   "the ribbon does not widen on hover")
-        try expect(dividerReach + LineNumberRulerView.changeMarkHoverWidth
+        // The ribbon has one width, the full one: it no longer starts narrow and
+        // grows under the pointer, so the target is there before it is aimed
+        // at. It still stops short of the numbers.
+        try expect(LineNumberRulerView.changeMarkWidth == 8,
+                   "the ribbon is not at its full width: \(LineNumberRulerView.changeMarkWidth)")
+        try expect(ruler.changeMarkBarsForTesting.allSatisfy {
+                        $0.width == LineNumberRulerView.changeMarkWidth },
+                   "a ribbon is not drawn at the full width: "
+                    + "\(ruler.changeMarkBarsForTesting.map(\.width))")
+        try expect(dividerReach + LineNumberRulerView.changeMarkWidth
                     <= LineNumberRulerView.numberColumn(digits: 2).start,
-                   "the hovered ribbon reaches into the line numbers")
-        // The width eases between the two sizes rather than jumping.
-        try expect(LineNumberRulerView.markWidth(progress: 0)
-                    == LineNumberRulerView.changeMarkWidth,
-                   "the transition does not start at the resting width")
-        try expect(LineNumberRulerView.markWidth(progress: 1)
-                    == LineNumberRulerView.changeMarkHoverWidth,
-                   "the transition does not end at the hovered width")
-        let midpoint = LineNumberRulerView.markWidth(progress: 0.5)
-        try expect(midpoint > LineNumberRulerView.changeMarkWidth
-                    && midpoint < LineNumberRulerView.changeMarkHoverWidth,
-                   "the midpoint is outside the two widths: \(midpoint)")
-        try expect(midpoint > (LineNumberRulerView.changeMarkWidth
-                                + LineNumberRulerView.changeMarkHoverWidth) / 2,
-                   "the easing is not front-loaded, so the ribbon lags the pointer")
-        try expect(LineNumberRulerView.markWidth(progress: -1)
-                    == LineNumberRulerView.changeMarkWidth
-                    && LineNumberRulerView.markWidth(progress: 2)
-                        == LineNumberRulerView.changeMarkHoverWidth,
-                   "progress outside 0...1 is not clamped")
-
-        ruler.hoverChangeForTesting(at: 2)
-        try expect(ruler.hoverIsAnimatingForTesting,
-                   "hovering did not start the transition")
-        // Let it run rather than reading a half-drawn frame.
-        ruler.settleHoverForTesting()
-        ruler.needsDisplay = true
-        ruler.displayIfNeeded()
-        let hovered = ruler.changeMarkBarsForTesting
-        try expect(hovered.contains { $0.width == LineNumberRulerView.changeMarkHoverWidth },
-                   "hovering a change did not widen its ribbon: \(hovered.map(\.width))")
-        try expect(hovered.contains { $0.width == LineNumberRulerView.changeMarkWidth },
-                   "every ribbon widened, not just the hovered one: \(hovered.map(\.width))")
-        ruler.hoverChangeForTesting(at: nil)
+                   "the ribbon reaches into the line numbers")
         // Four-digit line numbers still fit between the ribbon and the arrow.
         let numbers = LineNumberRulerView.numberColumn(digits: 4)
         let digits = ("8888" as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
@@ -10659,7 +10630,7 @@ enum RegressionTests {
         for line in [1, 9, 10, 99, 100, 1000, 99999] {
             let digits = Ruler.digits(forHighestLine: line)
             let column = Ruler.numberColumn(digits: digits)
-            try expect(column.start >= Ruler.dividerReach + Ruler.changeMarkHoverWidth,
+            try expect(column.start >= Ruler.dividerReach + Ruler.changeMarkWidth,
                        "line numbers run under the change ribbon at \(line) lines")
             try expect(column.end > column.start,
                        "the number column is empty at \(line) lines")
