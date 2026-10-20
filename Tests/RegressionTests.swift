@@ -191,6 +191,7 @@ enum RegressionTests {
         try testAllBranchesHistoryGraph()
         try testProjectHistoryIsTheCurrentBranch()
         try testProjectSwitchKeepsStateApart()
+        try testProjectSwitchKeepsItsTabs()
         try testFileHistoryBufferIsNotEvictedAsADiff()
         try testProjectHistoryMarksTheBranchBase()
         try testRefPillText()
@@ -9380,6 +9381,131 @@ enum RegressionTests {
     /// Switching projects must leave nothing of the project left behind on
     /// the one switched to — and what was still running in the project left
     /// behind must still land there.
+    /// Leaving a project keeps its tabs, and coming back puts them back: the
+    /// same tabs in the same order, the same one on screen, each caret where
+    /// it was — a diff and a file history among them. A file deleted meanwhile
+    /// stays closed, collapsing a project keeps its tabs too, a project closed
+    /// out of the window forgets them, and ⇧⌘T in another project does not
+    /// hand back a file that left with its own.
+    private static func testProjectSwitchKeepsItsTabs() throws {
+        let a = try temporaryDirectory("tabs-a"), b = try temporaryDirectory("tabs-b")
+        defer { for url in [a, b] { try? FileManager.default.removeItem(at: url) } }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: a)
+            try expect(result.code == 0, "tab fixture failed: \(args): \(result.err)")
+        }
+        let one = a.appendingPathComponent("one.txt"), two = a.appendingPathComponent("two.txt")
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Tabs Test"])
+        try git(["config", "user.email", "tabs@example.invalid"])
+        try Data("first line\nsecond line\n".utf8).write(to: one)
+        try Data("alpha\n".utf8).write(to: two)
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "start"])
+        try Data("first line\nchanged line\n".utf8).write(to: one)
+        let bFile = b.appendingPathComponent("b.txt")
+        try Data("b\n".utf8).write(to: bFile)
+        let resolvedA = a.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedB = b.standardizedFileURL.resolvingSymlinksInPath()
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        let editor = workspace.editor
+        func names() -> [String] {
+            editor.openURLs.map {
+                $0.isFileURL ? $0.lastPathComponent
+                    : DocumentStore.shared.document(for: $0).displayName ?? $0.absoluteString
+            }
+        }
+        workspace.openProject(a)
+        editor.open(url: one)
+        editor.open(url: two)
+        guard let pane = editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        pane.activate(index: 0)
+        pane.textViewForTesting.setSelectedRange(NSRange(location: 6, length: 0))
+        guard let entry = GitService.status(in: a).entries.first(where: { $0.path == "one.txt" }) else {
+            throw Failure(description: "the fixture has no change to diff")
+        }
+        // The diff is read off the main thread and lands as a tab after.
+        workspace.showDiff(for: entry, in: resolvedA)
+        let diffDeadline = Date().addingTimeInterval(5)
+        while editor.openURLs.count < 3, Date() < diffDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        var history = URLComponents()
+        history.scheme = DocumentStore.diffScheme
+        history.host = ""
+        history.path = "/" + a.path + "/.puzzle-diff-preview"
+        history.queryItems = [URLQueryItem(name: "path", value: "two.txt"),
+                              URLQueryItem(name: "commit", value: "file-history-table")]
+        guard let historyURL = history.url else { throw Failure(description: "no history URL") }
+        editor.showFileHistory(FileHistoryModel(tabURL: historyURL, repository: a,
+                                                relativePath: "two.txt",
+                                                displayName: "two.txt History", commits: []))
+        pane.activate(index: 1)
+        let before = editor.openURLs
+        try expect(before.count == 4 && editor.currentURL == two,
+                   "the fixture's tabs did not open: \(names())")
+
+        // Away: the other project starts empty, and ⇧⌘T there has nothing of
+        // this one's to give back.
+        workspace.openProject(b)
+        try expect(editor.openURLs.isEmpty,
+                   "the other project opened with this one's tabs: \(names())")
+        try expect(workspace.tabSessionProjectsForTesting == [resolvedA],
+                   "leaving did not keep the project's tabs: \(workspace.tabSessionProjectsForTesting)")
+        try expect(!editor.reopenLastClosedTab() && editor.openURLs.isEmpty,
+                   "⇧⌘T in the other project reopened a file that left with its own")
+        editor.open(url: bFile)
+
+        // Back: the same tabs, the same one on screen, the caret where it was,
+        // the history with its model.
+        workspace.activateProject(a)
+        try expect(editor.openURLs == before && editor.currentURL == two,
+                   "coming back did not restore the tabs: \(names()), on "
+                     + "\(String(describing: editor.currentURL?.lastPathComponent))")
+        try expect(workspace.tabSessionProjectsForTesting == [resolvedB],
+                   "the tabs put back are still kept, or the other project's were not: "
+                     + "\(workspace.tabSessionProjectsForTesting)")
+        try expect(pane.fileHistoryProvider?(historyURL)?.displayName == "two.txt History",
+                   "the file history came back without its model")
+        try expect(names().contains("two.txt History"),
+                   "the history tab lost its name: \(names())")
+        pane.activate(index: 0)
+        try expect(pane.caretLocationForTesting == 6,
+                   "the caret did not come back: \(pane.caretLocationForTesting)")
+
+        // The other project's tab came back too.
+        workspace.activateProject(b)
+        try expect(editor.openURLs.map(\.lastPathComponent) == ["b.txt"],
+                   "the other project's tab did not come back: \(names())")
+
+        // A file deleted while away stays closed; the rest come back, the one
+        // that was on screen on screen.
+        try FileManager.default.removeItem(at: two)
+        workspace.activateProject(a)
+        try expect(editor.openURLs == before.filter { $0 != two } && editor.currentURL == one,
+                   "a deleted file came back, or the rest did not: \(names())")
+
+        // Collapsing the project keeps its tabs as a switch does.
+        let kept = editor.openURLs
+        workspace.deactivateProject()
+        try expect(editor.openURLs.isEmpty, "collapsing left tabs open: \(names())")
+        workspace.activateProject(a)
+        try expect(editor.openURLs == kept, "expanding did not restore the tabs: \(names())")
+
+        // Closed out of the window, a project forgets its tabs.
+        workspace.activateProject(b)
+        workspace.closeProject(a)
+        try expect(!workspace.tabSessionProjectsForTesting.contains(resolvedA),
+                   "a closed project's tabs were kept")
+        workspace.openProject(a)
+        try expect(editor.openURLs.isEmpty,
+                   "a project closed and opened again brought its old tabs: \(names())")
+    }
+
     private static func testProjectSwitchKeepsStateApart() throws {
         var cleanup: [URL] = []
         defer { cleanup.forEach { try? FileManager.default.removeItem(at: $0) } }
@@ -9495,6 +9621,8 @@ enum RegressionTests {
         let tabA = try folder("switch-tab-a"), tabB = try folder("switch-tab-b")
         let held = tabA.appendingPathComponent("held.txt")
         try Data("on disk\n".utf8).write(to: held)
+        let beside = tabA.appendingPathComponent("beside.txt")
+        try Data("beside\n".utf8).write(to: beside)
         try Data("b".utf8).write(to: tabB.appendingPathComponent("b.txt"))
         let tabs = WorkspaceWindowController()
         defer { tabs.window?.close() }
@@ -9512,26 +9640,35 @@ enum RegressionTests {
                                               ofItemAtPath: held.path)
         _ = DocumentStore.shared.reloadExternalChanges(at: [held])
         try expect(document.hasDiskConflict, "the fixture did not make a disk conflict")
+        // Tabs close from the right, so the one beside it has closed by the
+        // time the held one refuses. It comes back with the project staying.
+        tabs.editor.open(url: beside)
         DocumentSaveCoordinator.conflictChoiceForTesting = .cancel
         defer { DocumentSaveCoordinator.conflictChoiceForTesting = nil }
         let resolvedA = tabA.standardizedFileURL.resolvingSymlinksInPath()
         let resolvedB = tabB.standardizedFileURL.resolvingSymlinksInPath()
+        func openNames() -> [String] { tabs.editor.openURLs.map(\.lastPathComponent) }
         tabs.activateProject(tabB)
-        try expect(tabs.projectURL == resolvedA
-                    && tabs.editor.openURLs.map(\.lastPathComponent) == ["held.txt"],
-                   "the switch went ahead past a tab that would not close: "
-                     + "\(String(describing: tabs.projectURL)) \(tabs.editor.openURLs)")
+        try expect(tabs.projectURL == resolvedA && openNames() == ["held.txt", "beside.txt"],
+                   "the switch went ahead past a tab that would not close, or lost the "
+                     + "tab beside it: \(String(describing: tabs.projectURL)) \(openNames())")
         tabs.closeProject(tabA)
-        try expect(tabs.projects.contains(resolvedA) && tabs.projectURL == resolvedA,
-                   "closing the project went ahead past a tab that would not close")
+        try expect(tabs.projects.contains(resolvedA) && tabs.projectURL == resolvedA
+                    && openNames() == ["held.txt", "beside.txt"],
+                   "closing the project went ahead past a tab that would not close: "
+                     + "\(openNames())")
         tabs.deactivateProject()
-        try expect(tabs.projectURL == resolvedA,
-                   "collapsing the project went ahead past a tab that would not close")
-        // Answered, the switch goes.
+        try expect(tabs.projectURL == resolvedA && openNames() == ["held.txt", "beside.txt"],
+                   "collapsing the project went ahead past a tab that would not close: "
+                     + "\(openNames())")
+        // Answered, the switch goes — and coming back brings both tabs.
         DocumentSaveCoordinator.conflictChoiceForTesting = .reload
         tabs.activateProject(tabB)
         try expect(tabs.projectURL == resolvedB && tabs.editor.openURLs.isEmpty,
                    "once the tab closed, the switch still did not happen")
+        tabs.activateProject(tabA)
+        try expect(openNames() == ["held.txt", "beside.txt"],
+                   "the project's tabs did not come back after the switch: \(openNames())")
 
         // 4. The tree forgets the last project's colours with its root.
         let treeA = try folder("switch-tree-a"), treeB = try folder("switch-tree-b")

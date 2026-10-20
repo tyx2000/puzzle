@@ -287,7 +287,43 @@ final class EditorViewController: NSViewController {
     /// Every tab, as a project switch requires. False when one would not
     /// close — the user kept a file whose disk version changed under an edit.
     @discardableResult
-    func closeAllTabs() -> Bool { pane?.closeAllTabs() ?? true }
+    func closeAllTabs(reopenable: Bool = true) -> Bool {
+        pane?.closeAllTabs(reopenable: reopenable) ?? true
+    }
+
+    /// What a project switch keeps of the editor: the pane's tabs, and the
+    /// model behind each file-history tab among them. A diff tab is rebuilt
+    /// from its URL; a history tab's URL names no query to rebuild it from.
+    struct TabSession {
+        var pane = EditorPaneViewController.TabSession()
+        var histories: [URL: FileHistoryModel] = [:]
+        var isEmpty: Bool { pane.isEmpty }
+    }
+
+    func tabSession() -> TabSession {
+        guard let pane else { return TabSession() }
+        let session = pane.tabSession()
+        let open = Set(session.urls)
+        return TabSession(pane: session, histories: fileHistories.filter { open.contains($0.key) })
+    }
+
+    /// Put back the tabs a project had when the window left it. A file
+    /// deleted since stays closed; a diff reads Git again, so it shows the
+    /// change as it is now — what clicking its row again would show.
+    func restoreTabs(_ session: TabSession) {
+        guard let pane, !session.isEmpty else { return }
+        for (url, model) in session.histories where !pane.openURLs.contains(url) {
+            fileHistories[url] = model
+            DocumentStore.shared.setVirtualDocument(url: url, text: "",
+                                                    displayName: model.displayName,
+                                                    rebuildable: false)
+        }
+        pane.restore(session.pane) { url in
+            url.isFileURL ? FileManager.default.fileExists(atPath: url.path)
+                          : url.scheme == DocumentStore.diffScheme
+        }
+        updatePlaceholder()
+    }
 
     @discardableResult
     func reopenLastClosedTab() -> Bool {

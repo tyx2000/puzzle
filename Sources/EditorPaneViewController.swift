@@ -1246,13 +1246,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if lineIsActive { scheduleInlineBlame() }
     }
 
-    func close(index: Int) {
+    /// `reopenable` false leaves the file off ⇧⌘T's list: a project switch
+    /// closes tabs that come back with the project, not ones the user let go.
+    func close(index: Int, reopenable: Bool = true) {
         guard openURLs.indices.contains(index) else { return }
         let url = openURLs[index]
         guard confirmClose(urls: [url]) else { return }
         gitChangePopover?.close()
         openURLs.remove(at: index)
-        if url.isFileURL {
+        if url.isFileURL, reopenable {
             closedURLs.removeAll { $0 == url }
             closedURLs.append(url)
             if closedURLs.count > Self.reopenableTabs { closedURLs.removeFirst() }
@@ -1287,7 +1289,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     /// Close every tab, which is what switching projects does: the files of
-    /// the project being left have no place in the one being entered.
+    /// the project being left have no place in the one being entered. The
+    /// window keeps a `TabSession` of them to put back when it returns.
     ///
     /// Closing one at a time rather than in a batch, because a batch keeps an
     /// anchor tab open by design — and because this is the path that writes
@@ -1296,13 +1299,50 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// True once every tab has closed; false when one would not, which stops
     /// the rest from closing too.
     @discardableResult
-    func closeAllTabs() -> Bool {
+    func closeAllTabs(reopenable: Bool = true) -> Bool {
         while !openURLs.isEmpty {
             let before = openURLs.count
-            close(index: openURLs.count - 1)
+            close(index: openURLs.count - 1, reopenable: reopenable)
             guard openURLs.count < before else { return false }
         }
         return true
+    }
+
+    /// What a project switch keeps of this pane's tabs, to put back when the
+    /// window returns to that project: which tabs, in what order, the one on
+    /// screen, and each caret — what switching back to a tab restores. Folds,
+    /// find and Markdown's source view start afresh, as for a file just
+    /// opened; every per-tab state added here is one more thing a switch has
+    /// to carry, so only what a reader would miss is.
+    struct TabSession: Equatable {
+        var urls: [URL] = []
+        var activeURL: URL?
+        var selections: [URL: NSRange] = [:]
+        var isEmpty: Bool { urls.isEmpty }
+    }
+
+    func tabSession() -> TabSession {
+        if let url = currentURL { selections[url] = textView.selectedRange() }
+        let open = Set(openURLs)
+        return TabSession(urls: openURLs, activeURL: currentURL,
+                          selections: selections.filter { open.contains($0.key) })
+    }
+
+    /// Put a project's tabs back after the switch away emptied the pane.
+    /// `keep` drops a tab that cannot come back — a file deleted meanwhile.
+    /// Only the tab put on screen is activated: activating each in turn would
+    /// lay out and highlight every one of them on the way.
+    func restore(_ session: TabSession, keeping keep: (URL) -> Bool) {
+        let urls = session.urls.filter { !openURLs.contains($0) && keep($0) }
+        guard !urls.isEmpty else { return }
+        for url in urls {
+            openURLs.append(url)
+            closedURLs.removeAll { $0 == url }
+            if let selection = session.selections[url] { selections[url] = selection }
+            onTabOpened?(url)
+        }
+        activate(index: session.activeURL.flatMap { openURLs.firstIndex(of: $0) }
+                    ?? openURLs.count - 1)
     }
 
     /// Close every tab except `index`.

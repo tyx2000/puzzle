@@ -349,10 +349,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// Switch to a project this window already holds.
     ///
     /// The editor is emptied first: nothing of the previous project is carried
-    /// across, and nothing about it is remembered — coming back loads it as if
-    /// it had just been opened. That is deliberate; keeping per-project tab
-    /// state would mean a bundle of caret positions, folds and find state that
-    /// every future per-tab feature would have to remember to join.
+    /// across. Its tabs are kept, though — which files, the one on screen and
+    /// where each caret was — and put back when the window returns to it.
     ///
     /// A tab that will not close — a file changed on disk under an edit, and
     /// the user cancelled the question that asks which to keep — keeps the
@@ -362,9 +360,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func activateProject(_ url: URL) {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
         guard projects.contains(resolved) else { return }
-        if projectURL != resolved, !editor.closeAllTabs() { return }
+        if projectURL != resolved, !leaveProjectTabs() { return }
         loadProject(resolved)
+        if let session = tabSessions.removeValue(forKey: resolved) {
+            editor.restoreTabs(session)
+        }
     }
+
+    /// The tabs each project had open when this window last left it, put back
+    /// when it returns. Kept while the window lives; a project closed out of
+    /// the window takes its tabs with it.
+    private var tabSessions: [URL: EditorViewController.TabSession] = [:]
+
+    /// Empty the editor to leave the project on screen, keeping its tabs to
+    /// come back to. False when a tab would not close: the project stays, and
+    /// so do the tabs that had already closed — tabs close from the right, and
+    /// those were otherwise lost, not even on ⇧⌘T's list.
+    private func leaveProjectTabs() -> Bool {
+        let session = editor.tabSession()
+        guard editor.closeAllTabs(reopenable: false) else {
+            editor.restoreTabs(session)
+            return false
+        }
+        if let leaving = projectURL, projects.contains(leaving) {
+            tabSessions[leaving] = session.isEmpty ? nil : session
+        }
+        return true
+    }
+
+    var tabSessionProjectsForTesting: Set<URL> { Set(tabSessions.keys) }
 
     private func loadProject(_ url: URL) {
         // Where the repository root is and who commits from it are resolved
@@ -1323,9 +1347,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         guard let index = projects.firstIndex(of: resolved) else { return }
         let wasShowing = projectURL == resolved
         // The project on screen goes only once its tabs have: one that will
-        // not close keeps the project, and its row, where they are.
-        if wasShowing, !editor.closeAllTabs() { return }
+        // not close keeps the project, its row and its other tabs where they
+        // are.
+        if wasShowing {
+            let session = editor.tabSession()
+            guard editor.closeAllTabs() else {
+                editor.restoreTabs(session)
+                return
+            }
+        }
         projects.remove(at: index)
+        tabSessions[resolved] = nil
         defer { updateSidebarVisibility() }
         // A summary outliving its project was also a wrong one: the sweep reads
         // only projects with none, so the same folder added back later showed
@@ -1347,9 +1379,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     ///
     /// The window is then what it is before any project is opened — the start
     /// page, and the recent projects on it — except that the rows are still
-    /// there to come back to.
+    /// there to come back to, and the project's tabs with them.
     func deactivateProject() {
-        guard projectURL != nil, clearProject() else { return }
+        guard projectURL != nil, leaveProjectTabs(), clearProject() else { return }
         refreshProjectTabs()
     }
 
