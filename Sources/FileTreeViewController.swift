@@ -1129,6 +1129,30 @@ extension FileTreeViewController: NSOutlineViewDelegate {
         }
     }
 
+    /// Called whenever a row view is put on a row, reused ones included — the
+    /// one place a row's depth is sure to be current.
+    func outlineView(_ outlineView: NSOutlineView, didAdd rowView: NSTableRowView, forRow row: Int) {
+        (rowView as? TreeRowView)?.guideXs = guideXs(forRow: row)
+    }
+
+    /// Where each folder above `row` draws its chevron's centre, outermost
+    /// first: the folder's cell starts one indent further in per level, and
+    /// the chevron sits at a fixed place inside its cell.
+    private func guideXs(forRow row: Int) -> [CGFloat] {
+        let level = outlineView.level(forRow: row)
+        guard level > 0 else { return [] }
+        let indent = outlineView.indentationPerLevel
+        let origin = outlineView.frameOfCell(atColumn: 0, row: row).minX - CGFloat(level) * indent
+        let chevron = FileTreeRowLayout.disclosureX + FileTreeRowLayout.disclosureSize / 2
+        return (0..<level).map { origin + CGFloat($0) * indent + chevron }
+    }
+
+    /// The chevron's centre on a row, in the outline's coordinates.
+    func chevronCentreForTesting(row: Int) -> CGFloat {
+        outlineView.frameOfCell(atColumn: 0, row: row).minX
+            + FileTreeRowLayout.disclosureX + FileTreeRowLayout.disclosureSize / 2
+    }
+
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
         let id = NSUserInterfaceItemIdentifier("tree-row")
         let row = (outlineView.makeView(withIdentifier: id, owner: self) as? TreeRowView)
@@ -1360,6 +1384,36 @@ final class TreeRowView: FlatRowView {
     var isActiveFile = false
     var isHovered = false {
         didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    /// Indent guides: a line under the chevron of each folder the row sits
+    /// inside, so an open folder's contents hang from its arrow. Positions are
+    /// in the row's coordinates, the outline's.
+    var guideXs: [CGFloat] = [] {
+        didSet { if guideXs != oldValue { needsLayout = true } }
+    }
+    /// One thin flat view per guide: a layer colour like the row's own, so a
+    /// guide costs no bitmap, and it repaints with the theme like the row.
+    private var guides: [FlatView] = []
+    static var guideColour: NSColor { Theme.gutter.withAlphaComponent(0.5) }
+
+    override func layout() {
+        super.layout()
+        while guides.count < guideXs.count {
+            let guide = FlatView()
+            guide.fillColor = Self.guideColour
+            addSubview(guide, positioned: .below, relativeTo: nil)
+            guides.append(guide)
+        }
+        while guides.count > guideXs.count { guides.removeLast().removeFromSuperview() }
+        for (guide, x) in zip(guides, guideXs) {
+            guide.frame = NSRect(x: floor(x), y: 0, width: 1, height: bounds.height)
+        }
+    }
+
+    var guideFramesForTesting: [NSRect] {
+        layoutSubtreeIfNeeded()
+        return guides.map(\.frame)
     }
 
     // Selection is conveyed by active-file/hover state; keep rows flat.

@@ -156,6 +156,7 @@ enum RegressionTests {
         try testMinifiedJSONOpensFormatted()
         try testFileTreeSurvivesReentrantReload()
         try testActiveTreeRowStaysLitThroughReload()
+        try testTreeIndentGuides()
         try testFileTreeContextEditing()
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
@@ -6661,6 +6662,84 @@ enum RegressionTests {
             }
         }
         try expect(frames > 0, "the active row was never on screen")
+    }
+
+    /// An open folder's contents hang from its chevron: every row inside a
+    /// folder carries a thin line under the chevron of each folder it sits in,
+    /// so the lines run unbroken from the arrow to the folder's last row.
+    private static func testTreeIndentGuides() throws {
+        let directory = try temporaryDirectory("tree-guides")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outer = directory.appendingPathComponent("outer", isDirectory: true)
+        let inner = outer.appendingPathComponent("inner", isDirectory: true)
+        try FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+        try Data("x\n".utf8).write(to: inner.appendingPathComponent("deep.txt"))
+        try Data("x\n".utf8).write(to: outer.appendingPathComponent("middle.txt"))
+        try Data("x\n".utf8).write(to: directory.appendingPathComponent("top.txt"))
+
+        let tree = FileTreeViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = tree
+        window.setContentSize(NSSize(width: 340, height: 420))
+        defer { window.close() }
+        tree.setRoot(directory)
+        tree.view.layoutSubtreeIfNeeded()
+        func row(_ name: String) -> Int? {
+            (0..<tree.rowCountForTesting).first { tree.nodeForTesting(at: $0)?.name == name }
+        }
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            tree.view.layoutSubtreeIfNeeded()
+        }
+        func guides(_ name: String) throws -> [NSRect] {
+            guard let index = row(name),
+                  let view = tree.outlineViewForTesting.rowView(atRow: index, makeIfNecessary: true)
+                    as? TreeRowView else {
+                throw Failure(description: "no row for \(name)")
+            }
+            return view.guideFramesForTesting
+        }
+        guard let outerRow = row("outer") else { throw Failure(description: "no outer folder row") }
+        tree.expandRowForTesting(outerRow)
+        settle()
+        guard let innerRow = row("inner") else { throw Failure(description: "outer did not open") }
+        tree.expandRowForTesting(innerRow)
+        settle()
+        guard let outerAt = row("outer"), let innerAt = row("inner") else {
+            throw Failure(description: "the folders lost their rows")
+        }
+        let outerChevron = floor(tree.chevronCentreForTesting(row: outerAt))
+        let innerChevron = floor(tree.chevronCentreForTesting(row: innerAt))
+
+        // Nothing above the top level, and a folder's own row starts nothing.
+        let top = try guides("top.txt"), outerOwn = try guides("outer")
+        try expect(top.isEmpty && outerOwn.isEmpty, "a top-level row carries guides")
+        // One level in: the line under outer's chevron.
+        let middle = try guides("middle.txt")
+        try expect(middle.map(\.minX) == [outerChevron],
+                   "middle.txt's guide is not under outer's chevron: \(middle) vs \(outerChevron)")
+        // Two levels in: outer's line, then inner's.
+        let deep = try guides("deep.txt")
+        try expect(deep.map(\.minX) == [outerChevron, innerChevron],
+                   "deep.txt's guides are not under its folders' chevrons: \(deep)")
+        // Thin, and the row's whole height, so rows join into one line.
+        let height = Theme.treeRowHeight()
+        try expect((middle + deep).allSatisfy { $0.width == 1 && abs($0.height - height) < 0.5 },
+                   "a guide is not a 1pt line the height of its row: \(middle + deep)")
+        // The rows' text starts clear of the guides.
+        try expect(deep.allSatisfy { $0.maxX <= tree.chevronCentreForTesting(row: row("deep.txt")!) },
+                   "a guide runs into the row's own chevron column")
+
+        // Closed and opened again, reused rows still carry the right lines.
+        tree.outlineViewForTesting.collapseItem(tree.nodeForTesting(at: outerAt))
+        settle()
+        try expect(row("middle.txt") == nil, "outer did not close")
+        tree.expandRowForTesting(row("outer")!)
+        settle()
+        let reopened = try guides("middle.txt")
+        try expect(reopened.map(\.minX) == [outerChevron],
+                   "a reopened folder's rows lost their guide: \(reopened)")
     }
 
     private static func testFileTreeContextEditing() throws {
