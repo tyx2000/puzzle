@@ -675,6 +675,12 @@ final class CommitLineField: NSTextField, NSTextFieldDelegate {
     }
 
     var drawsPlaceholderForTesting: Bool { currentText.isEmpty }
+    /// Where the field editor sits, and the line the text is set on, both in
+    /// the field's coordinates — nil when nobody is typing.
+    var editorLineForTesting: (editor: NSRect, line: NSRect)? {
+        guard let editor = currentEditor(), let cell else { return nil }
+        return (editor.convert(editor.bounds, to: self), cell.titleRect(forBounds: bounds))
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard currentEditor() != nil, let shortcut = CommitShortcut(event) else {
@@ -747,7 +753,18 @@ final class CenteredTextFieldCell: NSTextFieldCell {
     }
 
     override func titleRect(forBounds rect: NSRect) -> NSRect {
-        let natural = super.titleRect(forBounds: rect)
+        centred(super.titleRect(forBounds: rect), in: rect)
+    }
+
+    /// What AppKit lays the field editor out in again when the field changes
+    /// size while it is being typed in — the box narrowing as Push gains its
+    /// count after a commit, or the divider being dragged. Left alone, that
+    /// put the caret at the top of the strip, above the text's line.
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        centred(super.drawingRect(forBounds: rect), in: rect)
+    }
+
+    private func centred(_ natural: NSRect, in rect: NSRect) -> NSRect {
         let height = min(natural.height, cellSize(forBounds: rect).height)
         return NSRect(x: natural.minX, y: natural.minY + ((natural.height - height) / 2).rounded(),
                       width: natural.width, height: height)

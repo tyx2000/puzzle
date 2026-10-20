@@ -2508,6 +2508,28 @@ enum RegressionTests {
                     && bar.pushButton.toolTip == ProjectChangesViewController.pushHint(ahead: 1),
                    "Push does not offer the commit just made: "
                      + "\(bar.pushButton.isEnabled) '\(bar.pushButton.badge)'")
+        // The count made Push wider and the message box narrower while it was
+        // still being typed in. AppKit lays the field editor out again for
+        // that, and it had put the caret at the top of the strip.
+        bar.layoutSubtreeIfNeeded()
+        if bar.field.currentEditor() == nil { window.makeFirstResponder(bar.field) }
+        func caretIsOnTheLine() -> Bool {
+            guard let placed = bar.field.editorLineForTesting else { return false }
+            return abs(placed.editor.minY - placed.line.minY) <= 0.5
+                && abs(placed.editor.height - placed.line.height) <= 0.5
+        }
+        try expect(caretIsOnTheLine(),
+                   "after the commit the caret left the message's line: "
+                     + "\(String(describing: bar.field.editorLineForTesting))")
+        // Dragging the column narrower while typing is the same resize.
+        let typingWidth = window.contentView?.bounds.width ?? 360
+        window.setContentSize(NSSize(width: typingWidth - 40, height: 260))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(caretIsOnTheLine(),
+                   "resizing the column while typing moved the caret off the line: "
+                     + "\(String(describing: bar.field.editorLineForTesting))")
+        window.setContentSize(NSSize(width: typingWidth, height: 260))
+        window.contentView?.layoutSubtreeIfNeeded()
         // ⇧⌘↩ through the real event path, typed into the field. A window
         // off screen is sent no keys at all, so this one is put up; whether
         // it is key or not, the shortcut must arrive.
