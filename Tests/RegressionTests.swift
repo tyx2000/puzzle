@@ -191,6 +191,7 @@ enum RegressionTests {
         try testAllBranchesHistoryGraph()
         try testProjectHistoryIsTheCurrentBranch()
         try testProjectSwitchKeepsStateApart()
+        try testFileHistoryBufferIsNotEvictedAsADiff()
         try testProjectHistoryMarksTheBranchBase()
         try testRefPillText()
         try testIgnoredFilesAreDimmed()
@@ -13404,6 +13405,50 @@ enum RegressionTests {
         let absolute = MarkdownLiveStyler.resolvedLinkURL("https://example.com/a",
                                                           relativeTo: document)
         try expect(absolute?.scheme == "https", "an absolute URL stopped resolving")
+    }
+
+    /// A file history's tab has the diff scheme but names no diff. Its buffer
+    /// was evicted with the diffs under the cache budget and "rebuilt" as
+    /// `git diff` of a commit called "file-history-table", taking that name
+    /// for its tab. It stays until its tab lets it go.
+    private static func testFileHistoryBufferIsNotEvictedAsADiff() throws {
+        let directory = try temporaryDirectory("history-buffer")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        WorkspaceWindowController.registerDiffContentProvider()
+        let store = DocumentStore.shared
+        let budget = store.maxCachedDocuments
+        defer { store.maxCachedDocuments = budget }
+        store.maxCachedDocuments = 1
+        var components = URLComponents()
+        components.scheme = DocumentStore.diffScheme
+        components.host = ""
+        components.path = "/" + directory.path + "/.puzzle-diff-preview"
+        components.queryItems = [URLQueryItem(name: "path", value: "a.txt"),
+                                 URLQueryItem(name: "commit", value: "file-history-table")]
+        guard let historyURL = components.url else { throw Failure(description: "no URL") }
+        let editor = EditorViewController()
+        _ = editor.view
+        editor.showFileHistory(FileHistoryModel(tabURL: historyURL, repository: directory,
+                                                relativePath: "a.txt",
+                                                displayName: "a.txt History", commits: []))
+        try expect(!store.isRebuildableForTesting(historyURL),
+                   "a history buffer is taken for one its URL can rebuild")
+        // Other files on screen, the history behind them, over budget.
+        for index in 0..<4 {
+            let file = directory.appendingPathComponent("f\(index).txt")
+            try Data("file \(index)\n".utf8).write(to: file)
+            editor.open(url: file)
+        }
+        store.releaseTransientMemory()
+        try expect(store.cachedDocument(for: historyURL)?.displayName == "a.txt History",
+                   "the history buffer was evicted or rebuilt as a diff: "
+                     + "\(String(describing: store.cachedDocument(for: historyURL)?.displayName))")
+        // Closed, it goes, and the URL is nothing special any more.
+        editor.activePaneForTesting?.close(index: 0)
+        try expect(store.cachedDocument(for: historyURL) == nil
+                    && store.isRebuildableForTesting(historyURL),
+                   "a closed history tab's buffer stayed, or its URL stayed marked")
+        _ = editor.closeAllTabs()
     }
 
     /// Diff buffers count against the same budget as any other. They used to be

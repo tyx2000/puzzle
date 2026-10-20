@@ -26,6 +26,7 @@ final class DocumentStore {
 
     /// Whether a buffer is currently held (tests / diagnostics).
     func documentIsCached(_ url: URL) -> Bool { docs[url] != nil }
+    func isRebuildableForTesting(_ url: URL) -> Bool { isRegenerable(url) }
     func cachedDocument(for url: URL) -> Document? { docs[url] }
 
     var cachedBytes: Int { docs.values.reduce(0) { $0 + $1.estimatedMemoryCost } }
@@ -170,13 +171,24 @@ final class DocumentStore {
     /// dropped, because there is nowhere to read it back from.
     var virtualContentProvider: ((URL) -> VirtualContent?)?
 
+    /// Synthetic buffers that only their owner can fill: a file history's tab,
+    /// whose URL has the diff scheme but names no diff. Dropped, it came back
+    /// as `git diff` of a commit called "file-history-table", and its tab took
+    /// that buffer's name.
+    private var unrebuildable: Set<URL> = []
+
     /// A synthetic buffer may be dropped only if it can be built again.
     private func isRegenerable(_ url: URL) -> Bool {
         url.scheme == Self.diffScheme && virtualContentProvider != nil
+            && !unrebuildable.contains(url)
     }
 
+    /// `rebuildable` false keeps the buffer until its tab lets it go: nothing
+    /// can read it back from its URL.
     @discardableResult
-    func setVirtualDocument(url: URL, text: String, displayName: String? = nil) -> Document {
+    func setVirtualDocument(url: URL, text: String, displayName: String? = nil,
+                            rebuildable: Bool = true) -> Document {
+        if rebuildable { unrebuildable.remove(url) } else { unrebuildable.insert(url) }
         if let existing = docs[url], existing.isVirtual {
             existing.replaceVirtualContent(text, displayName: displayName)
             touch(url)
@@ -207,6 +219,7 @@ final class DocumentStore {
         HighlightService.shared.cancelPending(for: url)
         docs.removeValue(forKey: url)
         order.removeAll { $0 == url }
+        unrebuildable.remove(url)
         let stillNeeded = Set(docs.values.compactMap { $0.languageSpec?.name })
         HighlightService.shared.evictUnused(keeping: stillNeeded)
     }

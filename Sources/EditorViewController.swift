@@ -316,7 +316,7 @@ final class EditorViewController: NSViewController {
         // A tiny virtual document gives the existing tab/document lifecycle a
         // stable identity; the pane replaces its text area with FileHistoryView.
         DocumentStore.shared.setVirtualDocument(
-            url: model.tabURL, text: "", displayName: model.displayName)
+            url: model.tabURL, text: "", displayName: model.displayName, rebuildable: false)
         open(url: model.tabURL, replacingContent: true)
     }
 
