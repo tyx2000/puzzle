@@ -179,6 +179,7 @@ enum RegressionTests {
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
         try testAyuDarkTheme()
+        try testThemeSetting()
         try testDiffHeaderStepsThroughChanges()
         try testGitLineChangeMarks()
         try testThemeIsReadyBeforeAnyView()
@@ -7258,9 +7259,12 @@ enum RegressionTests {
                    "the file tree kept AppKit's scroller")
     }
 
-    /// One palette, fixed: nothing follows the system appearance and no setting
-    /// selects anything else, so the tokens can be asserted outright.
+    /// The default palette, fixed for the run: nothing follows the system
+    /// appearance, and the tests never load a settings file before the palette
+    /// is first read, so its tokens can be asserted outright.
     private static func testAyuDarkTheme() throws {
+        try expect(Theme.palette.id == "ayu-dark",
+                   "the tests are not painting the default palette: \(Theme.palette.id)")
         // A colour is one value, not an appearance-dependent one: views cache
         // what they are built with, and a dynamic colour would resolve against
         // whatever appearance happened to be current when they drew.
@@ -7288,10 +7292,11 @@ enum RegressionTests {
         try expect(sameColor(Theme.syntaxType, hexColor(0x39bae6))
                     && sameColor(Theme.syntaxFunction, hexColor(0xffb454)),
                    "the syntax roles are not Ayu's")
-        // Settings no longer carry a theme, and a file that still names one is
-        // rewritten without it rather than quietly keeping a dead key.
-        try expect(!Settings.shared.documentedContentsForTesting.contains("\"theme\""),
-                   "the settings template still offers a theme")
+        // Strings and properties keep Ayu's green and red: their roles are
+        // new, the colours are not.
+        try expect(sameColor(Theme.syntaxString, Theme.green)
+                    && sameColor(Theme.syntaxProperty, Theme.red),
+                   "Ayu Dark's strings or properties changed colour")
         // The sidebar/editor split takes the colour directly…
         try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
                    "the split did not take its divider colour from the theme")
@@ -7305,6 +7310,82 @@ enum RegressionTests {
                               width: 1, height: 100),
                    "the divider overlay does not sit on the split position: "
                     + "\(handle.paintedDividerRectForTesting)")
+    }
+
+    /// settings.json's "theme" picks one of the palettes, listed above the
+    /// field with what each looks like; a name it does not know keeps the one
+    /// in effect. Every palette is complete by construction; these are the
+    /// things the compiler cannot check.
+    private static func testThemeSetting() throws {
+        let ids = ThemePalette.all.map(\.id)
+        try expect(ids == ["ayu-dark", "ayu-light", "github-light"] && ThemePalette.default.id == "ayu-dark",
+                   "the palettes on offer changed: \(ids)")
+        try expect(Set(ids).count == ids.count, "two palettes share an id")
+        try expect(ThemePalette.ayuDark.isDark && !ThemePalette.ayuLight.isDark
+                    && !ThemePalette.githubLight.isDark,
+                   "a palette asks AppKit for the wrong side")
+        // The way Zed writes a theme's name works too.
+        for (written, id) in [("ayu-light", "ayu-light"), ("Ayu Light", "ayu-light"),
+                              ("GITHUB_LIGHT", "github-light"), (" github light ", "github-light")] {
+            try expect(ThemePalette.named(written)?.id == id,
+                       "\"\(written)\" did not name \(id)")
+        }
+        try expect(ThemePalette.named("solarized") == nil, "an unknown name found a palette")
+
+        // Body text reads on every palette's code area and panel.
+        func contrast(_ a: UInt32, _ b: UInt32) -> Double {
+            func lum(_ v: UInt32) -> Double {
+                let channels = [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff].map { c -> Double in
+                    let x = Double(c) / 255
+                    return x <= 0.03928 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+                }
+                return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+            }
+            let (l1, l2) = (lum(a), lum(b))
+            return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+        }
+        for palette in ThemePalette.all {
+            for surface in [palette.editorBackground, palette.panelBackground] {
+                try expect(contrast(palette.foreground, surface) >= 4.5,
+                           "\(palette.id)'s text is too faint on its surface")
+            }
+        }
+
+        // The setting takes a known name and keeps the current one otherwise.
+        let settings = Settings.shared
+        let saved = settings.theme
+        defer { settings.theme = saved }
+        settings.apply(["theme": "GitHub Light"])
+        try expect(settings.theme == "github-light", "a theme name was not taken: \(settings.theme)")
+        settings.apply(["theme": "no-such-theme"])
+        try expect(settings.theme == "github-light", "an unknown theme replaced the current one")
+
+        // The file lists every value above the field, then the one in effect,
+        // and reads back as that value.
+        let written = settings.documentedContentsForTesting
+        let lines = written.components(separatedBy: "\n")
+        guard let field = lines.firstIndex(where: { $0.contains("\"theme\":") }) else {
+            throw Failure(description: "the settings file has no theme field")
+        }
+        try expect(lines[field].trimmingCharacters(in: .whitespaces) == "\"theme\": \"github-light\",",
+                   "the theme field does not hold the theme in effect: \(lines[field])")
+        for (offset, palette) in ThemePalette.all.reversed().enumerated() {
+            let line = lines[field - 1 - offset]
+            try expect(line.trimmingCharacters(in: .whitespaces).hasPrefix("//")
+                        && line.contains("\"\(palette.id)\"") && line.contains(palette.summary),
+                       "\(palette.id) is not listed above the field: \(line)")
+        }
+        let stripped = Settings.strippingComments(written)
+        guard let object = try? JSONSerialization.jsonObject(with: Data(stripped.utf8)) as? [String: Any] else {
+            throw Failure(description: "the documented settings are not JSON once comments go")
+        }
+        try expect(object["theme"] as? String == "github-light",
+                   "the written theme does not read back: \(String(describing: object["theme"]))")
+
+        // Strings and properties are painted through their roles.
+        try expect(sameColor(SyntaxHighlighter.color(for: "string"), Theme.syntaxString)
+                    && sameColor(SyntaxHighlighter.color(for: "property"), Theme.syntaxProperty),
+                   "strings or properties do not take their syntax roles")
     }
 
     private static func hexColor(_ value: UInt32) -> NSColor {

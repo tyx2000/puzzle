@@ -7,6 +7,10 @@ final class Settings {
     static let shared = Settings()
     static let didChange = Notification.Name("PuzzleSettingsDidChange")
 
+    /// The palette to paint, by `ThemePalette.id`. Read at launch: a change
+    /// saved while Puzzle runs takes effect when it next starts.
+    var theme = ThemePalette.default.id
+
     // Editor (buffer) font
     var fontFamily = "Monaco"
     var fontSize: CGFloat = 12
@@ -45,6 +49,14 @@ final class Settings {
             guard v == v.rounded(), abs(v) < 1e15 else { return String(format: "%g", Double(v)) }
             return String(Int(v))
         }
+        // The values the theme can take, listed above it: the id, padded to
+        // one column, then what it looks like.
+        let width = ThemePalette.all.map(\.id.count).max() ?? 0
+        let themes = ThemePalette.all.map { palette in
+            let quoted = "\"\(palette.id)\""
+            let padding = String(repeating: " ", count: width + 2 - quoted.count + 2)
+            return "  //   \(quoted)\(padding)\(palette.summary)"
+        }.joined(separator: "\n")
         return """
         {
           // ───────────────────────────────────────────────────────────────────────
@@ -52,6 +64,13 @@ final class Settings {
           // Every property below is listed with its current value.
           // `//` comments are allowed.
           // ───────────────────────────────────────────────────────────────────────
+
+          // ── Appearance ─────────────────────────────────────────────────────────
+
+          // Colour theme for the whole window and the code. Takes effect the next
+          // time Puzzle starts. One of:
+        \(themes)
+          "theme": "\(theme)",
 
           // ── Editor (buffer) text ───────────────────────────────────────────────
 
@@ -96,6 +115,7 @@ final class Settings {
     /// Keys we know about; used to detect a settings file written by an older
     /// build that predates some options.
     private static let knownKeys = [
+        "theme",
         "buffer_font_family", "buffer_font_size", "buffer_font_weight",
         "code_line_height",
         "tab_size", "show_inline_blame",
@@ -108,9 +128,6 @@ final class Settings {
         "buffer_line_height", "ui_line_height",
         "active_code_foreground", "active_code_background",
         "active_file_foreground", "active_file_background",
-        // The app paints one palette now, so a pinned theme has nothing to
-        // select; an existing settings.json is rewritten without it.
-        "theme",
     ]
 
     /// A file written by an earlier build won't contain options added since, so
@@ -212,6 +229,16 @@ final class Settings {
             // so they are rejected by the range checks rather than smuggled
             // past them.
             (json[key] as? NSNumber).map { CGFloat($0.doubleValue) }
+        }
+        // A name no palette has keeps the one in effect rather than falling
+        // back to the default: a typo should not repaint the window.
+        if let v = json["theme"] as? String {
+            if let palette = ThemePalette.named(v) {
+                theme = palette.id
+            } else {
+                FileHandle.standardError.write(Data(
+                    "puzzle: no theme named \"\(v)\"; keeping \(theme)\n".utf8))
+            }
         }
         if let v = json["buffer_font_family"] as? String, !v.isEmpty { fontFamily = v }
         if let v = number("buffer_font_size"), v >= 6, v <= 72 { fontSize = v }

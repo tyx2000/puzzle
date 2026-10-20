@@ -669,7 +669,7 @@ final class SyntaxHighlighter {
     private static var colorMap: [String: NSColor] { [
         "comment": Theme.comment,
         "keyword": Theme.syntaxKeyword,
-        "string": Theme.green,
+        "string": Theme.syntaxString,
         "string.escape": Theme.cyan,
         "string.special": Theme.cyan,
         "string.special.key": Theme.red,
@@ -684,7 +684,7 @@ final class SyntaxHighlighter {
         "function": Theme.syntaxFunction,
         "function.method": Theme.syntaxFunction,
         "function.builtin": Theme.syntaxFunction,
-        "property": Theme.red,
+        "property": Theme.syntaxProperty,
         "attribute": Theme.yellow,
         "label": Theme.red,
         "tag": Theme.red,
@@ -696,7 +696,7 @@ final class SyntaxHighlighter {
         "punctuation.delimiter": Theme.punct,
         "punctuation.special": Theme.cyan,
         "text.title": Theme.yellow,
-        "text.literal": Theme.green,
+        "text.literal": Theme.syntaxString,
         "text.uri": Theme.blue,
         "text.reference": Theme.blue,
         // HTML / CSS / Swift additions

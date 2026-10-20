@@ -1,11 +1,15 @@
 import AppKit
 
-/// Ayu Dark, ported from ayu-theme/vscode-ayu (MIT), and the only palette the
-/// app paints. Every colour is one fixed value: nothing here follows the system
-/// appearance and there is no theme setting, so a token means the same thing
-/// everywhere it is read and views may cache what they are built with.
-/// Font and exact row heights still come from settings.json.
+/// The colours the app paints, from the palette settings.json's "theme" names
+/// — Ayu Dark unless it names another (see `ThemePalette`). The palette is read
+/// once, at launch: every colour is one fixed value for the life of the
+/// process and nothing follows the system appearance, so a token means the
+/// same thing everywhere it is read and views may cache what they are built
+/// with. Font and exact row heights still come from settings.json.
 enum Theme {
+    /// The palette this run paints, chosen by the settings loaded at launch.
+    static let palette = ThemePalette.named(Settings.shared.theme) ?? .default
+
     /// Colours are stored, not computed: one NSColor per token for the life of
     /// the process, so a draw call never allocates one.
     private static func hex(_ v: UInt32) -> NSColor {
@@ -14,29 +18,28 @@ enum Theme {
                 blue: CGFloat(v & 0xff) / 255.0, alpha: 1.0)
     }
 
-    /// The palette is dark, so AppKit's own chrome — menus, text selection,
-    /// scrollers, sheets — has to be told as much, whatever the system is set
-    /// to.
+    /// AppKit's own chrome — menus, text selection, scrollers, sheets — takes
+    /// the palette's side, dark or light, whatever the system is set to.
     static func applyAppearance() {
-        NSApp?.appearance = NSAppearance(named: .darkAqua)
+        NSApp?.appearance = NSAppearance(named: palette.isDark ? .darkAqua : .aqua)
     }
 
     // Surfaces
-    static let editorBackground = hex(0x0d1017)
-    static let panelBackground = hex(0x0d1017)
-    static let barBackground = hex(0x0d1017)
-    static let activityBar = hex(0x0d1017)
-    /// Scrollbars. AppKit's dark knob is a fixed light grey, which these near
-    /// black surfaces turn into the brightest thing on screen.
-    static let scrollerKnob = hex(0x39404e)
-    static let scrollerSlot = hex(0x11151d)
-    static let border = hex(0x1b1f29)
-    static let selection = hex(0x193155)
-    static let lineHighlight = hex(0x232a36)
+    static let editorBackground = hex(palette.editorBackground)
+    static let panelBackground = hex(palette.panelBackground)
+    static let barBackground = hex(palette.barBackground)
+    static let activityBar = hex(palette.activityBar)
+    /// Scrollbars. AppKit's dark knob is a fixed light grey, which near-black
+    /// surfaces turn into the brightest thing on screen.
+    static let scrollerKnob = hex(palette.scrollerKnob)
+    static let scrollerSlot = hex(palette.scrollerSlot)
+    static let border = hex(palette.border)
+    static let selection = hex(palette.selection)
+    static let lineHighlight = hex(palette.lineHighlight)
     // The code area matches the panel, so the active tab cannot also match the
     // editor without vanishing into the tab strip: it keeps the surface one step
     // lighter, which is the only thing marking which tab is open.
-    static let activeTab = hex(0x161a24)
+    static let activeTab = hex(palette.activeTab)
     /// Behind whatever is selected in a strip of controls: the panel tab, the
     /// activity-bar button, the open file's tab. One token so the three read as
     /// the same state, and far enough from the bar behind them to be seen —
@@ -44,16 +47,16 @@ enum Theme {
     /// barely a shadow.
     /// Kept in the same family as `activeRow`, the tone the file tree already
     /// selects with, rather than a brighter one of its own.
-    static let selectedControl = hex(0x232a36)
-    static let selectedControlText = hex(0xe6e9ef)
-    static let inactiveTab = hex(0x0d1017)
-    static let hover = hex(0x1c212b)
+    static let selectedControl = hex(palette.selectedControl)
+    static let selectedControlText = hex(palette.selectedControlText)
+    static let inactiveTab = hex(palette.inactiveTab)
+    static let hover = hex(palette.hover)
     /// Every other row of a list read across — branches, commits — so the eye
     /// keeps its line over a wide row. A step off the panel, well short of
     /// `hover`, so a stripe is never mistaken for the row under the pointer.
-    static let stripedRow = hex(0x131721)
+    static let stripedRow = hex(palette.stripedRow)
     /// active file in the tree
-    static let activeRow = hex(0x232a36)
+    static let activeRow = hex(palette.activeRow)
     /// A match, wherever it is found, is underlined — never boxed and never
     /// washed. An outline steals a couple of points on every side of the text
     /// and a background competes with both the syntax colours over it and the
@@ -66,58 +69,63 @@ enum Theme {
     static let matchUnderlineOffset: CGFloat = 2
 
     // Text
-    static let foreground = hex(0xbfbdb6)
-    static let dimText = hex(0x5a6378)
-    static let gutter = hex(0x404758)
-    static let gutterActive = hex(0x5a6378)
-    static let cursor = hex(0xe6b450)
+    static let foreground = hex(palette.foreground)
+    static let dimText = hex(palette.dimText)
+    static let gutter = hex(palette.gutter)
+    static let gutterActive = hex(palette.gutterActive)
+    static let cursor = hex(palette.cursor)
     /// collapsed folder icon
-    static let folderClosed = hex(0x5a6378)
+    static let folderClosed = hex(palette.folderClosed)
 
     // Search / find input
-    static let inputBackground = hex(0x10141c)
-    static let inputBorder = hex(0x1a1f2a)
-    static let inputBorderFocused = hex(0x5a6378)
-    static let toggleActiveBackground = hex(0x232a36)
+    static let inputBackground = hex(palette.inputBackground)
+    static let inputBorder = hex(palette.inputBorder)
+    static let inputBorderFocused = hex(palette.inputBorderFocused)
+    static let toggleActiveBackground = hex(palette.toggleActiveBackground)
     // Git diff: Ayu's markup.inserted / markup.deleted, with backgrounds mixed
     // down to sit under code without drowning it.
-    static let diffAddedText = hex(0x70bf56)
-    static let diffRemovedText = hex(0xf26d78)
+    static let diffAddedText = hex(palette.diffAddedText)
+    static let diffRemovedText = hex(palette.diffRemovedText)
     /// A panel laid over the code — the gutter's diff — a step lighter than
     /// the code, so it reads as on top of it rather than part of it.
-    static let raisedSurface = hex(0x161b24)
+    static let raisedSurface = hex(palette.raisedSurface)
     /// That panel's edge: light enough to show against the code either side.
-    static let raisedEdge = hex(0x2d3442)
-    static let diffAddedBackground = hex(0x18251b)
-    static let diffRemovedBackground = hex(0x2a1a1d)
+    static let raisedEdge = hex(palette.raisedEdge)
+    static let diffAddedBackground = hex(palette.diffAddedBackground)
+    static let diffRemovedBackground = hex(palette.diffRemovedBackground)
     /// The words that changed inside a changed line: the line's colour, a
     /// third of the way from its band to its text.
-    static let diffAddedWordBackground = hex(0x375b30)
-    static let diffRemovedWordBackground = hex(0x70373d)
+    static let diffAddedWordBackground = hex(palette.diffAddedWordBackground)
+    static let diffRemovedWordBackground = hex(palette.diffRemovedWordBackground)
 
     // Accent hues. These name a *hue*: the panels use them for git status,
     // links and markers.
-    static let red = hex(0xf07178)
-    static let green = hex(0xaad94c)
-    static let yellow = hex(0xffb454)
-    /// Ayu's own orange — the hue it paints keywords in, named here as a hue
+    static let red = hex(palette.red)
+    static let green = hex(palette.green)
+    static let yellow = hex(palette.yellow)
+    /// The palette's orange — Ayu paints keywords in it — named here as a hue
     /// so a panel can ask for it without asking for "keyword".
-    static let orange = hex(0xff8f40)
-    static let blue = hex(0x39bae6)
-    static let purple = hex(0xd2a6ff)
+    static let orange = hex(palette.orange)
+    static let blue = hex(palette.blue)
+    static let purple = hex(palette.purple)
     /// Shared with Gift's graph: colours identify ancestry tracks, not status.
     static let gitGraphColors: [NSColor] = [blue, purple, green, yellow, red, orange]
-    static let cyan = hex(0x95e6cb)
-    static let comment = hex(0x5a6673)
-    static let punct = hex(0x8a8983)
+    static let cyan = hex(palette.cyan)
+    static let comment = hex(palette.comment)
+    static let punct = hex(palette.punct)
 
     // Syntax roles are named for the role, not the hue: Ayu paints types blue
     // and calls yellow, which is the reverse of most palettes, and code that
     // asked for `blue` would have to know that.
-    static let syntaxType = hex(0x39bae6)
-    static let syntaxFunction = hex(0xffb454)
-    static let syntaxKeyword = hex(0xff8f40)
-    static let syntaxConstant = hex(0xd2a6ff)
+    static let syntaxType = hex(palette.syntaxType)
+    static let syntaxFunction = hex(palette.syntaxFunction)
+    static let syntaxKeyword = hex(palette.syntaxKeyword)
+    static let syntaxConstant = hex(palette.syntaxConstant)
+    /// Strings and properties have roles of their own because not every
+    /// palette paints them in a hue: GitHub's strings are navy and its
+    /// properties blue, where Ayu's are its green and its red.
+    static let syntaxString = hex(palette.syntaxString)
+    static let syntaxProperty = hex(palette.syntaxProperty)
 
     // Font + exact row metrics come from settings.json.
 
