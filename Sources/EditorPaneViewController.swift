@@ -200,6 +200,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(documentReloadedFromDisk(_:)),
             name: Document.didReloadFromDisk, object: nil)
+        // Brackets are paired by the syntax tree once there is one for the
+        // text as it stands; until then, and for text with no grammar, they
+        // are scanned for.
+        textView.bracketPairFinder = { [weak self] caret in
+            self?.currentDocument.flatMap { HighlightService.shared.bracketPair(beside: caret, in: $0) }
+        }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(documentSyntaxTreeChanged(_:)),
+            name: Document.syntaxTreeDidChange, object: nil)
 
         scrollView = NSScrollView()
         PuzzleScroller.adopt(scrollView)
@@ -1816,6 +1825,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.updateCodeBlocks(document.codeBlocks, resetFolds: false)
         textView.updateJSXTagMatches(document.jsxTagMatches)
         keepingCaretInPlace { presentMarkdown(of: document) }
+    }
+
+    @objc private func documentSyntaxTreeChanged(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              document.url == currentURL else { return }
+        textView.refreshBracketMatches()
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {

@@ -13,6 +13,9 @@ struct SVGDiffSides: Equatable {
 
 final class Document {
     static let structureDidChange = Notification.Name("PuzzleDocumentStructureDidChange")
+    /// Posted when the syntax tree is built from the text as it now stands,
+    /// or stops being.
+    static let syntaxTreeDidChange = Notification.Name("PuzzleDocumentSyntaxTreeDidChange")
     static let didReloadFromDisk = Notification.Name("PuzzleDocumentDidReloadFromDisk")
 
     private enum SaveError: LocalizedError {
@@ -165,6 +168,20 @@ final class Document {
 
     /// Bumped by every edit to the characters.
     private(set) var textRevision = 0
+
+    /// The revision of the text the highlighter's syntax tree was last built
+    /// from; nil when it holds none for this buffer.
+    private(set) var syntaxTreeRevision: Int?
+    /// Whether the syntax tree describes the text as it stands — not as it
+    /// was before an edit the next parse has yet to catch up with.
+    var syntaxTreeIsCurrent: Bool { syntaxTreeRevision == textRevision }
+
+    func noteSyntaxTree(built: Bool) {
+        let revision = built ? textRevision : nil
+        guard revision != syntaxTreeRevision else { return }
+        syntaxTreeRevision = revision
+        NotificationCenter.default.post(name: Self.syntaxTreeDidChange, object: self)
+    }
 
     /// What of the buffer the highlighter has still to colour, in its offsets
     /// now: all of it to begin with, then whatever each edit touched, until a

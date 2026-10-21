@@ -127,6 +127,8 @@ enum RegressionTests {
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
         try testBracketMatchingAndDeleteLine()
+        try testBracketsPairedByTheSyntaxTree()
+        try testEditorPairsBracketsByTheTree()
         try testBracketMatchingReadsLittle()
         try testCommentToggleRules()
         try testToggleCommentInTheEditor()
@@ -540,6 +542,95 @@ enum RegressionTests {
     /// anything but a bracket there is no pair to find, and otherwise the text
     /// is read a chunk at a time: asking for one character at a time cost
     /// ~27ms a walk, twice a keystroke, in an 800 KB file.
+    /// Brackets are paired by the syntax tree where there is one. A bracket
+    /// in code is a token of its own there, and one in a string, a comment or
+    /// JSX text is only a character of it — which the scan, guessing from the
+    /// text alone, got wrong across languages: a `#` after a space began a
+    /// comment, an apostrophe a string, `//` a comment, so none of these
+    /// pairs was found.
+    private static func testBracketsPairedByTheSyntaxTree() throws {
+        func pair(_ ext: String, _ text: String, caretAfter marker: String) throws -> [NSRange] {
+            guard let spec = SyntaxHighlighter.spec(forExtension: ext),
+                  let definition = SyntaxHighlighter.definition(for: spec),
+                  let highlighter = SyntaxHighlighter(definition: definition), highlighter.isUsable else {
+                throw Failure(description: "no grammar for .\(ext)")
+            }
+            let storage = NSTextStorage(string: text)
+            guard highlighter.parse(text: text, owner: storage) != nil,
+                  let found = highlighter.bracketPair(
+                    beside: NSMaxRange((text as NSString).range(of: marker)), in: storage) else {
+                throw Failure(description: "no tree for .\(ext): \(text)")
+            }
+            return found
+        }
+        // Where the last character of each marker is.
+        func at(_ text: String, _ marker: String) -> NSRange {
+            NSRange(location: NSMaxRange((text as NSString).range(of: marker)) - 1, length: 1)
+        }
+        let paired: [(String, String, String, String, String)] = [
+            ("tsx", "<a>\n    #{item.name}\n</a>\n", "#{item.name}", "#{", "name}"),
+            ("tsx", "<p>\n  Don't {x}\n</p>\n", "{x}", "t {", "{x}"),
+            ("tsx", "<p>\n  see http://x {y}\n</p>\n", "{y}", "x {", "{y}"),
+            ("tsx", "const s = `${a}`;\n", "${", "${", "a}"),
+            ("tsx", "class A {\n  #count = [];\n}\n", "= [", "= [", "[]"),
+            ("css", "#header {\n  color: red;\n}\n", "#header {", "#header {", "\n}"),
+            ("swift", "let s = #selector(tap)\n", "#selector(", "#selector(", "tap)"),
+            ("swift", "if #available(iOS 15, *) {\n}\n", "#available(", "#available(", "*)"),
+            ("rs", "#[derive(Debug)]\nstruct A;\n", "#[", "#[", ")]"),
+            ("py", "y = (a // 2)\n", "y = (", "y = (", "2)"),
+            ("c", "#define SQ(x) ((x)*(x))\n", "SQ(", "SQ(", "SQ(x)"),
+        ]
+        for (ext, text, caret, opening, closing) in paired {
+            let found = try pair(ext, text, caretAfter: caret)
+            try expect(found == [at(text, opening), at(text, closing)],
+                       ".\(ext) did not pair the brackets beside the caret in \(text.debugDescription): \(found)")
+        }
+        // A bracket in a string or a comment is text, and pairs with nothing.
+        for (ext, text, caret) in [("tsx", "const s = \"(\";\nf()\n", "\"("),
+                                   ("tsx", "// (x\nf()\n", "// ("),
+                                   ("py", "s = '[' # [\n", "'[")] {
+            let found = try pair(ext, text, caretAfter: caret)
+            try expect(found.isEmpty, ".\(ext) paired a bracket in a string or comment: \(found)")
+        }
+    }
+
+    /// In the editor, the tree pairs the brackets once the text has been
+    /// parsed; text with no grammar is still scanned.
+    private static func testEditorPairsBracketsByTheTree() throws {
+        let root = try temporaryDirectory("tree-brackets")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let tsx = root.appendingPathComponent("Item.tsx"), txt = root.appendingPathComponent("notes.txt")
+        let jsx = "export const Item = () => (\n  <a>\n    #{item.name}\n  </a>\n);\n"
+        try Data(jsx.utf8).write(to: tsx)
+        try Data("call(a)\n".utf8).write(to: txt)
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        func caretAfter(_ marker: String, in url: URL) throws -> (PuzzleTextView, NSString) {
+            workspace.editor.open(url: url)
+            guard let pane = workspace.editor.activePaneForTesting else {
+                throw Failure(description: "the editor has no pane")
+            }
+            let text = pane.textViewForTesting, ns = text.string as NSString
+            let document = DocumentStore.shared.document(for: url)
+            let deadline = Date().addingTimeInterval(5)
+            while url.pathExtension == "tsx", !document.syntaxTreeIsCurrent, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            text.setSelectedRange(NSRange(location: NSMaxRange(ns.range(of: marker)), length: 0))
+            text.refreshBracketMatches()
+            return (text, ns)
+        }
+        let (code, codeText) = try caretAfter("#{item.name}", in: tsx)
+        let brace = codeText.range(of: "#{").location + 1
+        try expect(code.bracketMatchRanges == [NSRange(location: brace, length: 1),
+                                               NSRange(location: codeText.range(of: "name}").location + 4, length: 1)],
+                   "the editor did not pair #{…} in JSX text: \(code.bracketMatchRanges)")
+        let (plain, _) = try caretAfter("call(", in: txt)
+        try expect(plain.bracketMatchRanges == [NSRange(location: 4, length: 1), NSRange(location: 6, length: 1)],
+                   "text with no grammar is no longer scanned for brackets: \(plain.bracketMatchRanges)")
+    }
+
     private static func testBracketMatchingReadsLittle() throws {
         // Strays inside a string and a comment on every line, so a walk that
         // lost track of either across a chunk would pair the wrong brackets.

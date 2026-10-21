@@ -54,6 +54,7 @@ final class HighlightService {
         doc.refreshCodeBlocksIfEdited()
         // Generated diff buffers get the diff painter, not tree-sitter.
         if doc.isVirtual {
+            doc.noteSyntaxTree(built: false)
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
             doc.diffBands = DiffHighlighter.apply(to: storage)
@@ -99,6 +100,7 @@ final class HighlightService {
         }
         doc.updateJSXTagMatches(parsed.tagMatches)
         doc.updateMarkdownPresentation(MarkdownPresentation())
+        doc.noteSyntaxTree(built: true)
 
         let ranges = rangesToPaint(doc)
         passCountForTesting += 1
@@ -118,6 +120,7 @@ final class HighlightService {
         if let hl = cache[doc.languageSpec?.name ?? ""], hl.holdsTree(for: storage) {
             hl.discardParseTree()
         }
+        doc.noteSyntaxTree(built: false)
         doc.updateJSXTagMatches([])
         doc.updateMarkdownPresentation(MarkdownPresentation())
         // Should it become code that is coloured, all of it is to be.
@@ -162,6 +165,8 @@ final class HighlightService {
         // even when the newly parsed presentation is equal to the old one.
         doc.updateMarkdownPresentation(presentation, synchronize: true)
         doc.updateJSXTagMatches(tags)
+        // Markdown's brackets are prose and code blocks alike: scanned.
+        doc.noteSyntaxTree(built: false)
         doc.markHighlighted(full)
     }
 
@@ -259,6 +264,16 @@ final class HighlightService {
     }
 
     func isParsingDetachedForTesting(_ url: URL) -> Bool { detachedParses[url] != nil }
+
+    /// The bracket pair beside `caret` in `doc` as its syntax tree has it.
+    /// Nil when there is no tree for its text as it stands — no grammar, or
+    /// an edit the parse has not caught up with — and the text is to be
+    /// scanned instead.
+    func bracketPair(beside caret: Int, in doc: Document) -> [NSRange]? {
+        guard doc.syntaxTreeIsCurrent, let name = doc.languageSpec?.name,
+              let hl = cache[name] else { return nil }
+        return hl.bracketPair(beside: caret, in: doc.storage)
+    }
 
     /// Give each of `ranges` the attributes `runs` describe — the plain ones
     /// where no run is — writing only where the storage differs, so TextKit

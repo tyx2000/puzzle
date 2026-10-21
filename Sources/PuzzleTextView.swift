@@ -162,6 +162,9 @@ final class PuzzleTextView: NSTextView {
     var searchResultLineLocation: Int? { didSet { needsDisplay = true } }
 
     private(set) var bracketMatchRanges: [NSRange] = []
+    /// The bracket pair beside a caret as the syntax tree has it, when there
+    /// is a tree for the text as it stands; nil sends the text to be scanned.
+    var bracketPairFinder: ((Int) -> [NSRange]?)?
     private var jsxTagMatches: [JSXTagMatch] = []
     private(set) var activeJSXTagMatch: JSXTagMatch?
 
@@ -175,8 +178,9 @@ final class PuzzleTextView: NSTextView {
         let refreshed: [NSRange]
         let refreshedTag: JSXTagMatch?
         if selectedRanges.count == 1, selectedRange().length == 0 {
-            refreshed = BracketMatcher.ranges(
-                in: string as NSString, caret: selectedRange().location)
+            let caret = selectedRange().location
+            refreshed = bracketPairFinder?(caret)
+                ?? BracketMatcher.ranges(in: string as NSString, caret: caret)
             // A delimiter immediately beside the caret is more specific than
             // the JSX tag containing it (for example an attribute's `{...}`).
             refreshedTag = refreshed.isEmpty

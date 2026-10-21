@@ -324,6 +324,83 @@ final class SyntaxHighlighter {
         return tree.map { ($0, changed) }
     }
 
+    // MARK: Brackets
+
+    /// The bracket pair the syntax tree has beside `caret` — the character
+    /// before it, or failing that the one after — in UTF-16 offsets of the
+    /// text last parsed for `storage`. Nil when this holds no tree for it.
+    ///
+    /// A bracket in code is a token of its own, and its pair is the token
+    /// that closes it among the same node's children. A bracket in a string,
+    /// a comment or JSX text is only a character of that leaf: it has no
+    /// pair, and the empty answer is the tree's, not a failure to find one.
+    /// Guessing those from the text alone took `#{item.name}` in JSX text,
+    /// `#header {` in CSS and `#selector(` in Swift for comments.
+    func bracketPair(beside caret: Int, in storage: NSTextStorage) -> [NSRange]? {
+        guard holdsTree(for: storage), let tree = previousTree else { return nil }
+        let mapper: ByteMapper
+        if let previousMapper {
+            mapper = previousMapper
+        } else {
+            mapper = previousBytes.withUnsafeBufferPointer { ByteMapper(bytes: $0) }
+            previousMapper = mapper
+        }
+        let root = ts_tree_root_node(tree)
+        for offset in [caret - 1, caret] where offset >= 0 {
+            let byte = mapper.byte(forUTF16: offset)
+            guard byte < previousBytes.count, Self.brackets[previousBytes[byte]] != nil,
+                  let pair = Self.pair(of: byte, under: root) else { continue }
+            return pair.map { NSRange(location: mapper.utf16(atOrBefore: $0), length: 1) }
+        }
+        return []
+    }
+
+    /// Each bracket, and whether it opens a pair.
+    private static let brackets: [UInt8: Bool] = [
+        0x28: true, 0x5B: true, 0x7B: true, 0x29: false, 0x5D: false, 0x7D: false,
+    ]
+    private static let closer: [UInt8: UInt8] = [0x28: 0x29, 0x5B: 0x5D, 0x7B: 0x7D]
+
+    /// The bracket a token is: one of its own, or the last character of a
+    /// short one that opens like one — `${` in a template, `#{` in Ruby,
+    /// `\(` in a Swift string.
+    private static func bracket(of node: TSNode) -> (character: UInt8, opens: Bool)? {
+        guard !ts_node_is_null(node), !ts_node_is_named(node), !ts_node_is_missing(node),
+              let type = ts_node_type(node) else { return nil }
+        let text = Array(String(cString: type).utf8)
+        guard let last = text.last, let opens = brackets[last],
+              text.count == 1 || (opens && text.count <= 3) else { return nil }
+        return (last, opens)
+    }
+
+    /// The bytes of the pair the bracket token ending at `byte` belongs to,
+    /// found among its node's children; nil when the character there is no
+    /// bracket token, or has nothing to pair with.
+    private static func pair(of byte: Int, under root: TSNode) -> [Int]? {
+        let node = ts_node_descendant_for_byte_range(root, UInt32(byte), UInt32(byte + 1))
+        guard bracket(of: node) != nil, Int(ts_node_end_byte(node)) == byte + 1 else { return nil }
+        let parent = ts_node_parent(node)
+        guard !ts_node_is_null(parent) else { return nil }
+        // A cursor, not child(at:): a child found by its index is a walk
+        // from the first, and an array literal can have thousands.
+        var cursor = ts_tree_cursor_new(parent)
+        defer { ts_tree_cursor_delete(&cursor) }
+        guard ts_tree_cursor_goto_first_child(&cursor) else { return nil }
+        var open: [(byte: Int, character: UInt8)] = []
+        repeat {
+            let child = ts_tree_cursor_current_node(&cursor)
+            guard let found = bracket(of: child) else { continue }
+            let at = Int(ts_node_end_byte(child)) - 1
+            if found.opens {
+                open.append((at, found.character))
+            } else if let last = open.last, closer[last.character] == found.character {
+                open.removeLast()
+                if last.byte == byte || at == byte { return [last.byte, at] }
+            }
+        } while ts_tree_cursor_goto_next_sibling(&cursor)
+        return nil
+    }
+
     var treeDescriptionForTesting: String? {
         guard let previousTree, let string = ts_node_string(ts_tree_root_node(previousTree)) else { return nil }
         defer { TreeSitterAllocator.free(string) }
