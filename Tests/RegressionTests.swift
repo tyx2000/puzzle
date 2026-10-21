@@ -2813,9 +2813,10 @@ enum RegressionTests {
     }
 
     /// The active pair's line runs down its block's indent guide, not 3pt
-    /// beside it, where the two read as one line drawn twice — and still
-    /// wraps under the closing bracket, whether the bracket starts its line
-    /// or ends it.
+    /// beside it, where the two read as one line drawn twice. Both ends are
+    /// tinted the whole height of their line, and the line borders them from
+    /// within: the bottom of the opening end, the left and the bottom of a
+    /// closing end that starts its line, the bottom of one that ends it.
     private static func testActivePairRunsDownTheGuide() throws {
         let settings = Settings.shared
         let saved = settings.indentMarkers
@@ -2844,6 +2845,15 @@ enum RegressionTests {
                 throw Failure(description: "the fixture's pair has no contour: \(source)")
             }
             try expect(line[1].x == line[2].x, "the contour's vertical is not vertical: \(line)")
+            // The whole line's height: the same rows the guides are drawn in.
+            let rows = text.drawnReadingAidsForTesting.guides.map(\.height)
+            try expect(ends.allSatisfy { end in rows.contains { abs($0 - end.height) < 0.01 } },
+                       "an end's tint is not as tall as its line: \(ends) vs \(Set(rows))")
+            let inside = BracketScopeGeometry.lineWidth / 2
+            try expect(line[0].y == ends[0].maxY - inside && line[0].x == ends[0].maxX,
+                       "the line is not the opening end's bottom border: \(line[0]) \(ends[0])")
+            try expect(line[2].y == ends[1].maxY - inside && line[3].x == ends[1].maxX,
+                       "the line is not the closing end's bottom border: \(line[2]) \(ends[1])")
             return (line, text.drawnReadingAidsForTesting.guides, ends)
         }
         func guided(_ drawn: (line: [NSPoint], guides: [NSRect], ends: [NSRect]),
@@ -2860,16 +2870,17 @@ enum RegressionTests {
         try expect(block.line[1].x == text.indentGuideX(columns: 2) + 0.5,
                    "the line runs beside the block's guide, not down it: \(block.line[1].x) "
                     + "vs \(text.indentGuideX(columns: 2))")
-        try expect(block.line[2].y > block.ends[1].maxY && block.line[3].x >= block.ends[1].maxX - 0.5,
-                   "the line does not wrap under the closing bracket: \(block.line) \(block.ends[1])")
+        try expect(block.ends[1].minX == block.line[1].x - BracketScopeGeometry.lineWidth / 2,
+                   "the line is not the left border of a closing bracket that starts its line: "
+                    + "\(block.line[1]) \(block.ends[1])")
 
         let literal = try scope("  const options = {\n    retries: 3,\n    timeout: 10 };\n",
                                 opening: "= {", closing: "10 }")
         try expect(guided(literal, columns: 2), "no guide is drawn down the literal: \(literal.guides)")
         try expect(literal.line[1].x == text.indentGuideX(columns: 2) + 0.5,
                    "the line runs beside the literal's guide, not down it")
-        try expect(literal.line[2].y > literal.ends[1].maxY,
-                   "the line does not pass under a bracket that ends its line's content")
+        try expect(literal.ends[1].minX > literal.line[1].x + 3,
+                   "a closing bracket after its line's content was stretched back to the line")
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {

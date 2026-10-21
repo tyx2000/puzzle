@@ -6,6 +6,9 @@ import AppKit
 struct BracketScopeGeometry {
     let box: NSRect?
     let polyline: [NSPoint]
+    /// The line is laid half of this inside the ends' tints, so it borders
+    /// them from within.
+    static let lineWidth: CGFloat = 1.5
 
     /// The outline is anchored to the text, never to the viewport.
     ///
@@ -15,25 +18,30 @@ struct BracketScopeGeometry {
     /// those caps stayed behind at whatever height they were drawn: a single
     /// pair ended up looking like several, with stray ticks across the guide.
     ///
-    /// `guideX` is where the vertical runs: down the middle of the indent
-    /// guide of the shallower of the two lines, so the two are one line.
+    /// `opening` and `closing` are the two ends as tinted, each the whole
+    /// height of its line, and the line borders them from within: along the
+    /// bottom of the opening end, then down the left of the closing end and
+    /// along its bottom. `guideX` is where the vertical runs: down the middle
+    /// of the indent guide of the shallower of the two lines, so the two are
+    /// one line.
     static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
                      visibleRect: NSRect) -> BracketScopeGeometry {
+        let inside = lineWidth / 2
         // A pair on one visual row reads best as one compact enclosure. A
         // multiline pair uses the open-sided scope contour shown by editors
         // such as Zed: opening row -> indentation guide -> closing row.
         if abs(opening.midY - closing.midY) < 0.5 {
-            let union = opening.union(closing).insetBy(dx: -2, dy: -2)
+            let union = opening.union(closing).insetBy(dx: inside, dy: inside)
             return BracketScopeGeometry(box: union, polyline: [])
         }
 
-        let openingY = opening.maxY + 1
-        let closingY = closing.maxY + 1
+        let openingY = opening.maxY - inside
+        let closingY = closing.maxY - inside
         let polyline = [
-            NSPoint(x: opening.maxX + 2, y: openingY),
+            NSPoint(x: opening.maxX, y: openingY),
             NSPoint(x: guideX, y: openingY),
             NSPoint(x: guideX, y: closingY),
-            NSPoint(x: closing.maxX + 2, y: closingY),
+            NSPoint(x: closing.maxX, y: closingY),
         ]
 
         return BracketScopeGeometry(box: nil, polyline: polyline)
@@ -596,97 +604,70 @@ final class PuzzleTextView: NSTextView {
         path.stroke()
     }
 
-    private struct BracketGlyphGeometry {
-        let glyphBox: NSRect
-        /// Columns of indentation on the bracket's line, counted as the
-        /// indent guides count them.
-        let leadingColumns: Int
-    }
-
-    private func bracketGlyphGeometry(for range: NSRange) -> BracketGlyphGeometry? {
-        guard let layoutManager, let container = textContainer,
-              range.location >= 0,
-              NSMaxRange(range) <= (string as NSString).length,
-              foldingManager?.isCharacterHidden(at: range.location) != true else { return nil }
-
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: range, actualCharacterRange: nil)
-        guard glyphRange.length > 0 else { return nil }
-        let fragment = layoutManager.lineFragmentRect(
-            forGlyphAt: glyphRange.location, effectiveRange: nil)
-        let raw = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-        guard !raw.isEmpty else { return nil }
-
-        let inset = textContainerInset
-        let vertical = glyphBox(fragmentHeight: fragment.height)
-        let box = NSRect(x: raw.minX + inset.width,
-                         y: fragment.minY + vertical.top + inset.height,
-                         width: max(raw.width, 1), height: vertical.height)
-
+    /// Columns of indentation on the line holding `location`, counted as the
+    /// indent guides count them: a tab reaches the next stop.
+    private func leadingColumns(ofLineAt location: Int) -> Int {
         let source = string as NSString
-        let line = source.lineRange(for: NSRange(location: range.location, length: 0))
+        let line = source.lineRange(for: NSRange(location: min(location, source.length), length: 0))
         let tabSize = max(1, Settings.shared.tabSize)
         var columns = 0
-        for location in line.location..<min(range.location, NSMaxRange(line)) {
-            switch source.character(at: location) {
+        for at in line.location..<min(location, NSMaxRange(line)) {
+            switch source.character(at: at) {
             case 0x20: columns += 1
             case 0x09: columns += tabSize - columns % tabSize
-            default: return BracketGlyphGeometry(glyphBox: box, leadingColumns: columns)
+            default: return columns
             }
         }
-        return BracketGlyphGeometry(glyphBox: box, leadingColumns: columns)
-    }
-
-    /// The scope contour's vertical for a pair: down the middle of the indent
-    /// guide of the shallower line.
-    private func scopeGuideX(opening: BracketGlyphGeometry,
-                             closing: BracketGlyphGeometry) -> CGFloat {
-        indentGuideX(columns: min(opening.leadingColumns, closing.leadingColumns)) + 0.5
+        return columns
     }
 
     func bracketScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
-        guard bracketMatchRanges.count == 2,
-              let opening = bracketGlyphGeometry(for: bracketMatchRanges[0]),
-              let closing = bracketGlyphGeometry(for: bracketMatchRanges[1]) else { return nil }
-        return BracketScopeGeometry.make(
-            opening: opening.glyphBox, closing: closing.glyphBox,
-            guideX: scopeGuideX(opening: opening, closing: closing),
-            visibleRect: viewport ?? visibleRect)
-    }
-
-    private func jsxScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
-        guard let match = activeJSXTagMatch,
-              let openingAngle = bracketGlyphGeometry(for: match.openingAngleRange),
-              let closing = bracketGlyphGeometry(for: match.closingTerminatorRange) else {
-            return nil
-        }
-
-        let guideX = scopeGuideX(opening: openingAngle, closing: closing)
-        let visible = viewport ?? visibleRect
-
-        switch match.kind {
-        case .selfClosing:
-            // Match the literal `<` and final `>`; on multiple lines this
-            // wraps the attributes between them, including a standalone `/>`.
-            return BracketScopeGeometry.make(
-                opening: openingAngle.glyphBox, closing: closing.glyphBox,
-                guideX: guideX, visibleRect: visible)
-
-        case .paired:
-            guard let openingHead = bracketGlyphGeometry(
-                for: match.openingHeadRange) else { return nil }
-            // The paired-element contour owns the complete element, including
-            // multiline attributes. Its top edge therefore starts at `<Button`
-            // (or `<UI.Button`), never at the opening tag's final `>`.
-            return BracketScopeGeometry.make(
-                opening: openingHead.glyphBox, closing: closing.glyphBox,
-                guideX: guideX, visibleRect: visible)
-        }
+        guard bracketMatchRanges.count == 2 else { return nil }
+        return activeScope()?.geometry
     }
 
     private func activeScopeGeometry() -> BracketScopeGeometry? {
-        if !bracketMatchRanges.isEmpty { return bracketScopeGeometry() }
-        return jsxScopeGeometry()
+        activeScope()?.geometry
+    }
+
+    /// The active pair as drawn: its contour, and its ends' tints.
+    ///
+    /// The contour runs from the row holding the opening bracket — or a
+    /// component's `<Button`, never its opening tag's final `>` — to the row
+    /// holding the closing bracket, or a component's last `>`. A self-closing
+    /// component is both ends at once: from its first row to its last.
+    private func activeScope() -> (geometry: BracketScopeGeometry, tints: [NSRect])? {
+        let ends: [[NSRect]]
+        let openingAt: Int, closingAt: Int
+        if bracketMatchRanges.count == 2 {
+            ends = bracketMatchRanges.map(scopeEndRows)
+            (openingAt, closingAt) = (bracketMatchRanges[0].location, bracketMatchRanges[1].location)
+        } else if let match = activeJSXTagMatch {
+            ends = ([match.openingTagRange] + (match.closingTagRange.map { [$0] } ?? []))
+                .map(scopeEndRows)
+            (openingAt, closingAt) = (match.openingAngleRange.location,
+                                      match.closingTerminatorRange.location)
+        } else {
+            return nil
+        }
+        guard let opening = ends.first?.first, let closing = ends.last?.last else { return nil }
+        let guideX = indentGuideX(columns: min(leadingColumns(ofLineAt: openingAt),
+                                               leadingColumns(ofLineAt: closingAt))) + 0.5
+        let geometry = BracketScopeGeometry.make(opening: opening, closing: closing,
+                                                 guideX: guideX, visibleRect: visibleRect)
+        var tints = ends.flatMap { $0 }
+        // An end that starts its line stands in the guide's column: its tint
+        // starts where the line does, so the line is its left border too.
+        if geometry.box == nil {
+            let lineLeft = guideX - BracketScopeGeometry.lineWidth / 2
+            for (index, tint) in tints.enumerated()
+            where (tint.minY == opening.minY || tint.minY == closing.minY)
+                && abs(tint.minX - lineLeft) <= 3 {
+                tints[index] = NSRect(x: lineLeft, y: tint.minY,
+                                      width: tint.maxX - lineLeft, height: tint.height)
+            }
+        }
+        return (geometry, tints)
     }
 
     override func drawBackground(in rect: NSRect) {
@@ -1276,15 +1257,6 @@ final class PuzzleTextView: NSTextView {
             }
         }
         return rects
-    }
-
-    /// Vertical geometry of just the glyphs inside a line fragment. Search-match
-    /// decorations use this smaller box; row-level decorations use the complete
-    /// `code_line_height` fragment.
-    private func glyphBox(fragmentHeight: CGFloat) -> (top: CGFloat, height: CGFloat) {
-        let font = self.font ?? Theme.editorFont()
-        let height = font.ascender - font.descender
-        return ((fragmentHeight - height) / 2, height)
     }
 
     /// The line fragment the caret sits in, handling the trailing empty line —
@@ -2799,24 +2771,22 @@ final class PuzzleTextView: NSTextView {
 
     // MARK: - The active pair: its ends tinted, its line flowing
 
-    /// The two ends the line joins: the bracket pair, or a component's opening
-    /// and closing tags (one tag, for a self-closing component).
-    private var scopeEndRanges: [NSRange] {
-        if bracketMatchRanges.count == 2 { return bracketMatchRanges }
-        guard let match = activeJSXTagMatch else { return [] }
-        return [match.openingTagRange] + (match.closingTagRange.map { [$0] } ?? [])
+    /// Where the ends' tint goes: around each end's glyphs and the whole
+    /// height of its line, row by row — an opening tag whose attributes run
+    /// over several lines is tinted on each, from its first character, not
+    /// from the indentation before it.
+    func scopeEndTintRects() -> [NSRect] {
+        activeScope()?.tints ?? []
     }
 
-    /// Where the ends' tint goes: around each end's glyphs, row by row — an
-    /// opening tag whose attributes run over several lines is tinted on each,
-    /// from its first character, not from the indentation before it.
-    func scopeEndTintRects() -> [NSRect] {
+    /// One end's rows as tinted, before the line has a say.
+    private func scopeEndRows(_ range: NSRange) -> [NSRect] {
         guard let layoutManager, let container = textContainer else { return [] }
         let text = string as NSString
         let inset = textContainerInset
         var rects: [NSRect] = []
-        for range in scopeEndRanges where range.length > 0 && NSMaxRange(range) <= text.length {
-            guard foldingManager?.isCharacterHidden(at: range.location) != true else { continue }
+        if range.length > 0, NSMaxRange(range) <= text.length,
+           foldingManager?.isCharacterHidden(at: range.location) != true {
             let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, rowGlyphs, _ in
                 var part = layoutManager.characterRange(
@@ -2836,10 +2806,9 @@ final class PuzzleTextView: NSTextView {
                     forGlyphRange: layoutManager.glyphRange(forCharacterRange: part,
                                                             actualCharacterRange: nil),
                     in: container)
-                let vertical = self.glyphBox(fragmentHeight: fragment.height)
                 rects.append(NSRect(x: raw.minX + inset.width - 2,
-                                    y: fragment.minY + vertical.top + inset.height,
-                                    width: raw.width + 4, height: vertical.height))
+                                    y: fragment.minY + inset.height,
+                                    width: raw.width + 4, height: fragment.height))
             }
         }
         return rects
@@ -2962,7 +2931,7 @@ private final class ScopeFlowOverlay: NSView {
         // Square corners, square ends: the corners it draws are the corners
         // of the code it encloses.
         shape.fillColor = nil
-        shape.lineWidth = 1.5
+        shape.lineWidth = BracketScopeGeometry.lineWidth
         shape.lineCap = .butt
         shape.lineJoin = .miter
         shape.masksToBounds = true
