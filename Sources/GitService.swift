@@ -493,6 +493,23 @@ enum GitService {
         blob(object: "\(hash):\(repositoryRelativePath(path, in: directory))", in: directory)
     }
 
+    /// The last version Git holds of a change the working tree has deleted:
+    /// the index's copy while the deletion is unstaged — all there is of a
+    /// file added and then deleted — and HEAD's once `git rm` has staged it.
+    ///
+    /// `id` is that blob's object name, so a copy kept under it is never
+    /// another version's. Nil when Git holds no such version.
+    static func deletedVersion(of entry: Status.Entry,
+                               in directory: URL) -> (id: String, blob: BlobResult)? {
+        let path = repositoryRelativePath(entry.path, in: directory)
+        let object = entry.indexStatus == "D" ? "HEAD:\(path)" : ":\(path)"
+        let resolved = run(["rev-parse", "--verify", "--quiet", object], in: directory)
+        let id = resolved.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolved.code == 0, !id.isEmpty else { return nil }
+        // Read by its id: the index may move on between the two calls.
+        return (id, blob(object: id, in: directory))
+    }
+
     /// One Git object, read with a ceiling on it.
     ///
     /// The size is asked for first so an oversized blob is reported rather than

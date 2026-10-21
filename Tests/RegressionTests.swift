@@ -199,6 +199,7 @@ enum RegressionTests {
         try testProjectHistoryIsTheCurrentBranch()
         try testProjectSwitchKeepsStateApart()
         try testProjectSwitchKeepsItsTabs()
+        try testDeletedPicturePreviews()
         try testFileHistoryBufferIsNotEvictedAsADiff()
         try testProjectHistoryMarksTheBranchBase()
         try testRefPillText()
@@ -10108,6 +10109,115 @@ enum RegressionTests {
         workspace.openProject(a)
         try expect(editor.openURLs.isEmpty,
                    "a project closed and opened again brought its old tabs: \(names())")
+    }
+
+    /// A deleted picture opens as Git last had it. The working tree has
+    /// nothing left to preview, and a binary's diff says only "Binary files
+    /// differ" — which is all clicking one used to show.
+    private static func testDeletedPicturePreviews() throws {
+        let root = try temporaryDirectory("deleted-picture")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "deleted-picture fixture failed: \(args): \(result.err)")
+        }
+        func png(_ rgba: [UInt8]) throws -> Data {
+            guard let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8,
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 16, bitsPerPixel: 32),
+                  let pixels = bitmap.bitmapData else {
+                throw Failure(description: "no bitmap for the fixture")
+            }
+            for i in 0..<64 { pixels[i] = rgba[i % 4] }
+            guard let data = bitmap.representation(using: .png, properties: [:]) else {
+                throw Failure(description: "no PNG for the fixture")
+            }
+            return data
+        }
+        let committed = try png([255, 0, 0, 255]), staged = try png([0, 160, 0, 255])
+        try expect(committed != staged, "the fixture's two pictures are the same")
+        let assets = root.appendingPathComponent("assets")
+        try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+        for name in ["unstaged.png", "removed.png", "edited.png", "old.png"] {
+            try committed.write(to: assets.appendingPathComponent(name))
+        }
+        try Data("one\ntwo\n".utf8).write(to: root.appendingPathComponent("notes.txt"))
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Deleted Picture Test"])
+        try git(["config", "user.email", "deleted@example.invalid"])
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "start"])
+        try git(["rm", "-q", "assets/old.png"])
+        try git(["commit", "-q", "-m", "drop the old picture"])
+        // Deleted in the working tree only; staged with `git rm`; edited and
+        // staged, then deleted — the last version is the index's, not HEAD's.
+        try FileManager.default.removeItem(at: assets.appendingPathComponent("unstaged.png"))
+        try git(["rm", "-q", "assets/removed.png"])
+        try staged.write(to: assets.appendingPathComponent("edited.png"))
+        try git(["add", "assets/edited.png"])
+        try FileManager.default.removeItem(at: assets.appendingPathComponent("edited.png"))
+        try FileManager.default.removeItem(at: root.appendingPathComponent("notes.txt"))
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        guard let project = workspace.projectURL else {
+            throw Failure(description: "the fixture project did not open")
+        }
+        let editor = workspace.editor
+        let entries = GitService.status(in: project).entries
+        func entry(_ path: String, _ code: String) throws -> GitService.Status.Entry {
+            guard let entry = entries.first(where: { $0.path == path }), entry.code == code else {
+                throw Failure(description: "the fixture's \(path) is not \(code): \(entries)")
+            }
+            return entry
+        }
+        // Read off the main thread, the tab lands after.
+        func opened(_ name: String) -> URL? {
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                if let url = editor.currentURL, url.lastPathComponent == name { return url }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return nil
+        }
+        func expectPicture(_ name: String, _ expected: Data, _ what: String) throws {
+            guard let url = opened(name) else {
+                throw Failure(description: "\(what) opened no picture: \(String(describing: editor.currentURL))")
+            }
+            try expect(url.isFileURL && DocumentStore.shared.document(for: url).isImage,
+                       "\(what) did not open in the picture preview: \(url)")
+            try expect((try? Data(contentsOf: url)) == expected,
+                       "\(what) showed another version of the picture")
+        }
+
+        workspace.showDiff(for: try entry("assets/unstaged.png", " D"), in: project)
+        try expectPicture("unstaged.png", committed, "a picture deleted in the working tree")
+        workspace.showDiff(for: try entry("assets/removed.png", "D "), in: project)
+        try expectPicture("removed.png", committed, "a picture removed with git rm")
+        workspace.showDiff(for: try entry("assets/edited.png", "MD"), in: project)
+        try expectPicture("edited.png", staged, "a picture staged and then deleted")
+
+        guard let drop = GitService.log(in: project, limit: 1).first else {
+            throw Failure(description: "the fixture has no commit")
+        }
+        workspace.showCommitDiff(commit: drop,
+                                 file: GitService.CommitFile(status: "D", path: "assets/old.png"),
+                                 in: project)
+        try expectPicture("old.png", committed, "the commit that deleted a picture")
+
+        // Text keeps its diff: every line it had, as removed.
+        workspace.showDiff(for: try entry("notes.txt", " D"), in: project)
+        let deadline = Date().addingTimeInterval(5)
+        while editor.currentURL?.isFileURL != false, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard let diff = editor.currentURL, !diff.isFileURL else {
+            throw Failure(description: "a deleted text file opened no diff")
+        }
+        let text = DocumentStore.shared.document(for: diff).storage.string
+        try expect(text.contains("-one\n-two"), "a deleted text file's diff lost its lines: \(text)")
     }
 
     private static func testProjectSwitchKeepsStateApart() throws {

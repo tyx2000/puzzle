@@ -495,8 +495,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 editor.open(url: fileURL)
                 return
             }
-            // Deleted image: nothing on disk to show, fall through to the diff.
+            // Deleted: nothing on disk to show, so the preview shows the last
+            // version Git holds. Only when it holds none is it the diff, which
+            // for a picture says no more than "Binary files differ".
+            openGitVersion(in: directory, failureTitle: "Unable to open deleted file", read: {
+                guard let version = GitService.deletedVersion(of: entry, in: directory) else {
+                    return nil
+                }
+                return (version.blob, Self.commitBlobURL(repository: directory,
+                                                         commit: version.id, path: entry.path))
+            }, otherwise: { [weak self] in self?.showTextDiff(for: entry, in: directory) })
+            return
         }
+        showTextDiff(for: entry, in: directory)
+    }
+
+    private func showTextDiff(for entry: GitService.Status.Entry, in directory: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let text = GitService.diff(for: entry, in: directory)
             // A picture that is also source: the diff tab shows both versions
@@ -517,45 +531,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     /// Show how one file changed in a specific commit (History tab).
     func showCommitDiff(commit: GitService.Commit, file: GitService.CommitFile, in directory: URL) {
-        // For an image, show the picture as it looked in THAT commit: extract the
-        // blob to a temp file so the normal image preview can decode it.
-        if Self.isImage(file.path), file.status != "D" {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let blob = GitService.blob(inCommit: commit.shortHash,
-                                           path: file.path, in: directory)
-                guard case .data(let data) = blob, !data.isEmpty else {
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.projectURL == directory else { return }
-                        let alert = NSAlert()
-                        alert.messageText = "Unable to open history image"
-                        switch blob {
-                        case .tooLarge(let bytes):
-                            alert.informativeText = "The image is "
-                                + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
-                                + ", which exceeds Puzzle's preview limit."
-                        case .unavailable(let message):
-                            alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                        case .data:
-                            alert.informativeText = "The image blob is empty."
-                        }
-                        alert.runModal()
-                    }
-                    return
-                }
-                let temp = WorkspaceWindowController.commitBlobURL(
-                    repository: directory, commit: commit.shortHash, path: file.path)
-                do {
-                    try FileManager.default.createDirectory(
-                        at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try data.write(to: temp, options: .atomic)
-                } catch {
-                    return
-                }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.projectURL == directory else { return }
-                    self.editor.open(url: temp)
-                }
-            }
+        // For an image, show the picture as it looked in THAT commit — or, for
+        // the commit that deleted it, as the commit before left it.
+        if Self.isImage(file.path) {
+            let source = file.status == "D" ? commit.shortHash + "^" : commit.shortHash
+            openGitVersion(in: directory, failureTitle: "Unable to open history image", read: {
+                (GitService.blob(inCommit: source, path: file.path, in: directory),
+                 Self.commitBlobURL(repository: directory, commit: source, path: file.path))
+            })
             return
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -571,6 +554,57 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     url: url, text: content.text, displayName: content.displayName)
                 document.svgDiffSides = content.svgSides
                 self.editor.open(url: url, replacingContent: true)
+            }
+        }
+    }
+
+    /// Opens a version of a file that Git holds and the working tree does not
+    /// — a picture as an old commit had it, a deleted file as it last was — in
+    /// the preview the file tree gives. That preview reads files, so the blob
+    /// is written out to `temp` first.
+    ///
+    /// `read` runs off the main thread. Nil from it means Git holds no such
+    /// version, and `otherwise` runs instead.
+    private func openGitVersion(in directory: URL, failureTitle: String,
+                                read: @escaping () -> (blob: GitService.BlobResult, temp: URL)?,
+                                otherwise: @escaping () -> Void = {}) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let version = read() else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.projectURL == directory else { return }
+                    otherwise()
+                }
+                return
+            }
+            guard case .data(let data) = version.blob, !data.isEmpty else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.projectURL == directory else { return }
+                    let alert = NSAlert()
+                    alert.messageText = failureTitle
+                    switch version.blob {
+                    case .tooLarge(let bytes):
+                        alert.informativeText = "The file is "
+                            + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+                            + ", which exceeds Puzzle's preview limit."
+                    case .unavailable(let message):
+                        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    case .data:
+                        alert.informativeText = "Git holds it as an empty file."
+                    }
+                    alert.runModal()
+                }
+                return
+            }
+            do {
+                try FileManager.default.createDirectory(
+                    at: version.temp.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: version.temp, options: .atomic)
+            } catch {
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.projectURL == directory else { return }
+                self.editor.open(url: version.temp)
             }
         }
     }
@@ -666,6 +700,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// Preserve the repository path below the per-commit temp directory. Using
     /// only `lastPathComponent` made `assets/icon.png` collide with
     /// `docs/icon.png`, so opening one could show the other's cached image.
+    /// `commit` is whatever pins the contents: a commit, the one before it
+    /// (`abc1234^`), or a deleted file's blob id.
     static func commitBlobURL(repository: URL, commit: String, path: String) -> URL {
         let repositoryKey = Data(
             repository.standardizedFileURL.resolvingSymlinksInPath().path.utf8)
