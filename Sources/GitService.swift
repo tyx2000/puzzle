@@ -232,9 +232,13 @@ enum GitService {
         "stash", "switch", "update-index",
     ]
 
+    static func writesIndex(_ args: [String]) -> Bool {
+        subcommand(of: args).map(indexWriters.contains) ?? false
+    }
+
     /// The subcommand is the first argument that is not a global option. `-c`
     /// takes a value, so it is stepped over rather than mistaken for one.
-    static func writesIndex(_ args: [String]) -> Bool {
+    static func subcommand(of args: [String]) -> String? {
         var index = args.startIndex
         while index < args.endIndex {
             let argument = args[index]
@@ -246,9 +250,9 @@ enum GitService {
                 index = args.index(after: index)
                 continue
             }
-            return indexWriters.contains(argument)
+            return argument
         }
-        return false
+        return nil
     }
 
     /// Retry while the failure is nothing but someone else's lock. Trying again
@@ -303,6 +307,15 @@ enum GitService {
         // housekeeping is worth nothing here and collides with the staging
         // Puzzle does on every change.
         environment["GIT_OPTIONAL_LOCKS"] = "0"
+        // Every path Puzzle passes Git comes from Git itself or from the file
+        // tree — a status entry, a commit's file list, the open file — and is
+        // meant literally. Read as a pathspec, a name holding `*`, `?`, `[]` or
+        // a leading `:` matched other files: discarding `*.txt` reverted every
+        // `.txt` beside it, and its diff, its gutter marks and its history were
+        // theirs as well. `readsPathspecsLiterally` says which commands are
+        // left out and why; for those the variable is taken away, so that a
+        // `:(literal)` name means what it says whatever Puzzle was started with.
+        environment["GIT_LITERAL_PATHSPECS"] = Self.readsPathspecsLiterally(arguments) ? "1" : nil
         environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
         environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
         process.environment = environment
@@ -403,6 +416,46 @@ enum GitService {
     /// How long a call with a deadline waits, once Git itself has gone, for
     /// its readers to see the end of the pipes before returning what it has.
     static let readerGrace: TimeInterval = 2
+
+    // MARK: - File names, not patterns
+
+    /// Subcommands that raise rather than accept literal pathspecs ("pathspec
+    /// magic not supported by this command"). `check-ignore` is left to read
+    /// its input as patterns; nothing it decides can lose work — it only says
+    /// which staged additions an ignore rule covers, and the `rm` that acts on
+    /// its answer reads them literally.
+    static let literalPathspecRefusers: Set<String> = ["check-ignore"]
+
+    /// Subcommands that run the repository's hooks, themselves or through a
+    /// Git they start. A hook inherits the environment, and it is the user's
+    /// own script, written for Git's ordinary reading: told to read pathspecs
+    /// literally, a pre-commit hook that lints `git diff --cached -- '*.swift'`
+    /// finds nothing to lint and passes.
+    ///
+    /// Puzzle hands one of these a file name only in `discard`, whose
+    /// `restore` (it runs post-checkout) spells the literal reading into each
+    /// name with `literalPathspec`. A commit is limited to `.`, which reads the
+    /// same either way, and a checkout or a push names branches.
+    static let hookRunners: Set<String> = [
+        "am", "checkout", "cherry-pick", "commit", "merge", "pull", "push",
+        "rebase", "restore", "revert", "switch",
+    ]
+
+    /// Whether a Git process reads its pathspecs literally. `arguments` are
+    /// what `/usr/bin/env` is handed: `git` and Git's own arguments, perhaps
+    /// after a variable or two.
+    static func readsPathspecsLiterally(_ arguments: [String]) -> Bool {
+        let gitArguments = Array(arguments.drop { $0 != "git" }.dropFirst())
+        guard let subcommand = subcommand(of: gitArguments) else { return true }
+        return !literalPathspecRefusers.contains(subcommand)
+            && !hookRunners.contains(subcommand)
+    }
+
+    /// A file name as a pathspec that matches that file alone, for the
+    /// commands `hookRunners` keeps the environment's literal reading from.
+    static func literalPathspec(_ path: String) -> String {
+        ":(literal)" + path
+    }
 
     /// One Git read at a time for the work the UI starts on its own — the
     /// gutter baseline on every tab switch, and anything else driven by typing
@@ -1065,8 +1118,8 @@ enum GitService {
             if entry.code.contains("R"), let originalPath = entry.originalPath {
                 paths.append(originalPath)
             }
-            let result = run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + paths,
-                             in: directory)
+            let result = run(["restore", "--source=HEAD", "--staged", "--worktree", "--"]
+                             + paths.map(literalPathspec), in: directory)
             guard result.code == 0 else {
                 return RemoteResult(ok: false,
                                     message: result.err.isEmpty ? result.out : result.err)

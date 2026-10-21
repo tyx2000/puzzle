@@ -66,6 +66,7 @@ enum RegressionTests {
         try testFindSelectionNavigationAndTabIsolation()
         try testPanelAffordances()
         try testScopedStatusAndStaging()
+        try testFileNamesAreNotPatterns()
         try testGitIgnoreRefreshReconciliation()
         try testRemoteConfigurationAndPushSelection()
         try testGitRepositoryMonitor()
@@ -1566,6 +1567,144 @@ enum RegressionTests {
         try expect(cell.nameForTesting == "App.swift",
                    "the row does not show the file name: \(cell.nameForTesting)")
 
+    }
+
+    /// A file name is a name, not a pattern. Git reads the paths after `--`
+    /// as pathspecs, so a file called `*.txt` matched — and discarded — every
+    /// other `.txt` beside it, and its diff, its gutter marks and its history
+    /// were theirs as well. `--` only ends option parsing; what stops the
+    /// pattern is GIT_LITERAL_PATHSPECS.
+    private static func testFileNamesAreNotPatterns() throws {
+        let root = try temporaryDirectory("literal-pathspecs")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) -> String {
+            GitService.run(args, in: root).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = git(["init", "-q", "-b", "main"])
+        _ = git(["config", "user.name", "Puzzle Test"])
+        _ = git(["config", "user.email", "puzzle@example.invalid"])
+        // The user's hooks, which say whether they were handed the literal
+        // reading. Hooks run at the top of the working tree; naming their
+        // folder keeps a global `core.hooksPath` from taking them elsewhere.
+        _ = git(["config", "core.hooksPath", ".git/hooks"])
+        let hooksFolder = root.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksFolder,
+                                                withIntermediateDirectories: true)
+        for hook in ["pre-commit", "post-checkout"] {
+            let script = hooksFolder.appendingPathComponent(hook)
+            try Data("#!/bin/sh\necho \"\(hook) [$GIT_LITERAL_PATHSPECS]\" >> .git/hook-log\n".utf8)
+                .write(to: script)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: script.path)
+        }
+        // Names Git would otherwise read as patterns, beside the ordinary
+        // files they would match.
+        let patterns = ["*.txt", "?.txt", "[ab].txt", ":x.txt"]
+        let bystanders = ["important.txt", "a.txt", "b.txt"]
+        for name in patterns + bystanders {
+            try Data("committed\n".utf8).write(to: root.appendingPathComponent(name))
+        }
+        try expect(GitService.commit("fixture", in: root).code == 0, "fixture commit failed")
+        let fixture = git(["rev-parse", "HEAD"])
+        // A commit the patterns' own history has no part in.
+        for name in bystanders {
+            try Data("committed\nagain\n".utf8).write(to: root.appendingPathComponent(name))
+        }
+        try expect(GitService.commit("bystanders", in: root).code == 0,
+                   "bystanders commit failed")
+        func contents(_ name: String) -> String {
+            (try? String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)) ?? ""
+        }
+        func entry(_ name: String) throws -> GitService.Status.Entry {
+            guard let found = GitService.status(in: root).entries.first(where: { $0.path == name })
+            else { throw Failure(description: "\(name) is not listed as changed") }
+            return found
+        }
+        func editEverything() throws {
+            for edited in patterns + bystanders {
+                try Data("edited \(edited)\n".utf8).write(to: root.appendingPathComponent(edited))
+            }
+            _ = GitService.stageAll(in: root)
+        }
+        func diffedFiles(_ diff: String) -> [Substring] {
+            diff.split(separator: "\n").filter { $0.hasPrefix("diff --git") }
+        }
+
+        for name in patterns {
+            try editEverything()
+            let discarded = GitService.discard(try entry(name), in: root)
+            try expect(discarded.ok, "discarding “\(name)” failed: \(discarded.message)")
+            try expect(contents(name) == "committed\n",
+                       "discarding “\(name)” did not restore it")
+            let survivors = (patterns + bystanders).filter { $0 != name }
+            for other in survivors {
+                try expect(contents(other) == "edited \(other)\n",
+                           "discarding “\(name)” also reverted \(other): \(contents(other))")
+            }
+            // And nothing else was taken out of the index on the way.
+            let changed = Set(GitService.status(in: root).entries.map(\.path))
+            try expect(changed == Set(survivors),
+                       "the other files left the change list: \(changed)")
+            _ = git(["checkout", "HEAD", "--", "."])
+        }
+
+        for name in patterns {
+            try editEverything()
+            let file = root.appendingPathComponent(name)
+            // The diff belongs to the one file, not to everything its name matches.
+            let diffs = [GitService.diff(for: try entry(name), in: root),
+                         GitService.diff(forPath: name, in: root) ?? "",
+                         GitService.diff(inCommit: fixture, path: name, in: root)]
+            for diff in diffs {
+                let named = diffedFiles(diff)
+                try expect(named.count == 1 && named[0].contains(name),
+                           "a diff for “\(name)” covers \(named.count) files: \(named)")
+            }
+            // So do the gutter's marks: one changed line, not one per match.
+            let marks = GitLineChanges.changes(for: file, in: root)
+            try expect(marks.count == 1 && marks[0].kind == .modified
+                       && marks[0].added == ["edited \(name)"],
+                       "the gutter's marks for “\(name)” are not its one line: \(marks)")
+            let history = GitService.log(file: file, in: root).map(\.subject)
+            try expect(history == ["fixture"],
+                       "the history of “\(name)” is not its own: \(history)")
+            _ = git(["checkout", "HEAD", "--", "."])
+        }
+
+        // A new file whose name is a pattern leaves the index on its own. It
+        // is gone from disk already, so discarding it sends nothing to the Trash.
+        let fresh = "*.log"
+        try Data("new\n".utf8).write(to: root.appendingPathComponent(fresh))
+        try Data("other\n".utf8).write(to: root.appendingPathComponent("keep.log"))
+        _ = GitService.stageAll(in: root)
+        try FileManager.default.removeItem(at: root.appendingPathComponent(fresh))
+        let freshEntry = try entry(fresh)
+        try expect(GitService.discardRemovesFile(freshEntry, in: root),
+                   "a never-committed file was not recognised as one")
+        let removed = GitService.discard(freshEntry, in: root)
+        try expect(removed.ok, "discarding the new file failed: \(removed.message)")
+        let left = GitService.status(in: root).entries.map { "\($0.code) \($0.path)" }
+        try expect(left == ["A  keep.log"],
+                   "discarding “\(fresh)” took keep.log out of the index: \(left)")
+
+        // An ignore rule written for that one name unstages that one name.
+        try expect(GitService.commit("keep", in: root).code == 0, "keep commit failed")
+        try Data("new\n".utf8).write(to: root.appendingPathComponent(fresh))
+        _ = GitService.stageAll(in: root)
+        try Data("\\*.log\n".utf8).write(to: root.appendingPathComponent(".gitignore"))
+        _ = GitService.stageAll(in: root)
+        let staged = GitService.status(in: root).entries.map { "\($0.code) \($0.path)" }
+        try expect(staged == ["A  .gitignore"],
+                   "unstaging the ignored “\(fresh)” reached other files: \(staged)")
+
+        // Hooks are the user's own scripts, and read their patterns as
+        // patterns: a pre-commit hook that lints `-- '*.swift'` must still
+        // find the Swift files.
+        let hooks = contents(".git/hook-log")
+        try expect(hooks.contains("pre-commit") && hooks.contains("post-checkout"),
+                   "the hooks did not run: \(hooks)")
+        try expect(!hooks.contains("[1]"),
+                   "a hook was handed the literal reading:\n\(hooks)")
     }
 
     private static func testGitIgnoreRefreshReconciliation() throws {
