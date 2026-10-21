@@ -182,6 +182,11 @@ enum Theme {
     static let comment = token(\.comment)
     static let punct = token(\.punct)
 
+    /// The line between a matched pair runs from the first to the second, and
+    /// each end's tint is the line's colour where it is.
+    static let matchLineStart = token(\.matchLineStart)
+    static let matchLineEnd = token(\.matchLineEnd)
+
     // Syntax roles are named for the role, not the hue: Ayu paints types blue
     // and calls yellow, which is the reverse of most palettes, and code that
     // asked for `blue` would have to know that.

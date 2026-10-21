@@ -89,7 +89,7 @@ enum RegressionTests {
         try testEditorManualSave()
         try testInlineBlameStaysOnItsLine()
         try testReadingAids()
-        try testActivePairTintedAndFlowing()
+        try testActivePairTintedAndLined()
         try testActivePairRunsDownTheGuide()
         try testActivePairIsOneFlowingLine()
         try testCommitImagePathsDoNotCollide()
@@ -2697,13 +2697,10 @@ enum RegressionTests {
     }
 
     /// The active pair's two ends — brackets, or a component's opening and
-    /// closing tags — sit on a light wash of the line's red, and the line
-    /// between them flows from the opening end to the closing one, on a
-    /// shape layer the render server animates. With Reduce Motion it is a
-    /// still, solid line.
-    private static func testActivePairTintedAndFlowing() throws {
-        defer { PuzzleTextView.reducesMotionOverride = nil }
-        PuzzleTextView.reducesMotionOverride = false
+    /// closing tags — sit on a light wash, and the line between them is solid
+    /// and runs through the theme's two line hues, from the opening end to
+    /// the closing one. Each end's wash is the line's colour where it stands.
+    private static func testActivePairTintedAndLined() throws {
         let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -2722,7 +2719,7 @@ enum RegressionTests {
                 .offsetBy(dx: text.textContainerInset.width, dy: text.textContainerInset.height)
         }
 
-        // A bracket pair over three lines: both brackets tinted, the line flowing.
+        // A bracket pair over three lines: both brackets tinted, the line drawn.
         text.string = "call(\n    value\n)"
         text.setSelectedRange(NSRange(location: 5, length: 0))
         text.refreshBracketMatches()
@@ -2731,34 +2728,50 @@ enum RegressionTests {
         try expect(tints.count == 2 && tints[0].contains(NSPoint(x: glyph(4).midX, y: glyph(4).midY))
                     && tints[1].contains(NSPoint(x: glyph(16).midX, y: glyph(16).midY)),
                    "the brackets are not the two tinted ends: \(tints)")
-        var flow = text.scopeFlowForTesting
+        let line = text.scopeLineForTesting
         guard let geometry = text.bracketScopeGeometry() else {
             throw Failure(description: "the fixture has no bracket scope")
         }
         let bounds = geometry.path.boundingBoxOfPath
-        try expect(flow.visible && flow.dashed && flow.flowing,
-                   "the pair's line is not a flowing dashed line: \(flow)")
+        try expect(line.visible, "the pair's line is not drawn")
         // Round the opening bracket's four corners, into and out of the
         // guide, and round three of the closing bracket's: it stands in the
         // guide's column, and the guide is its fourth side.
-        try expect(flow.curves == 9 && flow.roundEnds,
-                   "the line does not round every turn and its ends: \(flow)")
-        try expect(flow.path.insetBy(dx: -0.5, dy: -0.5).contains(bounds)
-                    && bounds.insetBy(dx: -0.5, dy: -0.5).contains(flow.path),
-                   "the flowing line is not where the pair's outline goes: \(flow.path) vs \(bounds)")
-
-        // Reduce Motion: the same line, still and solid.
-        PuzzleTextView.reducesMotionOverride = true
-        flow = text.scopeFlowForTesting
-        try expect(flow.visible && !flow.dashed && !flow.flowing,
-                   "with Reduce Motion the line still moves: \(flow)")
-        PuzzleTextView.reducesMotionOverride = false
+        try expect(line.curves == 9 && line.roundEnds,
+                   "the line does not round every turn and its ends: \(line)")
+        try expect(line.path.insetBy(dx: -0.5, dy: -0.5).contains(bounds)
+                    && bounds.insetBy(dx: -0.5, dy: -0.5).contains(line.path),
+                   "the line is not where the pair's outline goes: \(line.path) vs \(bounds)")
+        // The theme's two hues, from the top of the line to its bottom.
+        func same(_ a: CGColor?, _ b: NSColor) -> Bool {
+            guard let a, let a = NSColor(cgColor: a)?.usingColorSpace(.sRGB),
+                  let b = b.usingColorSpace(.sRGB) else { return false }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent) < 0.01
+        }
+        try expect(line.colours.count == 2 && same(line.colours.first, Theme.matchLineStart)
+                    && same(line.colours.last, Theme.matchLineEnd),
+                   "the line is not coloured in the theme's two line hues: \(line.colours)")
+        try expect(abs(line.from.y - bounds.minY) < 0.5 && abs(line.to.y - bounds.maxY) < 0.5,
+                   "the line's colour does not run from its top to its bottom: \(line.from) \(line.to)")
+        // Each end's wash is the line's colour there: the opening's nearer
+        // the first hue, the closing's nearer the second.
+        func distance(_ a: NSColor, _ b: NSColor) -> CGFloat {
+            guard let a = a.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return .infinity }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent)
+        }
+        let washes = text.drawnScopeTintColoursForTesting
+        try expect(washes.count == 2
+                    && distance(washes[0], Theme.matchLineStart) < distance(washes[0], Theme.matchLineEnd)
+                    && distance(washes[1], Theme.matchLineEnd) < distance(washes[1], Theme.matchLineStart),
+                   "the ends' washes are not the line's colour where they stand: \(washes)")
 
         // Off the pair, nothing of it is left.
         text.setSelectedRange(NSRange(location: 8, length: 0))
         text.refreshBracketMatches()
         settle()
-        try expect(!text.scopeFlowForTesting.visible && text.drawnScopeTintsForTesting.isEmpty,
+        try expect(!text.scopeLineForTesting.visible && text.drawnScopeTintsForTesting.isEmpty,
                    "the line or the tint outlived the pair")
 
         // A component whose opening tag runs over two lines: each row of it is
@@ -2790,7 +2803,7 @@ enum RegressionTests {
                                                     y: glyph(closing.location).midY)),
                        "the closing tag is not tinted")
         }
-        try expect(text.scopeFlowForTesting.visible, "a component's line does not flow")
+        try expect(text.scopeLineForTesting.visible, "a component's line is not drawn")
 
         // On the caret's own row the active line's band does not hide the tint.
         text.showsCurrentLineBand = true
@@ -8071,6 +8084,17 @@ enum RegressionTests {
         }
         // Comments stay a step back from the code they annotate.
         try expect(minimum.comment < minimum.code, "comments are asked to read as loud as code")
+        // The line between a matched pair marks the code, it is not code: every
+        // palette's two line hues are seen against its code area, and stay
+        // well under what the code itself is read at. At the code's own
+        // contrast the line shouted over what it marked.
+        for palette in ThemePalette.all {
+            for (end, hue) in [("first", palette.matchLineStart), ("second", palette.matchLineEnd)] {
+                let ratio = contrast(hue, palette.editorBackground)
+                try expect(ratio >= 1.8 && ratio <= 3.5,
+                           "\(palette.id)'s \(end) line hue reads at \(String(format: "%.2f", ratio)):1")
+            }
+        }
     }
 
     /// A theme saved into settings.json is painted at once. Views built before

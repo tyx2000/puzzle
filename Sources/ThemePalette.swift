@@ -74,6 +74,27 @@ struct ThemePalette {
     let syntaxString: UInt32
     let syntaxProperty: UInt32
 
+    // The active pair's line
+    /// The two hues the line between a matched pair runs through, from its
+    /// opening end to its closing one: two of the palette's own, its accent
+    /// and a neighbour, so the line reads as the theme's.
+    let matchLine: (start: KeyPath<ThemePalette, UInt32>, end: KeyPath<ThemePalette, UInt32>)
+    var matchLineStart: UInt32 { softened(self[keyPath: matchLine.start]) }
+    var matchLineEnd: UInt32 { softened(self[keyPath: matchLine.end]) }
+    /// How far the line's hues are taken toward the code area. At full
+    /// strength they are the colours code is read in, and a line round a
+    /// scope that loud shouts over the code it marks.
+    static let matchLineSoftness = 0.5
+
+    private func softened(_ hue: UInt32) -> UInt32 {
+        func channel(_ value: UInt32, _ shift: UInt32) -> Double { Double((value >> shift) & 0xff) }
+        return [16, 8, 0].reduce(UInt32(0)) { mixed, shift in
+            let blend = channel(hue, UInt32(shift)) * (1 - Self.matchLineSoftness)
+                + channel(editorBackground, UInt32(shift)) * Self.matchLineSoftness
+            return mixed | (UInt32(blend.rounded()) << UInt32(shift))
+        }
+    }
+
     /// What every light palette's code reads at against its code area, as WCAG
     /// contrast ratios. Thin dark strokes on white read lighter than the same
     /// contrast does on black, and code is read for hours: syntax colours meet
@@ -114,7 +135,8 @@ extension ThemePalette {
         green: 0xaad94c, yellow: 0xffb454, orange: 0xff8f40, blue: 0x39bae6, purple: 0xd2a6ff,
         cyan: 0x95e6cb, comment: 0x5a6673, punct: 0x8a8983, syntaxType: 0x39bae6,
         syntaxFunction: 0xffb454, syntaxKeyword: 0xff8f40, syntaxConstant: 0xd2a6ff,
-        syntaxString: 0xaad94c, syntaxProperty: 0xf07178)
+        syntaxString: 0xaad94c, syntaxProperty: 0xf07178,
+        matchLine: (start: \.cursor, end: \.orange))
 
     /// Ayu Light, from the same source: Ayu's hues on a near-white surface, flat
     /// like Ayu Dark — the panel is the code area's colour. Ayu's own light
@@ -136,7 +158,8 @@ extension ThemePalette {
         green: 0x465f00, yellow: 0x774e04, orange: 0x894303, blue: 0x035b8f, purple: 0x6d4592,
         cyan: 0x03634a, comment: 0x656669, punct: 0x53575c, syntaxType: 0x035b8f,
         syntaxFunction: 0x774e04, syntaxKeyword: 0x894303, syntaxConstant: 0x6d4592,
-        syntaxString: 0x465f00, syntaxProperty: 0xa22831)
+        syntaxString: 0x465f00, syntaxProperty: 0xa22831,
+        matchLine: (start: \.orange, end: \.red))
 
     /// GitHub Light, after GitHub's Primer colours: a white code area on a pale
     /// grey panel. Primer's hues are deepened where they fell short of the
@@ -157,7 +180,8 @@ extension ThemePalette {
         green: 0x006726, yellow: 0x785002, orange: 0x963c03, blue: 0x0254b4, purple: 0x6c35c4,
         cyan: 0x05636a, comment: 0x606972, punct: 0x515a64, syntaxType: 0x953800,
         syntaxFunction: 0x6c35c4, syntaxKeyword: 0xb5001d, syntaxConstant: 0x0550ae,
-        syntaxString: 0x0a3069, syntaxProperty: 0x0550ae)
+        syntaxString: 0x0a3069, syntaxProperty: 0x0550ae,
+        matchLine: (start: \.blue, end: \.purple))
 
     /// Material Teal: Material Design's colours on a faint mint surface, teal
     /// keywords and a teal caret. Original to Puzzle, not a port.
@@ -177,7 +201,8 @@ extension ThemePalette {
         green: 0x016613, yellow: 0x7a4e01, orange: 0x854700, blue: 0x00599e, purple: 0x8c22a8,
         cyan: 0x03606b, comment: 0x576b71, punct: 0x405c69, syntaxType: 0x5e35b1,
         syntaxFunction: 0x00599e, syntaxKeyword: 0x056359, syntaxConstant: 0xa42d02,
-        syntaxString: 0x016613, syntaxProperty: 0xaf044f)
+        syntaxString: 0x016613, syntaxProperty: 0xaf044f,
+        matchLine: (start: \.cursor, end: \.blue))
 
     /// Material Indigo: the classic Material pairing — indigo, with pink for
     /// keywords — on a white code area. Original to Puzzle.
@@ -197,7 +222,8 @@ extension ThemePalette {
         green: 0x016813, yellow: 0x7b4f03, orange: 0x874902, blue: 0x035a9f, purple: 0x5e35b1,
         cyan: 0x00626b, comment: 0x60697a, punct: 0x595959, syntaxType: 0x3949ab,
         syntaxFunction: 0x056359, syntaxKeyword: 0xb2004b, syntaxConstant: 0x934001,
-        syntaxString: 0x016813, syntaxProperty: 0x5e35b1)
+        syntaxString: 0x016813, syntaxProperty: 0x5e35b1,
+        matchLine: (start: \.cursor, end: \.purple))
 
     /// Material You: Material 3's baseline scheme — tonal lavender surfaces and
     /// a purple primary. Original to Puzzle.
@@ -217,5 +243,6 @@ extension ThemePalette {
         green: 0x306116, yellow: 0x814a01, orange: 0x8a4202, blue: 0x025a98, purple: 0x5f479a,
         cyan: 0x036060, comment: 0x68646e, punct: 0x5b546a, syntaxType: 0x814a01,
         syntaxFunction: 0x025a98, syntaxKeyword: 0x5f479a, syntaxConstant: 0x90395a,
-        syntaxString: 0x306116, syntaxProperty: 0x754b59)
+        syntaxString: 0x306116, syntaxProperty: 0x754b59,
+        matchLine: (start: \.cursor, end: \.red))
 }
