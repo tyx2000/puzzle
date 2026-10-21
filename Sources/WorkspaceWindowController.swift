@@ -299,9 +299,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         updateTitlebarGeometry()
     }
 
+    /// The buttons come home only once the window is out of full screen,
+    /// after the last resize of the way back.
+    func windowDidExitFullScreen(_ notification: Notification) {
+        updateTitlebarGeometry()
+    }
+
     private func updateTitlebarGeometry() {
-        guard let window,
-              let closeButton = window.standardWindowButton(.closeButton) else { return }
+        // In full screen the traffic lights move to a title bar window of
+        // their own, which slides in over this one, and on the way there they
+        // stand wherever the animation has them. Measured then, they sat a
+        // whole screen below this window's top: the tab row was made that
+        // tall, the window grew to hold it, and every resize doubled it until
+        // AppKit threw. In full screen they say nothing about this window,
+        // and the row keeps the height it had beside them.
+        guard let window, !window.styleMask.contains(.fullScreen),
+              let closeButton = window.standardWindowButton(.closeButton),
+              closeButton.window === window else { return }
         window.contentView?.layoutSubtreeIfNeeded()
         let buttonRect = closeButton.convert(closeButton.bounds, to: nil)
         let top = max(0, window.frame.height - buttonRect.maxY)
