@@ -90,6 +90,7 @@ enum RegressionTests {
         try testInlineBlameStaysOnItsLine()
         try testReadingAids()
         try testActivePairTintedAndFlowing()
+        try testActivePairRunsDownTheGuide()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -2809,6 +2810,66 @@ enum RegressionTests {
         } else {
             throw Failure(description: "the rendering could not be read")
         }
+    }
+
+    /// The active pair's line runs down its block's indent guide, not 3pt
+    /// beside it, where the two read as one line drawn twice — and still
+    /// wraps under the closing bracket, whether the bracket starts its line
+    /// or ends it.
+    private static func testActivePairRunsDownTheGuide() throws {
+        let settings = Settings.shared
+        let saved = settings.indentMarkers
+        defer { settings.indentMarkers = saved }
+        settings.indentMarkers = .guides
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.font = Theme.editorFont()
+
+        func scope(_ source: String, opening: String, closing: String)
+            throws -> (line: [NSPoint], guides: [NSRect], ends: [NSRect]) {
+            text.string = source
+            let ns = source as NSString
+            let open = ns.range(of: opening).location + opening.count - 1
+            text.setSelectedRange(NSRange(location: open + 1, length: 0))
+            text.refreshBracketMatches()
+            CATransaction.flush()
+            text.display()
+            let ends = text.drawnScopeTintsForTesting
+            guard let line = text.bracketScopeGeometry()?.polyline, line.count == 4, ends.count == 2,
+                  text.bracketMatchRanges.last?.location == ns.range(of: closing).location
+                    + closing.count - 1 else {
+                throw Failure(description: "the fixture's pair has no contour: \(source)")
+            }
+            try expect(line[1].x == line[2].x, "the contour's vertical is not vertical: \(line)")
+            return (line, text.drawnReadingAidsForTesting.guides, ends)
+        }
+        func guided(_ drawn: (line: [NSPoint], guides: [NSRect], ends: [NSRect]),
+                    columns: Int) -> Bool {
+            let x = text.indentGuideX(columns: columns)
+            return drawn.guides.contains {
+                $0.minX == x && $0.midY > drawn.ends[0].maxY && $0.midY < drawn.ends[1].minY
+            }
+        }
+
+        let block = try scope("if (path) {\n  try {\n    fp = open(path)\n    read(fp)\n  } catch (error) {\n  }\n}\n",
+                              opening: "try {", closing: "  }")
+        try expect(guided(block, columns: 2), "no guide is drawn down the try block: \(block.guides)")
+        try expect(block.line[1].x == text.indentGuideX(columns: 2) + 0.5,
+                   "the line runs beside the block's guide, not down it: \(block.line[1].x) "
+                    + "vs \(text.indentGuideX(columns: 2))")
+        try expect(block.line[2].y > block.ends[1].maxY && block.line[3].x >= block.ends[1].maxX - 0.5,
+                   "the line does not wrap under the closing bracket: \(block.line) \(block.ends[1])")
+
+        let literal = try scope("  const options = {\n    retries: 3,\n    timeout: 10 };\n",
+                                opening: "= {", closing: "10 }")
+        try expect(guided(literal, columns: 2), "no guide is drawn down the literal: \(literal.guides)")
+        try expect(literal.line[1].x == text.indentGuideX(columns: 2) + 0.5,
+                   "the line runs beside the literal's guide, not down it")
+        try expect(literal.line[2].y > literal.ends[1].maxY,
+                   "the line does not pass under a bracket that ends its line's content")
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {

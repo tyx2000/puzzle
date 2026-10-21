@@ -14,6 +14,9 @@ struct BracketScopeGeometry {
     /// scrolls by copying pixels and repainting only what is newly exposed, so
     /// those caps stayed behind at whatever height they were drawn: a single
     /// pair ended up looking like several, with stray ticks across the guide.
+    ///
+    /// `guideX` is where the vertical runs: down the middle of the indent
+    /// guide of the shallower of the two lines, so the two are one line.
     static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
                      visibleRect: NSRect) -> BracketScopeGeometry {
         // A pair on one visual row reads best as one compact enclosure. A
@@ -26,11 +29,10 @@ struct BracketScopeGeometry {
 
         let openingY = opening.maxY + 1
         let closingY = closing.maxY + 1
-        let resolvedGuideX = min(guideX, opening.minX - 3, closing.minX - 3)
         let polyline = [
             NSPoint(x: opening.maxX + 2, y: openingY),
-            NSPoint(x: resolvedGuideX, y: openingY),
-            NSPoint(x: resolvedGuideX, y: closingY),
+            NSPoint(x: guideX, y: openingY),
+            NSPoint(x: guideX, y: closingY),
             NSPoint(x: closing.maxX + 2, y: closingY),
         ]
 
@@ -596,7 +598,9 @@ final class PuzzleTextView: NSTextView {
 
     private struct BracketGlyphGeometry {
         let glyphBox: NSRect
-        let leadingContentX: CGFloat
+        /// Columns of indentation on the bracket's line, counted as the
+        /// indent guides count them.
+        let leadingColumns: Int
     }
 
     private func bracketGlyphGeometry(for range: NSRange) -> BracketGlyphGeometry? {
@@ -621,44 +625,33 @@ final class PuzzleTextView: NSTextView {
 
         let source = string as NSString
         let line = source.lineRange(for: NSRange(location: range.location, length: 0))
-        var firstContent = line.location
-        let lineEnd = min(NSMaxRange(line), source.length)
-        while firstContent < lineEnd {
-            let character = source.character(at: firstContent)
-            if character == 0x20 || character == 0x09 {
-                firstContent += 1
-            } else {
-                break
+        let tabSize = max(1, Settings.shared.tabSize)
+        var columns = 0
+        for location in line.location..<min(range.location, NSMaxRange(line)) {
+            switch source.character(at: location) {
+            case 0x20: columns += 1
+            case 0x09: columns += tabSize - columns % tabSize
+            default: return BracketGlyphGeometry(glyphBox: box, leadingColumns: columns)
             }
         }
+        return BracketGlyphGeometry(glyphBox: box, leadingColumns: columns)
+    }
 
-        var leadingX = box.minX
-        if firstContent < lineEnd,
-           source.character(at: firstContent) != 0x0A,
-           source.character(at: firstContent) != 0x0D {
-            let firstGlyph = layoutManager.glyphRange(
-                forCharacterRange: NSRange(location: firstContent, length: 1),
-                actualCharacterRange: nil)
-            if firstGlyph.length > 0 {
-                let firstRect = layoutManager.boundingRect(forGlyphRange: firstGlyph,
-                                                           in: container)
-                if !firstRect.isEmpty { leadingX = firstRect.minX + inset.width }
-            }
-        }
-        return BracketGlyphGeometry(glyphBox: box, leadingContentX: leadingX)
+    /// The scope contour's vertical for a pair: down the middle of the indent
+    /// guide of the shallower line.
+    private func scopeGuideX(opening: BracketGlyphGeometry,
+                             closing: BracketGlyphGeometry) -> CGFloat {
+        indentGuideX(columns: min(opening.leadingColumns, closing.leadingColumns)) + 0.5
     }
 
     func bracketScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
         guard bracketMatchRanges.count == 2,
               let opening = bracketGlyphGeometry(for: bracketMatchRanges[0]),
               let closing = bracketGlyphGeometry(for: bracketMatchRanges[1]) else { return nil }
-        let minimumGuideX = textContainerInset.width
-            + (textContainer?.lineFragmentPadding ?? 0) + 1
-        let guideX = max(minimumGuideX,
-                         min(opening.leadingContentX, closing.leadingContentX) - 3)
         return BracketScopeGeometry.make(
             opening: opening.glyphBox, closing: closing.glyphBox,
-            guideX: guideX, visibleRect: viewport ?? visibleRect)
+            guideX: scopeGuideX(opening: opening, closing: closing),
+            visibleRect: viewport ?? visibleRect)
     }
 
     private func jsxScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
@@ -668,11 +661,7 @@ final class PuzzleTextView: NSTextView {
             return nil
         }
 
-        let minimumGuideX = textContainerInset.width
-            + (textContainer?.lineFragmentPadding ?? 0) + 1
-        let guideX = max(minimumGuideX,
-                         min(openingAngle.leadingContentX,
-                             closing.leadingContentX) - 3)
+        let guideX = scopeGuideX(opening: openingAngle, closing: closing)
         let visible = viewport ?? visibleRect
 
         switch match.kind {
@@ -2696,7 +2685,7 @@ final class PuzzleTextView: NSTextView {
                     Self.neighbourIndent(of: text, from: line, step: 1, index: index, tabSize: tabSize))
                 var level = 0
                 while level * unit < indent {
-                    let mark = NSRect(x: floor(left + CGFloat(level * unit) * column), y: row.minY,
+                    let mark = NSRect(x: indentGuideX(columns: level * unit), y: row.minY,
                                       width: 1, height: row.height)
                     // Blended: a plain fill copies the translucent colour in,
                     // and the stripe or band under it showed through as the
@@ -2718,6 +2707,14 @@ final class PuzzleTextView: NSTextView {
                 break
             }
         }
+    }
+
+    /// Where the 1pt indent guide for that much indentation stands: the left
+    /// edge of the column, on a whole point. The active pair's line runs down
+    /// the same guide, so both ask here.
+    func indentGuideX(columns: Int) -> CGFloat {
+        floor(textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0)
+              + CGFloat(columns) * Theme.characterWidth())
     }
 
     /// Columns of leading whitespace on a 1-based line, a tab reaching the
