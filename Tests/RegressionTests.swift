@@ -16,6 +16,11 @@ enum RegressionTests {
         // As the app does, so every test that parses runs on it.
         TreeSitterAllocator.install()
         _ = NSApplication.shared
+        // AppKit reports the real pointer even to windows that are not on
+        // screen, and it is wherever the person running the suite has left
+        // it: a history list laid out under it lit that row, and ↓↓ counted
+        // on from there. Every test starts with it nowhere.
+        Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
         if CommandLine.arguments.contains("--line-popup-regressions") {
             try testActiveLineStaysInFiniteDocument()
             try testActiveLineSpansTheGutter()
@@ -207,6 +212,7 @@ enum RegressionTests {
         try testDeletedPicturePreviews()
         try testFileHistoryBufferIsNotEvictedAsADiff()
         try testProjectHistoryMarksTheBranchBase()
+        try testOnlyPointerReadsTheRealPointer()
         try testRefPillText()
         try testIgnoredFilesAreDimmed()
         try testEmptyEditorHints()
@@ -248,6 +254,21 @@ enum RegressionTests {
             && abs(lhs.greenComponent - rhs.greenComponent) < 0.002
             && abs(lhs.blueComponent - rhs.blueComponent) < 0.002
             && abs(lhs.alphaComponent - rhs.alphaComponent) < 0.002
+    }
+
+    /// Off every screen, so over no window.
+    private static let pointerNowhere = NSPoint(x: -100_000, y: -100_000)
+
+    /// Rests the pointer on the middle of `view`, as far as the views that
+    /// follow it can tell. A test that does this puts it back with
+    /// `pinPointer(at: pointerNowhere)`.
+    private static func pinPointer(over view: NSView) {
+        guard let window = view.window else { return }
+        let middle = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        pinPointer(at: window.convertPoint(toScreen: middle))
+    }
+    private static func pinPointer(at location: NSPoint, pressing buttons: Int = 0) {
+        Pointer.pinnedForTesting = Pointer.Pin(location: location, pressedButtons: buttons)
     }
 
     private static func testDockRecentProjectsMenu() throws {
@@ -9436,15 +9457,6 @@ enum RegressionTests {
                                        isRepo: true, userName: "T",
                                        ahead: 0, hasUpstream: true)
         panel.applyStatusForTesting(status, in: directory)
-        // The panel refuses to rebuild its rows while a mouse button is down,
-        // so a click is never swallowed mid-press — and that is the *machine's*
-        // mouse, which whoever is at the keyboard may be holding while the
-        // suite runs. The deferred rebuild lands 0.15s later; wait for it
-        // rather than reading the flag in whatever moment this happens to be.
-        let rebuilt = Date().addingTimeInterval(2)
-        while panel.reloadWouldRebuildForTesting, Date() < rebuilt {
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
-        }
         try expect(!panel.reloadWouldRebuildForTesting,
                    "the rows were left needing a rebuild right after one")
 
@@ -9454,14 +9466,29 @@ enum RegressionTests {
                    "an identical refresh still wanted to rebuild the rows, "
                     + "which is what swallowed clicks on the row buttons")
 
-        // A real change still rebuilds.
+        // A real change still rebuilds — but not while a mouse button is down,
+        // so a click on a row is never swallowed mid-press; the rows wait for
+        // the button to come up. The button is pinned, as the pointer is: the
+        // machine's own is whatever the person at it is holding, and this
+        // test used to wait out a rebuild for that reason rather than check it.
         let changed = GitService.Status(branch: "main",
                                         entries: [entry("a.swift", " M")],
                                         isRepo: true, userName: "T",
                                         ahead: 0, hasUpstream: true)
+        defer { pinPointer(at: pointerNowhere) }
+        pinPointer(at: pointerNowhere, pressing: 1)
         panel.applyStatusForTesting(changed, in: directory)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+        try expect(panel.reloadWouldRebuildForTesting && panel.rowCountForTesting == 2,
+                   "the rows were rebuilt under a held mouse button")
+        pinPointer(at: pointerNowhere)
+        let released = Date().addingTimeInterval(2)
+        while panel.reloadWouldRebuildForTesting, Date() < released {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
         try expect(panel.rowCountForTesting == 1,
-                   "a changed status did not reach the table: \(panel.rowCountForTesting)")
+                   "a changed status did not reach the table once the button came up: "
+                     + "\(panel.rowCountForTesting)")
 
         // What a changed file offers is on the row, under the pointer, not
         // behind a right-click.
@@ -10183,6 +10210,40 @@ enum RegressionTests {
                    "the hints are not centred: \(block.frame)")
     }
 
+    /// Only `Pointer` asks AppKit where the mouse is, so pinning it there is
+    /// enough to keep the real one out of the suite. A view that asked AppKit
+    /// itself lit whatever row the person running the tests had left the
+    /// mouse over — in a window that was not even on screen — and the next
+    /// test to press ↓ counted on from that row.
+    private static func testOnlyPointerReadsTheRealPointer() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let reads = ["mouseLocationOutsideOfEventStream", "NSEvent.mouseLocation",
+                     "NSEvent.pressedMouseButtons"]
+        var readers: [String] = []
+        for name in try FileManager.default.contentsOfDirectory(atPath: sources.path).sorted()
+            where name.hasSuffix(".swift") && name != "Pointer.swift" {
+            let text = try String(contentsOf: sources.appendingPathComponent(name),
+                                  encoding: .utf8)
+            readers += reads.filter { text.contains($0) }.map { "\(name): \($0)" }
+        }
+        try expect(readers.isEmpty, "the real pointer is read past Pointer: \(readers)")
+
+        // And what `Pointer` answers while pinned is the pin, in the window's
+        // own coordinates as well as the screen's.
+        let window = NSWindow(contentRect: NSRect(x: 200, y: 300, width: 100, height: 80),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.close() }
+        defer { pinPointer(at: pointerNowhere) }
+        pinPointer(at: NSPoint(x: 230, y: 310))
+        try expect(Pointer.location == NSPoint(x: 230, y: 310)
+                    && window.pointerLocation == NSPoint(x: 30, y: 10)
+                    && Pointer.pressedButtons == 0,
+                   "the pinned pointer is not what is read: \(Pointer.location), "
+                     + "\(window.pointerLocation) in the window")
+    }
+
     private static func testProjectHistoryMarksTheBranchBase() throws {
         let root = try temporaryDirectory("project-history-base")
         let remote = try temporaryDirectory("project-history-base-remote")
@@ -10280,12 +10341,31 @@ enum RegressionTests {
                     && history.baseCellForTesting(2)?.isFoldedForTesting == false,
                    "the base did not come back: \(history.rowOutlineForTesting)")
 
-        // The keys: ↓ lights the next row and keeps it through a layout, ↩
-        // does to it what a click does, ↑ goes back.
+        // A pointer resting on a row lights it when the list is laid out,
+        // with no event to say it is there; gone, it leaves nothing lit. The
+        // real pointer did this too, wherever it happened to rest, and ↓↓
+        // below then counted on from its row.
+        guard let restingRow = history.rowViewForTesting(4) else {
+            throw Failure(description: "the history has no fifth row to rest the pointer on")
+        }
+        defer { pinPointer(at: pointerNowhere) }
+        pinPointer(over: restingRow)
+        history.refreshHoverForTesting()
+        try expect(history.litRowForTesting == 4,
+                   "the row under a resting pointer is not lit: \(history.litRowForTesting)")
+        pinPointer(at: pointerNowhere)
+        history.refreshHoverForTesting()
+        try expect(history.litRowForTesting == -1,
+                   "a row stayed lit with the pointer gone: \(history.litRowForTesting)")
+
+        // The keys: ↓ lights the next row and keeps it through a layout, even
+        // one under the pointer; ↩ does to it what a click does, ↑ goes back.
         history.pressKeyForTesting(125)
         history.pressKeyForTesting(125)
         try expect(history.litRowForTesting == 1, "↓↓ lit row \(history.litRowForTesting)")
+        pinPointer(over: restingRow)
         history.refreshHoverForTesting()
+        pinPointer(at: pointerNowhere)
         try expect(history.litRowForTesting == 1,
                    "a layout took the keys' row back to the pointer: \(history.litRowForTesting)")
         history.pressKeyForTesting(36)

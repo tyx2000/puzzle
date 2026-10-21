@@ -256,7 +256,7 @@ final class LineNumberRulerView: NSRulerView {
 
     override func mouseExited(with event: NSEvent) {
         if let window {
-            let windowPoint = window.mouseLocationOutsideOfEventStream
+            let windowPoint = window.pointerLocation
             let insideGutter = bounds.contains(convert(windowPoint, from: nil))
             let insideEditor = textView.map {
                 $0.visibleRect.contains($0.convert(windowPoint, from: nil))

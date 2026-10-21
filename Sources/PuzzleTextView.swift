@@ -1648,7 +1648,7 @@ final class PuzzleTextView: NSTextView {
 
     private var pointerIsOverLinkPopover: Bool {
         guard linkCard.isVisible else { return false }
-        return linkCard.screenFrame.insetBy(dx: -6, dy: -6).contains(NSEvent.mouseLocation)
+        return linkCard.screenFrame.insetBy(dx: -6, dy: -6).contains(Pointer.location)
     }
 
     private func showLinkPopover(for link: MarkdownLinkDecoration) {
@@ -1843,7 +1843,7 @@ final class PuzzleTextView: NSTextView {
             clearCommandHover()
             return
         }
-        let point = window.mouseLocationOutsideOfEventStream
+        let point = window.pointerLocation
         let local = convert(point, from: nil)
         guard bounds.contains(local) else {
             clearCommandHover()
@@ -1857,7 +1857,7 @@ final class PuzzleTextView: NSTextView {
         guard NSEvent.modifierFlags.contains(.command), let window else { return }
         DispatchQueue.main.async { [weak self, weak window] in
             guard let self, let window else { return }
-            self.updateCommandHover(atWindowPoint: window.mouseLocationOutsideOfEventStream)
+            self.updateCommandHover(atWindowPoint: window.pointerLocation)
         }
     }
 

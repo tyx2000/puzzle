@@ -580,7 +580,7 @@ final class GitPanelViewController: NSViewController {
     private func reloadRows(force: Bool = false) {
         guard isViewLoaded else { return }
         guard force || rowsNeedReload else { return }
-        guard NSEvent.pressedMouseButtons == 0 else {
+        guard Pointer.pressedButtons == 0 else {
             guard !reloadDeferred else { return }
             reloadDeferred = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
