@@ -2789,7 +2789,7 @@ final class PuzzleTextView: NSTextView {
     /// How strongly the guides are drawn over the code area: faint, so the
     /// active pair's line — which stands in for one of them — is plainly not
     /// another guide.
-    static let indentGuideAlpha: CGFloat = 0.35
+    static let indentGuideAlpha: CGFloat = 0.25
 
     /// Where the 1pt indent guide for that much indentation stands.
     ///
