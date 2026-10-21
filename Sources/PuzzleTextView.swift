@@ -91,6 +91,7 @@ final class PuzzleTextView: NSTextView {
         bracketMatchRanges = refreshed
         activeJSXTagMatch = refreshedTag
         needsDisplay = true
+        syncScopeFlow()
     }
 
     private func jsxTagMatch(at caret: Int) -> JSXTagMatch? {
@@ -557,7 +558,9 @@ final class PuzzleTextView: NSTextView {
         drawMarkdownRules(in: dirtyRect)
         drawMarkdownCodeLabels(in: dirtyRect)
         drawCommandHoverUnderline()
-        drawBracketScopeOutline()
+        // Whatever made this draw may have moved the active pair — an edit, a
+        // fold, a new font, a new theme — so the flowing line follows it.
+        scheduleScopeFlowSync()
         drawInlineBlame()
     }
 
@@ -697,34 +700,6 @@ final class PuzzleTextView: NSTextView {
         return jsxScopeGeometry()
     }
 
-    private func drawBracketScopeOutline() {
-        guard let geometry = activeScopeGeometry() else { return }
-        NSGraphicsContext.saveGraphicsState()
-        visibleRect.clip()
-        defer { NSGraphicsContext.restoreGraphicsState() }
-
-        Theme.red.setStroke()
-        let path = NSBezierPath()
-        path.lineWidth = 1.5
-        path.lineCapStyle = .butt
-        path.lineJoinStyle = .miter
-
-        if let box = geometry.box {
-            path.appendRect(box)
-        } else {
-            appendPolyline(geometry.polyline, to: path)
-        }
-        path.stroke()
-    }
-
-    /// The scope outline is a plain polyline: square corners, square ends. The
-    /// corners it draws are the corners of the code it encloses.
-    private func appendPolyline(_ points: [NSPoint], to path: NSBezierPath) {
-        guard let first = points.first else { return }
-        path.move(to: first)
-        for point in points.dropFirst() { path.line(to: point) }
-    }
-
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         drawZebraStripes(in: rect)
@@ -732,6 +707,7 @@ final class PuzzleTextView: NSTextView {
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
         drawCurrentLineBand()
+        drawScopeEndTint()
     }
 
     /// A code span's box: as tall as the code's own type rather than its line
@@ -1525,10 +1501,22 @@ final class PuzzleTextView: NSTextView {
             NSEvent.removeMonitor(commandModifierMonitor)
             self.commandModifierMonitor = nil
         }
+        if let scopeFlowScrollObserver {
+            NotificationCenter.default.removeObserver(scopeFlowScrollObserver)
+            self.scopeFlowScrollObserver = nil
+        }
         guard window != nil else {
             clearCommandHover()
+            scopeFlow?.isHidden = true
             return
         }
+        if let clip = enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            scopeFlowScrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+            ) { [weak self] _ in self?.syncScopeFlow() }
+        }
+        scheduleScopeFlowSync()
         // flagsChanged is normally delivered only to the first responder. A
         // local monitor also clears/starts the underline when focus is in the
         // sidebar or find bar while the pointer is stationary over code.
@@ -1541,6 +1529,7 @@ final class PuzzleTextView: NSTextView {
 
     deinit {
         if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
+        if let scopeFlowScrollObserver { NotificationCenter.default.removeObserver(scopeFlowScrollObserver) }
         if let caretLinkScrollObserver {
             NotificationCenter.default.removeObserver(caretLinkScrollObserver)
         }
@@ -2709,7 +2698,10 @@ final class PuzzleTextView: NSTextView {
                 while level * unit < indent {
                     let mark = NSRect(x: floor(left + CGFloat(level * unit) * column), y: row.minY,
                                       width: 1, height: row.height)
-                    mark.fill()
+                    // Blended: a plain fill copies the translucent colour in,
+                    // and the stripe or band under it showed through as the
+                    // code area's colour instead.
+                    mark.fill(using: .sourceOver)
                     drawnReadingAidsForTesting.guides.append(mark)
                     level += 1
                 }
@@ -2807,5 +2799,182 @@ final class PuzzleTextView: NSTextView {
         let step = rises.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key
         return min(max(step ?? tabSize, 1), 16)
     }
+
+    // MARK: - The active pair: its ends tinted, its line flowing
+
+    /// The two ends the line joins: the bracket pair, or a component's opening
+    /// and closing tags (one tag, for a self-closing component).
+    private var scopeEndRanges: [NSRange] {
+        if bracketMatchRanges.count == 2 { return bracketMatchRanges }
+        guard let match = activeJSXTagMatch else { return [] }
+        return [match.openingTagRange] + (match.closingTagRange.map { [$0] } ?? [])
+    }
+
+    /// Where the ends' tint goes: around each end's glyphs, row by row — an
+    /// opening tag whose attributes run over several lines is tinted on each,
+    /// from its first character, not from the indentation before it.
+    func scopeEndTintRects() -> [NSRect] {
+        guard let layoutManager, let container = textContainer else { return [] }
+        let text = string as NSString
+        let inset = textContainerInset
+        var rects: [NSRect] = []
+        for range in scopeEndRanges where range.length > 0 && NSMaxRange(range) <= text.length {
+            guard foldingManager?.isCharacterHidden(at: range.location) != true else { continue }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, rowGlyphs, _ in
+                var part = layoutManager.characterRange(
+                    forGlyphRange: NSIntersectionRange(rowGlyphs, glyphs), actualGlyphRange: nil)
+                while part.length > 0,
+                      let c = UnicodeScalar(text.character(at: part.location)),
+                      CharacterSet.whitespacesAndNewlines.contains(c) {
+                    part = NSRange(location: part.location + 1, length: part.length - 1)
+                }
+                while part.length > 0,
+                      let c = UnicodeScalar(text.character(at: NSMaxRange(part) - 1)),
+                      CharacterSet.whitespacesAndNewlines.contains(c) {
+                    part.length -= 1
+                }
+                guard part.length > 0 else { return }
+                let raw = layoutManager.boundingRect(
+                    forGlyphRange: layoutManager.glyphRange(forCharacterRange: part,
+                                                            actualCharacterRange: nil),
+                    in: container)
+                let vertical = self.glyphBox(fragmentHeight: fragment.height)
+                rects.append(NSRect(x: raw.minX + inset.width - 2,
+                                    y: fragment.minY + vertical.top + inset.height,
+                                    width: raw.width + 4, height: vertical.height))
+            }
+        }
+        return rects
+    }
+
+    private(set) var drawnScopeTintsForTesting: [NSRect] = []
+
+    /// A light wash of the line's red behind both ends, so the pair is found
+    /// at a glance — under the text, over the active line's band.
+    private func drawScopeEndTint() {
+        let rects = scopeEndTintRects()
+        drawnScopeTintsForTesting = rects
+        guard !rects.isEmpty else { return }
+        Theme.red.withAlphaComponent(0.14).setFill()
+        rects.forEach { $0.fill(using: .sourceOver) }
+    }
+
+    /// The active pair's line, flowing from its opening end to its closing
+    /// one. A shape layer over the text: Core Animation moves the dashes in
+    /// the render server, so the text view draws no frame of it. With Reduce
+    /// Motion on, it is the still, solid line it always was.
+    private var scopeFlow: ScopeFlowOverlay?
+    private var scopeFlowScrollObserver: NSObjectProtocol?
+    private var scopeFlowSyncScheduled = false
+    /// Stands in for the system's Reduce Motion setting in tests.
+    static var reducesMotionOverride: Bool?
+    private var reducesMotion: Bool {
+        Self.reducesMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+    /// 4pt of line, 3pt of gap, moving along at 17.5pt a second.
+    static let scopeFlowDash: [CGFloat] = [4, 3]
+    static let scopeFlowPeriod: CFTimeInterval = 0.4
+
+    /// One sync for however many draws ask for it, after the draw: views are
+    /// not to be added or moved while one is being drawn.
+    private func scheduleScopeFlowSync() {
+        guard !scopeFlowSyncScheduled else { return }
+        scopeFlowSyncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scopeFlowSyncScheduled = false
+            self.syncScopeFlow()
+        }
+    }
+
+    private func syncScopeFlow() {
+        guard window != nil, let geometry = activeScopeGeometry() else {
+            scopeFlow?.isHidden = true
+            return
+        }
+        let overlay: ScopeFlowOverlay
+        if let existing = scopeFlow {
+            overlay = existing
+        } else {
+            overlay = ScopeFlowOverlay(frame: bounds)
+            overlay.autoresizingMask = [.width, .height]
+            addSubview(overlay)
+            scopeFlow = overlay
+        }
+        if overlay.frame != bounds { overlay.frame = bounds }
+        overlay.isHidden = false
+        let path = CGMutablePath()
+        if let box = geometry.box {
+            path.addRect(box)
+        } else if let first = geometry.polyline.first {
+            path.move(to: first)
+            geometry.polyline.dropFirst().forEach { path.addLine(to: $0) }
+        }
+        // Only what is near the screen is given to the layer: a scope can run
+        // for thousands of lines, and a layer that tall is not one to make.
+        let near = visibleRect.insetBy(dx: -visibleRect.width, dy: -visibleRect.height)
+        let frame = path.boundingBoxOfPath.insetBy(dx: -2, dy: -2).intersection(near)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let shape = overlay.shape
+        shape.frame = frame.isNull ? .zero : frame
+        var shift = CGAffineTransform(translationX: -shape.frame.minX, y: -shape.frame.minY)
+        shape.path = path.copy(using: &shift)
+        shape.strokeColor = Theme.red.cgColor
+        if reducesMotion {
+            shape.lineDashPattern = nil
+            shape.removeAnimation(forKey: "flow")
+        } else {
+            shape.lineDashPattern = Self.scopeFlowDash.map { NSNumber(value: Double($0)) }
+            if shape.animation(forKey: "flow") == nil {
+                let flow = CABasicAnimation(keyPath: "lineDashPhase")
+                flow.fromValue = 0
+                // Negative: the dashes travel the way the path runs.
+                flow.toValue = -Self.scopeFlowDash.reduce(0, +)
+                flow.duration = Self.scopeFlowPeriod
+                flow.repeatCount = .infinity
+                shape.add(flow, forKey: "flow")
+            }
+        }
+        CATransaction.commit()
+    }
+
+    /// The flowing line as it stands, for the tests: whether it shows, its
+    /// path in the text view's coordinates, and whether it is moving.
+    var scopeFlowForTesting: (visible: Bool, path: CGRect, dashed: Bool, flowing: Bool) {
+        syncScopeFlow()
+        guard let overlay = scopeFlow, !overlay.isHidden, let path = overlay.shape.path else {
+            return (false, .zero, false, false)
+        }
+        let box = path.boundingBoxOfPath.offsetBy(dx: overlay.shape.frame.minX,
+                                                  dy: overlay.shape.frame.minY)
+        return (true, box, overlay.shape.lineDashPattern != nil,
+                overlay.shape.animation(forKey: "flow") != nil)
+    }
+}
+
+/// Holds the active pair's flowing line over the text. It takes no clicks:
+/// they go through to the text under it.
+private final class ScopeFlowOverlay: NSView {
+    let shape = CAShapeLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        // Square corners, square ends: the corners it draws are the corners
+        // of the code it encloses.
+        shape.fillColor = nil
+        shape.lineWidth = 1.5
+        shape.lineCap = .butt
+        shape.lineJoin = .miter
+        shape.masksToBounds = true
+        layer?.addSublayer(shape)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 

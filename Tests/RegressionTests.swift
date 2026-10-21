@@ -89,6 +89,7 @@ enum RegressionTests {
         try testEditorManualSave()
         try testInlineBlameStaysOnItsLine()
         try testReadingAids()
+        try testActivePairTintedAndFlowing()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -2691,6 +2692,122 @@ enum RegressionTests {
         drawn = draw()
         try expect(drawn.stripes.isEmpty && drawn.dots.isEmpty, "rendered Markdown was striped")
         text.rendersMarkdown = false
+    }
+
+    /// The active pair's two ends — brackets, or a component's opening and
+    /// closing tags — sit on a light wash of the line's red, and the line
+    /// between them flows from the opening end to the closing one, on a
+    /// shape layer the render server animates. With Reduce Motion it is a
+    /// still, solid line.
+    private static func testActivePairTintedAndFlowing() throws {
+        defer { PuzzleTextView.reducesMotionOverride = nil }
+        PuzzleTextView.reducesMotionOverride = false
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.font = Theme.editorFont()
+        func settle() {
+            CATransaction.flush()
+            text.display()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        func glyph(_ location: Int) -> NSRect {
+            let layout = text.layoutManager!
+            return layout.boundingRect(forGlyphRange: NSRange(location: location, length: 1),
+                                       in: text.textContainer!)
+                .offsetBy(dx: text.textContainerInset.width, dy: text.textContainerInset.height)
+        }
+
+        // A bracket pair over three lines: both brackets tinted, the line flowing.
+        text.string = "call(\n    value\n)"
+        text.setSelectedRange(NSRange(location: 5, length: 0))
+        text.refreshBracketMatches()
+        settle()
+        let tints = text.drawnScopeTintsForTesting
+        try expect(tints.count == 2 && tints[0].contains(NSPoint(x: glyph(4).midX, y: glyph(4).midY))
+                    && tints[1].contains(NSPoint(x: glyph(16).midX, y: glyph(16).midY)),
+                   "the brackets are not the two tinted ends: \(tints)")
+        var flow = text.scopeFlowForTesting
+        guard let geometry = text.bracketScopeGeometry() else {
+            throw Failure(description: "the fixture has no bracket scope")
+        }
+        let bounds = geometry.polyline.reduce(CGRect.null) {
+            $0.union(CGRect(origin: $1, size: .zero))
+        }
+        try expect(flow.visible && flow.dashed && flow.flowing,
+                   "the pair's line is not a flowing dashed line: \(flow)")
+        try expect(abs(flow.path.minX - bounds.minX) < 0.5 && abs(flow.path.maxY - bounds.maxY) < 0.5,
+                   "the flowing line is not where the pair's outline goes: \(flow.path) vs \(bounds)")
+
+        // Reduce Motion: the same line, still and solid.
+        PuzzleTextView.reducesMotionOverride = true
+        flow = text.scopeFlowForTesting
+        try expect(flow.visible && !flow.dashed && !flow.flowing,
+                   "with Reduce Motion the line still moves: \(flow)")
+        PuzzleTextView.reducesMotionOverride = false
+
+        // Off the pair, nothing of it is left.
+        text.setSelectedRange(NSRange(location: 8, length: 0))
+        text.refreshBracketMatches()
+        settle()
+        try expect(!text.scopeFlowForTesting.visible && text.drawnScopeTintsForTesting.isEmpty,
+                   "the line or the tint outlived the pair")
+
+        // A component whose opening tag runs over two lines: each row of it is
+        // tinted from its first character, and so is the closing tag.
+        let source = "<Panel\n  title=\"x\">\n  <Row />\n</Panel>\n"
+        text.string = source
+        let ns = source as NSString
+        let openingEnd = ns.range(of: "\">").location + 2
+        let closing = ns.range(of: "</Panel>")
+        let match = JSXTagMatch(
+            kind: .paired,
+            openingTagRange: NSRange(location: 0, length: openingEnd),
+            closingTagRange: closing,
+            openingAngleRange: NSRange(location: 0, length: 1),
+            openingHeadRange: NSRange(location: 0, length: 6),
+            openingTerminatorRange: NSRange(location: openingEnd - 1, length: 1),
+            closingTerminatorRange: NSRange(location: NSMaxRange(closing) - 1, length: 1))
+        text.updateJSXTagMatches([match])
+        text.setSelectedRange(NSRange(location: 2, length: 0))
+        text.refreshBracketMatches()
+        settle()
+        let tagTints = text.drawnScopeTintsForTesting
+        let title = ns.range(of: "title").location
+        try expect(tagTints.count == 3, "the two tags are not tinted row by row: \(tagTints)")
+        if tagTints.count == 3 {
+            try expect(abs(tagTints[1].minX - (glyph(title).minX - 2)) < 0.5,
+                       "the tag's second row is tinted from its indentation: \(tagTints[1])")
+            try expect(tagTints[2].contains(NSPoint(x: glyph(closing.location).midX,
+                                                    y: glyph(closing.location).midY)),
+                       "the closing tag is not tinted")
+        }
+        try expect(text.scopeFlowForTesting.visible, "a component's line does not flow")
+
+        // On the caret's own row the active line's band does not hide the tint.
+        text.showsCurrentLineBand = true
+        CATransaction.flush()
+        guard let rep = text.bitmapImageRepForCachingDisplay(in: text.bounds) else {
+            throw Failure(description: "no rendering")
+        }
+        text.cacheDisplay(in: text.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / text.bounds.width
+        func pixel(_ p: NSPoint) -> NSColor? {
+            rep.colorAt(x: Int(p.x * scale), y: Int(p.y * scale))?.usingColorSpace(.sRGB)
+        }
+        let row = tagTints.first ?? .zero
+        let inTint = pixel(NSPoint(x: row.minX + 1.5, y: row.midY))
+        let onBand = pixel(NSPoint(x: text.bounds.width - 20, y: row.midY))
+        if let inTint, let onBand {
+            let apart = abs(inTint.redComponent - onBand.redComponent)
+                + abs(inTint.greenComponent - onBand.greenComponent)
+                + abs(inTint.blueComponent - onBand.blueComponent)
+            try expect(apart > 0.03, "the active line's band covered the tint: \(inTint) \(onBand)")
+        } else {
+            throw Failure(description: "the rendering could not be read")
+        }
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {
