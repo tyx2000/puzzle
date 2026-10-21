@@ -725,7 +725,8 @@ final class PuzzleTextView: NSTextView {
     /// component's `<Button`, never its opening tag's final `>` — to the row
     /// holding the closing bracket, or a component's last `>`. A self-closing
     /// component is both ends at once: from its first row to its last.
-    private func activeScope() -> (geometry: BracketScopeGeometry, tints: [NSRect])? {
+    private func activeScope() -> (geometry: BracketScopeGeometry, tints: [NSRect],
+                                   replacedGuideX: CGFloat?)? {
         let ends: [[NSRect]]
         let openingAt: Int, closingAt: Int
         if bracketMatchRanges.count == 2 {
@@ -739,25 +740,23 @@ final class PuzzleTextView: NSTextView {
         } else {
             return nil
         }
-        guard let firstRow = ends.first?.first, let lastRow = ends.last?.last else { return nil }
-        let guideX = indentGuideX(columns: min(leadingColumns(ofLineAt: openingAt),
-                                               leadingColumns(ofLineAt: closingAt))) + 0.5
+        let columns = min(leadingColumns(ofLineAt: openingAt), leadingColumns(ofLineAt: closingAt))
+        // Every end is framed 2pt out from its characters, on both sides. The
+        // line runs down the left edge of the frame round an end that starts
+        // its line in the shallower line's column, and stands in for that
+        // column's own guide, which is drawn right at the characters: beside
+        // the frame's edge it would be a second line a hair from the first.
+        let frameLeft = indentColumnX(columns: columns) - 2
         var tints = ends.flatMap { $0 }
-        // An end that starts its line stands in the guide's column: its tint
-        // starts where the line does, so the line is its left side too.
-        if abs(firstRow.midY - lastRow.midY) >= 0.5 {
-            let lineLeft = guideX - BracketScopeGeometry.lineWidth / 2
-            for (index, tint) in tints.enumerated()
-            where (tint.minY == firstRow.minY || tint.minY == lastRow.minY)
-                && abs(tint.minX - lineLeft) <= 3 {
-                tints[index] = NSRect(x: lineLeft, y: tint.minY,
-                                      width: tint.maxX - lineLeft, height: tint.height)
-            }
+        for (index, tint) in tints.enumerated() where abs(tint.minX - frameLeft) < 1 {
+            tints[index] = NSRect(x: frameLeft, y: tint.minY,
+                                  width: tint.maxX - frameLeft, height: tint.height)
         }
         guard let opening = tints.first, let closing = tints.last else { return nil }
-        let geometry = BracketScopeGeometry.make(opening: opening, closing: closing,
-                                                 guideX: guideX, visibleRect: visibleRect)
-        return (geometry, tints)
+        let geometry = BracketScopeGeometry.make(
+            opening: opening, closing: closing,
+            guideX: frameLeft + BracketScopeGeometry.lineWidth / 2, visibleRect: visibleRect)
+        return (geometry, tints, geometry.box == nil ? indentGuideX(columns: columns) : nil)
     }
 
     override func drawBackground(in rect: NSRect) {
@@ -2733,6 +2732,14 @@ final class PuzzleTextView: NSTextView {
         let column = Theme.characterWidth()
         let left = textContainerOrigin.x + container.lineFragmentPadding
         let dotSize = max(1.5, (column * 0.22).rounded())
+        // The active pair's line takes the place of its column's guide along
+        // the rows it runs down.
+        let replaced: (x: CGFloat, top: CGFloat, bottom: CGFloat)? = markers == .guides
+            ? activeScope().flatMap { scope in
+                guard let x = scope.replacedGuideX, let o = scope.geometry.openingRing,
+                      let c = scope.geometry.closingRing else { return nil }
+                return (x, o.maxY, c.maxY)
+            } : nil
         (markers == .guides ? Theme.gutter.withAlphaComponent(0.55)
                             : Theme.gutter.withAlphaComponent(0.8)).setFill()
         for (row, line, startsLine) in aid.rows where startsLine {
@@ -2749,6 +2756,11 @@ final class PuzzleTextView: NSTextView {
                 while level * unit < indent {
                     let mark = NSRect(x: indentGuideX(columns: level * unit), y: row.minY,
                                       width: 1, height: row.height)
+                    if let replaced, mark.minX == replaced.x,
+                       mark.midY > replaced.top, mark.midY < replaced.bottom {
+                        level += 1
+                        continue
+                    }
                     // Blended: a plain fill copies the translucent colour in,
                     // and the stripe or band under it showed through as the
                     // code area's colour instead.
@@ -2772,11 +2784,16 @@ final class PuzzleTextView: NSTextView {
     }
 
     /// Where the 1pt indent guide for that much indentation stands: the left
-    /// edge of the column, on a whole point. The active pair's line runs down
-    /// the same guide, so both ask here.
+    /// edge of the column, on a whole point. Where the active pair's line
+    /// runs, it stands in for its column's guide.
     func indentGuideX(columns: Int) -> CGFloat {
-        floor(textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0)
-              + CGFloat(columns) * Theme.characterWidth())
+        floor(indentColumnX(columns: columns))
+    }
+
+    /// Where a character that much indentation in starts.
+    func indentColumnX(columns: Int) -> CGFloat {
+        textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0)
+            + CGFloat(columns) * Theme.characterWidth()
     }
 
     /// Columns of leading whitespace on a 1-based line, a tab reaching the

@@ -2829,12 +2829,13 @@ enum RegressionTests {
         }
     }
 
-    /// The active pair's line runs down its block's indent guide, not 3pt
-    /// beside it, where the two read as one line drawn twice. Both ends are
-    /// tinted the whole height of their line, and the line runs round each
-    /// tint from within. A closing bracket that starts its line stands in the
-    /// guide's column, and its tint starts where the line does; one after its
-    /// line's content keeps its own left edge.
+    /// The active pair's line stands in for its block's indent guide: that
+    /// column's guide is not drawn where the line runs, so the two never sit
+    /// a hair apart, reading as one line drawn twice. Both ends are tinted the
+    /// whole height of their line and 2pt out from their characters on both
+    /// sides, and the line runs round each tint from within — down the left
+    /// edge of a closing bracket's that starts its line, along the bottom of
+    /// one after its line's content.
     private static func testActivePairRunsDownTheGuide() throws {
         let settings = Settings.shared
         let saved = settings.indentMarkers
@@ -2879,22 +2880,39 @@ enum RegressionTests {
                 $0.minX == x && $0.midY > drawn.ends[0].maxY && $0.midY < drawn.ends[1].minY
             }
         }
+        // A character's box as laid out, in the text view's coordinates.
+        func glyph(_ location: Int) -> NSRect {
+            text.layoutManager!.boundingRect(forGlyphRange: NSRange(location: location, length: 1),
+                                             in: text.textContainer!)
+                .offsetBy(dx: text.textContainerInset.width, dy: text.textContainerInset.height)
+        }
+        func framed(_ end: NSRect, _ location: Int) -> Bool {
+            abs(end.minX - (glyph(location).minX - 2)) < 0.05
+                && abs(end.maxX - (glyph(location).maxX + 2)) < 0.05
+        }
 
-        let block = try scope("if (path) {\n  try {\n    fp = open(path)\n    read(fp)\n  } catch (error) {\n  }\n}\n",
-                              opening: "try {", closing: "  }")
-        try expect(guided(block, columns: 2), "no guide is drawn down the try block: \(block.guides)")
-        try expect(block.line.guideX == text.indentGuideX(columns: 2) + 0.5,
-                   "the line runs beside the block's guide, not down it: \(block.line.guideX) "
-                    + "vs \(text.indentGuideX(columns: 2))")
+        let blockSource = "if (path) {\n  try {\n    fp = open(path)\n    read(fp)\n  } catch (error) {\n  }\n}\n"
+        let block = try scope(blockSource, opening: "try {", closing: "  }")
+        let blockText = blockSource as NSString
+        try expect(!guided(block, columns: 2) && guided(block, columns: 0),
+                   "the try block's own guide is drawn beside its line, or the outer one is gone: "
+                    + "\(block.guides)")
+        try expect(abs(block.line.guideX - (text.indentColumnX(columns: 2) - 2 + inside)) < 0.01,
+                   "the line does not run down the closing bracket's frame: \(block.line.guideX)")
+        let opening = blockText.range(of: "try {").location + 4
+        let closing = blockText.range(of: "  }").location + 2
+        try expect(framed(block.ends[0], opening) && framed(block.ends[1], closing),
+                   "the brackets are not framed 2pt out on both sides: \(block.ends)")
         try expect(block.ends[1].minX == block.line.guideX - inside,
-                   "a closing bracket that starts its line is not tinted from the line: "
+                   "the line is not the left side of a closing bracket that starts its line: "
                     + "\(block.line.guideX) \(block.ends[1])")
 
         let literal = try scope("  const options = {\n    retries: 3,\n    timeout: 10 };\n",
                                 opening: "= {", closing: "10 }")
-        try expect(guided(literal, columns: 2), "no guide is drawn down the literal: \(literal.guides)")
-        try expect(literal.line.guideX == text.indentGuideX(columns: 2) + 0.5,
-                   "the line runs beside the literal's guide, not down it")
+        try expect(!guided(literal, columns: 2) && guided(literal, columns: 0),
+                   "the literal's own guide is drawn beside its line: \(literal.guides)")
+        try expect(abs(literal.line.guideX - (text.indentColumnX(columns: 2) - 2 + inside)) < 0.01,
+                   "the line does not run where a bracket in its column would be framed")
         try expect(literal.ends[1].minX > literal.line.guideX + 3,
                    "a closing bracket after its line's content was stretched back to the line")
     }
