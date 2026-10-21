@@ -15,9 +15,11 @@ struct BracketScopeGeometry: Equatable {
     let openingRing: NSRect?
     let closingRing: NSRect?
     let guideX: CGFloat
-    /// The opening end is rounded along its bottom first, then up, back along
-    /// its top and down its left side. A component's opening tag always is;
-    /// a bracket is when it stands in the guide's column.
+    /// The opening end stands in the guide's column, and is rounded along its
+    /// bottom first, then up, back along its top and down its left side —
+    /// which is the guide. Rounded the other way, as an end further in is,
+    /// that side would be run up and then down, and the two would part in a
+    /// point. Bracket or component tag, it is where the end stands that says.
     let opensAlongTheBottom: Bool
 
     /// The line is laid half of this inside the ends' tints, so it borders
@@ -42,7 +44,6 @@ struct BracketScopeGeometry: Equatable {
     /// the middle of the indent guide of the shallower of the two lines, so
     /// the two are one line.
     static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
-                     opensAlongTheBottom: Bool = false,
                      visibleRect: NSRect) -> BracketScopeGeometry {
         let inside = lineWidth / 2
         if abs(opening.midY - closing.midY) < 0.5 {
@@ -54,7 +55,7 @@ struct BracketScopeGeometry: Equatable {
         return BracketScopeGeometry(
             box: nil, openingRing: openingRing,
             closingRing: closing.insetBy(dx: inside, dy: inside), guideX: guideX,
-            opensAlongTheBottom: opensAlongTheBottom || openingRing.minX - guideX <= 0.5)
+            opensAlongTheBottom: openingRing.minX - guideX <= 0.5)
     }
 
     /// The line as drawn. Every turn is an arc, and where the line meets
@@ -88,14 +89,7 @@ struct BracketScopeGeometry: Equatable {
             arc(bottomRight, topRight, ro)
             arc(topRight, topLeft, ro)
             arc(topLeft, bottomLeft, ro)
-            // ...which in the guide's column runs straight on down it.
-            // Further in, the line turns out along the row to the guide.
-            let room = o.minX - g
-            if room > 0.5 {
-                let out = min(ro, room / 2)
-                arc(bottomLeft, onGuide, out)
-                arc(onGuide, downGuide, min(radius, room - out))
-            }
+            // ...which is the guide: the line runs straight on down it.
         } else {
             // Set out along the bottom, heading the way the line will pass
             // there at the last: up the left side, along the top, down the
@@ -746,9 +740,8 @@ final class PuzzleTextView: NSTextView {
             }
         }
         guard let opening = tints.first, let closing = tints.last else { return nil }
-        let geometry = BracketScopeGeometry.make(
-            opening: opening, closing: closing, guideX: guideX,
-            opensAlongTheBottom: bracketMatchRanges.count != 2, visibleRect: visibleRect)
+        let geometry = BracketScopeGeometry.make(opening: opening, closing: closing,
+                                                 guideX: guideX, visibleRect: visibleRect)
         return (geometry, tints)
     }
 

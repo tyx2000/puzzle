@@ -2997,24 +2997,40 @@ enum RegressionTests {
                     && allman.walk.setsOut.dy > 0.99,
                    "the line does not set out down the guide from a bracket in its column: \(allman.walk)")
 
-        // A component's opening tag is rounded along its bottom first too.
-        let source = "<Panel title=\"x\">\n  <Row />\n</Panel>\n"
-        text.string = source
-        let ns = source as NSString
-        let openingEnd = ns.range(of: "\">").location + 2
-        let closing = ns.range(of: "</Panel>")
-        text.updateJSXTagMatches([JSXTagMatch(
-            kind: .paired,
-            openingTagRange: NSRange(location: 0, length: openingEnd),
-            closingTagRange: closing,
-            openingAngleRange: NSRange(location: 0, length: 1),
-            openingHeadRange: NSRange(location: 0, length: 6),
-            openingTerminatorRange: NSRange(location: openingEnd - 1, length: 1),
-            closingTerminatorRange: NSRange(location: NSMaxRange(closing) - 1, length: 1))])
-        let tag = try scope(source, caretAfter: "<P")
+        // A component's tags go by where they stand, as brackets do.
+        func component(_ source: String, _ name: String) throws
+            -> (line: BracketScopeGeometry, walk: Walk, o: NSRect, c: NSRect) {
+            text.string = source
+            let ns = source as NSString
+            let opening = ns.range(of: "<" + name)
+            let openingEnd = NSMaxRange(ns.range(of: ">", range: NSRange(
+                location: opening.location, length: ns.length - opening.location)))
+            let closing = ns.range(of: "</" + name + ">")
+            text.updateJSXTagMatches([JSXTagMatch(
+                kind: .paired,
+                openingTagRange: NSRange(location: opening.location,
+                                         length: openingEnd - opening.location),
+                closingTagRange: closing,
+                openingAngleRange: NSRange(location: opening.location, length: 1),
+                openingHeadRange: opening,
+                openingTerminatorRange: NSRange(location: openingEnd - 1, length: 1),
+                closingTerminatorRange: NSRange(location: NSMaxRange(closing) - 1, length: 1))])
+            return try scope(source, caretAfter: "<" + name.prefix(1))
+        }
+        // In the guide's column, rounded along its bottom first.
+        let tag = try component("<Panel title=\"x\">\n  <Row />\n</Panel>\n", "Panel")
         try expect(tag.line.opensAlongTheBottom && close(tag.walk.start.x, tag.line.guideX)
                     && tag.walk.setsOut.dy > 0.99,
                    "a component's line does not set out down the guide from its tag: \(tag.walk)")
+        // After `return`, the bracket way: set out along its bottom heading
+        // left, the way the line passes back there on to the guide.
+        let returned = try component(
+            "function Card() {\n  return <Box title=\"x\">\n    <Row />\n  </Box>;\n}\n", "Box")
+        try expect(!returned.line.opensAlongTheBottom && close(returned.walk.start.y, returned.o.maxY)
+                    && returned.walk.setsOut.dx < -0.99,
+                   "a returned component's line does not set out along its tag's bottom: \(returned.walk)")
+        try expect(close(returned.walk.end.x, returned.line.guideX) && returned.walk.arrives.dy > 0.99,
+                   "a returned component's line does not end running down into the guide: \(returned.walk)")
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {
