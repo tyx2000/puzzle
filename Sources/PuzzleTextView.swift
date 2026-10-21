@@ -25,6 +25,9 @@ struct BracketScopeGeometry: Equatable {
     /// The line is laid half of this inside the ends' tints, so it borders
     /// them from within.
     static let lineWidth: CGFloat = 1.5
+    /// How far an end's frame stands out from its characters, give or take
+    /// the half point that keeps the guides it lines up with crisp.
+    static let endMargin: CGFloat = 2
     /// How far the line's corners round off, measured to its middle.
     static let cornerRadius: CGFloat = 4
     /// The ends' tints round their corners out to the line's outer edge, so
@@ -741,22 +744,22 @@ final class PuzzleTextView: NSTextView {
             return nil
         }
         let columns = min(leadingColumns(ofLineAt: openingAt), leadingColumns(ofLineAt: closingAt))
-        // Every end is framed 2pt out from its characters, on both sides. The
-        // line runs down the left edge of the frame round an end that starts
-        // its line in the shallower line's column, and stands in for that
-        // column's own guide, which is drawn right at the characters: beside
-        // the frame's edge it would be a second line a hair from the first.
-        let frameLeft = indentColumnX(columns: columns) - 2
+        // The line runs down the shallower line's column's guide, and in its
+        // place: the left edge of the frame round an end in that column.
+        let guideX = indentGuideX(columns: columns)
+        let lineX = guideX + 0.5
+        let frameLeft = lineX - BracketScopeGeometry.lineWidth / 2
         var tints = ends.flatMap { $0 }
+        // A frame in that column starts there to the hair, whatever the sums
+        // of character widths left over.
         for (index, tint) in tints.enumerated() where abs(tint.minX - frameLeft) < 1 {
             tints[index] = NSRect(x: frameLeft, y: tint.minY,
                                   width: tint.maxX - frameLeft, height: tint.height)
         }
         guard let opening = tints.first, let closing = tints.last else { return nil }
-        let geometry = BracketScopeGeometry.make(
-            opening: opening, closing: closing,
-            guideX: frameLeft + BracketScopeGeometry.lineWidth / 2, visibleRect: visibleRect)
-        return (geometry, tints, geometry.box == nil ? indentGuideX(columns: columns) : nil)
+        let geometry = BracketScopeGeometry.make(opening: opening, closing: closing,
+                                                 guideX: lineX, visibleRect: visibleRect)
+        return (geometry, tints, geometry.box == nil ? guideX : nil)
     }
 
     override func drawBackground(in rect: NSRect) {
@@ -2783,11 +2786,22 @@ final class PuzzleTextView: NSTextView {
         }
     }
 
-    /// Where the 1pt indent guide for that much indentation stands: the left
-    /// edge of the column, on a whole point. Where the active pair's line
-    /// runs, it stands in for its column's guide.
+    /// Where the 1pt indent guide for that much indentation stands.
+    ///
+    /// Guides, the active pair's line and the frames round its ends keep to
+    /// one grid: a column's guide runs where a frame round a character in
+    /// that column starts, 2pt to the left of it — as near as a guide on a
+    /// whole point comes, so it stays crisp. The line runs down that frame's
+    /// edge, so it is its column's guide exactly, an indent step from either
+    /// neighbour. Drawn at the characters, as the guides used to be, the line
+    /// sat 2pt nearer the guide on its left than the one on its right.
     func indentGuideX(columns: Int) -> CGFloat {
-        floor(indentColumnX(columns: columns))
+        Self.guideX(beforeCharacterAt: indentColumnX(columns: columns))
+    }
+
+    /// The left edge of the 1pt guide before a character starting at `x`.
+    static func guideX(beforeCharacterAt x: CGFloat) -> CGFloat {
+        (x - BracketScopeGeometry.endMargin + 0.25).rounded()
     }
 
     /// Where a character that much indentation in starts.
@@ -2913,9 +2927,14 @@ final class PuzzleTextView: NSTextView {
                     forGlyphRange: layoutManager.glyphRange(forCharacterRange: part,
                                                             actualCharacterRange: nil),
                     in: container)
-                rects.append(NSRect(x: raw.minX + inset.width - 2,
-                                    y: fragment.minY + inset.height,
-                                    width: raw.width + 4, height: fragment.height))
+                // Framed from the guide grid's line before the characters,
+                // and as far out again past their end.
+                let characters = raw.offsetBy(dx: inset.width, dy: 0)
+                let left = Self.guideX(beforeCharacterAt: characters.minX) + 0.5
+                    - BracketScopeGeometry.lineWidth / 2
+                let margin = characters.minX - left
+                rects.append(NSRect(x: left, y: fragment.minY + inset.height,
+                                    width: characters.width + 2 * margin, height: fragment.height))
             }
         }
         return rects

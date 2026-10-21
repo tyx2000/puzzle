@@ -2624,7 +2624,11 @@ enum RegressionTests {
         func guides(on line: Int) -> [CGFloat] {
             drawn.guides.filter { abs($0.midY - row(line).midY) < 0.5 }.map(\.minX)
         }
-        func levels(_ count: Int) -> [CGFloat] { (0..<count).map { floor(left + CGFloat($0 * 4) * column) } }
+        // A guide stands where a frame round a character in its column
+        // starts — 2pt before it, on a whole point — not at the character.
+        func levels(_ count: Int) -> [CGFloat] {
+            (0..<count).map { (left + CGFloat($0 * 4) * column - 1.75).rounded() }
+        }
         try expect(guides(on: 1).isEmpty && guides(on: 8).isEmpty && guides(on: 10).isEmpty,
                    "an unindented line carries guides")
         try expect(guides(on: 2) == levels(1) && guides(on: 5) == levels(2),
@@ -2666,7 +2670,7 @@ enum RegressionTests {
         text.showsCurrentLineBand = true
         let fifth = (0..<4).reduce(0) { at, _ in NSMaxRange(ns.lineRange(for: NSRange(location: at, length: 0))) }
         text.setSelectedRange(NSRange(location: fifth + 10, length: 0))
-        let onGuide = NSPoint(x: floor(left) + 0.5, y: row(5).midY)
+        let onGuide = NSPoint(x: (left - 1.75).rounded() + 0.5, y: row(5).midY)
         let onDot = NSPoint(x: left + column / 2, y: row(5).midY)
         let clear = NSPoint(x: text.bounds.width - 20, y: row(5).midY)
         let plain = NSPoint(x: text.bounds.width - 20, y: row(1).midY)
@@ -2886,21 +2890,28 @@ enum RegressionTests {
                                              in: text.textContainer!)
                 .offsetBy(dx: text.textContainerInset.width, dy: text.textContainerInset.height)
         }
+        // Framed as far out on the right as on the left, and that about 2pt.
         func framed(_ end: NSRect, _ location: Int) -> Bool {
-            abs(end.minX - (glyph(location).minX - 2)) < 0.05
-                && abs(end.maxX - (glyph(location).maxX + 2)) < 0.05
+            let left = glyph(location).minX - end.minX, right = end.maxX - glyph(location).maxX
+            return abs(left - right) < 0.05 && left >= 1.5 && left <= 2.5
         }
 
-        let blockSource = "if (path) {\n  try {\n    fp = open(path)\n    read(fp)\n  } catch (error) {\n  }\n}\n"
-        let block = try scope(blockSource, opening: "try {", closing: "  }")
+        let blockSource = "if (path) {\n  try {\n    fp = open(path)\n    if (fp) {\n      read(fp)\n    }\n  } catch (error) {\n  }\n}\n"
+        let block = try scope(blockSource, opening: "try {", closing: "\n  }")
         let blockText = blockSource as NSString
         try expect(!guided(block, columns: 2) && guided(block, columns: 0),
                    "the try block's own guide is drawn beside its line, or the outer one is gone: "
                     + "\(block.guides)")
-        try expect(abs(block.line.guideX - (text.indentColumnX(columns: 2) - 2 + inside)) < 0.01,
-                   "the line does not run down the closing bracket's frame: \(block.line.guideX)")
+        try expect(block.line.guideX == text.indentGuideX(columns: 2) + 0.5,
+                   "the line does not run where its column's guide would: \(block.line.guideX)")
+        // An indent step from the guides on either side of it, alike.
+        let outer = text.indentGuideX(columns: 0) + 0.5, inner = text.indentGuideX(columns: 4) + 0.5
+        try expect(guided(block, columns: 4)
+                    && abs((block.line.guideX - outer) - (inner - block.line.guideX)) <= 1,
+                   "the line is not an indent step from the guides on either side: "
+                    + "\(outer) \(block.line.guideX) \(inner)")
         let opening = blockText.range(of: "try {").location + 4
-        let closing = blockText.range(of: "  }").location + 2
+        let closing = blockText.range(of: "\n  }").location + 3
         try expect(framed(block.ends[0], opening) && framed(block.ends[1], closing),
                    "the brackets are not framed 2pt out on both sides: \(block.ends)")
         try expect(block.ends[1].minX == block.line.guideX - inside,
@@ -2911,8 +2922,8 @@ enum RegressionTests {
                                 opening: "= {", closing: "10 }")
         try expect(!guided(literal, columns: 2) && guided(literal, columns: 0),
                    "the literal's own guide is drawn beside its line: \(literal.guides)")
-        try expect(abs(literal.line.guideX - (text.indentColumnX(columns: 2) - 2 + inside)) < 0.01,
-                   "the line does not run where a bracket in its column would be framed")
+        try expect(literal.line.guideX == text.indentGuideX(columns: 2) + 0.5,
+                   "the line does not run where its column's guide would")
         try expect(literal.ends[1].minX > literal.line.guideX + 3,
                    "a closing bracket after its line's content was stretched back to the line")
     }
