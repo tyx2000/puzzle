@@ -8113,6 +8113,17 @@ enum RegressionTests {
         }
         // Comments stay a step back from the code they annotate.
         try expect(minimum.comment < minimum.code, "comments are asked to read as loud as code")
+        // And no deeper than they need be: held far over the floor, every hue
+        // on white goes so dark that the highlighting reads as one grey. The
+        // middle of each palette's syntax colours stays light enough to be
+        // seen as colour.
+        let hues = code.filter { $0.0 != "punctuation" }.map(\.1)
+        for palette in light {
+            let ratios = hues.map { contrast(palette[keyPath: $0], palette.editorBackground) }.sorted()
+            let middle = ratios[ratios.count / 2]
+            try expect(middle <= 6.5, "\(palette.id)'s syntax colours are dark, a grey "
+                       + "over the code: the middle one reads at \(String(format: "%.2f", middle)):1")
+        }
         // The line between a matched pair marks the code, it is not code: every
         // palette's two line hues stay well under what the code itself is read
         // at — at the code's own contrast the line shouted over what it

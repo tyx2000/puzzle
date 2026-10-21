@@ -97,10 +97,14 @@ struct ThemePalette {
     }
 
     /// What every light palette's code reads at against its code area, as WCAG
-    /// contrast ratios. Thin dark strokes on white read lighter than the same
-    /// contrast does on black, and code is read for hours: syntax colours meet
-    /// AAA, comments stay a step back from the code, line numbers further.
-    static let minimumContrast = (code: 7.0, comment: 5.5, text: 10.0, gutter: 3.0, diffText: 4.5)
+    /// contrast ratios. Syntax colours meet 6:1, between AA and AAA. Held to
+    /// AAA, every hue on white had to be taken so dark that they all read as
+    /// shades of one grey beside the plain text, and the highlighting was
+    /// lost; at AA they read light and thin. At 6:1 each is as saturated as
+    /// its hue goes at that depth, while plain text stays darker still — so a
+    /// coloured word stands out from it as it does on a dark palette. Comments
+    /// stay a step back from the code, line numbers further.
+    static let minimumContrast = (code: 6.0, comment: 4.0, text: 10.0, gutter: 3.0, diffText: 4.5)
 
     /// Every palette, in the order the settings file lists them.
     static let all: [ThemePalette] = [.ayuDark, .ayuLight, .githubLight,
@@ -155,11 +159,11 @@ extension ThemePalette {
         inputBorderFocused: 0x8a9199, toggleActiveBackground: 0xeceff2, diffAddedText: 0x377c02,
         diffRemovedText: 0xc13a50, raisedSurface: 0xffffff, raisedEdge: 0xd8dce1,
         diffAddedBackground: 0xe9f5e1, diffRemovedBackground: 0xfdebed,
-        diffAddedWordBackground: 0xc6e6b2, diffRemovedWordBackground: 0xf9c8cd, red: 0xa22831,
-        green: 0x465f00, yellow: 0x774e04, orange: 0x894303, blue: 0x035b8f, purple: 0x6d4592,
-        cyan: 0x03634a, comment: 0x656669, punct: 0x53575c, syntaxType: 0x035b8f,
-        syntaxFunction: 0x774e04, syntaxKeyword: 0x894303, syntaxConstant: 0x6d4592,
-        syntaxString: 0x465f00, syntaxProperty: 0xa22831,
+        diffAddedWordBackground: 0xc6e6b2, diffRemovedWordBackground: 0xf9c8cd, red: 0xc3002b,
+        green: 0x4e6900, yellow: 0x845700, orange: 0x984b00, blue: 0x00659f, purple: 0x9021d8,
+        cyan: 0x006e53, comment: 0x7c7d81, punct: 0x53575c, syntaxType: 0x00659f,
+        syntaxFunction: 0x845700, syntaxKeyword: 0x984b00, syntaxConstant: 0x9021d8,
+        syntaxString: 0x4e6900, syntaxProperty: 0xc3002b,
         matchLine: (start: \.orange, end: \.red))
 
     /// GitHub Light, after GitHub's Primer colours: a white code area on a pale
@@ -177,11 +181,11 @@ extension ThemePalette {
         inputBorderFocused: 0x0969da, toggleActiveBackground: 0xe6eaef, diffAddedText: 0x1a7f37,
         diffRemovedText: 0xcf222e, raisedSurface: 0xffffff, raisedEdge: 0xd0d7de,
         diffAddedBackground: 0xe6ffec, diffRemovedBackground: 0xffebe9,
-        diffAddedWordBackground: 0xabf2bc, diffRemovedWordBackground: 0xffcecb, red: 0xb5001d,
-        green: 0x006726, yellow: 0x785002, orange: 0x963c03, blue: 0x0254b4, purple: 0x6c35c4,
-        cyan: 0x05636a, comment: 0x606972, punct: 0x515a64, syntaxType: 0x953800,
-        syntaxFunction: 0x6c35c4, syntaxKeyword: 0xb5001d, syntaxConstant: 0x0550ae,
-        syntaxString: 0x0a3069, syntaxProperty: 0x0550ae,
+        diffAddedWordBackground: 0xabf2bc, diffRemovedWordBackground: 0xffcecb, red: 0xc80021,
+        green: 0x00722b, yellow: 0x855900, orange: 0xa74200, blue: 0x005dc8, purple: 0x7c30e7,
+        cyan: 0x006e76, comment: 0x77808a, punct: 0x515a64, syntaxType: 0xa53f00,
+        syntaxFunction: 0x7c30e7, syntaxKeyword: 0xc80021, syntaxConstant: 0x0059c3,
+        syntaxString: 0x003886, syntaxProperty: 0x0059c3,
         matchLine: (start: \.blue, end: \.purple))
 
     /// Material Teal: Material Design's colours on a faint mint surface, teal
@@ -198,11 +202,11 @@ extension ThemePalette {
         inputBorderFocused: 0x00897b, toggleActiveBackground: 0xd4ece9, diffAddedText: 0x2e7d32,
         diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xcbdcd9,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb40011,
-        green: 0x016613, yellow: 0x7a4e01, orange: 0x854700, blue: 0x00599e, purple: 0x8c22a8,
-        cyan: 0x03606b, comment: 0x576b71, punct: 0x405c69, syntaxType: 0x5e35b1,
-        syntaxFunction: 0x00599e, syntaxKeyword: 0x056359, syntaxConstant: 0xa42d02,
-        syntaxString: 0x016613, syntaxProperty: 0xaf044f,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xc70014,
+        green: 0x007116, yellow: 0x875700, orange: 0x944f00, blue: 0x0063af, purple: 0xa20cc4,
+        cyan: 0x006b77, comment: 0x6d8188, punct: 0x405c69, syntaxType: 0x7026e1,
+        syntaxFunction: 0x0063af, syntaxKeyword: 0x006e63, syntaxConstant: 0xb63200,
+        syntaxString: 0x007116, syntaxProperty: 0xc20058,
         matchLine: (start: \.cursor, end: \.blue))
 
     /// Material Indigo: the classic Material pairing — indigo, with pink for
@@ -219,11 +223,11 @@ extension ThemePalette {
         inputBorderFocused: 0x3f51b5, toggleActiveBackground: 0xe3e6f6, diffAddedText: 0x2e7d32,
         diffRemovedText: 0xc62828, raisedSurface: 0xffffff, raisedEdge: 0xd0d4e6,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xb60011,
-        green: 0x016813, yellow: 0x7b4f03, orange: 0x874902, blue: 0x035a9f, purple: 0x5e35b1,
-        cyan: 0x00626b, comment: 0x60697a, punct: 0x595959, syntaxType: 0x3949ab,
-        syntaxFunction: 0x056359, syntaxKeyword: 0xb2004b, syntaxConstant: 0x934001,
-        syntaxString: 0x016813, syntaxProperty: 0x5e35b1,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xc90014,
+        green: 0x007316, yellow: 0x885800, orange: 0x965100, blue: 0x0064b1, purple: 0x7026e1,
+        cyan: 0x006d76, comment: 0x767f91, punct: 0x595959, syntaxType: 0x3b41ed,
+        syntaxFunction: 0x006e63, syntaxKeyword: 0xc40054, syntaxConstant: 0xa34700,
+        syntaxString: 0x007316, syntaxProperty: 0x7026e1,
         matchLine: (start: \.cursor, end: \.purple))
 
     /// Material You: Material 3's baseline scheme — tonal lavender surfaces and
@@ -240,10 +244,10 @@ extension ThemePalette {
         inputBorderFocused: 0x6750a4, toggleActiveBackground: 0xe8def8, diffAddedText: 0x386a20,
         diffRemovedText: 0xb3261e, raisedSurface: 0xffffff, raisedEdge: 0xd6cedf,
         diffAddedBackground: 0xe8f5e9, diffRemovedBackground: 0xffebee,
-        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xaa1b15,
-        green: 0x306116, yellow: 0x814a01, orange: 0x8a4202, blue: 0x025a98, purple: 0x5f479a,
-        cyan: 0x036060, comment: 0x68646e, punct: 0x5b546a, syntaxType: 0x814a01,
-        syntaxFunction: 0x025a98, syntaxKeyword: 0x5f479a, syntaxConstant: 0x90395a,
-        syntaxString: 0x306116, syntaxProperty: 0x754b59,
+        diffAddedWordBackground: 0xc8e6c9, diffRemovedWordBackground: 0xffcdd2, red: 0xc40005,
+        green: 0x2f6d00, yellow: 0x8f5200, orange: 0x994a00, blue: 0x0064a9, purple: 0x782de6,
+        cyan: 0x006b6c, comment: 0x807b86, punct: 0x5b546a, syntaxType: 0x8f5200,
+        syntaxFunction: 0x0064a9, syntaxKeyword: 0x782de6, syntaxConstant: 0xbe0066,
+        syntaxString: 0x2f6d00, syntaxProperty: 0xbe0068,
         matchLine: (start: \.cursor, end: \.red))
 }
