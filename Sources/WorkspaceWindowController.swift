@@ -104,6 +104,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(applicationDidBecomeActive(_:)),
             name: NSApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screenParametersChanged(_:)),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
         sidebar.onSelectProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             let wanted = self.projects[index]
@@ -317,6 +320,35 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillExitFullScreen(_ notification: Notification) {
         sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
+    }
+
+    /// Taking away the display a full-screen window is on strands it: AppKit
+    /// shrinks it to nothing, on no display, and leaves it in full screen.
+    /// Nothing shows it, and the menu with Exit Full Screen in it is hidden.
+    /// It is looked at once the displays have settled, so a window macOS has
+    /// moved to another display by then is left alone; one still on none is
+    /// taken out of full screen, which puts it back on a display at the size
+    /// it had before.
+    private var strandedCheck: DispatchWorkItem?
+
+    @objc private func screenParametersChanged(_ notification: Notification) {
+        strandedCheck?.cancel()
+        let check = DispatchWorkItem { [weak self] in self?.leaveFullScreenIfStranded() }
+        strandedCheck = check
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: check)
+    }
+
+    @discardableResult
+    func leaveFullScreenIfStranded() -> Bool {
+        guard let window, window.styleMask.contains(.fullScreen),
+              Self.isStranded(window.frame, on: NSScreen.screens.map(\.frame)) else { return false }
+        window.toggleFullScreen(nil)
+        return true
+    }
+
+    /// On no display: shrunk to nothing, or somewhere no display reaches.
+    static func isStranded(_ frame: NSRect, on screens: [NSRect]) -> Bool {
+        frame.width < 1 || frame.height < 1 || !screens.contains { $0.intersects(frame) }
     }
 
     private func updateTitlebarGeometry() {

@@ -94,6 +94,7 @@ enum RegressionTests {
         try testActivePairIsOneFlowingLine()
         try testCommitImagePathsDoNotCollide()
         try testFullScreenStripTakesTheLightsPlace()
+        try testFullScreenWindowOnNoDisplayIsRecognised()
         try testNarrowWindowNarrowsThePanel()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -3408,6 +3409,34 @@ enum RegressionTests {
         window.contentView?.layoutSubtreeIfNeeded()
         try expect(window.frame.width == 1706 && root.sidebarLaidOutWidthForTesting == 853,
                    "the search panel widened the window to \(window.frame.width)pt")
+    }
+
+    /// Unplugging the display a full-screen window is on leaves it 0x0, on no
+    /// display, still in full screen, and it is taken out of full screen to
+    /// be seen again. The frames are the ones it went through. The suite
+    /// cannot take a display away; a window that is not in full screen is
+    /// never touched.
+    private static func testFullScreenWindowOnNoDisplayIsRecognised() throws {
+        let screens = [NSRect(x: 0, y: 0, width: 2560, height: 1440)]
+        try expect(WorkspaceWindowController.isStranded(.zero, on: screens),
+                   "a window shrunk to nothing is not taken for stranded")
+        try expect(WorkspaceWindowController.isStranded(
+                    NSRect(x: 0, y: -104, width: 1141, height: 104), on: screens),
+                   "a window just below the only display is not taken for stranded")
+        try expect(WorkspaceWindowController.isStranded(
+                    NSRect(x: -1920, y: 360, width: 1920, height: 1080), on: screens),
+                   "a window where the unplugged display was is not taken for stranded")
+        try expect(!WorkspaceWindowController.isStranded(
+                    NSRect(x: 0, y: 0, width: 2560, height: 1410), on: screens),
+                   "a full-screen window on its display is taken for stranded")
+        try expect(!WorkspaceWindowController.isStranded(
+                    NSRect(x: 2400, y: 1300, width: 1200, height: 800), on: screens),
+                   "a window partly off its display is taken for stranded")
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        try expect(!workspace.leaveFullScreenIfStranded(),
+                   "a window that is not in full screen was taken out of it")
     }
 
     private static func testDefaultWindowPlacement() throws {
