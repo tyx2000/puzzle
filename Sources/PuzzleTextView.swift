@@ -3,39 +3,31 @@ import AppKit
 /// View-space geometry for the active bracket pair. Keeping this independent
 /// from TextKit makes viewport continuation and same-line behavior directly
 /// regression-testable.
-struct BracketScopeGeometry {
+///
+/// A pair on one row is one box round both ends. A pair over several rows is
+/// one line, flowing: round the opening end, down the indent guide, and round
+/// the closing end.
+struct BracketScopeGeometry: Equatable {
+    /// A pair on one row: the box round both ends.
     let box: NSRect?
-    let polyline: [NSPoint]
+    /// A pair over several rows: each end as the line runs round it — its
+    /// tint, half the line's width in — and where it runs down between them.
+    let openingRing: NSRect?
+    let closingRing: NSRect?
+    let guideX: CGFloat
+    /// The opening end is rounded along its bottom first, then up, back along
+    /// its top and down its left side. A component's opening tag always is;
+    /// a bracket is when it stands in the guide's column.
+    let opensAlongTheBottom: Bool
+
     /// The line is laid half of this inside the ends' tints, so it borders
     /// them from within.
     static let lineWidth: CGFloat = 1.5
     /// How far the line's corners round off, measured to its middle.
     static let cornerRadius: CGFloat = 4
     /// The ends' tints round their corners out to the line's outer edge, so
-    /// where the line turns round one the two curves are one.
+    /// where the line runs round one the two curves are one.
     static var tintCornerRadius: CGFloat { cornerRadius + lineWidth / 2 }
-
-    /// The line as drawn: round where it turns. The points it is made from
-    /// are where it would turn if it did so square.
-    var path: CGPath {
-        let path = CGMutablePath()
-        let radius = Self.cornerRadius
-        if let box {
-            let round = min(radius, box.width / 2, box.height / 2)
-            path.addRoundedRect(in: box, cornerWidth: round, cornerHeight: round)
-        } else if polyline.count == 4 {
-            let p = polyline
-            let down = abs(p[2].y - p[1].y) / 2
-            path.move(to: p[0])
-            // Each corner as round as the sides it joins leave room for.
-            path.addArc(tangent1End: p[1], tangent2End: p[2],
-                        radius: min(radius, abs(p[0].x - p[1].x), down))
-            path.addArc(tangent1End: p[2], tangent2End: p[3],
-                        radius: min(radius, abs(p[3].x - p[2].x), down))
-            path.addLine(to: p[3])
-        }
-        return path
-    }
 
     /// The outline is anchored to the text, never to the viewport.
     ///
@@ -46,34 +38,90 @@ struct BracketScopeGeometry {
     /// pair ended up looking like several, with stray ticks across the guide.
     ///
     /// `opening` and `closing` are the two ends as tinted, each the whole
-    /// height of its line, and the line borders them from within: along the
-    /// bottom of the opening end, then down the left of the closing end and
-    /// along its bottom. `guideX` is where the vertical runs: down the middle
-    /// of the indent guide of the shallower of the two lines, so the two are
-    /// one line.
+    /// height of its line. `guideX` is where the line runs down between them:
+    /// the middle of the indent guide of the shallower of the two lines, so
+    /// the two are one line.
     static func make(opening: NSRect, closing: NSRect, guideX: CGFloat,
+                     opensAlongTheBottom: Bool = false,
                      visibleRect: NSRect) -> BracketScopeGeometry {
         let inside = lineWidth / 2
-        // A pair on one visual row reads best as one compact enclosure. A
-        // multiline pair uses the open-sided scope contour shown by editors
-        // such as Zed: opening row -> indentation guide -> closing row.
         if abs(opening.midY - closing.midY) < 0.5 {
-            let union = opening.union(closing).insetBy(dx: inside, dy: inside)
-            return BracketScopeGeometry(box: union, polyline: [])
+            return BracketScopeGeometry(
+                box: opening.union(closing).insetBy(dx: inside, dy: inside),
+                openingRing: nil, closingRing: nil, guideX: guideX, opensAlongTheBottom: false)
         }
+        let openingRing = opening.insetBy(dx: inside, dy: inside)
+        return BracketScopeGeometry(
+            box: nil, openingRing: openingRing,
+            closingRing: closing.insetBy(dx: inside, dy: inside), guideX: guideX,
+            opensAlongTheBottom: opensAlongTheBottom || openingRing.minX - guideX <= 0.5)
+    }
 
-        let openingY = opening.maxY - inside
-        let closingY = closing.maxY - inside
-        // The ends stop where the tints start to round off, and their round
-        // caps reach on into the curve.
-        let polyline = [
-            NSPoint(x: max(guideX, opening.maxX - tintCornerRadius), y: openingY),
-            NSPoint(x: guideX, y: openingY),
-            NSPoint(x: guideX, y: closingY),
-            NSPoint(x: max(guideX, closing.maxX - tintCornerRadius), y: closingY),
-        ]
-
-        return BracketScopeGeometry(box: nil, polyline: polyline)
+    /// The line as drawn. Every turn is an arc, and where the line meets
+    /// itself — setting out from an end it will come back round, or closing
+    /// the closing end — it curves off or in the way the other part runs, so
+    /// the two part or join as one line.
+    var path: CGPath {
+        let path = CGMutablePath()
+        let radius = Self.cornerRadius
+        func round(_ rect: NSRect) -> CGFloat { min(radius, rect.width / 2, rect.height / 2) }
+        func arc(_ corner: NSPoint, _ toward: NSPoint, _ r: CGFloat) {
+            path.addArc(tangent1End: corner, tangent2End: toward, radius: max(0, r))
+        }
+        if let box {
+            let r = round(box)
+            path.addRoundedRect(in: box, cornerWidth: r, cornerHeight: r)
+            return path
+        }
+        guard let o = openingRing, let c = closingRing else { return path }
+        let g = guideX
+        let ro = round(o), rc = round(c)
+        let (bottomLeft, bottomRight) = (NSPoint(x: o.minX, y: o.maxY), NSPoint(x: o.maxX, y: o.maxY))
+        let (topLeft, topRight) = (NSPoint(x: o.minX, y: o.minY), NSPoint(x: o.maxX, y: o.minY))
+        let onGuide = NSPoint(x: g, y: o.maxY), downGuide = NSPoint(x: g, y: c.maxY)
+        if opensAlongTheBottom {
+            // Set out from the left side, curving off it the way the line
+            // will run down it at the last: along the bottom, up, back
+            // along the top and down the left side...
+            path.move(to: NSPoint(x: o.minX, y: o.maxY - ro))
+            arc(bottomLeft, bottomRight, ro)
+            arc(bottomRight, topRight, ro)
+            arc(topRight, topLeft, ro)
+            arc(topLeft, bottomLeft, ro)
+            // ...which in the guide's column runs straight on down it.
+            // Further in, the line turns out along the row to the guide.
+            let room = o.minX - g
+            if room > 0.5 {
+                let out = min(ro, room / 2)
+                arc(bottomLeft, onGuide, out)
+                arc(onGuide, downGuide, min(radius, room - out))
+            }
+        } else {
+            // Set out along the bottom, heading the way the line will pass
+            // there at the last: up the left side, along the top, down the
+            // right side, and back along the bottom on to the guide.
+            path.move(to: NSPoint(x: o.minX + ro, y: o.maxY))
+            arc(bottomLeft, topLeft, ro)
+            arc(topLeft, topRight, ro)
+            arc(topRight, bottomRight, ro)
+            arc(bottomRight, onGuide, ro)
+            arc(onGuide, downGuide, min(radius, o.maxX - ro - g))
+        }
+        // Down the guide and round the closing end: along its bottom, up its
+        // right side and back along its top.
+        let (closingLeft, closingRight) = (NSPoint(x: c.minX, y: c.maxY), NSPoint(x: c.maxX, y: c.maxY))
+        let (closingTopLeft, closingTopRight) = (NSPoint(x: c.minX, y: c.minY), NSPoint(x: c.maxX, y: c.minY))
+        arc(downGuide, closingRight, min(radius, c.maxX - rc - g))
+        arc(closingRight, closingTopRight, rc)
+        arc(closingTopRight, closingTopLeft, rc)
+        // In the guide's column its left side is the guide: the line curves
+        // down into it, running on the way it already does. Further in, it
+        // closes its own left side and curves into its own bottom.
+        arc(closingTopLeft, closingLeft, rc)
+        if c.minX - g > 0.5 {
+            arc(closingLeft, closingRight, rc)
+        }
+        return path
     }
 }
 
@@ -659,6 +707,9 @@ final class PuzzleTextView: NSTextView {
         activeScope()?.geometry
     }
 
+    /// The active pair's contour, a component's as well as a bracket pair's.
+    var activeScopeGeometryForTesting: BracketScopeGeometry? { activeScope()?.geometry }
+
     /// The active pair as drawn: its contour, and its ends' tints.
     ///
     /// The contour runs from the row holding the opening bracket — or a
@@ -679,23 +730,25 @@ final class PuzzleTextView: NSTextView {
         } else {
             return nil
         }
-        guard let opening = ends.first?.first, let closing = ends.last?.last else { return nil }
+        guard let firstRow = ends.first?.first, let lastRow = ends.last?.last else { return nil }
         let guideX = indentGuideX(columns: min(leadingColumns(ofLineAt: openingAt),
                                                leadingColumns(ofLineAt: closingAt))) + 0.5
-        let geometry = BracketScopeGeometry.make(opening: opening, closing: closing,
-                                                 guideX: guideX, visibleRect: visibleRect)
         var tints = ends.flatMap { $0 }
         // An end that starts its line stands in the guide's column: its tint
-        // starts where the line does, so the line is its left border too.
-        if geometry.box == nil {
+        // starts where the line does, so the line is its left side too.
+        if abs(firstRow.midY - lastRow.midY) >= 0.5 {
             let lineLeft = guideX - BracketScopeGeometry.lineWidth / 2
             for (index, tint) in tints.enumerated()
-            where (tint.minY == opening.minY || tint.minY == closing.minY)
+            where (tint.minY == firstRow.minY || tint.minY == lastRow.minY)
                 && abs(tint.minX - lineLeft) <= 3 {
                 tints[index] = NSRect(x: lineLeft, y: tint.minY,
                                       width: tint.maxX - lineLeft, height: tint.height)
             }
         }
+        guard let opening = tints.first, let closing = tints.last else { return nil }
+        let geometry = BracketScopeGeometry.make(
+            opening: opening, closing: closing, guideX: guideX,
+            opensAlongTheBottom: bracketMatchRanges.count != 2, visibleRect: visibleRect)
         return (geometry, tints)
     }
 

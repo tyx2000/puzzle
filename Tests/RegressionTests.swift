@@ -91,6 +91,7 @@ enum RegressionTests {
         try testReadingAids()
         try testActivePairTintedAndFlowing()
         try testActivePairRunsDownTheGuide()
+        try testActivePairIsOneFlowingLine()
         try testCommitImagePathsDoNotCollide()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
@@ -630,21 +631,21 @@ enum RegressionTests {
         let laidOutMultiline = textView.bracketScopeGeometry(
             in: NSRect(x: 0, y: 0, width: 400, height: 200))
         try expect(laidOutMultiline?.box == nil
-                   && laidOutMultiline?.polyline.count == 4,
+                   && laidOutMultiline?.openingRing != nil && laidOutMultiline?.closingRing != nil,
                    "TextKit did not turn a multiline bracket pair into a scope contour")
 
         let sameLine = BracketScopeGeometry.make(
             opening: NSRect(x: 20, y: 10, width: 8, height: 14),
             closing: NSRect(x: 80, y: 10, width: 8, height: 14),
             guideX: 10, visibleRect: NSRect(x: 0, y: 0, width: 100, height: 100))
-        try expect(sameLine.box != nil && sameLine.polyline.isEmpty,
+        try expect(sameLine.box != nil && sameLine.openingRing == nil,
                    "a same-line bracket pair did not produce a compact enclosure")
 
         let multiline = BracketScopeGeometry.make(
             opening: NSRect(x: 80, y: -30, width: 8, height: 14),
             closing: NSRect(x: 20, y: 130, width: 8, height: 14),
             guideX: 12, visibleRect: NSRect(x: 0, y: 0, width: 100, height: 100))
-        try expect(multiline.box == nil && multiline.polyline.count == 4,
+        try expect(multiline.box == nil && multiline.openingRing != nil && multiline.closingRing != nil,
                    "a multiline bracket pair did not produce a scope contour")
         // Nothing in the outline is measured from the viewport. The caps that
         // used to mark where the scope ran off the top and bottom of the screen
@@ -655,9 +656,8 @@ enum RegressionTests {
             opening: NSRect(x: 80, y: -30, width: 8, height: 14),
             closing: NSRect(x: 20, y: 130, width: 8, height: 14),
             guideX: 12, visibleRect: NSRect(x: 0, y: 500, width: 100, height: 100))
-        try expect(scrolled.polyline == multiline.polyline,
-                   "scrolling changed the outline: \(scrolled.polyline)")
-        try expect(multiline.polyline[1].x == multiline.polyline[2].x,
+        try expect(scrolled == multiline, "scrolling changed the outline: \(scrolled)")
+        try expect(multiline.path.boundingBoxOfPath.minX == multiline.guideX,
                    "the scope contour's indentation guide was not vertical")
     }
 
@@ -2735,14 +2735,16 @@ enum RegressionTests {
         guard let geometry = text.bracketScopeGeometry() else {
             throw Failure(description: "the fixture has no bracket scope")
         }
-        let bounds = geometry.polyline.reduce(CGRect.null) {
-            $0.union(CGRect(origin: $1, size: .zero))
-        }
+        let bounds = geometry.path.boundingBoxOfPath
         try expect(flow.visible && flow.dashed && flow.flowing,
                    "the pair's line is not a flowing dashed line: \(flow)")
-        try expect(flow.curves == 2 && flow.roundEnds,
-                   "the line does not round its two turns and its ends: \(flow)")
-        try expect(abs(flow.path.minX - bounds.minX) < 0.5 && abs(flow.path.maxY - bounds.maxY) < 0.5,
+        // Round the opening bracket's four corners, into and out of the
+        // guide, and round three of the closing bracket's: it stands in the
+        // guide's column, and the guide is its fourth side.
+        try expect(flow.curves == 9 && flow.roundEnds,
+                   "the line does not round every turn and its ends: \(flow)")
+        try expect(flow.path.insetBy(dx: -0.5, dy: -0.5).contains(bounds)
+                    && bounds.insetBy(dx: -0.5, dy: -0.5).contains(flow.path),
                    "the flowing line is not where the pair's outline goes: \(flow.path) vs \(bounds)")
 
         // Reduce Motion: the same line, still and solid.
@@ -2816,9 +2818,10 @@ enum RegressionTests {
 
     /// The active pair's line runs down its block's indent guide, not 3pt
     /// beside it, where the two read as one line drawn twice. Both ends are
-    /// tinted the whole height of their line, and the line borders them from
-    /// within: the bottom of the opening end, the left and the bottom of a
-    /// closing end that starts its line, the bottom of one that ends it.
+    /// tinted the whole height of their line, and the line runs round each
+    /// tint from within. A closing bracket that starts its line stands in the
+    /// guide's column, and its tint starts where the line does; one after its
+    /// line's content keeps its own left edge.
     private static func testActivePairRunsDownTheGuide() throws {
         let settings = Settings.shared
         let saved = settings.indentMarkers
@@ -2830,9 +2833,10 @@ enum RegressionTests {
         defer { window.close() }
         window.contentView = text
         text.font = Theme.editorFont()
+        let inside = BracketScopeGeometry.lineWidth / 2
 
         func scope(_ source: String, opening: String, closing: String)
-            throws -> (line: [NSPoint], guides: [NSRect], ends: [NSRect]) {
+            throws -> (line: BracketScopeGeometry, guides: [NSRect], ends: [NSRect]) {
             text.string = source
             let ns = source as NSString
             let open = ns.range(of: opening).location + opening.count - 1
@@ -2841,26 +2845,21 @@ enum RegressionTests {
             CATransaction.flush()
             text.display()
             let ends = text.drawnScopeTintsForTesting
-            guard let line = text.bracketScopeGeometry()?.polyline, line.count == 4, ends.count == 2,
+            guard let line = text.bracketScopeGeometry(), line.box == nil, ends.count == 2,
                   text.bracketMatchRanges.last?.location == ns.range(of: closing).location
                     + closing.count - 1 else {
                 throw Failure(description: "the fixture's pair has no contour: \(source)")
             }
-            try expect(line[1].x == line[2].x, "the contour's vertical is not vertical: \(line)")
             // The whole line's height: the same rows the guides are drawn in.
             let rows = text.drawnReadingAidsForTesting.guides.map(\.height)
             try expect(ends.allSatisfy { end in rows.contains { abs($0 - end.height) < 0.01 } },
                        "an end's tint is not as tall as its line: \(ends) vs \(Set(rows))")
-            let inside = BracketScopeGeometry.lineWidth / 2
-            // Along each end's bottom as far as the tint's rounded corner.
-            let round = BracketScopeGeometry.tintCornerRadius
-            try expect(line[0].y == ends[0].maxY - inside && line[0].x == ends[0].maxX - round,
-                       "the line is not the opening end's bottom border: \(line[0]) \(ends[0])")
-            try expect(line[2].y == ends[1].maxY - inside && line[3].x == ends[1].maxX - round,
-                       "the line is not the closing end's bottom border: \(line[2]) \(ends[1])")
+            try expect(line.openingRing == ends[0].insetBy(dx: inside, dy: inside)
+                        && line.closingRing == ends[1].insetBy(dx: inside, dy: inside),
+                       "the line does not run round the ends' tints from within: \(line) \(ends)")
             return (line, text.drawnReadingAidsForTesting.guides, ends)
         }
-        func guided(_ drawn: (line: [NSPoint], guides: [NSRect], ends: [NSRect]),
+        func guided(_ drawn: (line: BracketScopeGeometry, guides: [NSRect], ends: [NSRect]),
                     columns: Int) -> Bool {
             let x = text.indentGuideX(columns: columns)
             return drawn.guides.contains {
@@ -2871,20 +2870,151 @@ enum RegressionTests {
         let block = try scope("if (path) {\n  try {\n    fp = open(path)\n    read(fp)\n  } catch (error) {\n  }\n}\n",
                               opening: "try {", closing: "  }")
         try expect(guided(block, columns: 2), "no guide is drawn down the try block: \(block.guides)")
-        try expect(block.line[1].x == text.indentGuideX(columns: 2) + 0.5,
-                   "the line runs beside the block's guide, not down it: \(block.line[1].x) "
+        try expect(block.line.guideX == text.indentGuideX(columns: 2) + 0.5,
+                   "the line runs beside the block's guide, not down it: \(block.line.guideX) "
                     + "vs \(text.indentGuideX(columns: 2))")
-        try expect(block.ends[1].minX == block.line[1].x - BracketScopeGeometry.lineWidth / 2,
-                   "the line is not the left border of a closing bracket that starts its line: "
-                    + "\(block.line[1]) \(block.ends[1])")
+        try expect(block.ends[1].minX == block.line.guideX - inside,
+                   "a closing bracket that starts its line is not tinted from the line: "
+                    + "\(block.line.guideX) \(block.ends[1])")
 
         let literal = try scope("  const options = {\n    retries: 3,\n    timeout: 10 };\n",
                                 opening: "= {", closing: "10 }")
         try expect(guided(literal, columns: 2), "no guide is drawn down the literal: \(literal.guides)")
-        try expect(literal.line[1].x == text.indentGuideX(columns: 2) + 0.5,
+        try expect(literal.line.guideX == text.indentGuideX(columns: 2) + 0.5,
                    "the line runs beside the literal's guide, not down it")
-        try expect(literal.ends[1].minX > literal.line[1].x + 3,
+        try expect(literal.ends[1].minX > literal.line.guideX + 3,
                    "a closing bracket after its line's content was stretched back to the line")
+    }
+
+    /// Over several rows the active pair's line is one line: round the
+    /// opening end, down the guide, round the closing end. It never turns
+    /// sharp, and where it meets itself — setting out from an end it will come
+    /// back round, closing the closing end — it heads the way the other part
+    /// runs there, so the two part or join as one line.
+    private static func testActivePairIsOneFlowingLine() throws {
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.font = Theme.editorFont()
+
+        struct Walk {
+            var start = CGPoint.zero, end = CGPoint.zero
+            var setsOut = CGVector.zero, arrives = CGVector.zero
+            var sharpest: CGFloat = 0
+        }
+        func unit(_ v: CGVector) -> CGVector? {
+            let length = hypot(v.dx, v.dy)
+            return length > 1e-6 ? CGVector(dx: v.dx / length, dy: v.dy / length) : nil
+        }
+        // Where the path starts and ends, the way it heads there, and its
+        // sharpest turn from one piece to the next, in degrees.
+        func walk(_ path: CGPath) -> Walk {
+            var walk = Walk(), current = CGPoint.zero
+            var heading: CGVector?
+            func piece(_ points: [CGPoint]) {
+                let all = [current] + points
+                let first = all.dropFirst().lazy
+                    .compactMap { unit(CGVector(dx: $0.x - current.x, dy: $0.y - current.y)) }.first
+                let last = all.dropLast().reversed().lazy
+                    .compactMap { unit(CGVector(dx: points.last!.x - $0.x, dy: points.last!.y - $0.y)) }.first
+                if let first {
+                    if let heading {
+                        let turn = acos(max(-1, min(1, heading.dx * first.dx + heading.dy * first.dy)))
+                        walk.sharpest = max(walk.sharpest, turn * 180 / .pi)
+                    } else {
+                        walk.setsOut = first
+                    }
+                }
+                if let last { heading = last; walk.arrives = last }
+                current = points.last!
+                walk.end = current
+            }
+            path.applyWithBlock { element in
+                let points = element.pointee.points
+                switch element.pointee.type {
+                case .moveToPoint: current = points[0]; walk.start = current
+                case .addLineToPoint: piece([points[0]])
+                case .addQuadCurveToPoint: piece([points[0], points[1]])
+                case .addCurveToPoint: piece([points[0], points[1], points[2]])
+                default: break
+                }
+            }
+            return walk
+        }
+        // The line runs round a ring: the middle of each of its sides is on it.
+        func runsRound(_ ring: NSRect, _ path: CGPath) -> Bool {
+            let stroke = path.copy(strokingWithWidth: BracketScopeGeometry.lineWidth,
+                                   lineCap: .round, lineJoin: .round, miterLimit: 10)
+            return [NSPoint(x: ring.midX, y: ring.minY), NSPoint(x: ring.maxX, y: ring.midY),
+                    NSPoint(x: ring.midX, y: ring.maxY), NSPoint(x: ring.minX, y: ring.midY)]
+                .allSatisfy { stroke.contains($0) }
+        }
+        func scope(_ source: String, caretAfter marker: String) throws
+            -> (line: BracketScopeGeometry, walk: Walk, o: NSRect, c: NSRect) {
+            text.string = source
+            let ns = source as NSString
+            text.setSelectedRange(NSRange(location: NSMaxRange(ns.range(of: marker)), length: 0))
+            text.refreshBracketMatches()
+            CATransaction.flush()
+            text.display()
+            guard let line = text.activeScopeGeometryForTesting,
+                  let o = line.openingRing, let c = line.closingRing else {
+                throw Failure(description: "the fixture has no multiline contour: \(source)")
+            }
+            let walk = walk(line.path)
+            try expect(walk.sharpest < 2, "the line turns sharp, by \(walk.sharpest)°: \(source)")
+            try expect(runsRound(o, line.path) && runsRound(c, line.path),
+                       "the line does not run round both ends: \(source)")
+            return (line, walk, o, c)
+        }
+        func close(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.01 }
+
+        // An opening bracket after its line's content: the line sets out along
+        // its bottom heading left, the way it passes back there on to the
+        // guide. A closing bracket in the guide's column: the line ends
+        // curving down into the guide, the way the guide runs.
+        let block = try scope("if (path) {\n  try {\n    fp = open(path)\n  } catch (error) {\n  }\n}\n",
+                              caretAfter: "try {")
+        try expect(!block.line.opensAlongTheBottom && close(block.walk.start.y, block.o.maxY)
+                    && block.walk.setsOut.dx < -0.99,
+                   "the line does not set out along the opening bracket's bottom: \(block.walk)")
+        try expect(close(block.walk.end.x, block.line.guideX) && block.walk.arrives.dy > 0.99,
+                   "the line does not end running down into the guide: \(block.walk)")
+
+        // A closing bracket after its line's content closes its own left side
+        // and ends heading along its bottom, the way the line ran in under it.
+        let literal = try scope("const options = {\n  retries: 3,\n  timeout: 10 };\n", caretAfter: "= {")
+        try expect(close(literal.walk.end.y, literal.c.maxY) && literal.walk.arrives.dx > 0.99,
+                   "the line does not end along the closing bracket's bottom: \(literal.walk)")
+
+        // An opening bracket in the guide's column is rounded along its
+        // bottom first: the line sets out from its left side heading down,
+        // the way the guide runs on below it, and comes back down that side.
+        let allman = try scope("function check(value)\n{\n  return value;\n}\n", caretAfter: "\n{")
+        try expect(allman.line.opensAlongTheBottom && close(allman.walk.start.x, allman.line.guideX)
+                    && allman.walk.setsOut.dy > 0.99,
+                   "the line does not set out down the guide from a bracket in its column: \(allman.walk)")
+
+        // A component's opening tag is rounded along its bottom first too.
+        let source = "<Panel title=\"x\">\n  <Row />\n</Panel>\n"
+        text.string = source
+        let ns = source as NSString
+        let openingEnd = ns.range(of: "\">").location + 2
+        let closing = ns.range(of: "</Panel>")
+        text.updateJSXTagMatches([JSXTagMatch(
+            kind: .paired,
+            openingTagRange: NSRange(location: 0, length: openingEnd),
+            closingTagRange: closing,
+            openingAngleRange: NSRange(location: 0, length: 1),
+            openingHeadRange: NSRange(location: 0, length: 6),
+            openingTerminatorRange: NSRange(location: openingEnd - 1, length: 1),
+            closingTerminatorRange: NSRange(location: NSMaxRange(closing) - 1, length: 1))])
+        let tag = try scope(source, caretAfter: "<P")
+        try expect(tag.line.opensAlongTheBottom && close(tag.walk.start.x, tag.line.guideX)
+                    && tag.walk.setsOut.dy > 0.99,
+                   "a component's line does not set out down the guide from its tag: \(tag.walk)")
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {
