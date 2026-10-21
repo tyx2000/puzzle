@@ -76,7 +76,7 @@ private final class FileTreeOutlineView: NSOutlineView {
             setHoveredRow(-1)
             return
         }
-        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let point = convert(window.pointerLocation, from: nil)
         setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
     }
 

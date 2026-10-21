@@ -52,12 +52,12 @@ final class SplitDividerHandleView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        initialMouseX = NSEvent.mouseLocation.x
+        initialMouseX = Pointer.location.x
         onDragBegan?()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        onDrag?(NSEvent.mouseLocation.x - initialMouseX)
+        onDrag?(Pointer.location.x - initialMouseX)
     }
 }
 
@@ -128,13 +128,13 @@ final class WindowResizeHandleView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         activeEdges = edges(at: point)
         guard !activeEdges.isEmpty, let window else { return }
-        initialMouse = NSEvent.mouseLocation
+        initialMouse = Pointer.location
         initialFrame = window.frame
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !activeEdges.isEmpty, let window else { return }
-        let mouse = NSEvent.mouseLocation
+        let mouse = Pointer.location
         let deltaX = mouse.x - initialMouse.x
         let deltaY = mouse.y - initialMouse.y
         window.setFrame(Self.resizedFrame(initialFrame,

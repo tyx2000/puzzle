@@ -345,7 +345,7 @@ private final class RecentRowView: FlatView {
         // until the pointer leaves, so a page made under the pointer — it is
         // made a turn after the window — read as not hovered. Ask instead.
         if let window, window.isKeyWindow {
-            let inside = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+            let inside = bounds.contains(convert(window.pointerLocation, from: nil))
             if inside != hovering { hovering = inside }
         }
     }
