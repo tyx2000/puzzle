@@ -93,6 +93,7 @@ enum RegressionTests {
         try testActivePairRunsDownTheGuide()
         try testActivePairIsOneFlowingLine()
         try testCommitImagePathsDoNotCollide()
+        try testFullScreenStripTakesTheLightsPlace()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
         try testVirtualDocumentRefreshesInPlace()
@@ -3229,6 +3230,36 @@ enum RegressionTests {
         let otherRepository = WorkspaceWindowController.commitBlobURL(
             repository: secondRepository, commit: "abc1234", path: "assets/icon.png")
         try expect(first != otherRepository, "different repositories share a commit-image temp URL")
+    }
+
+    /// In full screen the traffic lights leave the window — they only slide in
+    /// over it on demand — and the project strip moves into the place they
+    /// stood rather than leaving it empty. Out of full screen it is beside
+    /// them again.
+    private static func testFullScreenStripTakesTheLightsPlace() throws {
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        guard let window = workspace.window, let close = window.standardWindowButton(.closeButton) else {
+            throw Failure(description: "the window has no traffic lights")
+        }
+        // The lights are measured once AppKit has laid them out, a turn later.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let firstLight = close.convert(close.bounds, to: nil).minX
+        let lastButton = window.standardWindowButton(.zoomButton) ?? close
+        let lastLight = lastButton.convert(lastButton.bounds, to: nil).maxX
+        let beside = workspace.sidebar.titlebarLeadingInsetForTesting
+        try expect(beside > lastLight, "the strip does not start past the lights: \(beside) \(lastLight)")
+
+        workspace.windowWillEnterFullScreen(
+            Notification(name: NSWindow.willEnterFullScreenNotification, object: window))
+        try expect(workspace.sidebar.titlebarLeadingInsetForTesting == firstLight,
+                   "in full screen the strip leaves the lights' place empty: "
+                    + "\(workspace.sidebar.titlebarLeadingInsetForTesting) vs \(firstLight)")
+        workspace.windowWillExitFullScreen(
+            Notification(name: NSWindow.willExitFullScreenNotification, object: window))
+        try expect(workspace.sidebar.titlebarLeadingInsetForTesting == beside,
+                   "out of full screen the strip is not beside the lights again: "
+                    + "\(workspace.sidebar.titlebarLeadingInsetForTesting)")
     }
 
     private static func testDefaultWindowPlacement() throws {

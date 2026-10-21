@@ -189,6 +189,7 @@ final class SidebarViewController: NSViewController {
     func setTitlebarLeadingInset(_ inset: CGFloat) {
         projectTitleLeadingConstraint.constant = inset
     }
+    var titlebarLeadingInsetForTesting: CGFloat { projectTitleLeadingConstraint.constant }
 
     func setProjectTitle(project: String, branch: String) {
         projectTitle.configure(project: project, branch: branch)

@@ -305,6 +305,20 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         updateTitlebarGeometry()
     }
 
+    /// Where the project strip starts: beside the traffic lights, or — in
+    /// full screen, where they are gone from this window and only slide in
+    /// over it on demand — where the first of them stood, so the strip takes
+    /// their place rather than leaving it empty.
+    private var titlebarLeadingInsets = (besideLights: CGFloat(78), withoutLights: CGFloat(20))
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.withoutLights)
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
+    }
+
     private func updateTitlebarGeometry() {
         // In full screen the traffic lights move to a title bar window of
         // their own, which slides in over this one, and on the way there they
@@ -331,7 +345,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // than at a guessed offset — the buttons move with the system metrics.
         let lastButton = window.standardWindowButton(.zoomButton) ?? closeButton
         let trailing = lastButton.convert(lastButton.bounds, to: nil).maxX
-        sidebar.setTitlebarLeadingInset(trailing + 10)
+        titlebarLeadingInsets = (trailing + 10, buttonRect.minX)
+        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
     }
 
     func releaseTransientMemory() {
