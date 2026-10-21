@@ -2743,7 +2743,7 @@ final class PuzzleTextView: NSTextView {
                       let c = scope.geometry.closingRing else { return nil }
                 return (x, o.maxY, c.maxY)
             } : nil
-        (markers == .guides ? Theme.gutter.withAlphaComponent(0.55)
+        (markers == .guides ? Theme.gutter.withAlphaComponent(Self.indentGuideAlpha)
                             : Theme.gutter.withAlphaComponent(0.8)).setFill()
         for (row, line, startsLine) in aid.rows where startsLine {
             let lead = Self.leadingColumns(of: text, line: line, index: index, tabSize: tabSize)
@@ -2785,6 +2785,11 @@ final class PuzzleTextView: NSTextView {
             }
         }
     }
+
+    /// How strongly the guides are drawn over the code area: faint, so the
+    /// active pair's line — which stands in for one of them — is plainly not
+    /// another guide.
+    static let indentGuideAlpha: CGFloat = 0.35
 
     /// Where the 1pt indent guide for that much indentation stands.
     ///

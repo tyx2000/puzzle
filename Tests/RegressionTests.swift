@@ -8114,14 +8114,26 @@ enum RegressionTests {
         // Comments stay a step back from the code they annotate.
         try expect(minimum.comment < minimum.code, "comments are asked to read as loud as code")
         // The line between a matched pair marks the code, it is not code: every
-        // palette's two line hues are seen against its code area, and stay
-        // well under what the code itself is read at. At the code's own
-        // contrast the line shouted over what it marked.
+        // palette's two line hues stay well under what the code itself is read
+        // at — at the code's own contrast the line shouted over what it
+        // marked — and well over the indent guides it runs among, so it is
+        // never taken for one more of them.
         for palette in ThemePalette.all {
+            let ground = palette.editorBackground
+            let alpha = Double(PuzzleTextView.indentGuideAlpha)
+            let guide = [16, 8, 0].reduce(UInt32(0)) { mixed, shift in
+                let over = Double((palette.gutter >> UInt32(shift)) & 0xff) * alpha
+                    + Double((ground >> UInt32(shift)) & 0xff) * (1 - alpha)
+                return mixed | (UInt32(over.rounded()) << UInt32(shift))
+            }
+            let guides = contrast(guide, ground)
             for (end, hue) in [("first", palette.matchLineStart), ("second", palette.matchLineEnd)] {
-                let ratio = contrast(hue, palette.editorBackground)
-                try expect(ratio >= 1.8 && ratio <= 3.5,
+                let ratio = contrast(hue, ground)
+                try expect(ratio >= 2.5 && ratio <= 5.5,
                            "\(palette.id)'s \(end) line hue reads at \(String(format: "%.2f", ratio)):1")
+                try expect(ratio >= guides * 1.8,
+                           "\(palette.id)'s \(end) line hue, at \(String(format: "%.2f", ratio)):1, "
+                            + "is not plainly over its guides at \(String(format: "%.2f", guides)):1")
             }
         }
     }

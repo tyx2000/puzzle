@@ -83,8 +83,9 @@ struct ThemePalette {
     var matchLineEnd: UInt32 { softened(self[keyPath: matchLine.end]) }
     /// How far the line's hues are taken toward the code area. At full
     /// strength they are the colours code is read in, and a line round a
-    /// scope that loud shouts over the code it marks.
-    static let matchLineSoftness = 0.5
+    /// scope that loud shouts over the code it marks; taken too far, it is
+    /// one more faint line among the indent guides.
+    static let matchLineSoftness = 0.3
 
     private func softened(_ hue: UInt32) -> UInt32 {
         func channel(_ value: UInt32, _ shift: UInt32) -> Double { Double((value >> shift) & 0xff) }
