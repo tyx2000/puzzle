@@ -14480,11 +14480,17 @@ enum RegressionTests {
             userInfo: nil)
         ExceptionLog.record(exception)
 
-        guard let written = try? String(contentsOf: url, encoding: .utf8) else {
+        // In bytes, as `before` is: the log's rules are three bytes a
+        // character, so dropping characters cut into the new entry whenever
+        // the log already held one.
+        func appended(since offset: Int) -> String {
+            String(decoding: ((try? Data(contentsOf: url)) ?? Data()).dropFirst(offset), as: UTF8.self)
+        }
+        guard let size = try? Data(contentsOf: url).count else {
             throw Failure(description: "nothing was written to \(url.path)")
         }
-        try expect(written.count > before, "the record did not append")
-        let entry = String(written.dropFirst(before))
+        try expect(size > before, "the record did not append")
+        let entry = appended(since: before)
         try expect(entry.contains("NSInvalidArgumentException"),
                    "the exception name was not recorded: \(entry)")
         try expect(entry.contains("a test reason"),
@@ -14506,8 +14512,7 @@ enum RegressionTests {
         guard written2.wait(timeout: .now() + 5) == .success else {
             throw Failure(description: "recording off the main thread never finished")
         }
-        let offMain = String(((try? String(contentsOf: url, encoding: .utf8)) ?? "")
-                                .dropFirst(offMainStart))
+        let offMain = appended(since: offMainStart)
         try expect(offMain.contains("raised off the main thread in a test"),
                    "an exception raised off the main thread lost its reason")
         try expect(offMain.contains("not read") && !offMain.contains("screens: "),
