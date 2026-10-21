@@ -9,6 +9,33 @@ struct BracketScopeGeometry {
     /// The line is laid half of this inside the ends' tints, so it borders
     /// them from within.
     static let lineWidth: CGFloat = 1.5
+    /// How far the line's corners round off, measured to its middle.
+    static let cornerRadius: CGFloat = 4
+    /// The ends' tints round their corners out to the line's outer edge, so
+    /// where the line turns round one the two curves are one.
+    static var tintCornerRadius: CGFloat { cornerRadius + lineWidth / 2 }
+
+    /// The line as drawn: round where it turns. The points it is made from
+    /// are where it would turn if it did so square.
+    var path: CGPath {
+        let path = CGMutablePath()
+        let radius = Self.cornerRadius
+        if let box {
+            let round = min(radius, box.width / 2, box.height / 2)
+            path.addRoundedRect(in: box, cornerWidth: round, cornerHeight: round)
+        } else if polyline.count == 4 {
+            let p = polyline
+            let down = abs(p[2].y - p[1].y) / 2
+            path.move(to: p[0])
+            // Each corner as round as the sides it joins leave room for.
+            path.addArc(tangent1End: p[1], tangent2End: p[2],
+                        radius: min(radius, abs(p[0].x - p[1].x), down))
+            path.addArc(tangent1End: p[2], tangent2End: p[3],
+                        radius: min(radius, abs(p[3].x - p[2].x), down))
+            path.addLine(to: p[3])
+        }
+        return path
+    }
 
     /// The outline is anchored to the text, never to the viewport.
     ///
@@ -37,11 +64,13 @@ struct BracketScopeGeometry {
 
         let openingY = opening.maxY - inside
         let closingY = closing.maxY - inside
+        // The ends stop where the tints start to round off, and their round
+        // caps reach on into the curve.
         let polyline = [
-            NSPoint(x: opening.maxX, y: openingY),
+            NSPoint(x: max(guideX, opening.maxX - tintCornerRadius), y: openingY),
             NSPoint(x: guideX, y: openingY),
             NSPoint(x: guideX, y: closingY),
-            NSPoint(x: closing.maxX, y: closingY),
+            NSPoint(x: max(guideX, closing.maxX - tintCornerRadius), y: closingY),
         ]
 
         return BracketScopeGeometry(box: nil, polyline: polyline)
@@ -2823,7 +2852,10 @@ final class PuzzleTextView: NSTextView {
         drawnScopeTintsForTesting = rects
         guard !rects.isEmpty else { return }
         Theme.red.withAlphaComponent(0.14).setFill()
-        rects.forEach { $0.fill(using: .sourceOver) }
+        for rect in rects {
+            let round = min(BracketScopeGeometry.tintCornerRadius, rect.width / 2, rect.height / 2)
+            NSBezierPath(roundedRect: rect, xRadius: round, yRadius: round).fill()
+        }
     }
 
     /// The active pair's line, flowing from its opening end to its closing
@@ -2838,8 +2870,11 @@ final class PuzzleTextView: NSTextView {
     private var reducesMotion: Bool {
         Self.reducesMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
-    /// 4pt of line, 3pt of gap, moving along at 17.5pt a second.
-    static let scopeFlowDash: [CGFloat] = [4, 3]
+    /// 4pt of line, 3pt of gap, moving along at 17.5pt a second. The round
+    /// caps add half the line's width to each end of a dash, so the pattern
+    /// says that much less line and that much more gap.
+    static let scopeFlowDash: [CGFloat] = [4 - BracketScopeGeometry.lineWidth,
+                                           3 + BracketScopeGeometry.lineWidth]
     static let scopeFlowPeriod: CFTimeInterval = 0.4
 
     /// One sync for however many draws ask for it, after the draw: views are
@@ -2870,13 +2905,7 @@ final class PuzzleTextView: NSTextView {
         }
         if overlay.frame != bounds { overlay.frame = bounds }
         overlay.isHidden = false
-        let path = CGMutablePath()
-        if let box = geometry.box {
-            path.addRect(box)
-        } else if let first = geometry.polyline.first {
-            path.move(to: first)
-            geometry.polyline.dropFirst().forEach { path.addLine(to: $0) }
-        }
+        let path = geometry.path
         // Only what is near the screen is given to the layer: a scope can run
         // for thousands of lines, and a layer that tall is not one to make.
         let near = visibleRect.insetBy(dx: -visibleRect.width, dy: -visibleRect.height)
@@ -2907,16 +2936,25 @@ final class PuzzleTextView: NSTextView {
     }
 
     /// The flowing line as it stands, for the tests: whether it shows, its
-    /// path in the text view's coordinates, and whether it is moving.
-    var scopeFlowForTesting: (visible: Bool, path: CGRect, dashed: Bool, flowing: Bool) {
+    /// path in the text view's coordinates, whether it is moving, and how
+    /// many of its turns are curves and whether its ends are round.
+    var scopeFlowForTesting: (visible: Bool, path: CGRect, dashed: Bool, flowing: Bool,
+                              curves: Int, roundEnds: Bool) {
         syncScopeFlow()
         guard let overlay = scopeFlow, !overlay.isHidden, let path = overlay.shape.path else {
-            return (false, .zero, false, false)
+            return (false, .zero, false, false, 0, false)
         }
         let box = path.boundingBoxOfPath.offsetBy(dx: overlay.shape.frame.minX,
                                                   dy: overlay.shape.frame.minY)
+        var curves = 0
+        path.applyWithBlock { element in
+            if element.pointee.type == .addCurveToPoint || element.pointee.type == .addQuadCurveToPoint {
+                curves += 1
+            }
+        }
         return (true, box, overlay.shape.lineDashPattern != nil,
-                overlay.shape.animation(forKey: "flow") != nil)
+                overlay.shape.animation(forKey: "flow") != nil, curves,
+                overlay.shape.lineCap == .round && overlay.shape.lineJoin == .round)
     }
 }
 
@@ -2928,12 +2966,11 @@ private final class ScopeFlowOverlay: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        // Square corners, square ends: the corners it draws are the corners
-        // of the code it encloses.
+        // Round ends, round dashes; the path rounds its own corners.
         shape.fillColor = nil
         shape.lineWidth = BracketScopeGeometry.lineWidth
-        shape.lineCap = .butt
-        shape.lineJoin = .miter
+        shape.lineCap = .round
+        shape.lineJoin = .round
         shape.masksToBounds = true
         layer?.addSublayer(shape)
     }

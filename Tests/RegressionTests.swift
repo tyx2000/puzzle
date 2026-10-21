@@ -2740,6 +2740,8 @@ enum RegressionTests {
         }
         try expect(flow.visible && flow.dashed && flow.flowing,
                    "the pair's line is not a flowing dashed line: \(flow)")
+        try expect(flow.curves == 2 && flow.roundEnds,
+                   "the line does not round its two turns and its ends: \(flow)")
         try expect(abs(flow.path.minX - bounds.minX) < 0.5 && abs(flow.path.maxY - bounds.maxY) < 0.5,
                    "the flowing line is not where the pair's outline goes: \(flow.path) vs \(bounds)")
 
@@ -2850,9 +2852,11 @@ enum RegressionTests {
             try expect(ends.allSatisfy { end in rows.contains { abs($0 - end.height) < 0.01 } },
                        "an end's tint is not as tall as its line: \(ends) vs \(Set(rows))")
             let inside = BracketScopeGeometry.lineWidth / 2
-            try expect(line[0].y == ends[0].maxY - inside && line[0].x == ends[0].maxX,
+            // Along each end's bottom as far as the tint's rounded corner.
+            let round = BracketScopeGeometry.tintCornerRadius
+            try expect(line[0].y == ends[0].maxY - inside && line[0].x == ends[0].maxX - round,
                        "the line is not the opening end's bottom border: \(line[0]) \(ends[0])")
-            try expect(line[2].y == ends[1].maxY - inside && line[3].x == ends[1].maxX,
+            try expect(line[2].y == ends[1].maxY - inside && line[3].x == ends[1].maxX - round,
                        "the line is not the closing end's bottom border: \(line[2]) \(ends[1])")
             return (line, text.drawnReadingAidsForTesting.guides, ends)
         }
