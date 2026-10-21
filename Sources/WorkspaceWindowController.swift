@@ -208,15 +208,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // Every ticked project joins this window, and the last one read becomes
         // the one on screen.
         editor.onOpenChecked = { [weak self] urls in self?.openSelection(urls) }
-        editor.onDocumentSaved = { [weak self] url in
+        editor.onDocumentSaved = { [weak self] url in self?.fileWasWritten(url) }
+        // A replace in the search panel writes files no tab may be showing,
+        // and every one of them is a save as far as the window is concerned.
+        sidebar.onSearchReplaced = { [weak self] urls in
             guard let self else { return }
-            // The file changed on disk, so its cached blame is stale.
-            self.editor.invalidateBlame(for: url)
-            // Saving settings.json applies the new display config immediately.
-            if url.standardizedFileURL == Settings.fileURL.standardizedFileURL {
-                Settings.shared.reload()
-            }
-            self.scheduleGitRefreshAfterSave()
+            self.editor.reloadTabs()
+            urls.forEach(self.fileWasWritten)
         }
         // Keep the file tree's active-file highlight in sync with the active tab.
         editor.onActiveDocumentChanged = { [weak self] url in
@@ -743,6 +741,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             .appendingPathComponent(repositoryKey, isDirectory: true)
             .appendingPathComponent(commit, isDirectory: true)
             .appendingPathComponent(path)
+    }
+
+    /// What follows a file reaching disk, whether a tab or a replace wrote it.
+    private func fileWasWritten(_ url: URL) {
+        // The file changed on disk, so its cached blame is stale.
+        editor.invalidateBlame(for: url)
+        // Saving settings.json applies the new display config immediately.
+        if url.standardizedFileURL == Settings.fileURL.standardizedFileURL {
+            Settings.shared.reload()
+        }
+        scheduleGitRefreshAfterSave()
     }
 
     /// Saves arrive in bursts now that leaving a buffer writes it — switching

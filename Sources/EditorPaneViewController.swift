@@ -200,6 +200,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(documentReloadedFromDisk(_:)),
             name: Document.didReloadFromDisk, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(documentWillReplaceText(_:)),
+            name: Document.willReplaceText, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(documentReplacedText(_:)),
+            name: Document.didReplaceText, object: nil)
         // Brackets are paired by the syntax tree once there is one for the
         // text as it stands; until then, and for text with no grammar, they
         // are scanned for.
@@ -1128,6 +1134,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         // Move this pane's layout manager onto the document's storage.
         if layoutManager.textStorage !== doc.storage {
+            // The typing run belongs to the outgoing file's undo history; the
+            // next keystroke starts a new one in this file's.
+            textView.breakUndoCoalescing()
             layoutManager.textStorage?.removeLayoutManager(layoutManager)
             doc.storage.addLayoutManager(layoutManager)
         }
@@ -1135,7 +1144,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         configureLineWrapping(for: doc)
 
         // Undo records hold the replaced text, so an unbounded stack grows with
-        // every edit for as long as the window lives.
+        // every edit for as long as the buffer lives. Each document's own
+        // stack is bounded where it is made; this covers the window's, which
+        // a pane with no file falls back to.
         textView.undoManager?.levelsOfUndo = Self.undoLevels
 
         let length = doc.storage.length
@@ -1715,6 +1726,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     // MARK: - NSTextViewDelegate
 
+    /// Each file keeps its own history, so ⌘Z undoes what was done to the file
+    /// on screen. A pane with no file falls back to the window's.
+    func undoManager(for view: NSTextView) -> UndoManager? {
+        guard view === textView, let url = currentURL else { return nil }
+        return DocumentStore.shared.cachedDocument(for: url)?.undoManager
+    }
+
     func textDidChange(_ notification: Notification) {
         guard let doc = currentDocument else { return }
         guard !doc.isApplyingExternalChange else { return }
@@ -1856,6 +1874,36 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.updateJSXTagMatches(document.jsxTagMatches)
         keepingCaretInPlace { presentMarkdown(of: document) }
         textView.refreshBracketMatches()
+        textView.needsDisplay = true
+        scrollView.verticalRulerView?.needsDisplay = true
+    }
+
+    /// An edit made to the buffer without this text view — a project replace,
+    /// or undoing one — is about to land. Whatever is being typed stops being
+    /// one undo run here, or the next keystroke would join a run that the
+    /// replace now sits on top of.
+    @objc private func documentWillReplaceText(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              document.url == currentURL else { return }
+        textView.breakUndoCoalescing()
+    }
+
+    /// The same catching up typing does in `textDidChange`, for an edit that
+    /// did not come through the text view.
+    @objc private func documentReplacedText(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              openURLs.contains(document.url) else { return }
+        reloadTabs()
+        guard document.url == currentURL else { return }
+        gitChangePopover?.close()
+        // Every range the find bar holds was measured in the old text.
+        findBar.invalidateMatches()
+        clearInlineBlameRequest()
+        document.updateJSXTagMatches([])
+        textView.refreshBracketMatches()
+        scheduleGitLineChanges()
+        scheduleIdleSave(for: document)
+        if document.isSVG { scheduleSVGRender(for: document) }
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
     }

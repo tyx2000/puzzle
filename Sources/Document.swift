@@ -573,6 +573,61 @@ final class Document {
     var name: String { url.lastPathComponent }
     var text: String { storage.string }
 
+    /// This file's own undo history, shared by every pane that shows it and by
+    /// nothing else. The window's single stack used to hold every tab's edits,
+    /// so ⌘Z in one file undid the last edit made in another, out of sight.
+    private(set) lazy var undoManager: UndoManager = {
+        let manager = UndoManager()
+        manager.levelsOfUndo = EditorPaneViewController.undoLevels
+        return manager
+    }()
+
+    /// One replacement: a range of the text as it stands, and what goes there.
+    struct Edit: Equatable {
+        let range: NSRange
+        let text: String
+    }
+
+    /// Posted on either side of `replace(_:)`. A pane showing the buffer breaks
+    /// its typing's undo run before, and catches up with the new text after.
+    static let willReplaceText = Notification.Name("PuzzleDocumentWillReplaceText")
+    static let didReplaceText = Notification.Name("PuzzleDocumentDidReplaceText")
+
+    /// Make `edits` — ascending, non-overlapping ranges of the current text —
+    /// as one step that one ⌘Z in this file takes back. For edits made without
+    /// a text view: a project replace reaches files no pane is showing.
+    ///
+    /// Returns the edits that undo it, as ranges of the new text.
+    @discardableResult
+    func replace(_ edits: [Edit], actionName: String = "Replace") -> [Edit] {
+        guard !edits.isEmpty, !isReadOnly,
+              edits.allSatisfy({ NSMaxRange($0.range) <= storage.length }) else { return [] }
+        NotificationCenter.default.post(name: Self.willReplaceText, object: self)
+        var undo: [Edit] = []
+        var shift = 0
+        storage.beginEditing()
+        for edit in edits {
+            let range = NSRange(location: edit.range.location + shift, length: edit.range.length)
+            let old = storage.mutableString.substring(with: range)
+            storage.replaceCharacters(in: range, with: edit.text)
+            let written = NSRange(location: range.location, length: (edit.text as NSString).length)
+            // Inserted text takes the attributes of whatever it replaced; the
+            // highlighter colours it on its next pass.
+            storage.setAttributes(Theme.textAttributes(color: Theme.foreground), range: written)
+            undo.append(Edit(range: written, text: old))
+            shift += written.length - range.length
+        }
+        storage.endEditing()
+        markLocalEdit()
+        undoManager.registerUndo(withTarget: self) { document in
+            document.replace(undo, actionName: actionName)
+        }
+        undoManager.setActionName(actionName)
+        HighlightService.shared.scheduleHighlight(self)
+        NotificationCenter.default.post(name: Self.didReplaceText, object: self)
+        return undo
+    }
+
     /// Refresh a generated diff without allocating a second document while an
     /// existing layout manager still owns the old one.
     /// Counts the times this buffer's content has been swapped out from under
@@ -590,6 +645,7 @@ final class Document {
         storage.setAttributedString(NSAttributedString(string: text))
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
+        undoManager.removeAllActions()
         invalidateLineIndex()
         diffBands.removeAll(keepingCapacity: false)
         diffLineNumbers.removeAll(keepingCapacity: false)
@@ -788,6 +844,10 @@ final class Document {
                               range: NSRange(location: 0, length: storage.length))
         storage.endEditing()
         isApplyingExternalChange = false
+        // Every step in the history names ranges of the text just thrown away.
+        // With one history per file this holds for a tab that is not on screen
+        // too, and undoing one of them into the new text could raise.
+        undoManager.removeAllActions()
         invalidateLineIndex()
         isDisplayFormatted = presentation.isDisplayFormatted
         isMinifiedPreview = presentation.isMinifiedPreview

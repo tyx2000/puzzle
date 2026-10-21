@@ -108,6 +108,9 @@ final class EditorViewController: NSViewController {
     /// Blame is keyed by file and line; a commit or checkout invalidates it.
     func refreshGitLineChanges() { pane?.refreshGitLineChanges() }
 
+    /// Redraw the tabs' saved and unsaved marks after a write made elsewhere.
+    func reloadTabs() { pane?.reloadTabs() }
+
     func invalidateBlame(for url: URL? = nil) {
         pane?.invalidateBlame(for: url)
     }

@@ -30,6 +30,7 @@ final class SidebarViewController: NSViewController {
 
     var onSearchResult: ((URL, Int) -> Void)?
     var onSearchFile: ((URL) -> Void)?
+    var onSearchReplaced: (([URL]) -> Void)?
     var onGitFile: ((URL) -> Void)?
     var onGitDiff: ((GitService.Status.Entry, URL) -> Void)?
     var onGitCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
@@ -212,6 +213,7 @@ final class SidebarViewController: NSViewController {
     var fileTreeTopInsetForTesting: CGFloat { containerTopConstraint.constant }
     /// The Git panel, if it has been built.
     var gitPanelForTesting: GitPanelViewController? { gitController }
+    var searchPanelForTesting: SearchViewController? { searchController }
     var titleSeparatorForTesting: FlatView { titleSeparator }
 
     /// `nil` when the window has no project left: the panels empty rather than
@@ -348,6 +350,7 @@ final class SidebarViewController: NSViewController {
         let search = SearchViewController()
         search.onOpenResult = { [weak self] url, line in self?.onSearchResult?(url, line) }
         search.onOpenFile = { [weak self] url in self?.onSearchFile?(url) }
+        search.onFilesReplaced = { [weak self] urls in self?.onSearchReplaced?(urls) }
         if let directory { search.setDirectory(directory) }
         searchController = search
         mount(search)

@@ -26,6 +26,16 @@ enum RegressionTests {
             print("Active-line and Git panel regression tests passed (6)")
             return
         }
+        if CommandLine.arguments.contains("--project-replace-regressions") {
+            try testProjectReplaceExpandsRegexGroups()
+            try testProjectReplaceKeepsUnsavedEdits()
+            try testProjectReplaceReadsDiskChangesSinceSearch()
+            try testProjectReplaceSkipsWhatSearchSkips()
+            try testUndoStaysInItsFile()
+            try testRowActionTakesTheClick()
+            print("Project replace regression tests passed (6)")
+            return
+        }
         if CommandLine.arguments.contains("--wrapping-regressions") {
             try testCodeAndDiffKeepHardLines()
             try testGutterRibbonRunsUnbroken()
@@ -75,6 +85,12 @@ enum RegressionTests {
         try testDockRecentProjectsMenu()
         try testSearchMatcher()
         try testProjectSearchBackend()
+        try testProjectReplaceExpandsRegexGroups()
+        try testProjectReplaceKeepsUnsavedEdits()
+        try testProjectReplaceReadsDiskChangesSinceSearch()
+        try testProjectReplaceSkipsWhatSearchSkips()
+        try testUndoStaysInItsFile()
+        try testRowActionTakesTheClick()
         try testDefinitionNavigation()
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
@@ -2005,6 +2021,333 @@ enum RegressionTests {
                    "regex matching failed")
         try expect(SearchMatcher(query: "[", options: regex) == nil,
                    "invalid regex should not create a matcher")
+    }
+
+    // MARK: - Project replace
+
+    /// Wait out the panel's debounce and search.
+    private static func settleSearch(_ search: SearchViewController) throws {
+        let deadline = Date().addingTimeInterval(10)
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        } while search.isSearchingForTesting && Date() < deadline
+        try expect(!search.isSearchingForTesting, "the project search did not finish")
+    }
+
+    /// A file's text, or a marker the expectations cannot mistake for it.
+    private static func contents(_ url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? "<unreadable>"
+    }
+
+    /// With a regular expression, `$1` in the replacement is the query's first
+    /// group — whole word on or not — and the rows show what it expands to. A
+    /// plain query writes the replacement as typed, dollar signs and all.
+    private static func testProjectReplaceExpandsRegexGroups() throws {
+        let root = try temporaryDirectory("replace-regex")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let calls = root.appendingPathComponent("calls.swift")
+        try Data("let a = fetchUser(id)\nlet b = fetchOrder(id) + prefetchUser()\n".utf8)
+            .write(to: calls)
+        defer { DocumentStore.shared.release(calls, stillOpen: false) }
+
+        let search = SearchViewController()
+        _ = search.view
+        search.setDirectory(root)
+        search.setOptionsForTesting(SearchOptions(caseSensitive: true, wholeWord: true, regex: true))
+        search.performSearch("fetch(\\w+)")
+        try settleSearch(search)
+        let hits = search.groupsForTesting.flatMap(\.hits)
+        try expect(hits.map(\.line) == [1, 2],
+                   "the regex search found lines \(hits.map(\.line))")
+        search.setReplaceVisible(true, focus: false)
+        search.setReplacementForTesting("load$1")
+        try expect(search.previewReplacementForTesting(hits[0]) == "loadUser",
+                   "the row previews \(String(describing: search.previewReplacementForTesting(hits[0])))")
+        search.replaceAllForTesting()
+        try expect(contents(calls) == "let a = loadUser(id)\nlet b = loadOrder(id) + prefetchUser()\n",
+                   "regex groups were not expanded: \(contents(calls).debugDescription)")
+        try expect(search.summaryForTesting.hasPrefix("Replaced 2 matches in 1 file"),
+                   "the summary says \(search.summaryForTesting.debugDescription)")
+
+        let prices = root.appendingPathComponent("prices.txt")
+        try Data("cost cost\n".utf8).write(to: prices)
+        defer { DocumentStore.shared.release(prices, stillOpen: false) }
+        let plain = ProjectReplace.replaceAll(
+            in: [prices], .init(query: "cost", options: SearchOptions(), template: "$1 \\0"),
+            save: { (try? $0.save()) != nil })
+        try expect(plain.replacements == 2 && (contents(prices)) == "$1 \\0 $1 \\0\n",
+                   "a plain query's replacement was read as a template: "
+                    + (contents(prices)).debugDescription)
+    }
+
+    /// A tab with unsaved edits is replaced in as it stands: the search read
+    /// the buffer, so the replace edits the buffer, and ⌘Z in that tab takes
+    /// back that file's replace and nothing else. The summary's Undo then
+    /// puts back the files that are as the replace left them, and leaves the
+    /// one that has changed since.
+    private static func testProjectReplaceKeepsUnsavedEdits() throws {
+        let root = try temporaryDirectory("replace-unsaved")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let open = root.appendingPathComponent("open.txt")
+        let closed = root.appendingPathComponent("closed.txt")
+        try Data("alpha needle\nbeta\n".utf8).write(to: open)
+        try Data("needle at rest\n".utf8).write(to: closed)
+        defer { DocumentStore.shared.release(closed, stillOpen: false) }
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(root)
+        workspace.editor.open(url: open)
+        guard let pane = workspace.editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        // Typed but not yet written: in the buffer the tab shows, not on disk.
+        let document = DocumentStore.shared.document(for: open)
+        document.storage.replaceCharacters(in: NSRange(location: document.storage.length, length: 0),
+                                           with: "gamma needle unsaved\n")
+        document.markLocalEdit()
+        let unsaved = "alpha needle\nbeta\ngamma needle unsaved\n"
+        try expect(pane.textForTesting == unsaved && (contents(open)) == "alpha needle\nbeta\n",
+                   "the fixture's edit is not an unsaved one")
+
+        workspace.sidebar.showSearch()
+        guard let search = workspace.sidebar.searchPanelForTesting else {
+            throw Failure(description: "the search panel did not load")
+        }
+        search.performSearch("needle")
+        try settleSearch(search)
+        let openLines = search.groupsForTesting.first { $0.url.lastPathComponent == "open.txt" }?
+            .hits.map(\.line)
+        try expect(openLines == [1, 3], "the search did not read the unsaved buffer: \(String(describing: openLines))")
+        search.setReplaceVisible(true, focus: false)
+        search.setReplacementForTesting("pin")
+        search.replaceAllForTesting()
+
+        let replaced = "alpha pin\nbeta\ngamma pin unsaved\n"
+        try expect(pane.textForTesting == replaced,
+                   "the open tab shows \(pane.textForTesting.debugDescription)")
+        try expect(document.text == replaced, "the buffer holds \(document.text.debugDescription)")
+        try expect(contents(open) == replaced,
+                   "the file was written from the disk's text, not the buffer's: "
+                    + (contents(open)).debugDescription)
+        try expect(contents(closed) == "pin at rest\n", "the file no tab shows was not replaced")
+        try expect(search.offersUndoForTesting, "the summary offers no Undo after a replace")
+
+        // One ⌘Z in the tab: this file's replace, back to the unsaved text.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        pane.undoForTesting()
+        try expect(pane.textForTesting == unsaved,
+                   "⌘Z in the tab did not take back its replace: \(pane.textForTesting.debugDescription)")
+
+        // The summary's Undo: the closed file is as the replace left it and
+        // goes back; the open one has changed since, and is left as it is.
+        search.undoReplaceForTesting()
+        try expect(contents(closed) == "needle at rest\n",
+                   "Undo did not put the closed file back: \((contents(closed)).debugDescription)")
+        try expect(pane.textForTesting == unsaved,
+                   "Undo rewrote a file edited after the replace: \(pane.textForTesting.debugDescription)")
+        try expect(search.summaryForTesting.contains("1 edited since"),
+                   "the summary does not say a file was left: \(search.summaryForTesting.debugDescription)")
+        try expect(!search.offersUndoForTesting, "Undo is still offered once it has been used")
+    }
+
+    /// A file rewritten after the search — before any file event has reached
+    /// the buffer the editor holds for it — is replaced as it is now, and a
+    /// row whose line has changed is left alone.
+    private static func testProjectReplaceReadsDiskChangesSinceSearch() throws {
+        let root = try temporaryDirectory("replace-disk")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let whole = root.appendingPathComponent("whole.txt")
+        let single = root.appendingPathComponent("single.txt")
+        for file in [whole, single] {
+            try Data("one needle\ntwo\n".utf8).write(to: file)
+        }
+        // Held by the store and clean, as a file looked at earlier is.
+        let wholeDocument = DocumentStore.shared.document(for: whole)
+        let singleDocument = DocumentStore.shared.document(for: single)
+        defer {
+            DocumentStore.shared.release(whole, stillOpen: false)
+            DocumentStore.shared.release(single, stillOpen: false)
+        }
+
+        let search = SearchViewController()
+        _ = search.view
+        search.setDirectory(root)
+        search.performSearch("needle")
+        try settleSearch(search)
+        guard let wholeGroup = search.groupsForTesting.first(where: { $0.url.lastPathComponent == "whole.txt" }),
+              let singleGroup = search.groupsForTesting.first(where: { $0.url.lastPathComponent == "single.txt" }),
+              let singleHit = singleGroup.hits.first, singleHit.line == 1 else {
+            throw Failure(description: "the search did not find both files")
+        }
+
+        let rewritten = "zero needle\none needle\ntwo needle\n"
+        let later = Date().addingTimeInterval(5)
+        for file in [whole, single] {
+            try Data(rewritten.utf8).write(to: file)
+            try FileManager.default.setAttributes([.modificationDate: later], ofItemAtPath: file.path)
+        }
+        try expect(wholeDocument.text == "one needle\ntwo\n",
+                   "the fixture's buffer already knows of the rewrite")
+        search.setReplaceVisible(true, focus: false)
+        search.setReplacementForTesting("pin")
+
+        // Every match in the file as it is now; the rewrite is kept.
+        search.replaceForTesting(wholeGroup)
+        try expect(contents(whole) == "zero pin\none pin\ntwo pin\n",
+                   "replacing in a file rewritten since the search gave "
+                    + (contents(whole)).debugDescription)
+        try expect(!wholeDocument.isModified && wholeDocument.text == "zero pin\none pin\ntwo pin\n",
+                   "the held buffer was left as \(wholeDocument.text.debugDescription)")
+
+        // The row stood for line 1, which now holds other text.
+        try settleSearch(search)
+        search.replaceForTesting(singleHit, in: singleGroup)
+        try expect(contents(single) == rewritten,
+                   "a row's replace edited a line that changed since the search: "
+                    + (contents(single)).debugDescription)
+        try expect(!singleDocument.isModified && singleDocument.text == rewritten,
+                   "the held buffer was edited from its old text: \(singleDocument.text.debugDescription)")
+        try expect(search.summaryForTesting.contains("changed since the search"),
+                   "the summary does not say why: \(search.summaryForTesting.debugDescription)")
+    }
+
+    /// What the search would not read now is not replaced: a file that has
+    /// grown past the search's limit, or turned binary, since it was found.
+    /// The Undo still works for a file whose buffer has left memory.
+    private static func testProjectReplaceSkipsWhatSearchSkips() throws {
+        let root = try temporaryDirectory("replace-skips")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = root.appendingPathComponent("text.txt")
+        let grows = root.appendingPathComponent("grows.txt")
+        let binary = root.appendingPathComponent("binary.dat")
+        try Data("needle one\n".utf8).write(to: text)
+        try Data("needle two\n".utf8).write(to: grows)
+        try Data("needle three\n".utf8).write(to: binary)
+        defer { DocumentStore.shared.release(text, stillOpen: false) }
+
+        let search = SearchViewController()
+        _ = search.view
+        search.setDirectory(root)
+        search.performSearch("needle")
+        try settleSearch(search)
+        try expect(search.groupsForTesting.count == 3,
+                   "the search found \(search.groupsForTesting.map(\.relative))")
+
+        // Readable lines, but more of them than the search opens.
+        let grown = Data(("needle two\n" + String(repeating: String(repeating: "x", count: 99) + "\n",
+                                                count: 21_000)).utf8)
+        try expect(grown.count >= SearchViewController.maxNativeFileBytes, "the fixture is too small")
+        try grown.write(to: grows)
+        let turned = Data("needle three\n".utf8) + Data([0, 1, 2, 0])
+        try turned.write(to: binary)
+
+        search.setReplaceVisible(true, focus: false)
+        search.setReplacementForTesting("pin")
+        search.replaceAllForTesting()
+        try expect(contents(text) == "pin one\n", "the text file was not replaced")
+        try expect((try? Data(contentsOf: grows)) == grown, "a file past the search's limit was replaced in")
+        try expect((try? Data(contentsOf: binary)) == turned, "a binary file was replaced in")
+        try expect(search.summaryForTesting.contains("2 skipped"),
+                   "the summary does not count the skipped files: \(search.summaryForTesting.debugDescription)")
+
+        // The replaced file's buffer has gone; its text is what is checked.
+        DocumentStore.shared.release(text, stillOpen: false)
+        try expect(!DocumentStore.shared.documentIsCached(text), "the buffer is still held")
+        try settleSearch(search)
+        search.undoReplaceForTesting()
+        try expect(contents(text) == "needle one\n",
+                   "Undo did not put back a file whose buffer was released: "
+                    + (contents(text)).debugDescription)
+    }
+
+    /// A click on a row's action replaces; it does not open the file. The
+    /// list, not the cell, receives a click on a row — that is where AppKit's
+    /// hit testing delivers it in a key window — so the list has to hand it on.
+    private static func testRowActionTakesTheClick() throws {
+        let root = try temporaryDirectory("replace-click")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("notes.txt")
+        try Data("one needle\ntwo needle\n".utf8).write(to: file)
+        defer { DocumentStore.shared.release(file, stillOpen: false) }
+
+        let search = SearchViewController()
+        var opened: [Int] = []
+        search.onOpenResult = { _, line in opened.append(line) }
+        search.onOpenFile = { _ in opened.append(0) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = search
+        window.setContentSize(NSSize(width: 360, height: 400))
+        defer { window.close() }
+        search.setDirectory(root)
+        search.performSearch("needle")
+        try settleSearch(search)
+        search.setReplaceVisible(true, focus: false)
+        search.setReplacementForTesting("pin")
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        let outline = search.outlineForTesting
+        guard let row = (0..<outline.numberOfRows).first(where: {
+            (outline.item(atRow: $0) as? SearchViewController.HitRow)?.hit.line == 2
+        }) else { throw Failure(description: "no row for line 2") }
+        outline.setHoveredRowForTesting(row)
+        guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SearchActionCell,
+              cell.actionRectForTesting != .zero else {
+            throw Failure(description: "the hovered row shows no action")
+        }
+        let box = cell.actionRectForTesting
+        let point = cell.convert(NSPoint(x: box.midX, y: box.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil,
+                               eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        NSApp.postEvent(event(.leftMouseUp), atStart: false)
+        outline.mouseDown(with: event(.leftMouseDown))
+        _ = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true)
+        try expect(contents(file) == "one needle\ntwo pin\n",
+                   "a click on the row's action did not replace its match: \(contents(file).debugDescription)")
+        try expect(opened.isEmpty, "a click on the row's action opened the file at \(opened)")
+    }
+
+    /// ⌘Z undoes what was done to the file on screen. The window kept one
+    /// stack for every tab, so undoing in one file took back typing in
+    /// another, out of sight.
+    private static func testUndoStaysInItsFile() throws {
+        let root = try temporaryDirectory("undo-per-file")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first.txt")
+        let second = root.appendingPathComponent("second.txt")
+        try Data("first\n".utf8).write(to: first)
+        try Data("second\n".utf8).write(to: second)
+        let pane = EditorPaneViewController()
+        // In a window: the window's stack is what a text view used to fall
+        // back to, so it has to exist for the old behaviour to show.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+
+        pane.open(url: first)
+        pane.setCaretForTesting(0)
+        pane.insertTextForTesting("typed ")
+        settle()
+        pane.open(url: second)
+        settle()
+        pane.undoForTesting()
+        try expect(pane.textForTesting == "second\n",
+                   "⌘Z changed the file on screen: \(pane.textForTesting.debugDescription)")
+        try expect(DocumentStore.shared.document(for: first).text == "typed first\n",
+                   "⌘Z in one file took back typing in another: "
+                    + DocumentStore.shared.document(for: first).text.debugDescription)
+        pane.open(url: first)
+        settle()
+        pane.undoForTesting()
+        try expect(pane.textForTesting == "first\n",
+                   "the file's own history did not survive a tab switch: \(pane.textForTesting.debugDescription)")
     }
 
     private static func testProjectSearchBackend() throws {

@@ -29,6 +29,52 @@ final class DocumentStore {
     func isRebuildableForTesting(_ url: URL) -> Bool { isRegenerable(url) }
     func cachedDocument(for url: URL) -> Document? { docs[url] }
 
+    /// The buffer held for a file, however its URL is spelled. Search builds
+    /// its URLs from the project folder; a tab may hold the same file by
+    /// another spelling — a `/private/var` the enumerator resolved, say — and
+    /// editing a second buffer of it would leave the tab's copy stale.
+    func cachedDocument(forFileAt url: URL) -> Document? {
+        if let exact = docs[url] { return exact }
+        guard url.isFileURL else { return nil }
+        let path = url.standardizedFileURL.path
+        let name = url.lastPathComponent
+        let candidates = docs.values.filter {
+            $0.url.isFileURL && !$0.isVirtual && $0.url.lastPathComponent == name
+        }
+        if let same = candidates.first(where: { $0.url.standardizedFileURL.path == path }) {
+            return same
+        }
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return candidates.first {
+            $0.url.standardizedFileURL.resolvingSymlinksInPath().path == resolved
+        }
+    }
+
+    /// Buffers handed in by `adopt` that nothing has coloured yet.
+    private var uncoloured: Set<URL> = []
+
+    /// Hold a buffer made outside the store — a file a project replace edited
+    /// without anyone opening it — so its undo is there if the file is opened
+    /// next. It is coloured when a pane first asks for it, not now: a replace
+    /// across hundreds of files would otherwise parse every one of them.
+    func adopt(_ document: Document) {
+        guard docs[document.url] == nil else { return }
+        docs[document.url] = document
+        uncoloured.insert(document.url)
+        touch(document.url)
+        evictIfNeeded(excluding: document.url)
+    }
+
+    /// Bring a clean buffer up to date with its file before something acts on
+    /// its text. File events arrive late, and a buffer that has not heard of
+    /// the latest write would hand an edit the old text — then write it back
+    /// over the new.
+    func refreshFromDisk(_ document: Document) {
+        guard !document.isModified, document.reloadFromDiskIfLatest() else { return }
+        HighlightService.shared.highlight(document)
+        NotificationCenter.default.post(name: Document.didReloadFromDisk, object: document)
+    }
+
     var cachedBytes: Int { docs.values.reduce(0) { $0 + $1.estimatedMemoryCost } }
 
     /// Immutable copies of current unsaved text inside a project. Project
@@ -72,6 +118,9 @@ final class DocumentStore {
         return reloaded
     }
 
+    /// Whether some pane has the file as a tab, where an unsaved edit is seen.
+    func isOpenInTab(_ url: URL) -> Bool { owners[url] != nil }
+
     func registerOpen(_ url: URL, owner: AnyObject) {
         owners[url, default: []].insert(ObjectIdentifier(owner))
     }
@@ -85,7 +134,12 @@ final class DocumentStore {
     }
 
     func document(for url: URL) -> Document {
-        if let existing = docs[url] { touch(url); return existing }
+        if let existing = docs[url] {
+            touch(url)
+            if uncoloured.remove(url) != nil { HighlightService.shared.highlight(existing) }
+            return existing
+        }
+        uncoloured.remove(url)
         // A diff tab whose buffer was released must not be read from disk — its
         // URL is synthetic. It is not lost either: the URL names the repository,
         // the path and, for history, the commit, which is everything the diff is

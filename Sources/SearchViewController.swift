@@ -6,14 +6,45 @@ import AppKit
 final class SearchViewController: NSViewController {
     var onOpenResult: ((URL, Int) -> Void)?
     var onOpenFile: ((URL) -> Void)?
+    /// Files a replace — or undoing one — wrote, for what follows a save:
+    /// blame, the Git panel, settings.json.
+    var onFilesReplaced: (([URL]) -> Void)?
 
     private var directory: URL?
     private let searchField = SearchInputView()
     private let summaryLabel = NSTextField(labelWithString: "")
+    /// "Undo", after the summary of a replace: takes back every file the last
+    /// replace changed, where each file's own ⌘Z would take them one by one —
+    /// and cannot at all once a file nobody opened has left memory.
+    private let undoReplaceButton = NSButton()
+    private var summaryRow: NSStackView!
     /// Fills the empty result area: what this panel searches, and what the
     /// three cryptic toggles above it mean.
     private let placeholderLabel = NSTextField(labelWithString: "")
-    private let outline = NSOutlineView()
+    private let outline = SearchOutlineView()
+    /// The second row: what each match becomes. Closed until the chevron
+    /// beside the query opens it, as in the find bar — most searches never
+    /// replace, and the panel should not give up a row until asked.
+    private let replaceToggle = NSButton()
+    private let replaceField = SearchInputView()
+    private let replaceAllButton = BadgeButton()
+    private let replaceRow = NSView()
+    private var summaryBelowQuery: NSLayoutConstraint!
+    private var summaryBelowReplace: NSLayoutConstraint!
+    /// What the rows on screen were found with. The replacement each row
+    /// previews, and the text a replace writes, are worked out with this
+    /// rather than with whatever the query field says now.
+    private var resultQuery: (query: String, options: SearchOptions)? {
+        didSet { resultMatcher = resultQuery.flatMap { SearchMatcher(query: $0.query, options: $0.options) } }
+    }
+    private var resultMatcher: SearchMatcher?
+    /// What the last replace did, said in the summary until the query changes.
+    private var replaceReport: String?
+    /// The last replace, for the summary's Undo.
+    private var lastReplace: [ProjectReplace.FileChange] = []
+    /// Writes what a replace changed, by the rule leaving a tab writes by: a
+    /// file that changed on disk underneath an edit is not overwritten.
+    private let saver = DocumentSaveCoordinator()
     private var searchWork: DispatchWorkItem?
     /// Cancels the query that is already running, which the work item cannot.
     private var searchToken: CancellationToken?
@@ -48,6 +79,9 @@ final class SearchViewController: NSViewController {
     func setDirectory(_ url: URL?) {
         guard directory != url else { return }
         directory = url
+        replaceReport = nil
+        lastReplace = []
+        undoReplaceButton.isHidden = true
         searchGeneration += 1
         searchWork?.cancel()
         searchWork = nil
@@ -66,13 +100,58 @@ final class SearchViewController: NSViewController {
 
         searchField.placeholder = "Search project…"
         searchField.translatesAutoresizingMaskIntoConstraints = false
-        searchField.onChange = { [weak self] _, _ in self?.searchChanged() }
-        searchField.onSubmit = { [weak self] _, _ in self?.searchChanged() }
+        searchField.onChange = { [weak self] _, _ in self?.queryChanged() }
+        searchField.onSubmit = { [weak self] _, _ in self?.queryChanged() }
+
+        replaceToggle.image = Self.disclosureImage(open: false)
+        replaceToggle.isBordered = false
+        replaceToggle.bezelStyle = .regularSquare
+        replaceToggle.contentTintColor = Theme.dimText
+        replaceToggle.toolTip = "Replace"
+        replaceToggle.setAccessibilityLabel("Toggle replace")
+        replaceToggle.target = self
+        replaceToggle.action = #selector(toggleReplace)
+        replaceToggle.translatesAutoresizingMaskIntoConstraints = false
+
+        replaceField.placeholder = "Replace with…"
+        replaceField.showsOptions = false
+        replaceField.translatesAutoresizingMaskIntoConstraints = false
+        replaceField.onChange = { [weak self] _, _ in self?.replacementChanged() }
+        replaceField.onCancel = { [weak self] in self?.setReplaceVisible(false) }
+
+        replaceAllButton.title = "Replace All"
+        replaceAllButton.toolTip = "Replace every match in every file listed"
+        replaceAllButton.onClick = { [weak self] in self?.replaceEverything() }
+        replaceAllButton.translatesAutoresizingMaskIntoConstraints = false
+        replaceAllButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        replaceRow.translatesAutoresizingMaskIntoConstraints = false
+        replaceRow.isHidden = true
+        replaceRow.addSubview(replaceField)
+        replaceRow.addSubview(replaceAllButton)
 
         summaryLabel.font = Theme.uiFont(10.5)
         summaryLabel.textColor = Theme.dimText
         summaryLabel.alignment = .center
-        summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        summaryLabel.lineBreakMode = .byTruncatingTail
+        summaryLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+
+        undoReplaceButton.isBordered = false
+        undoReplaceButton.bezelStyle = .regularSquare
+        undoReplaceButton.attributedTitle = Self.undoTitle()
+        undoReplaceButton.toolTip = "Undo the last replace in every file it changed"
+        undoReplaceButton.target = self
+        undoReplaceButton.action = #selector(undoLastReplace)
+        undoReplaceButton.isHidden = true
+        undoReplaceButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        // The two sit together in the middle; a stack collapses the button's
+        // room while it is hidden.
+        summaryRow = NSStackView(views: [summaryLabel, undoReplaceButton])
+        summaryRow.orientation = .horizontal
+        summaryRow.spacing = 6
+        summaryRow.alignment = .centerY
+        summaryRow.translatesAutoresizingMaskIntoConstraints = false
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("hit"))
         column.resizingMask = .autoresizingMask
@@ -96,31 +175,61 @@ final class SearchViewController: NSViewController {
         scroll.backgroundColor = Theme.panelBackground
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
+        container.addSubview(replaceToggle)
         container.addSubview(searchField)
+        container.addSubview(replaceRow)
         placeholderLabel.font = Theme.uiFont(11)
         placeholderLabel.textColor = Theme.dimText
         placeholderLabel.alignment = .center
         placeholderLabel.maximumNumberOfLines = 0
         placeholderLabel.lineBreakMode = .byWordWrapping
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(summaryLabel)
+        container.addSubview(summaryRow)
         container.addSubview(placeholderLabel)
         defer { updatePlaceholder(query: "", matches: nil) }
         container.addSubview(scroll)
+        summaryBelowQuery = summaryRow.topAnchor.constraint(
+            equalTo: searchField.bottomAnchor, constant: 6)
+        summaryBelowReplace = summaryRow.topAnchor.constraint(
+            equalTo: replaceRow.bottomAnchor, constant: 6)
         NSLayoutConstraint.activate([
+            replaceToggle.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            replaceToggle.widthAnchor.constraint(equalToConstant: 18),
+            // Centred on the query, as the find bar's is.
+            replaceToggle.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-            searchField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            searchField.leadingAnchor.constraint(equalTo: replaceToggle.trailingAnchor, constant: 2),
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            summaryLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
-            summaryLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            summaryLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            placeholderLabel.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 40),
+
+            replaceRow.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
+            replaceRow.leadingAnchor.constraint(equalTo: searchField.leadingAnchor),
+            replaceRow.trailingAnchor.constraint(equalTo: searchField.trailingAnchor),
+            replaceRow.heightAnchor.constraint(equalToConstant: 30),
+            replaceField.leadingAnchor.constraint(equalTo: replaceRow.leadingAnchor),
+            replaceField.centerYAnchor.constraint(equalTo: replaceRow.centerYAnchor),
+            replaceField.trailingAnchor.constraint(
+                equalTo: replaceAllButton.leadingAnchor, constant: -6),
+            replaceAllButton.trailingAnchor.constraint(equalTo: replaceRow.trailingAnchor),
+            replaceAllButton.centerYAnchor.constraint(equalTo: replaceRow.centerYAnchor),
+            replaceAllButton.heightAnchor.constraint(equalToConstant: BadgeButton.height),
+
+            summaryBelowQuery,
+            summaryRow.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            summaryRow.leadingAnchor.constraint(
+                greaterThanOrEqualTo: container.leadingAnchor, constant: 8),
+            summaryRow.trailingAnchor.constraint(
+                lessThanOrEqualTo: container.trailingAnchor, constant: -8),
+            // The row is as tall as the label alone, so the results do not
+            // move down when Undo appears beside it.
+            summaryRow.heightAnchor.constraint(equalTo: summaryLabel.heightAnchor),
+            undoReplaceButton.heightAnchor.constraint(equalTo: summaryLabel.heightAnchor),
+            placeholderLabel.topAnchor.constraint(equalTo: summaryRow.bottomAnchor, constant: 40),
             placeholderLabel.leadingAnchor.constraint(
                 equalTo: container.leadingAnchor, constant: 24),
             placeholderLabel.trailingAnchor.constraint(
                 equalTo: container.trailingAnchor, constant: -24),
 
-            scroll.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 6),
+            scroll.topAnchor.constraint(equalTo: summaryRow.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -129,6 +238,163 @@ final class SearchViewController: NSViewController {
     }
 
     func focusSearchField() { searchField.focus() }
+
+    // MARK: - Replace
+
+    private static func disclosureImage(open: Bool) -> NSImage? {
+        NSImage(systemSymbolName: open ? "chevron.down" : "chevron.right",
+                accessibilityDescription: "Toggle replace")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+    }
+
+    @objc private func toggleReplace() {
+        setReplaceVisible(replaceRow.isHidden)
+    }
+
+    func setReplaceVisible(_ visible: Bool, focus: Bool = true) {
+        guard replaceRow.isHidden == visible else { return }
+        replaceRow.isHidden = !visible
+        summaryBelowQuery.isActive = !visible
+        summaryBelowReplace.isActive = visible
+        replaceToggle.image = Self.disclosureImage(open: visible)
+        outline.offersRowActions = visible
+        refreshRows()
+        if focus { visible ? replaceField.focus() : searchField.focus() }
+    }
+
+    /// What the rows preview a match turning into: nothing while the replace
+    /// row is closed, so a search that is only a search looks as it always has.
+    private var shownReplacement: String? {
+        replaceRow.isHidden ? nil : replaceField.stringValue
+    }
+
+    private func replacementChanged() { refreshRows() }
+
+    /// Draw the rows again where they are. Their structure has not changed,
+    /// so the folding of each file is left as the user set it.
+    private func refreshRows() {
+        replaceAllButton.isEnabled = !groups.isEmpty
+        guard outline.numberOfRows > 0 else { return }
+        outline.reloadData(forRowIndexes: IndexSet(integersIn: 0..<outline.numberOfRows),
+                           columnIndexes: IndexSet(integer: 0))
+    }
+
+    /// The text `hit`'s match becomes, worked out on the preview line, so a
+    /// regular expression's `$1` shows what it will really write.
+    private func previewReplacement(for hit: Hit) -> String? {
+        guard let template = shownReplacement, let matcher = resultMatcher,
+              let match = matcher.firstMatch(in: hit.preview),
+              hit.matchRange == match.range else { return nil }
+        return matcher.replacement(for: match, in: hit.preview, template: template)
+    }
+
+    /// The query the rows were found with, and the replacement as typed.
+    private var replaceRequest: ProjectReplace.Request? {
+        guard let resultQuery, let template = shownReplacement else { return nil }
+        return ProjectReplace.Request(query: resultQuery.query, options: resultQuery.options,
+                                      template: template)
+    }
+
+    private func replace(hit: Hit, in group: FileGroup) {
+        guard let request = replaceRequest else { return }
+        finish(ProjectReplace.replace(line: hit.line, preview: hit.preview, in: group.url,
+                                      request, save: write))
+    }
+
+    private func replaceAll(in group: FileGroup) {
+        guard let request = replaceRequest else { return }
+        finish(ProjectReplace.replaceAll(in: [group.url], request, save: write))
+    }
+
+    /// Every match in every file listed. Not asked about first: the summary's
+    /// Undo takes it back, file by file.
+    private func replaceEverything() {
+        guard let request = replaceRequest, !groups.isEmpty else { return }
+        finish(ProjectReplace.replaceAll(in: groups.map(\.url), request, save: write))
+    }
+
+    @objc private func undoLastReplace() {
+        let changes = lastReplace
+        guard !changes.isEmpty else { return }
+        finish(ProjectReplace.undo(changes, save: write), undoing: true)
+    }
+
+    private func write(_ document: Document) -> Bool {
+        saver.save(document, because: .leaving)
+    }
+
+    /// Say what happened, keep what Undo needs, and search again: what is
+    /// left is what the replace did not reach.
+    private func finish(_ outcome: ProjectReplace.Outcome, undoing: Bool = false) {
+        if undoing {
+            lastReplace = []
+        } else if !outcome.changes.isEmpty {
+            lastReplace = outcome.changes
+        }
+        undoReplaceButton.isHidden = lastReplace.isEmpty
+        replaceReport = Self.report(outcome, undoing: undoing)
+        summaryLabel.toolTip = Self.skipDetails(outcome)
+        if !outcome.touched.isEmpty { onFilesReplaced?(outcome.touched) }
+        searchChanged()
+    }
+
+    private static func report(_ outcome: ProjectReplace.Outcome, undoing: Bool) -> String {
+        let count = outcome.replacements, files = outcome.touched.count
+        var parts: [String] = []
+        if count > 0 {
+            let matches = "\(count) match\(count == 1 ? "" : "es")"
+            let where_ = "\(files) file\(files == 1 ? "" : "s")"
+            parts.append(undoing ? "Put back \(matches) in \(where_)" : "Replaced \(matches) in \(where_)")
+        }
+        let stale = outcome.skipped.filter { $0.reason == .changedSinceSearch }.count
+        let edited = outcome.skipped.filter { $0.reason == .changedSinceReplace }.count
+        let other = outcome.skipped.count - stale - edited
+        if stale > 0 {
+            parts.append(count == 0 && outcome.skipped.count == 1
+                ? "“\(outcome.skipped[0].url.lastPathComponent)” changed since the search"
+                : "\(stale) changed since the search")
+        }
+        if edited > 0 { parts.append("\(edited) edited since, left as is") }
+        if other > 0 { parts.append("\(other) skipped") }
+        if !outcome.unsaved.isEmpty {
+            parts.append("\(outcome.unsaved.count) not saved: changed on disk")
+        }
+        return parts.isEmpty ? "Nothing to replace" : parts.joined(separator: " · ")
+    }
+
+    /// Which files were left alone, and why, for the summary's tooltip.
+    private static func skipDetails(_ outcome: ProjectReplace.Outcome) -> String? {
+        let lines = outcome.skipped.map { skip -> String in
+            let why: String
+            switch skip.reason {
+            case .notText: why = "not a text file the search reads"
+            case .readOnly: why = "read-only here"
+            case .changedSinceSearch: why = "changed since the search"
+            case .changedSinceReplace: why = "edited since the replace"
+            case .notWritten: why = "could not be written"
+            }
+            return "\(skip.url.lastPathComponent): \(why)"
+        } + outcome.unsaved.map { "\($0.lastPathComponent): changed on disk, left unsaved in its tab" }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    private static func undoTitle() -> NSAttributedString {
+        NSAttributedString(string: "Undo", attributes: [
+            .font: Theme.uiFont(10.5),
+            .foregroundColor: Theme.blue,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+    }
+
+    /// A new query or new options: what the summary said about the last
+    /// replace no longer describes these rows.
+    private func queryChanged() {
+        replaceReport = nil
+        lastReplace = []
+        undoReplaceButton.isHidden = true
+        summaryLabel.toolTip = nil
+        searchChanged()
+    }
 
     /// The results area explains itself when it has nothing to show: what the
     /// panel does before a query, and what came back after one.
@@ -150,6 +416,26 @@ final class SearchViewController: NSViewController {
         placeholderLabel.isHidden = placeholderLabel.stringValue.isEmpty
     }
 
+    var outlineForTesting: SearchOutlineView { outline }
+    var groupsForTesting: [FileGroup] { groups }
+    /// A search is waiting out its debounce or running.
+    var isSearchingForTesting: Bool { searchWork != nil }
+    var summaryForTesting: String { summaryLabel.stringValue }
+    var offersUndoForTesting: Bool { !undoReplaceButton.isHidden }
+    func replaceAllForTesting() { replaceEverything() }
+    func replaceForTesting(_ group: FileGroup) { replaceAll(in: group) }
+    func replaceForTesting(_ hit: Hit, in group: FileGroup) { replace(hit: hit, in: group) }
+    func undoReplaceForTesting() { undoLastReplace() }
+    func previewReplacementForTesting(_ hit: Hit) -> String? { previewReplacement(for: hit) }
+    var isReplaceVisibleForTesting: Bool { !replaceRow.isHidden }
+    func setReplacementForTesting(_ text: String) {
+        replaceField.stringValue = text
+        replacementChanged()
+    }
+    func setOptionsForTesting(_ options: SearchOptions) {
+        searchField.setOptions(options)
+    }
+
     var placeholderTextForTesting: String {
         placeholderLabel.isHidden ? "" : placeholderLabel.stringValue
     }
@@ -159,7 +445,11 @@ final class SearchViewController: NSViewController {
         outline.backgroundColor = Theme.panelBackground
         outline.enclosingScrollView?.backgroundColor = Theme.panelBackground
         searchField.refreshFonts()
+        replaceField.refreshFonts()
+        replaceToggle.contentTintColor = Theme.dimText
+        replaceAllButton.needsDisplay = true
         summaryLabel.font = Theme.uiFont(10.5)
+        undoReplaceButton.attributedTitle = Self.undoTitle()
         outline.reloadData()
         if outline.numberOfRows > 0 {
             outline.noteHeightOfRows(withIndexesChanged:
@@ -179,7 +469,7 @@ final class SearchViewController: NSViewController {
     /// Run a query programmatically (used by the `--search` launch flag).
     func performSearch(_ query: String) {
         searchField.stringValue = query
-        searchChanged()
+        queryChanged()
     }
 
     @objc private func searchChanged() {
@@ -206,7 +496,9 @@ final class SearchViewController: NSViewController {
         groups.removeAll()
         hitRowCache.removeAll()
         outline.reloadData()
-        summaryLabel.stringValue = "Searching…"
+        // After a replace the panel searches again; what the replace did stays
+        // said while it does.
+        summaryLabel.stringValue = replaceReport ?? "Searching…"
         updatePlaceholder(query: query, matches: nil)
         // Disk search cannot see edits that have not been saved yet. Snapshot
         // modified buffers on the main thread, then let the worker use those
@@ -226,12 +518,19 @@ final class SearchViewController: NSViewController {
                 self.searchWork = nil
                 self.hitRowCache.removeAll()   // stale rows from the previous query
                 self.groups = found
+                self.resultQuery = (query, options)
+                self.replaceAllButton.isEnabled = !found.isEmpty
                 self.outline.reloadData()
                 for g in found { self.outline.expandItem(g) }
                 let matches = found.reduce(0) { $0 + $1.hits.count }
-                self.summaryLabel.stringValue = matches == 0
+                let results = matches == 0
                     ? "No results"
                     : "\(matches) result\(matches == 1 ? "" : "s") in \(found.count) file\(found.count == 1 ? "" : "s")"
+                if let report = self.replaceReport {
+                    self.summaryLabel.stringValue = matches == 0 ? report : "\(report) · \(matches) left"
+                } else {
+                    self.summaryLabel.stringValue = results
+                }
                 self.updatePlaceholder(query: query, matches: matches)
             }
         }
@@ -488,7 +787,7 @@ final class SearchViewController: NSViewController {
     }
 
     /// Keep a bounded preview while ensuring a late match remains visible.
-    private static func searchPreview(_ line: String, query: String,
+    static func searchPreview(_ line: String, query: String,
                                       options: SearchOptions) -> String {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = trimmed as NSString
@@ -660,16 +959,31 @@ extension SearchViewController: NSOutlineViewDelegate {
         let row = (ov.makeView(withIdentifier: id, owner: self) as? SearchRowView)
             ?? SearchRowView()
         row.identifier = id
+        // A reused row may have been the lit one somewhere else in the list.
+        row.isHovered = false
         return row
     }
 
     func outlineView(_ ov: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        let cell = makeCell(ov, for: item)
+        // A reused cell may have been the lit one somewhere else in the list.
+        cell?.isRowHovered = outline.hoveredRow >= 0 && outline.hoveredRow == ov.row(forItem: item)
+        return cell
+    }
+
+    private func makeCell(_ ov: NSOutlineView, for item: Any) -> SearchActionCell? {
         if let group = item as? FileGroup {
             let id = NSUserInterfaceItemIdentifier("search-group-cell")
             let cell = (ov.makeView(withIdentifier: id, owner: self)
                         as? SearchGroupCell) ?? SearchGroupCell()
             cell.identifier = id
             cell.configure(group: group)
+            cell.action = shownReplacement == nil ? nil : SearchRowAction(
+                symbol: "rectangle.2.swap", label: "Replace in this file"
+            ) { [weak self, weak group] in
+                guard let self, let group else { return }
+                self.replaceAll(in: group)
+            }
             return cell
         }
 
@@ -678,12 +992,124 @@ extension SearchViewController: NSOutlineViewDelegate {
         let cell = (ov.makeView(withIdentifier: id, owner: self)
                     as? SearchHitCell) ?? SearchHitCell()
         cell.identifier = id
-        cell.configure(hit: row.hit)
+        cell.configure(hit: row.hit, replacement: previewReplacement(for: row.hit))
+        cell.action = shownReplacement == nil ? nil : SearchRowAction(
+            symbol: "arrow.left.arrow.right", label: "Replace"
+        ) { [weak self, weak row] in
+            guard let self, let row else { return }
+            self.replace(hit: row.hit, in: row.group)
+        }
         return cell
     }
 }
 
-private final class SearchGroupCell: DrawnSidebarCell {
+/// The one thing a result row offers while the replace row is open: replace
+/// this match, or every match in this file.
+struct SearchRowAction {
+    let symbol: String
+    let label: String
+    let perform: () -> Void
+}
+
+/// A result row that can carry a `SearchRowAction`, drawn at its trailing edge
+/// while the pointer is over the row — the Git panel's file actions, measured
+/// the same way. Shown always, it would put a mark against every line.
+class SearchActionCell: DrawnSidebarCell, RowHoverAware {
+    var action: SearchRowAction? {
+        didSet {
+            actionLit = false
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    var isRowHovered = false {
+        didSet {
+            guard isRowHovered != oldValue else { return }
+            if !isRowHovered { actionLit = false }
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    private var actionLit = false
+    private var actionTracking: NSTrackingArea?
+
+    private var showsAction: Bool { isRowHovered && action != nil }
+
+    /// Where the action sits, `.zero` while it is not shown.
+    var actionRect: NSRect {
+        guard showsAction else { return .zero }
+        let size = GitFileActionCell.actionSize
+        return NSRect(x: bounds.maxX - GitFileActionCell.actionInset - size,
+                      y: ((bounds.height - size) / 2).rounded(), width: size, height: size)
+    }
+
+    /// The room the action takes from the row's text, nothing when it is gone.
+    var actionWidth: CGFloat {
+        showsAction ? GitFileActionCell.actionSize + GitFileActionCell.actionInset : 0
+    }
+
+    func drawAction() {
+        guard let action, showsAction else { return }
+        let box = actionRect
+        if actionLit {
+            Theme.activeRow.setFill()
+            NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
+        }
+        let glyph = GitFileActionCell.actionGlyph
+        SidebarCellDrawing.image(
+            Theme.symbol(action.symbol, accessibilityDescription: action.label, pointSize: 11),
+            tint: actionLit ? Theme.foreground : Theme.dimText,
+            in: NSRect(x: box.midX - glyph / 2, y: box.midY - glyph / 2,
+                       width: glyph, height: glyph))
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let actionTracking { removeTrackingArea(actionTracking) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        actionTracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        setActionLit(actionRect.contains(convert(event.locationInWindow, from: nil)))
+    }
+
+    override func mouseExited(with event: NSEvent) { setActionLit(false) }
+
+    private func setActionLit(_ lit: Bool) {
+        guard lit != actionLit else { return }
+        actionLit = lit
+        needsDisplay = true
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if showsAction { addCursorRect(actionRect, cursor: .pointingHand) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Anywhere else is the row's own click, which opens the file.
+        guard performAction(at: event.locationInWindow) else { return super.mouseDown(with: event) }
+    }
+
+    /// Run the action when `windowPoint` is on it. The list asks this first,
+    /// because a click on a row's own views goes to the list, not to them.
+    func performAction(at windowPoint: NSPoint) -> Bool {
+        guard let action, actionRect.contains(convert(windowPoint, from: nil)) else { return false }
+        action.perform()
+        return true
+    }
+
+    var actionRectForTesting: NSRect { actionRect }
+    func setActionLitForTesting(_ lit: Bool) { setActionLit(lit) }
+}
+
+private final class SearchGroupCell: SearchActionCell {
     private var icon: SidebarIcon?
     private var name = ""
     private var folder = ""
@@ -704,16 +1130,26 @@ private final class SearchGroupCell: DrawnSidebarCell {
         SidebarCellDrawing.primaryAndSecondary(
             primary: name, primaryFont: Theme.uiFont(11.5), primaryColor: Theme.foreground,
             secondary: folder, secondaryFont: Theme.uiFont(10), secondaryColor: Theme.dimText,
-            in: NSRect(x: 20, y: 0, width: max(0, bounds.width - 24), height: bounds.height))
+            in: NSRect(x: 20, y: 0, width: max(0, bounds.width - 24 - actionWidth),
+                       height: bounds.height))
+        drawAction()
     }
 }
 
-final class SearchHitCell: DrawnSidebarCell {
+final class SearchHitCell: SearchActionCell {
     private var content = NSAttributedString()
     private var highlightRange: NSRange?
     /// Measuring the run costs a TextKit pass, so keep it until the row or the
     /// panel width changes.
     private var cachedHighlight: (width: CGFloat, rect: NSRect)?
+    /// What a row previewing a replacement shows at one width: the whole line
+    /// when the change fits, or the line from just before the match when it
+    /// would be cut off at the end.
+    private var previewing: (hit: SearchViewController.Hit, match: NSRange, replacement: String)?
+    private var fitted: (width: CGFloat, content: NSAttributedString)?
+    /// Characters of the line kept ahead of a match that had to be brought
+    /// into view.
+    static let leadingContext = 10
     private let paragraph: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
@@ -726,11 +1162,48 @@ final class SearchHitCell: DrawnSidebarCell {
         ]
         return style.copy() as! NSParagraphStyle
     }()
-    func configure(hit: SearchViewController.Hit) {
+
+    /// `replacement` is what the match becomes, when the replace row is open:
+    /// the match is struck through and the replacement written after it, so
+    /// the row reads as the line will after the replace.
+    func configure(hit: SearchViewController.Hit, replacement: String? = nil) {
         let number = String(hit.line)
-        let prefix = "\t\(number)\t"
+        highlightRange = nil
+        previewing = nil
+        fitted = nil
+        cachedHighlight = nil
+        if let match = hit.matchRange, NSMaxRange(match) <= (hit.preview as NSString).length {
+            if let replacement {
+                previewing = (hit, match, replacement)
+                content = Self.preview(hit, match: match, replacement: replacement,
+                                       from: 0, paragraph: paragraph)
+            } else {
+                content = Self.plain(hit, paragraph: paragraph)
+                // The highlight is painted behind the row rather than set as a
+                // background attribute: an attribute only covers the glyph box,
+                // which left a band of row above and below it. The fill is dark
+                // enough for the row's own text colour to stay readable, so the
+                // match is not re-inked.
+                highlightRange = NSRange(location: Self.prefix(hit).length + match.location,
+                                         length: match.length)
+            }
+        } else {
+            content = Self.plain(hit, paragraph: paragraph)
+        }
+        exposeToAccessibility(replacement.map { "Line \(number): \(hit.preview), replaced with \($0)" }
+                              ?? "Line \(number): \(hit.preview)")
+        needsDisplay = true
+    }
+
+    private static func prefix(_ hit: SearchViewController.Hit) -> NSString {
+        "\t\(hit.line)\t" as NSString
+    }
+
+    private static func plain(_ hit: SearchViewController.Hit,
+                              paragraph: NSParagraphStyle) -> NSMutableAttributedString {
+        let number = String(hit.line)
         let attributed = NSMutableAttributedString(
-            string: prefix + hit.preview,
+            string: (prefix(hit) as String) + hit.preview,
             attributes: [.font: Theme.uiFont(11),
                          .foregroundColor: Theme.foreground,
                          .paragraphStyle: paragraph])
@@ -738,41 +1211,74 @@ final class SearchHitCell: DrawnSidebarCell {
             .foregroundColor,
             value: Theme.dimText,
             range: NSRange(location: 1, length: (number as NSString).length))
-        // The highlight is painted behind the row rather than set as a
-        // background attribute: an attribute only covers the glyph box, which
-        // left a band of row above and below it.
-        if let match = hit.matchRange,
-           NSMaxRange(match) <= (hit.preview as NSString).length {
-            let previewOffset = (prefix as NSString).length
-            // The fill is dark enough for the row's own text colour to stay
-            // readable, so the match is not re-inked.
-            highlightRange = NSRange(location: previewOffset + match.location,
-                                     length: match.length)
-        } else {
-            highlightRange = nil
+        return attributed
+    }
+
+    /// The line from `start` on, with the match struck through and the
+    /// replacement after it.
+    private static func preview(_ hit: SearchViewController.Hit, match: NSRange,
+                                replacement: String, from start: Int,
+                                paragraph: NSParagraphStyle) -> NSAttributedString {
+        let attributed = plain(hit, paragraph: paragraph)
+        let offset = prefix(hit).length
+        let matched = NSRange(location: offset + match.location, length: match.length)
+        attributed.addAttributes([
+            .foregroundColor: Theme.diffRemovedText,
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .strikethroughColor: Theme.diffRemovedText,
+        ], range: matched)
+        attributed.insert(NSAttributedString(string: replacement, attributes: [
+            .font: Theme.uiFont(11),
+            .foregroundColor: Theme.diffAddedText,
+            .paragraphStyle: paragraph,
+        ]), at: NSMaxRange(matched))
+        if start > 0 {
+            attributed.replaceCharacters(in: NSRange(location: offset, length: start), with: "…")
         }
-        content = attributed
-        cachedHighlight = nil
-        exposeToAccessibility("Line \(number): \(hit.preview)")
-        needsDisplay = true
+        return attributed
+    }
+
+    /// The content to draw at `width`. Only a row previewing a replacement
+    /// moves: the line's start gives way when the change would otherwise be
+    /// cut off at the end, which in a narrow panel it usually is.
+    private func content(fitting width: CGFloat) -> NSAttributedString {
+        guard let previewing else { return content }
+        if let fitted, fitted.width == width { return fitted.content }
+        let changeEnd = Self.prefix(previewing.hit).length + NSMaxRange(previewing.match)
+            + (previewing.replacement as NSString).length
+        var shown = content
+        if let box = Self.box(of: NSRange(location: changeEnd - 1, length: 1), in: content,
+                              width: .greatestFiniteMagnitude),
+           box.maxX > width, previewing.match.location > Self.leadingContext {
+            let line = previewing.hit.preview as NSString
+            let start = line.rangeOfComposedCharacterSequence(
+                at: previewing.match.location - Self.leadingContext).location
+            shown = Self.preview(previewing.hit, match: previewing.match,
+                                 replacement: previewing.replacement,
+                                 from: start, paragraph: paragraph)
+        }
+        fitted = (width, shown)
+        return shown
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let textWidth = max(0, bounds.width - 4)
+        let textWidth = max(0, bounds.width - 4 - actionWidth)
         let textRect = NSRect(x: 0, y: 0, width: textWidth, height: bounds.height)
         // Gutter number and source text are intentionally one attributed line:
         // tab stops and a shared baseline make vertical drift impossible.
-        SidebarCellDrawing.attributedText(content, in: textRect)
+        let shown = content(fitting: textWidth)
+        SidebarCellDrawing.attributedText(shown, in: textRect)
         // A rule under the match, the same one the editor draws: nothing is
         // painted over the preview, so the row keeps its own contrast.
         if let box = highlightBox(width: textWidth),
-           let line = SidebarCellDrawing.textLineRect(content, in: textRect) {
+           let line = SidebarCellDrawing.textLineRect(shown, in: textRect) {
             Theme.matchUnderline.setFill()
             NSRect(x: box.minX,
                    y: line.maxY - Theme.matchUnderlineWidth - 1,
                    width: box.width,
                    height: Theme.matchUnderlineWidth).fill()
         }
+        drawAction()
     }
 
     var contentForTesting: NSAttributedString { content }
@@ -784,20 +1290,25 @@ final class SearchHitCell: DrawnSidebarCell {
     private func highlightBox(width: CGFloat) -> NSRect? {
         guard let highlightRange, width > 0 else { return nil }
         if let cachedHighlight, cachedHighlight.width == width { return cachedHighlight.rect }
+        guard let rect = Self.box(of: highlightRange, in: content, width: width) else { return nil }
+        cachedHighlight = (width, rect)
+        return rect
+    }
+
+    private static func box(of range: NSRange, in content: NSAttributedString,
+                            width: CGFloat) -> NSRect? {
+        guard width > 0, NSMaxRange(range) <= content.length else { return nil }
         let storage = NSTextStorage(attributedString: content)
         let manager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
         container.lineFragmentPadding = 0
         manager.addTextContainer(container)
         storage.addLayoutManager(manager)
-        let glyphs = manager.glyphRange(forCharacterRange: highlightRange,
-                                        actualCharacterRange: nil)
+        defer { storage.removeLayoutManager(manager) }
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         guard glyphs.length > 0 else { return nil }
         let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
-        storage.removeLayoutManager(manager)
-        guard rect.width > 0 else { return nil }
-        cachedHighlight = (width, rect)
-        return rect
+        return rect.width > 0 ? rect : nil
     }
 }
 
@@ -822,11 +1333,98 @@ struct SearchHitCellProbe {
     }
 }
 
+/// The results list. While the replace row is open, the row under the pointer
+/// lights up and its cell shows what can be done to it.
+final class SearchOutlineView: NSOutlineView {
+    var offersRowActions = false {
+        didSet {
+            guard offersRowActions != oldValue else { return }
+            refreshHoverState()
+        }
+    }
+    private var hoverTrackingArea: NSTrackingArea?
+    private(set) var hoveredRow = -1
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard hoverTrackingArea == nil else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateHoveredRow(with: event) }
+    override func mouseExited(with event: NSEvent) { setHoveredRow(-1) }
+
+    /// A view-based list keeps a click on a row's own views for itself — it
+    /// selects the row — so the cell never hears of a click on its action,
+    /// and the row's click opened the file instead. Measured: hit testing in
+    /// a key window hands the list the event, not the cell.
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0,
+           let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SearchActionCell,
+           cell.performAction(at: event.locationInWindow) {
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func layout() {
+        super.layout()
+        refreshHoverState()
+    }
+
+    /// Rows come and go under a resting pointer as results arrive.
+    func refreshHoverState() {
+        guard let window, offersRowActions else {
+            setHoveredRow(-1)
+            return
+        }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    private func updateHoveredRow(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        setHoveredRow(offersRowActions && bounds.contains(point) ? row(at: point) : -1)
+    }
+
+    func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }
+
+    private func setHoveredRow(_ row: Int) {
+        let next = row >= 0 && row < numberOfRows ? row : -1
+        guard next != hoveredRow else { return }
+        let previous = hoveredRow
+        hoveredRow = next
+        // `previous` may name a row that has gone since: asking for it raises,
+        // and this runs from `layout()`, where that is a crash.
+        for index in [previous, next] where index >= 0 && index < numberOfRows {
+            (rowView(atRow: index, makeIfNecessary: false) as? SearchRowView)?
+                .isHovered = index == next
+            (view(atColumn: 0, row: index, makeIfNecessary: false) as? RowHoverAware)?
+                .isRowHovered = index == next
+        }
+    }
+}
+
 /// Search-result row: flat background, selection uses the same subtle tint as
 /// the active file in the tree instead of the system blue highlight.
 final class SearchRowView: FlatRowView {
+    var isHovered = false {
+        didSet {
+            guard isHovered != oldValue else { return }
+            needsDisplay = true
+        }
+    }
+
     override var ground: NSColor {
-        isSelected && selectionHighlightStyle != .none ? Theme.activeRow : Theme.panelBackground
+        if isSelected && selectionHighlightStyle != .none { return Theme.activeRow }
+        return isHovered ? Theme.hover : Theme.panelBackground
     }
 
     override var isEmphasized: Bool {
