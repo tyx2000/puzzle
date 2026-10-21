@@ -183,6 +183,9 @@ final class SearchViewController: NSViewController {
         placeholderLabel.alignment = .center
         placeholderLabel.maximumNumberOfLines = 0
         placeholderLabel.lineBreakMode = .byWordWrapping
+        // It wraps to the panel's width rather than setting it: unwrapped, it
+        // asks for over 20000pt, which widened the panel and the window with it.
+        placeholderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(summaryRow)
         container.addSubview(placeholderLabel)

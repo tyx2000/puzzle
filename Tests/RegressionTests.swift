@@ -116,6 +116,8 @@ enum RegressionTests {
         try testActivePairIsOneFlowingLine()
         try testCommitImagePathsDoNotCollide()
         try testFullScreenStripTakesTheLightsPlace()
+        try testFullScreenWindowOnNoDisplayIsRecognised()
+        try testNarrowWindowNarrowsThePanel()
         try testDefaultWindowPlacement()
         try testDocumentStoreProtectsNewBuffer()
         try testVirtualDocumentRefreshesInPlace()
@@ -3854,6 +3856,90 @@ enum RegressionTests {
         try expect(workspace.sidebar.titlebarLeadingInsetForTesting == beside,
                    "out of full screen the strip is not beside the lights again: "
                     + "\(workspace.sidebar.titlebarLeadingInsetForTesting)")
+    }
+
+    /// A window narrows as far as the panel's floor and the editor's
+    /// narrowest allow, whatever width the panel was given: the panel gives
+    /// way, and has its width back as the window widens. Holding its width
+    /// over the window's size, an 853pt panel kept the window from going
+    /// under 1141pt, so it could not be tiled to half a laptop's screen. Nor
+    /// does a panel's content widen it: the search panel's hint, unwrapped,
+    /// asked for over 20000pt and took the window with it.
+    private static func testNarrowWindowNarrowsThePanel() throws {
+        let project = try temporaryDirectory("narrow-window")
+        defer { try? FileManager.default.removeItem(at: project) }
+        try Data("a".utf8).write(to: project.appendingPathComponent("a.txt"))
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        guard let window = workspace.window else {
+            throw Failure(description: "the workspace has no window")
+        }
+        workspace.openSelection([project])
+        let root = workspace.rootForTesting
+        func size(to width: CGFloat) {
+            window.setFrame(NSRect(x: 0, y: 0, width: width, height: 900), display: false)
+            window.contentView?.layoutSubtreeIfNeeded()
+        }
+        size(to: 1706)
+        root.resizeSidebarForTesting(to: 853)
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(root.sidebarLaidOutWidthForTesting == 853,
+                   "the panel was not given its width: \(root.sidebarLaidOutWidthForTesting)")
+
+        // Half a 1470pt laptop screen.
+        size(to: 735)
+        let narrowed = root.sidebarLaidOutWidthForTesting
+        try expect(window.frame.width == 735,
+                   "an 853pt panel held the window at \(window.frame.width)pt, not 735pt")
+        try expect(narrowed < 853 && narrowed >= RootViewController.minimumSidebarWidth,
+                   "the panel did not give way to the window: \(narrowed)")
+        for (name, show) in [("search", workspace.sidebar.showSearch),
+                             ("git", workspace.sidebar.showGit),
+                             ("files", workspace.sidebar.showFiles)] {
+            show()
+            root.preserveSidebarWidth()
+            window.contentView?.layoutSubtreeIfNeeded()
+            try expect(window.frame.width == 735 && root.sidebarLaidOutWidthForTesting == narrowed,
+                       "the \(name) panel moved a narrow window to \(window.frame.width)pt "
+                         + "and its panel to \(root.sidebarLaidOutWidthForTesting)pt")
+        }
+
+        size(to: 1706)
+        try expect(root.sidebarLaidOutWidthForTesting == 853,
+                   "the panel did not get its width back: \(root.sidebarLaidOutWidthForTesting)")
+        workspace.sidebar.showSearch()
+        root.preserveSidebarWidth()
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(window.frame.width == 1706 && root.sidebarLaidOutWidthForTesting == 853,
+                   "the search panel widened the window to \(window.frame.width)pt")
+    }
+
+    /// Unplugging the display a full-screen window is on leaves it 0x0, on no
+    /// display, still in full screen, and it is taken out of full screen to
+    /// be seen again. The frames are the ones it went through. The suite
+    /// cannot take a display away; a window that is not in full screen is
+    /// never touched.
+    private static func testFullScreenWindowOnNoDisplayIsRecognised() throws {
+        let screens = [NSRect(x: 0, y: 0, width: 2560, height: 1440)]
+        try expect(WorkspaceWindowController.isStranded(.zero, on: screens),
+                   "a window shrunk to nothing is not taken for stranded")
+        try expect(WorkspaceWindowController.isStranded(
+                    NSRect(x: 0, y: -104, width: 1141, height: 104), on: screens),
+                   "a window just below the only display is not taken for stranded")
+        try expect(WorkspaceWindowController.isStranded(
+                    NSRect(x: -1920, y: 360, width: 1920, height: 1080), on: screens),
+                   "a window where the unplugged display was is not taken for stranded")
+        try expect(!WorkspaceWindowController.isStranded(
+                    NSRect(x: 0, y: 0, width: 2560, height: 1410), on: screens),
+                   "a full-screen window on its display is taken for stranded")
+        try expect(!WorkspaceWindowController.isStranded(
+                    NSRect(x: 2400, y: 1300, width: 1200, height: 800), on: screens),
+                   "a window partly off its display is taken for stranded")
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        try expect(!workspace.leaveFullScreenIfStranded(),
+                   "a window that is not in full screen was taken out of it")
     }
 
     private static func testDefaultWindowPlacement() throws {

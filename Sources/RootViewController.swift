@@ -58,8 +58,9 @@ final class RootViewController: NSViewController {
         sidebarItem.canCollapse = true
         // The panel holds its width; the editor absorbs window resizing. With
         // `.defaultLow` the panel is the pane that yields, so it snapped back to
-        // its content minimum and could not be widened.
-        sidebarItem.holdingPriority = .defaultHigh
+        // its content minimum and could not be widened. Held below the window's
+        // own size, though, like the width below: see there.
+        sidebarItem.holdingPriority = Self.belowWindowSize(by: 2)
         let editorItem = NSSplitViewItem(viewController: editor)
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(editorItem)
@@ -68,8 +69,17 @@ final class RootViewController: NSViewController {
         // The panel's width is owned by this constraint, so switching panels can
         // never change it. Dragging the divider updates the constant (below), so
         // the divider still works normally.
+        //
+        // It gives way to the window's size, though. Held above it (it was at
+        // 999) the panel held the window instead: a window could not be made
+        // narrower than its panel and the editor's narrowest together, so one
+        // opened at 1706pt stopped at 1141pt — tiled to half a laptop's
+        // screen, dragged, or moved to a smaller display. Now the panel narrows
+        // once the editor is at its narrowest, to the floor, and has its width
+        // back as the window widens. No panel's content asks for more than the
+        // floor, so switching panels still cannot move it.
         sidebarWidthConstraint = sidebar.view.widthAnchor.constraint(equalToConstant: lastSidebarWidth)
-        sidebarWidthConstraint.priority = .init(999)
+        sidebarWidthConstraint.priority = Self.belowWindowSize(by: 1)
         sidebarWidthConstraint.isActive = true
 
         split.onDividerDrag = { [weak self] proposed in
@@ -140,8 +150,17 @@ final class RootViewController: NSViewController {
         return min(max(half, minimumSidebarWidth), limit)
     }
 
+    /// Just under the priority a window holds its size at: what the window is
+    /// asked to be wins over it.
+    static func belowWindowSize(by steps: Float) -> NSLayoutConstraint.Priority {
+        NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.windowSizeStayPut.rawValue - steps)
+    }
+
     func resizeSidebarForTesting(to width: CGFloat) { resizeSidebar(to: width) }
     var sidebarWidthForTesting: CGFloat { sidebarWidthConstraint.constant }
+    /// The width the panel is laid out at, which a narrow window can hold
+    /// under the one it was given.
+    var sidebarLaidOutWidthForTesting: CGFloat { sidebar.view.frame.width }
 
     /// Re-assert the remembered width after switching panels.
     func preserveSidebarWidth() { applyWidth(lastSidebarWidth) }
