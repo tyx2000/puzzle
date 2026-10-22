@@ -11184,6 +11184,15 @@ enum RegressionTests {
                    "a project closed and opened again brought its old tabs: \(names())")
     }
 
+    /// The mouse's events, which a test pumping events by hand drops: the
+    /// real mouse is the person running the suite, and its clicks are not
+    /// the test's.
+    static let mouseEvents: NSEvent.EventTypeMask = [
+        .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp,
+        .rightMouseDragged, .otherMouseDown, .otherMouseUp, .otherMouseDragged,
+        .mouseMoved, .mouseEntered, .mouseExited, .scrollWheel,
+    ]
+
     /// A deleted file whose name starts the way an index stage does — `0:`
     /// to `3:` — is still read back as itself: `:2:x.txt` is stage 2 of
     /// `x.txt`, and the last version of `2:x.txt` used to come back as none.
@@ -13104,9 +13113,14 @@ enum RegressionTests {
         NSApp.postEvent(push, atStart: false)
         let pushDeadline = Date().addingTimeInterval(10)
         while changedIn.count < 2 && Date() < pushDeadline {
+            // Everything but the mouse: passing on every event let a real
+            // click on the window, made while the test waited, land in it.
+            // Taken with a narrower mask, the posted shortcut never came back
+            // at all, so every event is taken and the mouse's are dropped.
             if let event = NSApp.nextEvent(matching: .any,
                                            until: Date().addingTimeInterval(0.02),
-                                           inMode: .default, dequeue: true) {
+                                           inMode: .default, dequeue: true),
+               !Self.mouseEvents.contains(NSEvent.EventTypeMask(type: event.type)) {
                 NSApp.sendEvent(event)
             }
         }
@@ -13976,6 +13990,10 @@ enum RegressionTests {
         workspace.openProject(second.clone)
         try expect(waitUntil { knows(second.clone, second.remote) },
                    "opening a project did not fetch it")
+        // The fetch is noted on the main queue, and Git can show what it
+        // brought before that turn has come: read straight away, the list
+        // was sometimes still empty.
+        _ = waitUntil { !BackgroundFetch.fetchedForTesting.isEmpty }
         try expect(BackgroundFetch.fetchedForTesting == [second.clone],
                    "the wrong projects were fetched: \(BackgroundFetch.fetchedForTesting)")
 
