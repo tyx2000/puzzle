@@ -465,13 +465,24 @@ class GitFileActionCell: DrawnSidebarCell, RowHoverAware {
     }
 
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+        // Anywhere but an action is the row's own click, which shows the diff.
+        if !performAction(at: event.locationInWindow) { super.mouseDown(with: event) }
+    }
+
+    /// Runs the action drawn at a point in the window, if one is there.
+    ///
+    /// The list calls this from its own `mouseDown`: in a key window a click
+    /// on a row's plain views goes to the list, which selects the row with
+    /// it, and never reaches the cell — so a click on discard or open showed
+    /// the diff instead.
+    @discardableResult
+    func performAction(at windowPoint: NSPoint) -> Bool {
+        let point = convert(windowPoint, from: nil)
         guard let action = shownActions.first(where: { rect(of: $0).contains(point) }) else {
-            // Anywhere else is the row's own click, which shows the diff.
-            super.mouseDown(with: event)
-            return
+            return false
         }
         perform(action)
+        return true
     }
 
     private func perform(_ action: ChangeRowAction) {
@@ -821,6 +832,20 @@ final class GitTableView: NSTableView {
     override func mouseEntered(with event: NSEvent) {
         keysLitRow = false
         updateHoveredRow(with: event)
+    }
+
+    /// A click on a row's action goes to the action. In a key window the
+    /// list, not the cell, hears a click on a row's plain views, and without
+    /// this it selected the row: discard and open showed the diff instead.
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point), column = self.column(at: point)
+        if row >= 0, column >= 0,
+           let cell = view(atColumn: column, row: row, makeIfNecessary: false) as? GitFileActionCell,
+           cell.performAction(at: event.locationInWindow) {
+            return
+        }
+        super.mouseDown(with: event)
     }
     override func mouseMoved(with event: NSEvent) {
         keysLitRow = false

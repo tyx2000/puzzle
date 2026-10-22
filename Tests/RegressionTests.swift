@@ -13631,6 +13631,13 @@ enum RegressionTests {
         // Open asks for the file itself, not its diff.
         var openedDiff = 0
         changes.onOpenDiff = { _, _ in openedDiff += 1 }
+        // Clicked as a real click arrives in a key window — at the list, not
+        // the cell — open still opens the file, and the row's diff is not
+        // shown for it.
+        changes.clickListForTesting(atCell: 0, point: NSPoint(x: open.midX, y: open.midY))
+        try expect(opened.count == 1 && openedDiff == 0,
+                   "a click on the list at open did not open the file: opened \(opened), diffs \(openedDiff)")
+        opened.removeAll()
         try expect(hovered.clickForTesting(at: NSPoint(x: open.midX, y: open.midY)) == .open,
                    "the open button did not take the click")
         try expect(opened.map(\.lastPathComponent) == [changes.rowNameForTesting(0) ?? ""]

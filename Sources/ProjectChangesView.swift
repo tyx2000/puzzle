@@ -309,6 +309,24 @@ final class ProjectChangesViewController: NSViewController {
         _ = view
         return table.hoveredRow
     }
+    /// A click at a point in a row's cell, delivered to the list, where a
+    /// real one in a key window arrives.
+    func clickListForTesting(atCell row: Int, point: NSPoint) {
+        guard let cell = cellForTesting(row), let window = view.window,
+              let event = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: cell.convert(point, to: nil), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { return }
+        // The list tracks the button until it comes up.
+        if let up = NSEvent.mouseEvent(
+            with: .leftMouseUp, location: event.locationInWindow, modifierFlags: [],
+            timestamp: event.timestamp, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 0) {
+            NSApp.postEvent(up, atStart: false)
+        }
+        table.mouseDown(with: event)
+        _ = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true)
+    }
     func setHoveredRowForTesting(_ row: Int) {
         _ = view
         table.layoutSubtreeIfNeeded()
