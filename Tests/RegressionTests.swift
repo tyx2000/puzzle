@@ -887,6 +887,18 @@ enum RegressionTests {
         _ = git(["init", "-q", "-b", "main"])
         _ = git(["config", "user.name", "Gift Test"])
         _ = git(["config", "user.email", "gift@example.invalid"])
+        // The user's hooks, which say whether they were handed the literal
+        // reading. Hooks run at the top of the working tree; naming their
+        // folder keeps a global `core.hooksPath` from taking them elsewhere.
+        _ = git(["config", "core.hooksPath", ".git/hooks"])
+        let hooksFolder = root.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksFolder, withIntermediateDirectories: true)
+        for hook in ["pre-commit", "post-checkout"] {
+            let script = hooksFolder.appendingPathComponent(hook)
+            try Data("#!/bin/sh\necho \"\(hook) [$GIT_LITERAL_PATHSPECS]\" >> .git/hook-log\n".utf8)
+                .write(to: script)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        }
         // Names Git would otherwise read as patterns, beside the ordinary
         // files they would match.
         let patterns = ["*.txt", "?.txt", "[ab].txt", ":x.txt"]
@@ -944,6 +956,14 @@ enum RegressionTests {
                    "the new file is still there")
         try expect(contents("keep.log") == "other\n",
                    "discarding “\(fresh)” took keep.log with it: \(contents("keep.log"))")
+
+        // Hooks are the user's own scripts, and read their patterns as
+        // patterns: a pre-commit hook that lints `-- '*.swift'` must still
+        // find the Swift files.
+        let hooks = contents(".git/hook-log")
+        try expect(hooks.contains("pre-commit") && hooks.contains("post-checkout"),
+                   "the hooks did not run: \(hooks)")
+        try expect(!hooks.contains("[1]"), "a hook was handed the literal reading:\n\(hooks)")
     }
 
     private static func testGitIgnoreRefreshReconciliation() throws {

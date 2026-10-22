@@ -308,13 +308,10 @@ enum GitService {
         // pathspec pattern: discarding one such file also reverted every other
         // file its name happened to match, losing uncommitted work.
         //
-        // `check-ignore` is the exception: it refuses the literal magic
-        // outright ("pathspec magic not supported by this command"), so it is
-        // left to read its input as patterns. Nothing it decides can lose
-        // work — it only says which staged additions an ignore rule covers.
-        if !Self.rejectsLiteralPathspecs(arguments) {
-            environment["GIT_LITERAL_PATHSPECS"] = "1"
-        }
+        // `readsPathspecsLiterally` says which commands are left out and why;
+        // for those the variable is taken away, so a `:(literal)` name means
+        // what it says whatever Gift was started with.
+        environment["GIT_LITERAL_PATHSPECS"] = Self.readsPathspecsLiterally(arguments) ? "1" : nil
         environment["GIT_ASKPASS"] = environment["GIT_ASKPASS"] ?? "true"
         environment["SSH_ASKPASS"] = environment["SSH_ASKPASS"] ?? "true"
         process.environment = environment
@@ -427,9 +424,34 @@ enum GitService {
             .first { !$0.hasPrefix("-") }
     }
 
-    static func rejectsLiteralPathspecs(_ arguments: [String]) -> Bool {
-        guard let subcommand = subcommand(of: arguments) else { return false }
-        return literalPathspecRefusers.contains(subcommand)
+    /// Subcommands that run the repository's hooks, themselves or through a
+    /// Git they start. A hook inherits the environment, and it is the user's
+    /// own script, written for Git's ordinary reading: told to read pathspecs
+    /// literally, a pre-commit hook that lints `git diff --cached -- '*.swift'`
+    /// finds nothing to lint and passes.
+    ///
+    /// Gift hands one of these a file name only in `discard`, whose `restore`
+    /// (it runs post-checkout) spells the literal reading into each name with
+    /// `literalPathspec`. A commit is limited to `.`, which reads the same
+    /// either way, and a checkout or a push names branches.
+    static let hookRunners: Set<String> = [
+        "am", "checkout", "cherry-pick", "commit", "merge", "pull", "push",
+        "rebase", "restore", "revert", "switch",
+    ]
+
+    /// Whether a Git process reads its pathspecs literally: every command but
+    /// those that refuse the reading (`check-ignore`, whose answers cannot
+    /// lose work) and those that run hooks.
+    static func readsPathspecsLiterally(_ arguments: [String]) -> Bool {
+        guard let subcommand = subcommand(of: arguments) else { return true }
+        return !literalPathspecRefusers.contains(subcommand)
+            && !hookRunners.contains(subcommand)
+    }
+
+    /// A file name as a pathspec that matches that file alone, for the
+    /// commands `hookRunners` keeps the environment's literal reading from.
+    static func literalPathspec(_ path: String) -> String {
+        ":(literal)" + path
     }
 
     /// One Git read at a time for the work the UI starts on its own — the
@@ -942,8 +964,8 @@ enum GitService {
             if entry.code.contains("R"), let originalPath = entry.originalPath {
                 paths.append(originalPath)
             }
-            let result = run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + paths,
-                             in: directory)
+            let result = run(["restore", "--source=HEAD", "--staged", "--worktree", "--"]
+                             + paths.map(literalPathspec), in: directory)
             guard result.code == 0 else {
                 return RemoteResult(ok: false,
                                     message: result.err.isEmpty ? result.out : result.err)
