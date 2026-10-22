@@ -555,7 +555,9 @@ enum GitService {
     static func deletedVersion(of entry: Status.Entry,
                                in directory: URL) -> (id: String, blob: BlobResult)? {
         let path = repositoryRelativePath(entry.path, in: directory)
-        let object = entry.indexStatus == "D" ? "HEAD:\(path)" : ":\(path)"
+        // The index's copy is named by its stage, 0, in full: `:2:x` alone is
+        // stage 2 of `x`, not a file named `2:x`.
+        let object = entry.indexStatus == "D" ? "HEAD:\(path)" : ":0:\(path)"
         let resolved = run(["rev-parse", "--verify", "--quiet", object], in: directory)
         let id = resolved.out.trimmingCharacters(in: .whitespacesAndNewlines)
         guard resolved.code == 0, !id.isEmpty else { return nil }

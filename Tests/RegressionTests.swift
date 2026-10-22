@@ -229,6 +229,7 @@ enum RegressionTests {
         try testProjectSwitchKeepsStateApart()
         try testProjectSwitchKeepsItsTabs()
         try testDeletedPicturePreviews()
+        try testDeletedVersionOfAStageLikeName()
         try testFileHistoryBufferIsNotEvictedAsADiff()
         try testProjectHistoryMarksTheBranchBase()
         try testOnlyPointerReadsTheRealPointer()
@@ -11177,6 +11178,35 @@ enum RegressionTests {
         workspace.openProject(a)
         try expect(editor.openURLs.isEmpty,
                    "a project closed and opened again brought its old tabs: \(names())")
+    }
+
+    /// A deleted file whose name starts the way an index stage does — `0:`
+    /// to `3:` — is still read back as itself: `:2:x.txt` is stage 2 of
+    /// `x.txt`, and the last version of `2:x.txt` used to come back as none.
+    private static func testDeletedVersionOfAStageLikeName() throws {
+        let root = try temporaryDirectory("stage-like-name")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "stage-like fixture failed: \(args): \(result.err)")
+        }
+        try Data("the file named 2:x\n".utf8).write(to: root.appendingPathComponent("2:x.txt"))
+        try Data("the file named x\n".utf8).write(to: root.appendingPathComponent("x.txt"))
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Stage Test"])
+        try git(["config", "user.email", "stage@example.invalid"])
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "start"])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("2:x.txt"))
+        guard let entry = GitService.status(in: root).entries.first(where: { $0.path == "2:x.txt" }) else {
+            throw Failure(description: "the fixture's deletion is not listed")
+        }
+        guard let version = GitService.deletedVersion(of: entry, in: root),
+              case .data(let data) = version.blob else {
+            throw Failure(description: "the last version of 2:x.txt was not found")
+        }
+        try expect(String(decoding: data, as: UTF8.self) == "the file named 2:x\n",
+                   "another file's version came back: \(String(decoding: data, as: UTF8.self))")
     }
 
     /// A deleted picture opens as Git last had it. The working tree has
