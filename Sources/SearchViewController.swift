@@ -188,9 +188,12 @@ final class SearchViewController: NSViewController {
         placeholderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(summaryRow)
+        container.addSubview(scroll)
+        // Over the results, not under them: the list draws its background,
+        // and a hint added before it — "No matches for …" — was drawn over
+        // and never seen.
         container.addSubview(placeholderLabel)
         defer { updatePlaceholder(query: "", matches: nil) }
-        container.addSubview(scroll)
         summaryBelowQuery = summaryRow.topAnchor.constraint(
             equalTo: searchField.bottomAnchor, constant: 6)
         summaryBelowReplace = summaryRow.topAnchor.constraint(
@@ -441,6 +444,13 @@ final class SearchViewController: NSViewController {
 
     var placeholderTextForTesting: String {
         placeholderLabel.isHidden ? "" : placeholderLabel.stringValue
+    }
+    /// Whether the hint is drawn over the results list rather than under it.
+    var placeholderIsOverResultsForTesting: Bool {
+        guard let siblings = placeholderLabel.superview?.subviews,
+              let hint = siblings.firstIndex(of: placeholderLabel),
+              let list = siblings.firstIndex(where: { $0 is NSScrollView }) else { return false }
+        return hint > list
     }
 
     func refreshFonts() {

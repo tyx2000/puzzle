@@ -1193,6 +1193,10 @@ enum RegressionTests {
         try expect(idle.contains("match case") && idle.contains("whole word")
                     && idle.contains("regular expression"),
                    "the empty state does not explain Aa / wd / .*")
+        // It is drawn over the results list: under it, "No matches for …" was
+        // covered by the list's background and never seen.
+        try expect(search.placeholderIsOverResultsForTesting,
+                   "the search panel's hint is drawn under its results list")
 
         // Search rows measure like the file tree's, not their own font.
         let savedTreeHeight = Settings.shared.treeLineHeight
