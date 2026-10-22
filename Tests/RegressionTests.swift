@@ -114,6 +114,7 @@ enum RegressionTests {
         try testActivePairTintedAndLined()
         try testActivePairRunsDownTheGuide()
         try testActivePairIsOneFlowingLine()
+        try testDiffPairIgnoresTheMarks()
         try testCommitImagePathsDoNotCollide()
         try testFullScreenStripTakesTheLightsPlace()
         try testFullScreenWindowOnNoDisplayIsRecognised()
@@ -3675,6 +3676,40 @@ enum RegressionTests {
                    "a returned component's line does not set out along its tag's bottom: \(returned.walk)")
         try expect(close(returned.walk.end.x, returned.line.guideX) && returned.walk.arrives.dy > 0.99,
                    "a returned component's line does not end running down into the guide: \(returned.walk)")
+    }
+
+    /// In a diff, a pair's line keeps to the code, not the `+`/`-` marks in
+    /// front of it: the mark is one more column of indentation. Counted as
+    /// the line's content, it put every pair's line out at the left edge,
+    /// round the marks.
+    private static func testDiffPairIgnoresTheMarks() throws {
+        let text = PuzzleTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = text
+        text.font = Theme.editorFont()
+        let source = "@@ -1,3 +1,4 @@\n+  try {\n+    run()\n+  }\n   done()\n"
+        text.string = source
+        // Painted as the editor paints a diff, marks set apart and all.
+        text.diffBands = DiffHighlighter.apply(to: text.textStorage!)
+        text.diffLineNumbers = DiffHighlighter.lineNumbers(in: source)
+        let ns = source as NSString
+        text.setSelectedRange(NSRange(location: NSMaxRange(ns.range(of: "try {")), length: 0))
+        text.refreshBracketMatches()
+        guard let line = text.bracketScopeGeometry(), let closing = line.closingRing else {
+            throw Failure(description: "the diff's pair has no contour: \(text.bracketMatchRanges)")
+        }
+        // Just before the code, as in any file — not round the marks, and not
+        // a column short of the code, where the marks' extra width left it.
+        let layout = text.layoutManager!
+        let brace = ns.range(of: "+  }").location + 3
+        let glyph = layout.boundingRect(forGlyphRange: NSRange(location: brace, length: 1),
+                                        in: text.textContainer!).minX + text.textContainerInset.width
+        try expect(glyph - line.guideX > 0.5 && glyph - line.guideX < 3,
+                   "the pair's line is not just before the code: \(line.guideX) against the brace at \(glyph)")
+        try expect(abs(closing.minX - line.guideX) < 0.01,
+                   "the closing bracket's frame does not start at the line: \(closing) \(line.guideX)")
     }
 
     private static func testInlineBlameStaysOnItsLine() throws {

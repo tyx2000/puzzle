@@ -704,7 +704,16 @@ final class PuzzleTextView: NSTextView {
         let line = source.lineRange(for: NSRange(location: min(location, source.length), length: 0))
         let tabSize = max(1, Settings.shared.tabSize)
         var columns = 0
-        for at in line.location..<min(location, NSMaxRange(line)) {
+        var start = line.location
+        // In a diff, a hunk's line starts with its mark — `+`, `-` or a
+        // space — and the code is indented after it. The mark is one more
+        // column of indentation, not the line's content: counted as content,
+        // every pair's line ran out round the marks at the left edge.
+        if isDiffBodyLine(at: line.location), start < min(location, NSMaxRange(line)) {
+            columns = 1
+            start += 1
+        }
+        for at in start..<min(location, NSMaxRange(line)) {
             switch source.character(at: at) {
             case 0x20: columns += 1
             case 0x09: columns += tabSize - columns % tabSize
@@ -712,6 +721,35 @@ final class PuzzleTextView: NSTextView {
             }
         }
         return columns
+    }
+
+    private func lineStart(of location: Int) -> Int {
+        let source = string as NSString
+        return source.lineRange(for: NSRange(location: min(location, source.length), length: 0)).location
+    }
+
+    /// Where the first character of code on the line holding `location` is
+    /// laid out: past its indentation and, in a diff, its mark.
+    private func contentX(ofLineAt location: Int) -> CGFloat? {
+        guard let layoutManager, let container = textContainer else { return nil }
+        let source = string as NSString
+        let line = source.lineRange(for: NSRange(location: min(location, source.length), length: 0))
+        var at = line.location + (isDiffBodyLine(at: line.location) ? 1 : 0)
+        while at < NSMaxRange(line), [0x20, 0x09].contains(source.character(at: at)) { at += 1 }
+        guard at < NSMaxRange(line) else { return nil }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: NSRange(location: at, length: 1),
+                                              actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        return layoutManager.boundingRect(forGlyphRange: glyphs, in: container).minX
+            + textContainerInset.width
+    }
+
+    /// Whether the line starting at `location` is a line of a hunk in a diff
+    /// buffer, which `diffLineNumbers` numbers; headers have no number.
+    private func isDiffBodyLine(at location: Int) -> Bool {
+        guard !diffLineNumbers.isEmpty else { return false }
+        let line = (lineIndexProvider?() ?? LineIndex(string as NSString)).line(at: location)
+        return line - 1 < diffLineNumbers.count && diffLineNumbers[line - 1] != nil
     }
 
     func bracketScopeGeometry(in viewport: NSRect? = nil) -> BracketScopeGeometry? {
@@ -749,8 +787,14 @@ final class PuzzleTextView: NSTextView {
         }
         let columns = min(leadingColumns(ofLineAt: openingAt), leadingColumns(ofLineAt: closingAt))
         // The line runs down the shallower line's column's guide, and in its
-        // place: the left edge of the frame round an end in that column.
-        let guideX = indentGuideX(columns: columns)
+        // place: the left edge of the frame round an end in that column. In a
+        // diff the marks are drawn wider than a column, so the code's columns
+        // are found where its first characters are laid out instead.
+        let diffLines = [openingAt, closingAt].filter { isDiffBodyLine(at: lineStart(of: $0)) }
+        let guideX = diffLines.isEmpty
+            ? indentGuideX(columns: columns)
+            : [openingAt, closingAt].compactMap(contentX(ofLineAt:)).min()
+                .map(Self.guideX(beforeCharacterAt:)) ?? indentGuideX(columns: columns)
         let lineX = guideX + 0.5
         let frameLeft = lineX - BracketScopeGeometry.lineWidth / 2
         var tints = ends.flatMap { $0 }
