@@ -161,6 +161,20 @@ final class PuzzleTextView: NSTextView {
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
     var searchResultLineLocation: Int? { didSet { needsDisplay = true } }
 
+    /// The lines of the Git change whose diff panel is open, lit in the
+    /// change's colour so the code the panel speaks of stands out beside it.
+    /// Nil with no panel open, and for a deletion, which has no lines left.
+    struct GitChangeHighlight: Equatable {
+        let lines: NSRange
+        let colour: NSColor
+    }
+    var gitChangeHighlight: GitChangeHighlight? {
+        didSet { if gitChangeHighlight != oldValue { needsDisplay = true } }
+    }
+    static let gitChangeBandAlpha: CGFloat = 0.13
+    static let gitChangeBarAlpha: CGFloat = 0.85
+    static let gitChangeBarWidth: CGFloat = 2.5
+
     private(set) var bracketMatchRanges: [NSRange] = []
     /// The bracket pair beside a caret as the syntax tree has it, when there
     /// is a tree for the text as it stands; nil sends the text to be scanned.
@@ -817,6 +831,7 @@ final class PuzzleTextView: NSTextView {
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
         drawCurrentLineBand()
+        drawGitChangeHighlight()
         drawScopeEndTint()
     }
 
@@ -1461,6 +1476,44 @@ final class PuzzleTextView: NSTextView {
         guard let rect = currentLineBandRect() else { return }
         Theme.lineHighlight.setFill()
         rect.fill()
+    }
+
+    /// The open change's rows, as wide as the current-line band, or nil.
+    func gitChangeBandRect() -> NSRect? {
+        guard let lit = gitChangeHighlight, let layoutManager else { return nil }
+        let range = NSIntersectionRange(lit.lines,
+                                        NSRange(location: 0, length: (string as NSString).length))
+        guard range.length > 0 else { return nil }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rows = NSRect.null
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, _, _ in
+            rows = rows.union(fragment)
+        }
+        guard !rows.isNull else { return nil }
+        return NSRect(x: bounds.minX,
+                      y: rows.minY + textContainerOrigin.y,
+                      width: max(bounds.width, visibleRect.maxX - bounds.minX),
+                      height: rows.height)
+    }
+
+    /// Where the code is seen from: the clip's left edge past the gutter it
+    /// sets the text beside, however far the text is scrolled. The change's
+    /// panel starts there, so its bar and the lines' bar make one line.
+    var visibleCodeMinX: CGFloat {
+        guard let clip = enclosingScrollView?.contentView else { return bounds.minX }
+        let edge = convert(NSPoint(x: clip.bounds.minX + clip.contentInsets.left, y: 0), from: clip)
+        return max(bounds.minX, edge.x)
+    }
+
+    /// A light band of the change's colour over its rows, under the text,
+    /// and a bar of it down their left edge.
+    private func drawGitChangeHighlight() {
+        guard let lit = gitChangeHighlight, let band = gitChangeBandRect() else { return }
+        lit.colour.withAlphaComponent(Self.gitChangeBandAlpha).setFill()
+        band.fill(using: .sourceOver)
+        lit.colour.withAlphaComponent(Self.gitChangeBarAlpha).setFill()
+        NSRect(x: visibleCodeMinX, y: band.minY, width: Self.gitChangeBarWidth, height: band.height)
+            .fill(using: .sourceOver)
     }
 
     /// The caret uses the complete configured code row, matching the active

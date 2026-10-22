@@ -28,7 +28,8 @@ enum RegressionTests {
             try testGitChangePopoverKeepsHardLines()
             try testGutterLinksMarkToItsDiff()
             try testGitChangePanelFlows()
-            print("Active-line and Git panel regression tests passed (6)")
+            try testGitChangeLightsItsLines()
+            print("Active-line and Git panel regression tests passed (7)")
             return
         }
         if CommandLine.arguments.contains("--project-replace-regressions") {
@@ -148,6 +149,7 @@ enum RegressionTests {
         try testMarkdownKeystrokeStaysLocal()
         try testGutterLinksMarkToItsDiff()
         try testGitChangePanelFlows()
+        try testGitChangeLightsItsLines()
         try testMarkdownEquivalentEditsRestoreLayout()
         try testMarkdownInlineCodeBoxes()
         try testFindMatchesAreComplete()
@@ -7569,6 +7571,213 @@ enum RegressionTests {
                    "Esc made the panel vanish instead of fold")
         settle(GitChangePanel.disappearDuration)
         try expect(!reopened.isVisible, "Esc did not put the panel away")
+    }
+
+    /// While a change's diff panel is open the code lights that change's own
+    /// lines: a light band of its colour across them and a bar of it down
+    /// their left, in line with the panel's own bar even with the text
+    /// scrolled sideways. The light moves with the panel, there is none for a
+    /// deletion, and it goes when the panel goes.
+    private static func testGitChangeLightsItsLines() throws {
+        let root = try temporaryDirectory("gutter-light")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+        _ = GitService.run(["config", "user.name", "T"], in: root)
+        _ = GitService.run(["config", "user.email", "t@e.invalid"], in: root)
+        let file = root.appendingPathComponent("sample.swift")
+        let lines = (1...40).map { "let value\($0) = \($0)" }
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.commit("base", in: root)
+        var changed = lines
+        changed[2] = "let value3 = 30"
+        changed[3] = "let value4 = \(String(repeating: "4", count: 400))"
+        changed.insert("let extra = 1", at: 10)
+        changed.remove(at: 20)
+        try Data((changed.joined(separator: "\n") + "\n").utf8).write(to: file)
+        _ = GitService.stageAll(in: root)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 640),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        pane.repositoryRoot = root
+        pane.open(url: file)
+        window.setContentSize(NSSize(width: 800, height: 640))
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let deadline = Date().addingTimeInterval(5)
+        while pane.gitLineChangesForTesting.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        guard let ruler = pane.lineNumberRulerForTesting,
+              let modified = GitLineChanges.change(at: 3, in: ruler.gitChanges),
+              modified.kind == .modified, modified.lines == 3...4,
+              let added = GitLineChanges.change(at: 11, in: ruler.gitChanges),
+              added.kind == .added, added.lines == 11...11,
+              let deleted = ruler.gitChanges.first(where: { $0.kind == .deleted }) else {
+            throw Failure(description: "the fixture's three changes are not marked: "
+                            + "\(pane.gitLineChangesForTesting.map { "\($0.kind) \($0.lines)" })")
+        }
+        let text = pane.textViewForTesting
+        let source = text.string as NSString
+        guard let layout = text.layoutManager,
+              let clip = text.enclosingScrollView?.contentView else {
+            throw Failure(description: "the editor has no laid-out text")
+        }
+        func lineRange(_ lines: ClosedRange<Int>) -> NSRange {
+            var start = 0
+            for _ in 1..<lines.lowerBound {
+                start = NSMaxRange(source.lineRange(for: NSRange(location: start, length: 0)))
+            }
+            var end = start
+            for _ in lines {
+                end = NSMaxRange(source.lineRange(for: NSRange(location: end, length: 0)))
+            }
+            return NSRange(location: start, length: end - start)
+        }
+        func row(_ line: Int) -> NSRect {
+            var rect = layout.lineFragmentRect(
+                forGlyphAt: layout.glyphIndexForCharacter(at: lineRange(line...line).location),
+                effectiveRange: nil)
+            rect.origin.y += text.textContainerOrigin.y
+            return rect
+        }
+        // Drawn as the window would draw it, each point read in the view's
+        // own (flipped) coordinates.
+        func pixels() throws -> (NSPoint) -> NSColor {
+            let shown = text.visibleRect
+            guard let rep = text.bitmapImageRepForCachingDisplay(in: shown) else {
+                throw Failure(description: "the editor could not be drawn")
+            }
+            text.cacheDisplay(in: shown, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / shown.width
+            return { point in
+                rep.colorAt(x: Int((point.x - shown.minX) * scale),
+                            y: Int((point.y - shown.minY) * scale))?
+                    .usingColorSpace(.sRGB) ?? .clear
+            }
+        }
+        // Clear of the text: the short lines end well before the right edge.
+        func blank(_ line: Int) -> NSPoint {
+            NSPoint(x: text.visibleRect.maxX - 12, y: row(line).midY)
+        }
+        func bar(_ line: Int) -> NSPoint {
+            NSPoint(x: text.visibleCodeMinX + 1, y: row(line).midY)
+        }
+
+        // Each row as it is with nothing lit: rows may be striped.
+        try expect(text.gitChangeHighlight == nil && text.gitChangeBandRect() == nil,
+                   "the code is lit with no change's panel open")
+        let unlit = try pixels()
+        var at = unlit
+        func channels(_ colour: NSColor) -> [CGFloat] {
+            [colour.redComponent, colour.greenComponent, colour.blueComponent]
+        }
+        // How far a point has moved from its row's unlit colour, and whether
+        // every channel the change's colour pulls on moved its way. Exact
+        // blends depend on the colour space the window draws in.
+        func moved(_ point: NSPoint) -> CGFloat {
+            zip(channels(at(point)), channels(unlit(point))).map { abs($0 - $1) }.max() ?? 0
+        }
+        func toward(_ colour: NSColor, _ point: NSPoint) -> Bool {
+            guard let target = colour.usingColorSpace(.sRGB) else { return false }
+            return zip(zip(channels(at(point)), channels(unlit(point))), channels(target))
+                .allSatisfy { pair, pull in
+                    let (now, was) = pair
+                    return abs(pull - was) < 0.15 || (now - was) * (pull - was) > 0
+                }
+        }
+        func lightlyLit(_ line: Int, _ colour: NSColor) -> Bool {
+            (0.02..<0.2).contains(moved(blank(line))) && toward(colour, blank(line))
+        }
+        func barred(_ line: Int, _ colour: NSColor) -> Bool {
+            moved(bar(line)) > 0.3 && toward(colour, bar(line))
+        }
+        func untouched(_ line: Int) -> Bool { moved(blank(line)) < 0.005 }
+
+        // A modification: its two lines, lightly, in its colour; a bar of it
+        // down their left where the panel's bar starts.
+        try expect(ruler.clickChangeForTesting(at: 3), "the modification's mark did nothing")
+        guard let panel = pane.gitChangePanelForTesting, panel.isVisible else {
+            throw Failure(description: "the mark did not open its diff")
+        }
+        try expect(text.gitChangeHighlight?.lines == lineRange(3...4)
+                    && sameColor(text.gitChangeHighlight?.colour, modified.colour),
+                   "the open modification's lines are not the ones lit: "
+                     + "\(String(describing: text.gitChangeHighlight)) for \(lineRange(3...4))")
+        let band = text.gitChangeBandRect()
+        try expect(band.map { abs($0.minY - row(3).minY) < 0.5 && abs($0.maxY - row(4).maxY) < 0.5 }
+                    ?? false,
+                   "the band does not cover the change's rows exactly: \(String(describing: band)) "
+                     + "for \(row(3)) to \(row(4))")
+        at = try pixels()
+        try expect(lightlyLit(3, modified.colour),
+                   "the modification's line is not lit lightly in its colour: \(at(blank(3))) "
+                     + "from \(unlit(blank(3)))")
+        try expect(untouched(2) && untouched(5),
+                   "the light spills past the change: \(at(blank(2))), \(at(blank(5)))")
+        try expect(barred(3, modified.colour) && barred(4, modified.colour),
+                   "no bar of the change's colour down its lines: \(at(bar(3))) "
+                     + "from \(unlit(bar(3)))")
+        let pastBar = NSPoint(x: bar(3).x + PuzzleTextView.gitChangeBarWidth + 2, y: bar(3).y)
+        try expect(moved(pastBar) < 0.2, "the bar is a block: \(at(pastBar))")
+        func barOnScreen(_ line: Int) -> CGFloat {
+            window.convertToScreen(text.convert(NSRect(x: text.visibleCodeMinX, y: row(line).minY,
+                                                       width: 1, height: 1), to: nil)).minX
+        }
+        try expect(abs(barOnScreen(3) - panel.frame.minX) < 0.5,
+                   "the lines' bar is not in line with the panel's: \(barOnScreen(3)) "
+                     + "against \(panel.frame.minX)")
+
+        // Another mark: the light goes with the panel to the added line.
+        try expect(ruler.clickChangeForTesting(at: 11), "the addition's mark did nothing")
+        try expect(text.gitChangeHighlight?.lines == lineRange(11...11)
+                    && sameColor(text.gitChangeHighlight?.colour, added.colour),
+                   "the light did not move to the addition: "
+                     + "\(String(describing: text.gitChangeHighlight))")
+        at = try pixels()
+        try expect(untouched(3), "the first change stayed lit")
+        try expect(lightlyLit(11, added.colour) && barred(11, added.colour),
+                   "the addition is not lit in its colour: \(at(blank(11)))")
+
+        // A deletion has no lines in the text to light.
+        try expect(ruler.clickChangeForTesting(at: deleted.lines.lowerBound),
+                   "the deletion's mark did nothing")
+        try expect(pane.gitChangePopoverControllerForTesting?.change == deleted,
+                   "the panel did not move to the deletion")
+        at = try pixels()
+        try expect(text.gitChangeHighlight == nil && untouched(11),
+                   "lines are lit for a deletion: \(String(describing: text.gitChangeHighlight))")
+
+        // It goes with the panel.
+        try expect(ruler.clickChangeForTesting(at: 3), "the modification's mark did nothing")
+        try expect(text.gitChangeHighlight != nil, "the modification was not lit again")
+        pane.gitChangePanelForTesting?.close()
+        at = try pixels()
+        try expect(text.gitChangeHighlight == nil && untouched(3),
+                   "closing the panel left its change lit")
+
+        // Scrolled sideways, the bar stays at the code's visible edge, where
+        // the panel opens.
+        clip.scroll(to: NSPoint(x: clip.bounds.minX + 240, y: clip.bounds.minY))
+        text.enclosingScrollView?.reflectScrolledClipView(clip)
+        try expect(text.visibleCodeMinX > 200, "the long line did not scroll the text sideways")
+        let scrolledUnlit = try pixels()
+        try expect(ruler.clickChangeForTesting(at: 3), "the modification's mark did nothing")
+        guard let scrolledPanel = pane.gitChangePanelForTesting, scrolledPanel.isVisible else {
+            throw Failure(description: "the mark did not open its diff with the text scrolled")
+        }
+        at = try pixels()
+        let scrolledBar = zip(channels(at(bar(3))), channels(scrolledUnlit(bar(3))))
+            .map { abs($0 - $1) }.max() ?? 0
+        try expect(scrolledBar > 0.3 && abs(barOnScreen(3) - scrolledPanel.frame.minX) < 0.5,
+                   "scrolled sideways, the bar is not at the panel's edge: \(at(bar(3))) at "
+                     + "\(barOnScreen(3)) against \(scrolledPanel.frame.minX)")
     }
 
     private static func testFindMatchesAreComplete() throws {

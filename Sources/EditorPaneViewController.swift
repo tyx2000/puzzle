@@ -519,6 +519,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if let open = gitChangePopover, open.isVisible, open.parent === window {
             open.move(to: controller, below: anchor, codeArea: visibleCodeAreaOnScreen)
             gutter?.linkChange(change, to: open)
+            highlightGitChange(change)
             return
         }
         gitChangePopover?.close()
@@ -529,7 +530,24 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         gitChangePopover = popover
         // The gutter joins the clicked mark to the panel while it is up.
         gutter?.linkChange(change, to: popover)
-        popover.onClose = { [weak gutter] in gutter?.linkChange(nil, to: nil) }
+        highlightGitChange(change)
+        popover.onClose = { [weak gutter, weak self] in
+            gutter?.linkChange(nil, to: nil)
+            self?.highlightGitChange(nil)
+        }
+    }
+
+    /// The text lights the open change's own lines while its panel is up. A
+    /// deletion's lines are only in the panel, so nothing is lit for one.
+    private func highlightGitChange(_ change: GitLineChanges.Change?) {
+        guard let change, change.kind != .deleted, let index = currentDocument?.lineIndex else {
+            textView.gitChangeHighlight = nil
+            return
+        }
+        let from = index.start(ofLine: change.lines.lowerBound)
+        let to = index.start(ofLine: change.lines.upperBound + 1)
+        textView.gitChangeHighlight = PuzzleTextView.GitChangeHighlight(
+            lines: NSRange(location: from, length: max(0, to - from)), colour: change.colour)
     }
 
     /// The clip includes the ruler in its content insets. Subtract those,
