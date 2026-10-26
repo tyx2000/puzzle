@@ -66,6 +66,7 @@ final class EditorTabBar: NSView {
     static var selectedColoursForTesting: (surface: NSColor, ink: NSColor) {
         (Theme.selectedControl, Theme.selectedControlText)
     }
+    var titlesForTesting: [String] { pills.map(\.titleForTesting) }
 
     func reload(tabs: [TabInfo], active: Int) {
         while pills.count > tabs.count {
@@ -160,6 +161,8 @@ final class TabPillView: NSView {
         addSubview(closeButton)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    var titleForTesting: String { label.stringValue }
 
     func configure(title: String, modified: Bool, active: Bool, path: String) {
         self.active = active

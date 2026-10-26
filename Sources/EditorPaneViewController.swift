@@ -1287,7 +1287,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     /// `reopenable` false leaves the file off ⇧⌘T's list: a project switch
     /// closes tabs that come back with the project, not ones the user let go.
-    func close(index: Int, reopenable: Bool = true) {
+    /// `showingNext` false leaves the next tab off screen, for a walk that
+    /// closes it too.
+    func close(index: Int, reopenable: Bool = true, showingNext: Bool = true) {
         guard openURLs.indices.contains(index) else { return }
         let url = openURLs[index]
         guard confirmClose(urls: [url]) else { return }
@@ -1324,6 +1326,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             onEmptied?(self)
             return
         }
+        guard showingNext else {
+            // The buffer on screen lets go of the pane before it is released,
+            // or the store keeps it for a tab that no longer exists.
+            if index == activeIndex {
+                activeIndex = nil
+                detachFromDocument()
+            } else if let active = activeIndex, index < active {
+                activeIndex = active - 1
+            }
+            return
+        }
         activate(index: min(index, openURLs.count - 1))
     }
 
@@ -1337,12 +1350,22 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// cancelled) stops the walk rather than looping on it.
     /// True once every tab has closed; false when one would not, which stops
     /// the rest from closing too.
+    ///
+    /// Nothing is put on screen on the way. Each close used to show the tab
+    /// beside it — loading, laying out and colouring a file only to close it
+    /// next — which was most of the wait when a project with eight tabs was
+    /// left. A walk that stops ends where it always did: on the last tab left.
     @discardableResult
     func closeAllTabs(reopenable: Bool = true) -> Bool {
+        var closedAny = false
         while !openURLs.isEmpty {
             let before = openURLs.count
-            close(index: openURLs.count - 1, reopenable: reopenable)
-            guard openURLs.count < before else { return false }
+            close(index: openURLs.count - 1, reopenable: reopenable, showingNext: false)
+            guard openURLs.count < before else {
+                if closedAny { activate(index: openURLs.count - 1) }
+                return false
+            }
+            closedAny = true
         }
         return true
     }
@@ -1719,9 +1742,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         reloadTabs()
     }
 
+    /// A file's tab is labelled from its buffer only when that is in memory
+    /// already. One that is not has nothing unsaved to mark — a modified
+    /// buffer is never let go — and loading it to label its tab read and
+    /// coloured every file a project came back with, though only one of them
+    /// goes on screen. A diff's tab takes its name from its buffer, which is
+    /// made off the main thread.
     func reloadTabs() {
         let infos = openURLs.map { url -> EditorTabBar.TabInfo in
-            let doc = DocumentStore.shared.document(for: url)
+            guard let doc = url.isFileURL ? DocumentStore.shared.cachedDocument(for: url)
+                                          : DocumentStore.shared.document(for: url) else {
+                return EditorTabBar.TabInfo(title: url.lastPathComponent, modified: false,
+                                            path: url.path)
+            }
             let title = doc.displayName
                 ?? (doc.isVirtual ? "\(url.lastPathComponent) (diff)" : url.lastPathComponent)
             let path = tabPath(for: url, doc: doc, fallback: title)
@@ -1849,6 +1882,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.markdownDecorationCountsForTesting
     }
     var markdownTaskCountForTesting: Int { textView.markdownTaskCountForTesting }
+    var tabTitlesForTesting: [String] { tabBar.titlesForTesting }
     var showsLineNumbersForTesting: Bool { scrollView.rulersVisible }
     var currentLineHeightForTesting: CGFloat? {
         layoutManager.ensureLayout(for: textView.textContainer!)

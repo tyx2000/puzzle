@@ -66,6 +66,9 @@ final class ProjectRowView: NSView {
     /// The first row has none, and neither does the gap between a project and
     /// the tree that belongs to it.
     var showsDivider = false { didSet { needsDisplay = true } }
+    /// A line under the row: the last one, while every project is collapsed,
+    /// closes the list off from the empty panel below it.
+    var showsBottomLine = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
     private var branchIsHovered = false
     private var pullIsHovered = false
@@ -275,6 +278,10 @@ final class ProjectRowView: NSView {
         if showsDivider {
             Theme.border.setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        }
+        if showsBottomLine {
+            Theme.border.setFill()
+            NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
         if isActive {
             Theme.cursor.setFill()
@@ -1032,9 +1039,6 @@ final class ProjectsPanelViewController: NSViewController {
             rows[index].configure(name: project.name, branch: project.branch,
                                   user: project.user, changes: project.changes,
                                   path: project.path, isActive: index == active)
-            // Between rows only: not under the project whose tree follows it,
-            // where a line would cut the project off from its own contents.
-            rows[index].showsDivider = index > 0
             rows[index].isSyncing = syncingPaths.contains(project.path)
         }
         activeIndex = active
@@ -1044,6 +1048,22 @@ final class ProjectsPanelViewController: NSViewController {
             projects.indices.contains($0) ? !projects[$0].branch.isEmpty : nil
         })
         layOut(active: active)
+        refreshRowLines()
+    }
+
+    /// Lines between rows, in the order they are on screen — which a dragged
+    /// row changes as it goes. None over the first row, and none between a
+    /// project and the tree under it, where a line would cut the project off
+    /// from its own contents. With every project collapsed the list ends
+    /// above empty panel, so a line under the last row closes it; with one
+    /// open, its tree fills that space and the rows after it sit on the
+    /// panel's foot.
+    private func refreshRowLines() {
+        let order = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
+        for (position, row) in order.enumerated() {
+            row.showsDivider = position > 0
+            row.showsBottomLine = activeIndex == nil && position == order.count - 1
+        }
     }
 
     /// Rows in order, with the expanded project's two columns inserted
@@ -1139,6 +1159,7 @@ final class ProjectsPanelViewController: NSViewController {
         let slot = max(0, min(rows.count - 1, dragStartIndex + moved))
         guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
         stack.insertArrangedSubview(row, at: slot)
+        refreshRowLines()
         stack.layoutSubtreeIfNeeded()
     }
 

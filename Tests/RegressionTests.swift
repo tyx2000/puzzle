@@ -107,6 +107,7 @@ enum RegressionTests {
         try testStartingErrandsAreTitleBandButtons()
         try testStartPageHasTheWindowToItself()
         try testCollapsingTheLastProjectKeepsThePanel()
+        try testCollapsedProjectsEndInALine()
         try testReplacedContentSettlesIn()
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
@@ -231,6 +232,7 @@ enum RegressionTests {
         try testProjectHistoryIsTheCurrentBranch()
         try testProjectSwitchKeepsStateApart()
         try testProjectSwitchKeepsItsTabs()
+        try testProjectSwitchLoadsOnlyTheTabOnScreen()
         try testDeletedPicturePreviews()
         try testDeletedVersionOfAStageLikeName()
         try testFileHistoryBufferIsNotEvictedAsADiff()
@@ -2645,6 +2647,40 @@ enum RegressionTests {
                     + "\(window.frame) was \(before)")
         try expect(empty.rootForTesting.sidebarIsHiddenForTesting,
                    "the panel did not end up hidden")
+    }
+
+    /// With every project collapsed the list ends above empty panel, and a
+    /// line under the last row closes it off. With one open, its tree fills
+    /// that space and no row needs one. The lines follow a row being dragged:
+    /// the list on screen is the order being dropped.
+    private static func testCollapsedProjectsEndInALine() throws {
+        let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        _ = panel.view
+        let projects = ["a", "b", "c"].map {
+            (name: $0, branch: "", user: "", changes: 0, path: "/\($0)")
+        }
+        func lines() -> (above: [Bool], below: [Bool]) {
+            (panel.rowsForTesting.map(\.showsDivider), panel.rowsForTesting.map(\.showsBottomLine))
+        }
+        panel.configure(projects: projects, active: nil)
+        try expect(lines().above == [false, true, true] && lines().below == [false, false, true],
+                   "collapsed, the list is not closed by a line under its last row: \(lines())")
+        panel.configure(projects: projects, active: 1)
+        try expect(lines().below == [false, false, false],
+                   "with a project open, a row still has a line under it: \(lines())")
+        panel.configure(projects: projects, active: nil)
+        try expect(lines().below == [false, false, true],
+                   "collapsing again did not close the list: \(lines())")
+
+        // Dragged to the bottom, the first row takes the line under the list
+        // and the row now on top gives up the one above it.
+        try expect(panel.beginDragForTesting(0), "a collapsed list could not be reordered")
+        panel.moveDragForTesting(0, by: ProjectRowView.height * 2)
+        try expect(panel.visualOrderForTesting.map { $0.prefix(1) } == ["b", "c", "a"],
+                   "the drag did not move the row: \(panel.visualOrderForTesting)")
+        try expect(lines().above == [true, false, true] && lines().below == [true, false, false],
+                   "the lines stayed with the rows instead of their places: \(lines())")
+        panel.endDragForTesting()
     }
 
     private static func testStartPageHasTheWindowToItself() throws {
@@ -11426,6 +11462,57 @@ enum RegressionTests {
         workspace.openProject(a)
         try expect(editor.openURLs.isEmpty,
                    "a project closed and opened again brought its old tabs: \(names())")
+    }
+
+    /// Leaving a project closes its tabs without putting each one on screen
+    /// on the way out, and coming back loads only the tab that goes on
+    /// screen; the others keep their names. Both used to load, lay out and
+    /// colour every file: half a second a switch with eight tabs open.
+    private static func testProjectSwitchLoadsOnlyTheTabOnScreen() throws {
+        let a = try temporaryDirectory("switch-load-a"), b = try temporaryDirectory("switch-load-b")
+        defer { for url in [a, b] { try? FileManager.default.removeItem(at: url) } }
+        let names = ["one.swift", "two.swift", "three.md", "four.txt"]
+        let files = names.map { a.appendingPathComponent($0) }
+        for (index, file) in files.enumerated() {
+            try Data("let value\(index) = \(index)\n".utf8).write(to: file)
+        }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        let editor = workspace.editor
+        workspace.openProject(a)
+        files.forEach { editor.open(url: $0) }
+        guard let pane = editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        pane.activate(index: 1)
+        func loaded() -> [String] {
+            files.filter { DocumentStore.shared.cachedDocument(for: $0) != nil }
+                .map(\.lastPathComponent)
+        }
+
+        var shown: [URL?] = []
+        let notify = pane.onActiveDocumentChanged
+        pane.onActiveDocumentChanged = { url in
+            shown.append(url)
+            notify?(url)
+        }
+        workspace.openProject(b)
+        try expect(shown.allSatisfy { $0 == nil },
+                   "leaving the project put \(shown.compactMap { $0?.lastPathComponent }) "
+                     + "on screen on the way out")
+        try expect(loaded().isEmpty, "closed tabs kept their buffers: \(loaded())")
+
+        workspace.activateProject(a)
+        try expect(editor.openURLs == files && editor.currentURL == files[1],
+                   "the project's tabs did not come back: \(editor.openURLs.map(\.lastPathComponent))")
+        try expect(loaded() == ["two.swift"],
+                   "coming back loaded \(loaded()), not only the tab on screen")
+        try expect(pane.tabTitlesForTesting == names,
+                   "tabs not on screen lost their names: \(pane.tabTitlesForTesting)")
+        pane.activate(index: 2)
+        try expect(loaded() == ["two.swift", "three.md"] && pane.tabTitlesForTesting == names,
+                   "a tab put on screen did not load, or a name changed: "
+                     + "\(loaded()) \(pane.tabTitlesForTesting)")
     }
 
     /// The mouse's events, which a test pumping events by hand drops: the
