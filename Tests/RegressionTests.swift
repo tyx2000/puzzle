@@ -216,6 +216,8 @@ enum RegressionTests {
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
         try testScrollersShowWheneverThereIsMoreToSee()
+        try testScrollersAreCaughtWhereTheyShow()
+        try testScrollerKnobTakesHoldWhereItIsPainted()
         try testDraggingAScrollerLightsNothing()
         try testCodeLightsTheLineUnderThePointer()
         try testAFileOpenedAtItsStartShowsItsTop()
@@ -8868,12 +8870,23 @@ enum RegressionTests {
         try expect(horizontal == NSRect(x: 40, y: 0, width: 60, height: PuzzleScroller.thickness),
                    "a horizontal knob does not lie across its scroller: \(horizontal)")
 
-        // It is actually what gets painted, not just a colour nobody reads.
-        guard let paintedColour = PuzzleScroller.knobColourForTesting() else {
+        // It is what gets painted: over the code's own surface, paler than
+        // the theme's knob yet apart from that surface; stronger under the
+        // pointer, and the theme's knob itself while held.
+        let surface = luminance(Theme.editorBackground)
+        let shades = [PuzzleScroller.KnobState.resting, .hovered, .dragged].map {
+            PuzzleScroller.knobColourForTesting(over: Theme.editorBackground, state: $0)
+                .map(luminance)
+        }
+        guard let resting = shades[0], let hovered = shades[1], let dragged = shades[2] else {
             throw Failure(description: "the scroller drew nothing")
         }
-        try expect(abs(luminance(paintedColour) - knob) < 0.08,
-                   "the knob painted \(luminance(paintedColour)) against the theme's \(knob)")
+        try expect(resting > surface + 0.01 && resting < knob - 0.01,
+                   "the knob at rest is not pale: \(resting) between \(surface) and \(knob)")
+        try expect(resting < hovered && hovered < dragged,
+                   "rest, hover and hold look alike: \(resting) \(hovered) \(dragged)")
+        try expect(abs(dragged - knob) < 0.08,
+                   "the held knob painted \(dragged) against the theme's \(knob)")
 
         // A scroller that opts out of the overlay style is silently replaced
         // by AppKit's own wherever that style is chosen.
@@ -8940,6 +8953,8 @@ enum RegressionTests {
         guard let scroller = scroll.verticalScroller as? PuzzleScroller else {
             throw Failure(description: "the scroll view kept AppKit's scroller")
         }
+        try expect(PuzzleScroller.thickness == 5,
+                   "scrollers are \(PuzzleScroller.thickness)pt across, not 5")
         try expect(scroll.scrollerStyle == .legacy && scroller.scrollerStyle == .legacy,
                    "the scroller is still one that shows only while scrolling")
         try expect(!scroller.isHidden, "a long document has no scroller")
@@ -8983,6 +8998,28 @@ enum RegressionTests {
         try expect(same(edge, inner) && !same(edge, past),
                    "the knob is not painted against the edge: edge \(String(describing: edge)), "
                      + "inner \(String(describing: inner)), past it \(String(describing: past))")
+
+        // Along the window's own edge, where its resize border takes the
+        // outermost points, the scroller is that much wider: the knob is as
+        // wide as any against the edge, and taken hold of across all of it.
+        let alongEdge = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        PuzzleScroller.adopt(alongEdge, alongWindowEdge: true)
+        alongEdge.hasVerticalScroller = true
+        alongEdge.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+        alongEdge.tile()
+        alongEdge.reflectScrolledClipView(alongEdge.contentView)
+        if let edgeScroller = alongEdge.verticalScroller {
+            let reach = PuzzleScroller.thickness + PuzzleScroller.windowBorderReach
+            let painted = PuzzleScroller.knobPaintRect(for: edgeScroller.rect(for: .knob),
+                                                       in: edgeScroller.bounds, vertical: true)
+            let caught = PuzzleScroller.knobCatchRect(for: edgeScroller.rect(for: .knob),
+                                                      in: edgeScroller.bounds, vertical: true)
+            try expect(edgeScroller.frame.width == reach && edgeScroller.frame.maxX == alongEdge.bounds.maxX,
+                       "a scroller along the window's edge is \(edgeScroller.frame.width)pt, not \(reach)")
+            try expect(painted.width == PuzzleScroller.thickness
+                        && painted.maxX == edgeScroller.bounds.maxX && caught.width == reach,
+                       "the knob along the window's edge is \(painted), caught across \(caught)")
+        }
 
         // Nothing more to see, nothing shown — and the code gets the room.
         document.frame.size.height = 100
@@ -9034,6 +9071,231 @@ enum RegressionTests {
         try expect(foreign.isEmpty,
                    "scroll views with another scroller: "
                      + "\(foreign.map { String(describing: type(of: $0.documentView ?? $0)) })")
+    }
+
+    /// The invisible handles laid over the panes' edges — the line between
+    /// the tree and the Git lists, the one between the panel and the code,
+    /// the window's own resize border — lie over the scrollers along those
+    /// edges, and took every press there for a resize. Where a scroller is
+    /// showing, a press is the scroller's; away from them the handles still
+    /// answer.
+    private static func testScrollersAreCaughtWhereTheyShow() throws {
+        let project = try temporaryDirectory("caught-scrollers")
+        defer { try? FileManager.default.removeItem(at: project) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: project)
+            try expect(result.code == 0, "scroller fixture failed: \(args): \(result.err)")
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Scroller Test"])
+        try git(["config", "user.email", "scroller@example.invalid"])
+        for index in 0..<60 {
+            try Data("one\n".utf8).write(to: project.appendingPathComponent("f\(index).txt"))
+        }
+        let code = project.appendingPathComponent("long.swift")
+        try Data((1...400).map { "let value\($0) = \(String(repeating: "x", count: $0 % 7 == 0 ? 200 : 10))\n" }
+                    .joined().utf8).write(to: code)
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "start"])
+        for index in 0..<40 { try git(["commit", "-q", "--allow-empty", "-m", "c\(index)"]) }
+        for index in 0..<40 {
+            try Data("two\n".utf8).write(to: project.appendingPathComponent("f\(index).txt"))
+        }
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        guard let window = workspace.window, let frameView = window.contentView?.superview else {
+            throw Failure(description: "the workspace has no window")
+        }
+        window.setFrame(NSRect(x: 0, y: 0, width: 1100, height: 700), display: false)
+        workspace.openProject(project)
+        workspace.editor.open(url: code)
+        func showing() -> [PuzzleScroller] {
+            var found: [PuzzleScroller] = []
+            func walk(_ view: NSView) {
+                if let scroller = view as? PuzzleScroller, !scroller.isHiddenOrHasHiddenAncestor,
+                   !scroller.bounds.isEmpty {
+                    found.append(scroller)
+                }
+                view.subviews.forEach(walk)
+            }
+            walk(frameView)
+            return found
+        }
+        // One under each kind of handle: the tree's against the line beside
+        // the Git lists, a Git list's against the line beside the panel, and
+        // the code's two along the window's right and bottom edges.
+        func kinds() -> [String] {
+            showing().map { scroller in
+                let document = (scroller.superview as? NSScrollView)?.documentView
+                let across = scroller.frame.width > scroller.frame.height ? " across" : ""
+                return document.map { String(describing: type(of: $0)) + across } ?? "?"
+            }
+        }
+        let wanted: Set = ["FileTreeOutlineView", "GitTableView", "PuzzleTextView",
+                           "PuzzleTextView across"]
+        let deadline = Date().addingTimeInterval(8)
+        while !wanted.isSubset(of: Set(kinds())), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.contentView?.layoutSubtreeIfNeeded()
+        }
+        try expect(wanted.isSubset(of: Set(kinds())),
+                   "the fixture does not show a scroller under each handle: \(kinds())")
+        let scrollers = showing()
+        // Each takes a press across a knob's width, from its inner side —
+        // along the window's edge, where the window's own border takes the
+        // outermost points, the scroller is that much wider.
+        for scroller in scrollers {
+            let vertical = scroller.bounds.height > scroller.bounds.width
+            for offset in stride(from: 0.5, to: PuzzleScroller.thickness, by: 1) {
+                let local = vertical
+                    ? NSPoint(x: scroller.bounds.minX + offset, y: scroller.bounds.midY)
+                    : NSPoint(x: scroller.bounds.midX, y: scroller.bounds.minY + offset)
+                let hit = frameView.hitTest(scroller.convert(local, to: nil))
+                try expect(hit === scroller,
+                           "a press \(offset)pt into the "
+                             + "\(String(describing: type(of: (scroller.superview as? NSScrollView)?.documentView ?? scroller))) "
+                             + "scroller went to \(hit.map { String(describing: type(of: $0)) } ?? "nothing")")
+            }
+        }
+
+        // Away from the scrollers the handles still take hold: the line
+        // beside the panel at the height of the project rows, the window's
+        // right edge in the title band, above the code's scroller.
+        let panel = workspace.sidebar.view
+        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.maxY - 50), to: nil)
+        try expect(frameView.hitTest(besidePanel) is SplitDividerHandleView,
+                   "the line beside the panel no longer takes hold where no scroller is")
+        let rightEdge = NSPoint(x: window.frame.width - 5, y: window.frame.height - 20)
+        try expect(frameView.hitTest(rightEdge) is WindowResizeHandleView,
+                   "the window's right edge no longer resizes it where no scroller is")
+
+        // AppKit's own band beside the panel — where it shows its resize
+        // cursor — leaves out the scrollers too, and keeps the line.
+        var splitViews: [NSSplitView] = []
+        func findSplits(_ view: NSView) {
+            if let split = view as? NSSplitView, split.delegate is PuzzleSplitViewController {
+                splitViews.append(split)
+            }
+            view.subviews.forEach(findSplits)
+        }
+        findSplits(frameView)
+        guard let split = splitViews.first, let delegate = split.delegate,
+              let first = split.arrangedSubviews.first else {
+            throw Failure(description: "the window has no panel divider")
+        }
+        let drawn = NSRect(x: first.frame.maxX, y: 0, width: split.dividerThickness,
+                           height: split.bounds.height)
+        let band = delegate.splitView?(split, effectiveRect: drawn.insetBy(dx: -2, dy: 0),
+                                       forDrawnRect: drawn, ofDividerAt: 0) ?? .zero
+        let covered = PuzzleScroller.showingRects(in: window).map { split.convert($0, from: nil) }
+            .filter { $0.intersection(band).width > 0 && $0.intersection(band).height > 0 }
+        try expect(covered.isEmpty && band.contains(NSPoint(x: drawn.midX, y: drawn.midY)),
+                   "the divider's band \(band) lies over scrollers \(covered), or lost the line")
+
+        // The cursors say the same: the handles leave out what a scroller covers.
+        let rect = NSRect(x: 0, y: 0, width: 10, height: 100)
+        try expect(PuzzleScroller.subtract(NSRect(x: 5, y: 20, width: 10, height: 30), from: rect)
+                    .reduce(0) { $0 + $1.width * $1.height } == 1000 - 150,
+                   "taking a scroller out of a handle's rect left the wrong area")
+        try expect(PuzzleScroller.subtract(NSRect(x: 20, y: 0, width: 5, height: 5), from: rect)
+                    == [rect], "a scroller beside a handle's rect cut into it")
+    }
+
+    /// The knob takes hold wherever it is painted. AppKit lays its own knob
+    /// out for a scroller of its own width, so in one this narrow only its
+    /// first 2pt took hold and the rest paged; and while AppKit dragged it,
+    /// the painted knob stood still as the list ran past. It also says what
+    /// it is doing: pale at rest, stronger under the pointer, whole while held.
+    private static func testScrollerKnobTakesHoldWhereItIsPainted() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        PuzzleScroller.adopt(scroll)
+        scroll.hasVerticalScroller = true
+        // Flipped, as every list here is: it starts at its top.
+        final class Page: NSView { override var isFlipped: Bool { true } }
+        scroll.documentView = Page(frame: NSRect(x: 0, y: 0, width: 300, height: 3000))
+        scroll.wantsLayer = true
+        window.contentView = scroll
+        scroll.layoutSubtreeIfNeeded()
+        scroll.reflectScrolledClipView(scroll.contentView)
+        guard let scroller = scroll.verticalScroller as? PuzzleScroller else {
+            throw Failure(description: "the scroll view kept AppKit's scroller")
+        }
+        func painted() -> NSRect {
+            PuzzleScroller.knobPaintRect(for: scroller.rect(for: .knob), in: scroller.bounds,
+                                         vertical: true)
+        }
+        let knob = painted()
+        func inWindow(_ point: NSPoint) -> NSPoint { scroller.convert(point, to: nil) }
+        try expect(scroller.testPart(inWindow(NSPoint(x: knob.maxX - 0.5, y: knob.midY))) == .knob,
+                   "the far side of the painted knob does not take hold of it")
+        try expect(scroller.testPart(inWindow(NSPoint(x: knob.minX + 0.5, y: knob.midY))) == .knob,
+                   "the near side of the painted knob does not take hold of it")
+        try expect(scroller.testPart(inWindow(NSPoint(x: knob.midX, y: knob.maxY + 40)))
+                    == .incrementPage,
+                   "a press on the track past the knob does not page towards it")
+
+        // Held on its far side and dragged, it carries the list and itself.
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil,
+                               eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        let start = inWindow(NSPoint(x: knob.maxX - 0.5, y: knob.midY))
+        for step in 1...5 {
+            if let drag = event(.leftMouseDragged,
+                                NSPoint(x: start.x, y: start.y - CGFloat(step) * 20)) {
+                NSApp.postEvent(drag, atStart: false)
+            }
+        }
+        if let up = event(.leftMouseUp, NSPoint(x: start.x, y: start.y - 100)) {
+            NSApp.postEvent(up, atStart: false)
+        }
+        guard let down = event(.leftMouseDown, start) else {
+            throw Failure(description: "could not make the press")
+        }
+        scroller.mouseDown(with: down)
+        try expect(scroll.contentView.bounds.minY > 500 && painted().minY > knob.minY + 50,
+                   "dragging the knob by its far side did not carry the list: clip "
+                     + "\(scroll.contentView.bounds.minY), knob \(knob.minY) → \(painted().minY)")
+
+        // Whatever scrolls the list, the painted knob is drawn again on the
+        // next pass. AppKit takes `needsDisplay` for its own knob's layer,
+        // and the one painted here stood still as the list scrolled.
+        func draws(after change: () -> Void) -> Int {
+            window.displayIfNeeded()
+            CATransaction.flush()
+            let before = scroller.drawsForTesting
+            change()
+            window.displayIfNeeded()
+            CATransaction.flush()
+            return scroller.drawsForTesting - before
+        }
+        try expect(draws { scroll.contentView.scroll(to: NSPoint(x: 0, y: 200)) } > 0,
+                   "the knob was not drawn again when the list was scrolled")
+        try expect(draws {
+            NotificationCenter.default.post(name: NSView.boundsDidChangeNotification,
+                                            object: scroll.contentView)
+        } > 0, "the knob was not drawn again when told the list scrolled")
+
+        // Pale at rest, stronger under the pointer, whole while held.
+        scroller.refreshKnobStateForTesting()
+        try expect(scroller.knobState == .resting, "the knob is not at rest: \(scroller.knobState)")
+        pinPointer(at: window.convertPoint(toScreen: inWindow(
+            NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY))))
+        scroller.refreshKnobStateForTesting()
+        try expect(scroller.knobState == .hovered,
+                   "the knob under the pointer looks as it does at rest")
+        scroller.beginDraggingForTesting()
+        try expect(scroller.knobState == .dragged, "the held knob does not look held")
+        scroller.endDraggingForTesting()
+        try expect(scroller.knobState == .hovered,
+                   "the knob let go under the pointer did not go back to hovered")
     }
 
     /// While a scroller is dragged nothing is lit by the pointer: the rows the

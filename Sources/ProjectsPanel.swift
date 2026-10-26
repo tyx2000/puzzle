@@ -589,7 +589,7 @@ final class ProjectRowView: NSView {
 /// What an expanded project shows: its file tree and its changes, side by
 /// side under the two headings its row draws. Laid out by hand so the line
 /// between the columns lands on exactly the point the row's does.
-final class ProjectColumnsView: FlatView {
+final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// Which way the pair is split: side by side, or one above the other.
     enum Axis { case horizontal, vertical }
     var axis: Axis = .horizontal { didSet { needsLayout = true; needsDisplay = true } }
@@ -648,9 +648,12 @@ final class ProjectColumnsView: FlatView {
     /// Whether a point (in this view's own coordinates) is on the band that
     /// moves the line. Anything else that lands on this view is not the
     /// line's to act on.
+    /// A scroller showing under the band — the left list's, against the
+    /// line — is the scroller's, or it could not be caught.
     private func isOnGrabBand(_ point: NSPoint) -> Bool {
         showsSecond && bounds.contains(point)
             && abs(position(of: point) - divider) <= Self.grabRadius
+            && !PuzzleScroller.isShowing(at: convert(point, to: nil), in: window)
     }
 
     /// Where a point falls along the axis, measured the way `divider` is: from
@@ -663,9 +666,17 @@ final class ProjectColumnsView: FlatView {
     override func resetCursorRects() {
         super.resetCursorRects()
         guard showsSecond else { return }
-        addCursorRect(dividerRect(radius: Self.grabRadius),
-                      cursor: axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
+        for rect in PuzzleScroller.uncovered(dividerRect(radius: Self.grabRadius), in: self) {
+            addCursorRect(rect, cursor: axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
+        }
     }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        PuzzleScroller.rebuildCursors(of: self)
+    }
+
+    @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
 
     /// The line itself at radius 0, the band that answers to a drag above it.
     private func dividerRect(radius: CGFloat) -> NSRect {

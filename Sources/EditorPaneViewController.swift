@@ -217,7 +217,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             name: Document.syntaxTreeDidChange, object: nil)
 
         scrollView = NSScrollView()
-        PuzzleScroller.adopt(scrollView)
+        PuzzleScroller.adopt(scrollView, alongWindowEdge: true)
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true

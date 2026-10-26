@@ -99,7 +99,7 @@ final class FileHistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate 
             table.addTableColumn(column)
         }
 
-PuzzleScroller.adopt(tableScroll)
+PuzzleScroller.adopt(tableScroll, alongWindowEdge: true)
         tableScroll.documentView = table
         tableScroll.hasVerticalScroller = true
         tableScroll.hasHorizontalScroller = true
@@ -152,7 +152,7 @@ PuzzleScroller.adopt(tableScroll)
         detailText.showsCurrentLineBand = false
         detailText.insertionPointColor = Theme.cursor
         detailText.selectedTextAttributes = [.backgroundColor: Theme.selection]
-PuzzleScroller.adopt(detailScroll)
+PuzzleScroller.adopt(detailScroll, alongWindowEdge: true)
         detailScroll.documentView = detailText
         detailScroll.hasVerticalScroller = true
         detailScroll.hasHorizontalScroller = true

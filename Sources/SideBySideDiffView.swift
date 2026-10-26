@@ -43,7 +43,7 @@ final class SideBySideDiffView: FlatView {
         table.dataSource = self
         table.delegate = self
 
-        PuzzleScroller.adopt(scroll)
+        PuzzleScroller.adopt(scroll, alongWindowEdge: true)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
@@ -54,6 +54,7 @@ final class SideBySideDiffView: FlatView {
         // The table remains viewport-wide so gutters and the divider stay put.
         // Only the text inside the two columns follows this shared scroller.
         horizontalScroller.scrollerStyle = .legacy
+        horizontalScroller.controlSize = .large
         horizontalScroller.target = self
         horizontalScroller.action = #selector(scrollHorizontally(_:))
         horizontalScroller.translatesAutoresizingMaskIntoConstraints = false
@@ -131,7 +132,7 @@ final class SideBySideDiffView: FlatView {
         let visible = maximumHorizontalOffset > 0 && textViewportWidth > 0
         horizontalScroller.isHidden = !visible
         horizontalScroller.isEnabled = visible
-        let height = visible ? PuzzleScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        let height = visible ? PuzzleScroller.scrollerWidth(for: .large, scrollerStyle: .legacy) : 0
         if horizontalScrollerHeight.constant != height {
             horizontalScrollerHeight.constant = height
         }

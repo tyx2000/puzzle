@@ -3,7 +3,7 @@ import AppKit
 /// An explicit invisible target over the sidebar/editor divider. Keeping this
 /// separate from the drawn one-pixel divider makes the interaction predictable
 /// even when AppKit's effective-divider rect varies between macOS releases.
-final class SplitDividerHandleView: NSView {
+final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     static let hitWidth: CGFloat = 13
 
     var onDragBegan: (() -> Void)?
@@ -21,6 +21,23 @@ final class SplitDividerHandleView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The handle reaches into the panel either side of the line, where the
+    /// panel's lists keep their scrollers. Where one is showing, the press is
+    /// the scroller's — handed to it straight, since under this handle lies
+    /// AppKit's own divider, which would take it otherwise.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        let inWindow = superview?.convert(point, to: nil) ?? point
+        return PuzzleScroller.showing(at: inWindow, in: window) ?? hit
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        PuzzleScroller.rebuildCursors(of: self)
+    }
+
+    @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
 
     /// The handle straddles the divider, so painting its middle column replaces
     /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
@@ -48,7 +65,9 @@ final class SplitDividerHandleView: NSView {
         } else {
             cursor = .resizeLeftRight
         }
-        addCursorRect(bounds, cursor: cursor)
+        for rect in PuzzleScroller.uncovered(bounds, in: self) {
+            addCursorRect(rect, cursor: cursor)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -65,7 +84,7 @@ final class SplitDividerHandleView: NSView {
 /// The native outside border remains active; this adds a forgiving internal
 /// target without changing the visible chrome or intercepting the content away
 /// from the perimeter.
-final class WindowResizeHandleView: NSView {
+final class WindowResizeHandleView: NSView, ScrollerCursorRebuilding {
     struct Edges: OptionSet {
         let rawValue: UInt8
         static let left = Edges(rawValue: 1 << 0)
@@ -90,38 +109,51 @@ final class WindowResizeHandleView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The border lies over the code's scrollers along the right and bottom
+    /// edges. Where one is showing, the pointer is the scroller's; the
+    /// window's own border, just outside, still resizes it there.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard !edges(at: point).isEmpty,
               window?.styleMask.contains(.resizable) == true,
-              window?.styleMask.contains(.fullScreen) != true else { return nil }
+              window?.styleMask.contains(.fullScreen) != true,
+              !PuzzleScroller.isShowing(at: superview?.convert(point, to: nil) ?? point,
+                                        in: window) else { return nil }
         return self
     }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        PuzzleScroller.rebuildCursors(of: self)
+    }
+
+    @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
 
     override func resetCursorRects() {
         super.resetCursorRects()
         let t = Self.hitThickness
         let c = Self.cornerLength
+        func add(_ rect: NSRect, _ cursor: NSCursor) {
+            for piece in PuzzleScroller.uncovered(rect, in: self) {
+                addCursorRect(piece, cursor: cursor)
+            }
+        }
 
-        addCursorRect(NSRect(x: 0, y: c, width: t, height: max(0, bounds.height - 2 * c)),
-                      cursor: horizontalCursor())
-        addCursorRect(NSRect(x: bounds.maxX - t, y: c, width: t,
-                             height: max(0, bounds.height - 2 * c)),
-                      cursor: horizontalCursor())
-        addCursorRect(NSRect(x: c, y: 0, width: max(0, bounds.width - 2 * c), height: t),
-                      cursor: verticalCursor())
-        addCursorRect(NSRect(x: c, y: bounds.maxY - t,
-                             width: max(0, bounds.width - 2 * c), height: t),
-                      cursor: verticalCursor())
+        add(NSRect(x: 0, y: c, width: t, height: max(0, bounds.height - 2 * c)),
+            horizontalCursor())
+        add(NSRect(x: bounds.maxX - t, y: c, width: t, height: max(0, bounds.height - 2 * c)),
+            horizontalCursor())
+        add(NSRect(x: c, y: 0, width: max(0, bounds.width - 2 * c), height: t),
+            verticalCursor())
+        add(NSRect(x: c, y: bounds.maxY - t, width: max(0, bounds.width - 2 * c), height: t),
+            verticalCursor())
 
-        addCursorRect(NSRect(x: 0, y: 0, width: c, height: t),
-                      cursor: cornerCursor(top: false, left: true))
-        addCursorRect(NSRect(x: bounds.maxX - c, y: 0, width: c, height: t),
-                      cursor: cornerCursor(top: false, left: false))
-        addCursorRect(NSRect(x: 0, y: bounds.maxY - t, width: c, height: t),
-                      cursor: cornerCursor(top: true, left: true))
-        addCursorRect(NSRect(x: bounds.maxX - c, y: bounds.maxY - t,
-                             width: c, height: t),
-                      cursor: cornerCursor(top: true, left: false))
+        add(NSRect(x: 0, y: 0, width: c, height: t), cornerCursor(top: false, left: true))
+        add(NSRect(x: bounds.maxX - c, y: 0, width: c, height: t),
+            cornerCursor(top: false, left: false))
+        add(NSRect(x: 0, y: bounds.maxY - t, width: c, height: t),
+            cornerCursor(top: true, left: true))
+        add(NSRect(x: bounds.maxX - c, y: bounds.maxY - t, width: c, height: t),
+            cornerCursor(top: true, left: false))
     }
 
     override func mouseDown(with event: NSEvent) {

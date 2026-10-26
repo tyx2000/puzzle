@@ -98,7 +98,7 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
 
-        PuzzleScroller.adopt(textScroll)
+        PuzzleScroller.adopt(textScroll, alongWindowEdge: true)
         textScroll.documentView = textView
         textScroll.hasVerticalScroller = true
         textScroll.drawsBackground = true
