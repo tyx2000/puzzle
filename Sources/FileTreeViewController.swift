@@ -38,7 +38,7 @@ private final class PendingTreeEdit {
     }
 }
 
-private final class FileTreeOutlineView: NSOutlineView {
+private final class FileTreeOutlineView: NSOutlineView, PointerHoverRefreshing {
     var contextMenuProvider: ((Int) -> NSMenu?)?
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoverTrackingAreaInstallCountForTesting = 0
@@ -76,13 +76,17 @@ private final class FileTreeOutlineView: NSOutlineView {
             setHoveredRow(-1)
             return
         }
-        let point = convert(window.pointerLocation, from: nil)
-        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+        hover(at: convert(window.pointerLocation, from: nil))
     }
 
     private func updateHoveredRow(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+        hover(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Nothing is lit while a scroller is dragged: the rows it scrolls pass
+    /// under the pointer, and each lit in turn as it went.
+    private func hover(at point: NSPoint) {
+        setHoveredRow(!PuzzleScroller.isDragging && bounds.contains(point) ? row(at: point) : -1)
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }

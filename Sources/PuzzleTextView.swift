@@ -139,7 +139,7 @@ struct BracketScopeGeometry: Equatable {
 
 /// NSTextView that paints the current-line band and keeps the caret the same
 /// height as the text rather than the whole tall line box.
-final class PuzzleTextView: NSTextView {
+final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// Programmatic selection changes (opening/switching tabs) must not look
     /// like a user-selected line. The pane uses this callback to activate line
     /// UI only for real pointer/keyboard interaction.
@@ -830,6 +830,7 @@ final class PuzzleTextView: NSTextView {
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
+        drawHoverLineBand()
         drawCurrentLineBand()
         drawGitChangeHighlight()
         drawScopeEndTint()
@@ -1478,6 +1479,70 @@ final class PuzzleTextView: NSTextView {
         rect.fill()
     }
 
+    /// The line under the pointer is lit the way the line being worked on is,
+    /// wherever that one would be: code that can be typed into. Set by the
+    /// pane with each document it shows.
+    var showsHoverLineBand = false { didSet { refreshHoverState() } }
+
+    /// The band across the line under the pointer, in view coordinates. Kept
+    /// where it is rather than tied to a character: the pointer is still over
+    /// the same row when the text under it changes.
+    private var hoverLineBand: NSRect? {
+        didSet {
+            guard hoverLineBand != oldValue else { return }
+            for rect in [oldValue, hoverLineBand].compactMap({ $0 }) { setNeedsDisplay(rect) }
+        }
+    }
+    var hoverLineBandForTesting: NSRect? { hoverLineBand }
+
+    /// Where the pointer is now — after the code scrolled under it, say. Not
+    /// while a scroller is dragged, which scrolls every line past it.
+    func refreshHoverState() {
+        guard let window else {
+            hoverLineBand = nil
+            return
+        }
+        updateHoverLine(at: convert(window.pointerLocation, from: nil))
+    }
+
+    private func updateHoverLine(at point: NSPoint) {
+        hoverLineBand = showsHoverLineBand && !PuzzleScroller.isDragging
+            ? lineBandRect(at: point) : nil
+    }
+
+    /// The band across the line at `point`, as wide as the current-line band;
+    /// nil off the code, or below its last line.
+    func lineBandRect(at point: NSPoint) -> NSRect? {
+        guard visibleRect.contains(point), let layoutManager, let container = textContainer else {
+            return nil
+        }
+        let origin = textContainerOrigin
+        let y = point.y - origin.y
+        var fragment = NSRect.zero
+        if layoutManager.numberOfGlyphs > 0 {
+            let glyph = layoutManager.glyphIndex(
+                for: NSPoint(x: point.x - origin.x, y: y), in: container)
+            fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        }
+        if !(fragment.minY...fragment.maxY).contains(y) || fragment.height == 0 {
+            // Past a final newline, the empty line the caret can go to.
+            let extra = layoutManager.extraLineFragmentRect
+            guard layoutManager.extraLineFragmentTextContainer === container,
+                  extra.height > 0, y >= extra.minY, y < extra.maxY else { return nil }
+            fragment = extra
+        }
+        return NSRect(x: bounds.minX,
+                      y: fragment.minY + origin.y,
+                      width: max(bounds.width, visibleRect.maxX - bounds.minX),
+                      height: fragment.height)
+    }
+
+    private func drawHoverLineBand() {
+        guard let rect = hoverLineBand else { return }
+        Theme.lineHighlight.setFill()
+        rect.fill()
+    }
+
     /// The open change's rows, as wide as the current-line band, or nil.
     func gitChangeBandRect() -> NSRect? {
         guard let lit = gitChangeHighlight, let layoutManager else { return nil }
@@ -1661,6 +1726,7 @@ final class PuzzleTextView: NSTextView {
         }
         guard window != nil else {
             clearCommandHover()
+            hoverLineBand = nil
             scopeLine?.isHidden = true
             return
         }
@@ -1668,7 +1734,10 @@ final class PuzzleTextView: NSTextView {
             clip.postsBoundsChangedNotifications = true
             scopeLineScrollObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
-            ) { [weak self] _ in self?.syncScopeLine() }
+            ) { [weak self] _ in
+                self?.syncScopeLine()
+                self?.refreshHoverState()
+            }
         }
         scheduleScopeLineSync()
         // flagsChanged is normally delivered only to the first responder. A
@@ -1690,15 +1759,20 @@ final class PuzzleTextView: NSTextView {
         caretLinkBar.close()
     }
 
-    override func mouseEntered(with event: NSEvent) { updateCommandHover(with: event) }
+    override func mouseEntered(with event: NSEvent) {
+        updateCommandHover(with: event)
+        updateHoverLine(at: convert(event.locationInWindow, from: nil))
+    }
     override func mouseMoved(with event: NSEvent) {
         updateCommandHover(with: event)
         updateLinkHover(with: event)
+        updateHoverLine(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         clearCommandHover()
         updateLinkHover(with: nil)
+        hoverLineBand = nil
     }
 
     // MARK: - Markdown link hover

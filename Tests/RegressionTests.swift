@@ -215,6 +215,10 @@ enum RegressionTests {
         try testSettingsGearLivesTopRight()
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
+        try testScrollersShowWheneverThereIsMoreToSee()
+        try testDraggingAScrollerLightsNothing()
+        try testCodeLightsTheLineUnderThePointer()
+        try testAFileOpenedAtItsStartShowsItsTop()
         try testAyuDarkTheme()
         try testThemeSetting()
         try testLightThemesReadClearly()
@@ -8849,18 +8853,20 @@ enum RegressionTests {
         try expect(luminance(Theme.foreground) - knob > 0.3,
                    "the knob competes with the text for attention")
 
-        // The capsule must survive the inset: an overlay knob is 6pt across,
-        // and taking 3pt off each side left nothing to see.
-        let overlayKnob = NSRect(x: 8, y: 14.5, width: 6, height: 26)
-        let painted = PuzzleScroller.knobPaintRect(for: overlayKnob, vertical: true)
-        try expect(painted.width >= 4 && painted.height == overlayKnob.height,
-                   "the knob collapsed under its inset: \(painted)")
-        try expect(PuzzleScroller.knobPaintRect(for: .zero, vertical: true).isEmpty,
+        // The knob lies across the whole scroller, wherever AppKit puts it
+        // along it: AppKit's own rect stands off both sides.
+        let slot = NSRect(x: 0, y: 0, width: PuzzleScroller.thickness, height: 200)
+        let painted = PuzzleScroller.knobPaintRect(
+            for: NSRect(x: 2, y: 14.5, width: 4, height: 26), in: slot, vertical: true)
+        try expect(painted == NSRect(x: 0, y: 14.5, width: slot.width, height: 26),
+                   "the knob does not lie across its scroller: \(painted)")
+        try expect(PuzzleScroller.knobPaintRect(for: .zero, in: slot, vertical: true).isEmpty,
                    "an empty knob rect produced something to draw")
         let horizontal = PuzzleScroller.knobPaintRect(
-            for: NSRect(x: 4, y: 8, width: 40, height: 6), vertical: false)
-        try expect(horizontal.height >= 4 && horizontal.width == 40,
-                   "a horizontal knob collapsed: \(horizontal)")
+            for: NSRect(x: 40, y: 2, width: 60, height: 4),
+            in: NSRect(x: 0, y: 0, width: 300, height: PuzzleScroller.thickness), vertical: false)
+        try expect(horizontal == NSRect(x: 40, y: 0, width: 60, height: PuzzleScroller.thickness),
+                   "a horizontal knob does not lie across its scroller: \(horizontal)")
 
         // It is actually what gets painted, not just a colour nobody reads.
         guard let paintedColour = PuzzleScroller.knobColourForTesting() else {
@@ -8869,8 +8875,8 @@ enum RegressionTests {
         try expect(abs(luminance(paintedColour) - knob) < 0.08,
                    "the knob painted \(luminance(paintedColour)) against the theme's \(knob)")
 
-        // Overlay scrollers are what every window here uses; a scroller that
-        // opts out of them is silently replaced by AppKit's own.
+        // A scroller that opts out of the overlay style is silently replaced
+        // by AppKit's own wherever that style is chosen.
         try expect(PuzzleScroller.isCompatibleWithOverlayScrollers,
                    "the themed scroller would be dropped for overlay style")
 
@@ -8918,6 +8924,348 @@ enum RegressionTests {
         _ = tree.view
         try expect(tree.verticalScrollerForTesting is PuzzleScroller,
                    "the file tree kept AppKit's scroller")
+    }
+
+    /// Every scroller is shown whenever there is more to scroll to, is the
+    /// same everywhere, and lies against the edge of what it scrolls. macOS
+    /// hid them until the content moved, so a list gave no sign it went on.
+    private static func testScrollersShowWheneverThereIsMoreToSee() throws {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        PuzzleScroller.adopt(scroll)
+        scroll.hasVerticalScroller = true
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+        scroll.documentView = document
+        scroll.tile()
+        scroll.reflectScrolledClipView(scroll.contentView)
+        guard let scroller = scroll.verticalScroller as? PuzzleScroller else {
+            throw Failure(description: "the scroll view kept AppKit's scroller")
+        }
+        try expect(scroll.scrollerStyle == .legacy && scroller.scrollerStyle == .legacy,
+                   "the scroller is still one that shows only while scrolling")
+        try expect(!scroller.isHidden, "a long document has no scroller")
+        try expect(scroller.frame.width == PuzzleScroller.thickness
+                    && scroller.frame.maxX == scroll.bounds.maxX,
+                   "the scroller is not \(PuzzleScroller.thickness)pt against the right edge: "
+                     + "\(scroller.frame) in \(scroll.bounds)")
+        let knob = PuzzleScroller.knobPaintRect(for: scroller.rect(for: .knob),
+                                                in: scroller.bounds, vertical: true)
+        try expect(knob.height > 0 && knob.minX == scroller.bounds.minX
+                    && knob.maxX == scroller.bounds.maxX,
+                   "the knob stands off the edge: \(knob) in \(scroller.bounds)")
+        // And that is what is painted, in a layer-backed window as the app's
+        // are: AppKit keeps a layer of its own for the knob, laid out for its
+        // own scrollers' width, and drawing there showed 5pt of it, 3pt off
+        // the edge.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        scroll.wantsLayer = true
+        window.contentView = scroll
+        scroll.layoutSubtreeIfNeeded()
+        scroll.reflectScrolledClipView(scroll.contentView)
+        func paint(x: CGFloat, y: CGFloat) -> NSColor? {
+            let spot = NSRect(x: x, y: y, width: 1, height: 1)
+            guard let bitmap = scroll.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
+            scroll.cacheDisplay(in: spot, to: bitmap)
+            return bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB)
+        }
+        let knobInScroll = scroller.convert(knob, to: scroll)
+        let edge = paint(x: scroll.bounds.maxX - 0.5, y: knobInScroll.midY)
+        let inner = paint(x: scroller.frame.minX + 0.5, y: knobInScroll.midY)
+        let past = paint(x: scroll.bounds.maxX - 0.5,
+                         y: knobInScroll.maxY < scroll.bounds.maxY - 20
+                            ? knobInScroll.maxY + 10 : knobInScroll.minY - 10)
+        func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
+            guard let a, let b else { return false }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent) < 0.02
+        }
+        try expect(same(edge, inner) && !same(edge, past),
+                   "the knob is not painted against the edge: edge \(String(describing: edge)), "
+                     + "inner \(String(describing: inner)), past it \(String(describing: past))")
+
+        // Nothing more to see, nothing shown — and the code gets the room.
+        document.frame.size.height = 100
+        scroll.tile()
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try expect(scroller.isHidden && scroll.contentView.frame.width == 300,
+                   "a document that fits still has a scroller beside it")
+        // The system's own setting does not take it back.
+        NotificationCenter.default.post(
+            name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+        try expect(scroll.scrollerStyle == .legacy,
+                   "a change of the system's scroller setting turned it back into an overlay")
+
+        // Every scroll view a project's window shows is one: the code, the
+        // tree, the changes and the history, the Git panel and search.
+        let project = try temporaryDirectory("every-scroller")
+        defer { try? FileManager.default.removeItem(at: project) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: project)
+            try expect(result.code == 0, "scroller fixture failed: \(args): \(result.err)")
+        }
+        let file = project.appendingPathComponent("one.swift")
+        try Data("let one = 1\n".utf8).write(to: file)
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Scroller Test"])
+        try git(["config", "user.email", "scroller@example.invalid"])
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "start"])
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(project)
+        workspace.editor.open(url: file)
+        workspace.sidebar.showGit()
+        workspace.sidebar.showSearch()
+        guard let content = workspace.window?.contentView else {
+            throw Failure(description: "the window has no content")
+        }
+        content.layoutSubtreeIfNeeded()
+        var all: [NSScrollView] = []
+        func collect(_ view: NSView) {
+            if let scroll = view as? NSScrollView { all.append(scroll) }
+            view.subviews.forEach(collect)
+        }
+        collect(content)
+        try expect(all.count >= 5, "the window shows only \(all.count) scroll views")
+        let foreign = all.filter {
+            !($0.verticalScroller is PuzzleScroller) || $0.scrollerStyle != .legacy
+        }
+        try expect(foreign.isEmpty,
+                   "scroll views with another scroller: "
+                     + "\(foreign.map { String(describing: type(of: $0.documentView ?? $0)) })")
+    }
+
+    /// While a scroller is dragged nothing is lit by the pointer: the rows the
+    /// drag scrolls pass under it, and each lit in turn — the tree, the Git
+    /// lists and the code all flickered the whole way. When the drag ends,
+    /// what is under the pointer is lit again.
+    private static func testDraggingAScrollerLightsNothing() throws {
+        defer { pinPointer(at: pointerNowhere) }
+
+        // The tree.
+        let directory = try temporaryDirectory("drag-tree")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<80 {
+            try Data("x".utf8).write(to: directory.appendingPathComponent("f\(index).txt"))
+        }
+        let tree = FileTreeViewController()
+        let treeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+        treeWindow.contentViewController = tree
+        treeWindow.setContentSize(NSSize(width: 300, height: 400))
+        defer { treeWindow.close() }
+        tree.setRoot(directory)
+        tree.view.layoutSubtreeIfNeeded()
+        guard let treeScroller = tree.verticalScrollerForTesting as? PuzzleScroller,
+              let treeList = (treeScroller.superview as? NSScrollView)?.documentView
+                as? PointerHoverRefreshing else {
+            throw Failure(description: "the tree has no scroller of its own")
+        }
+        pinPointer(over: tree.view)
+        treeList.refreshHoverState()
+        try expect(tree.hoveredRowForTesting >= 0, "the fixture's pointer is over no row")
+        treeScroller.beginDraggingForTesting()
+        try expect(tree.hoveredRowForTesting == -1,
+                   "the tree row stayed lit when its scroller was taken")
+        treeList.refreshHoverState()
+        try expect(tree.hoveredRowForTesting == -1,
+                   "a row the drag scrolled under the pointer lit up: \(tree.hoveredRowForTesting)")
+        treeScroller.endDraggingForTesting()
+        try expect(tree.hoveredRowForTesting >= 0, "the row under the pointer stayed dark after the drag")
+
+        // The changes and history lists.
+        final class Rows: NSObject, NSTableViewDataSource {
+            func numberOfRows(in tableView: NSTableView) -> Int { 80 }
+        }
+        let rows = Rows()
+        let table = GitTableView()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
+        table.dataSource = rows
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        PuzzleScroller.adopt(scroll)
+        scroll.hasVerticalScroller = true
+        scroll.documentView = table
+        let listWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+        listWindow.contentView = scroll
+        defer { listWindow.close() }
+        table.reloadData()
+        scroll.layoutSubtreeIfNeeded()
+        guard let listScroller = scroll.verticalScroller as? PuzzleScroller else {
+            throw Failure(description: "the list has no scroller of its own")
+        }
+        pinPointer(over: scroll.contentView)
+        table.refreshHoverState()
+        try expect(table.hoveredRow >= 0, "the fixture's pointer is over no list row")
+        listScroller.beginDraggingForTesting()
+        table.refreshHoverState()
+        try expect(table.hoveredRow == -1,
+                   "a list row lit up under a dragged scroller: \(table.hoveredRow)")
+        listScroller.endDraggingForTesting()
+        try expect(table.hoveredRow >= 0, "the list row under the pointer stayed dark after the drag")
+
+        // The code.
+        let code = directory.appendingPathComponent("lines.swift")
+        try Data((1...200).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: code)
+        let pane = EditorPaneViewController()
+        let codeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+        codeWindow.contentViewController = pane
+        codeWindow.setContentSize(NSSize(width: 700, height: 400))
+        defer { codeWindow.close() }
+        pane.open(url: code)
+        codeWindow.contentView?.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let codeScroller = pane.verticalScrollerForTesting as? PuzzleScroller else {
+            throw Failure(description: "the code has no scroller of its own")
+        }
+        let visible = text.visibleRect
+        pinPointer(at: codeWindow.convertPoint(toScreen: text.convert(
+            NSPoint(x: visible.midX, y: visible.minY + 60), to: nil)))
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting != nil, "the fixture's pointer is over no line")
+        codeScroller.beginDraggingForTesting()
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting == nil,
+                   "a line lit up under a dragged scroller: "
+                     + "\(String(describing: text.hoverLineBandForTesting))")
+        codeScroller.endDraggingForTesting()
+        try expect(text.hoverLineBandForTesting != nil,
+                   "the line under the pointer stayed dark after the drag")
+    }
+
+    /// The line under the pointer is lit with the line being worked on's own
+    /// band — the same rect, the same colour — in code that can be typed into,
+    /// and not in rendered Markdown, which is laid out as prose.
+    private static func testCodeLightsTheLineUnderThePointer() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let directory = try temporaryDirectory("hover-line")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let code = directory.appendingPathComponent("lines.swift")
+        try Data((1...200).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: code)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 400))
+        defer { window.close() }
+        pane.open(url: code)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let layoutManager = text.layoutManager, let container = text.textContainer else {
+            throw Failure(description: "the code has no layout")
+        }
+
+        // Off the code, nothing is lit.
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting == nil,
+                   "a line is lit with the pointer nowhere near the code")
+
+        // Over a line a little way down the screen.
+        let visible = text.visibleRect
+        let point = NSPoint(x: visible.midX, y: visible.minY + 60)
+        pinPointer(at: window.convertPoint(toScreen: text.convert(point, to: nil)))
+        text.refreshHoverState()
+        guard let band = text.hoverLineBandForTesting else {
+            throw Failure(description: "the line under the pointer is not lit")
+        }
+        try expect(band.minY <= point.y && point.y < band.maxY,
+                   "the band \(band) is not on the line under the pointer at \(point.y)")
+        // The same band the line being worked on gets.
+        let origin = text.textContainerOrigin
+        let glyph = layoutManager.glyphIndex(
+            for: NSPoint(x: point.x - origin.x, y: point.y - origin.y), in: container)
+        let line = (text.string as NSString).substring(
+            to: layoutManager.characterIndexForGlyph(at: glyph))
+            .reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        pane.jumpToLine(line)
+        try expect(pane.currentLineBandRectForTesting == band,
+                   "the hover band \(band) is not the active line's "
+                     + "\(String(describing: pane.currentLineBandRectForTesting))")
+        pane.jumpToLine(1)
+        text.refreshHoverState()
+
+        // And it is painted as the active line is, where the code is empty
+        // past the line's end; the line above it is not. Read back from one
+        // render and compared within it: the bitmap is in the display's
+        // colour space, which moves every colour away from its token.
+        guard let active = pane.currentLineBandRectForTesting, active.maxY <= band.minY - band.height
+        else {
+            throw Failure(description: "the fixture's active line is not above the hovered one")
+        }
+        func sample(at y: CGFloat) -> NSColor? {
+            let spot = NSRect(x: visible.maxX - 40, y: y, width: 4, height: 1)
+            guard let bitmap = text.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
+            text.cacheDisplay(in: spot, to: bitmap)
+            return bitmap.colorAt(x: 1, y: 0)?.usingColorSpace(.sRGB)
+        }
+        func distance(_ a: NSColor?, _ b: NSColor?) -> CGFloat {
+            guard let a, let b else { return .infinity }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent)
+        }
+        let hovered = sample(at: band.midY)
+        let working = sample(at: active.midY)
+        let above = sample(at: band.minY - band.height / 2)
+        try expect(distance(hovered, working) < 0.02,
+                   "the line under the pointer is painted \(String(describing: hovered)), "
+                     + "the active line \(String(describing: working))")
+        try expect(distance(hovered, above) > 0.05,
+                   "the line above the pointer is lit too: \(String(describing: above))")
+
+        // Rendered Markdown is prose: no line is lit under the pointer.
+        let notes = directory.appendingPathComponent("notes.md")
+        try Data((1...50).map { "Paragraph \($0).\n" }.joined(separator: "\n").utf8).write(to: notes)
+        pane.open(url: notes)
+        window.contentView?.layoutSubtreeIfNeeded()
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting == nil,
+                   "a line of rendered Markdown is lit under the pointer")
+    }
+
+    /// A file whose caret is at its start — one just opened — is shown from
+    /// its top, whatever the tab before it was scrolled to. With the scroller
+    /// a column of its own, the file coming in is laid out at another width
+    /// as it arrives, and the view kept part of the last one's offset: the
+    /// top of the file was cut off.
+    private static func testAFileOpenedAtItsStartShowsItsTop() throws {
+        let directory = try temporaryDirectory("opens-at-top")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let filler = { (count: Int) in (1...count).map { "Filler line \($0)." }.joined(separator: "\n\n") }
+        let longNotes = directory.appendingPathComponent("long.md")
+        let shortNotes = directory.appendingPathComponent("short.md")
+        try Data("# Long\n\n\(filler(120))\n".utf8).write(to: longNotes)
+        try Data("```bash\necho top\n```\n\n\(filler(40))\n".utf8).write(to: shortNotes)
+        let longCode = directory.appendingPathComponent("long.swift")
+        let shortCode = directory.appendingPathComponent("short.swift")
+        try Data((1...400).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: longCode)
+        try Data((1...60).map { "let other\($0) = \($0)\n" }.joined().utf8).write(to: shortCode)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 420))
+        defer {
+            pane.prepareForClose()
+            window.close()
+        }
+        let clip = pane.scrollViewForTesting.contentView
+        for (first, second) in [(longNotes, shortNotes), (longCode, shortCode)] {
+            pane.open(url: first)
+            window.contentView?.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let height = pane.textViewForTesting.frame.height
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: max(0, height - clip.bounds.height)))
+            pane.scrollViewForTesting.reflectScrolledClipView(clip)
+            try expect(clip.bounds.minY > 100,
+                       "the fixture did not scroll \(first.lastPathComponent) down: \(clip.bounds)")
+            pane.open(url: second)
+            window.contentView?.layoutSubtreeIfNeeded()
+            try expect(clip.bounds.minY == 0,
+                       "\(second.lastPathComponent) opened \(clip.bounds.minY)pt down, not at its top")
+        }
     }
 
     /// The default palette, fixed for the run: nothing follows the system

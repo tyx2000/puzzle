@@ -1174,6 +1174,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         suppressSelectionSideEffects = false
         textView.updateJSXTagMatches(doc.jsxTagMatches)
         textView.refreshBracketMatches()
+        // A document whose caret is at its start is shown from its top. The
+        // view still holds what the last one was scrolled to; revealing the
+        // caret from there scrolled only until its line showed, which left
+        // the top margin cut off.
+        if caret.location == 0 {
+            let clip = scrollView.contentView
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: 0))
+            scrollView.reflectScrolledClipView(clip)
+        }
         textView.scrollRangeToVisible(caret)
         textView.typingAttributes = Theme.textAttributes(color: Theme.foreground)
         // Binary files show a placeholder and must not be editable — typing into
@@ -1183,6 +1192,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let lineIsActive = lineActivatedURLs.contains(url)
         textView.showsCurrentLineBand = lineIsActive
             && doc.languageSpec?.name != "markdown"
+        // The line under the pointer is lit wherever the line being worked on
+        // would be: not in a diff or a preview, which are read, nor in
+        // rendered Markdown, which is laid out as prose.
+        textView.showsHoverLineBand = !doc.isReadOnly && doc.languageSpec?.name != "markdown"
         // Brackets open blocks in code. In prose, and in a file with no
         // language at all, a line ending in "(" is just a line ending in "(".
         textView.usesBracketIndent = doc.languageSpec != nil
@@ -1313,6 +1326,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             restoreFindState(for: nil)
             // No document: don't paint a current-line band in the empty area.
             textView.showsCurrentLineBand = false
+            textView.showsHoverLineBand = false
             textView.updateCodeBlocks([], resetFolds: false)
             textView.updateJSXTagMatches([])
             layoutManager.updateMarkdownSyntaxRanges([], revealing: nil)

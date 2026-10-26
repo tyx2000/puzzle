@@ -1348,7 +1348,7 @@ struct SearchHitCellProbe {
 
 /// The results list. While the replace row is open, the row under the pointer
 /// lights up and its cell shows what can be done to it.
-final class SearchOutlineView: NSOutlineView {
+final class SearchOutlineView: NSOutlineView, PointerHoverRefreshing {
     var offersRowActions = false {
         didSet {
             guard offersRowActions != oldValue else { return }
@@ -1398,13 +1398,18 @@ final class SearchOutlineView: NSOutlineView {
             setHoveredRow(-1)
             return
         }
-        let point = convert(window.pointerLocation, from: nil)
-        setHoveredRow(bounds.contains(point) ? row(at: point) : -1)
+        hover(at: convert(window.pointerLocation, from: nil))
     }
 
     private func updateHoveredRow(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        setHoveredRow(offersRowActions && bounds.contains(point) ? row(at: point) : -1)
+        hover(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Nothing is lit while a scroller is dragged: the rows it scrolls pass
+    /// under the pointer, and each lit in turn as it went.
+    private func hover(at point: NSPoint) {
+        setHoveredRow(offersRowActions && !PuzzleScroller.isDragging && bounds.contains(point)
+                        ? row(at: point) : -1)
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }

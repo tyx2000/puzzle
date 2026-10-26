@@ -284,6 +284,7 @@ final class GitPanelViewController: NSViewController {
         commitField.textColor = Theme.foreground
         commitField.textContainerInset = NSSize(width: 4, height: 4)
         commitScroll = HorizontalBorderScrollView()
+        PuzzleScroller.adopt(commitScroll)
         commitScroll.documentView = commitField
         commitScroll.borderType = .noBorder
         commitScroll.hasVerticalScroller = true

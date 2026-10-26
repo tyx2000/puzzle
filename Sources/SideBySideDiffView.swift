@@ -131,7 +131,7 @@ final class SideBySideDiffView: FlatView {
         let visible = maximumHorizontalOffset > 0 && textViewportWidth > 0
         horizontalScroller.isHidden = !visible
         horizontalScroller.isEnabled = visible
-        let height = visible ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
+        let height = visible ? PuzzleScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
         if horizontalScrollerHeight.constant != height {
             horizontalScrollerHeight.constant = height
         }
