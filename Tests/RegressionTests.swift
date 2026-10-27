@@ -207,6 +207,7 @@ enum RegressionTests {
         try testGitPanelHistoryPages()
         try testBranchMenu()
         try testSplitterAndRowGestures()
+        try testDividersTakeHoldAtTheirMiddle()
         try testTerminalLaunchScripts()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -9216,12 +9217,16 @@ enum RegressionTests {
         }
 
         // Away from the scrollers the handles still take hold: the line
-        // beside the panel at the height of the project rows, the window's
-        // right edge in the title band, above the code's scroller.
+        // beside the panel at its middle, the window's right edge in the
+        // title band, above the code's scroller. The line takes hold nowhere
+        // else — not at the height of the project rows.
         let panel = workspace.sidebar.view
-        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.maxY - 50), to: nil)
+        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.midY), to: nil)
         try expect(frameView.hitTest(besidePanel) is SplitDividerHandleView,
                    "the line beside the panel no longer takes hold where no scroller is")
+        let besideRows = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.maxY - 50), to: nil)
+        try expect(!(frameView.hitTest(besideRows) is SplitDividerHandleView),
+                   "the line beside the panel took hold away from its middle")
         let rightEdge = NSPoint(x: window.frame.width - 5, y: window.frame.height - 20)
         try expect(frameView.hitTest(rightEdge) is WindowResizeHandleView,
                    "the window's right edge no longer resizes it where no scroller is")
@@ -9248,6 +9253,8 @@ enum RegressionTests {
             .filter { $0.intersection(band).width > 0 && $0.intersection(band).height > 0 }
         try expect(covered.isEmpty && band.contains(NSPoint(x: drawn.midX, y: drawn.midY)),
                    "the divider's band \(band) lies over scrollers \(covered), or lost the line")
+        try expect(band.height <= DividerGrip.reach,
+                   "AppKit's band runs \(band.height)pt of the line, not just its middle")
 
         // The cursors say the same: the handles leave out what a scroller covers.
         let rect = NSRect(x: 0, y: 0, width: 10, height: 100)
@@ -13759,6 +13766,152 @@ enum RegressionTests {
         pane.view.layoutSubtreeIfNeeded()
         try expect(!pane.diffHeaderIsVisibleForTesting && pane.diffNavigatorForTesting.isHidden,
                    "a normal file showed the diff header or its buttons")
+    }
+
+    /// A divider is taken hold of only at the middle of its line, where a
+    /// capsule shows while the pointer is over it and for the whole of a
+    /// drag; along the rest of the line a press is the panes'. The same for
+    /// the line between the tree and the Git lists, the one between the
+    /// changes and the history, and the one beside the panel.
+    private static func testDividersTakeHoldAtTheirMiddle() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        window.contentView = host
+        func pin(_ point: NSPoint, in view: NSView) {
+            pinPointer(at: window.convertPoint(toScreen: view.convert(point, to: nil)))
+        }
+        func hit(_ point: NSPoint, in view: NSView) -> NSView? {
+            host.hitTest(view.convert(point, to: host))
+        }
+
+        for axis in [ProjectColumnsView.Axis.horizontal, .vertical] {
+            let splitter = ProjectColumnsView(frame: host.bounds)
+            splitter.axis = axis
+            splitter.minimumPane = ProjectColumnsView.minimumRow
+            let first = NSView()
+            let second = NSView()
+            splitter.first = first
+            splitter.second = second
+            splitter.addSubview(first)
+            splitter.addSubview(second)
+            host.subviews = [splitter]
+            splitter.layoutSubtreeIfNeeded()
+            let name = axis == .horizontal ? "the line between the columns"
+                                           : "the line between the changes and the history"
+            // Where the line is: its middle, and a point on it far from that;
+            // and the same two a little way into the first pane, where the
+            // band lies over the pane.
+            let middle: NSPoint
+            let end: NSPoint
+            let intoFirst: (dx: CGFloat, dy: CGFloat)
+            switch axis {
+            case .horizontal:
+                middle = NSPoint(x: splitter.divider + 0.5, y: 150)
+                end = NSPoint(x: splitter.divider + 0.5, y: 20)
+                intoFirst = (-2, 0)
+            case .vertical:
+                let lineY = splitter.bounds.height - splitter.divider - 0.5
+                middle = NSPoint(x: 200, y: lineY)
+                end = NSPoint(x: 20, y: lineY)
+                intoFirst = (0, 2)
+            }
+            func beside(_ point: NSPoint) -> NSPoint {
+                NSPoint(x: point.x + intoFirst.dx, y: point.y + intoFirst.dy)
+            }
+
+            try expect(splitter.subviews.last is DividerGrip.Capsule,
+                       "\(name)'s capsule lies under the panes")
+            let capsule = splitter.gripRectForTesting
+            try expect(abs(capsule.midX - middle.x) <= 0.5 && abs(capsule.midY - middle.y) <= 0.5
+                        && min(capsule.width, capsule.height) == DividerGrip.thickness
+                        && max(capsule.width, capsule.height) == DividerGrip.length,
+                       "\(name)'s capsule is not across its middle: \(capsule)")
+
+            pinPointer(at: pointerNowhere)
+            splitter.refreshGripForTesting()
+            try expect(!splitter.showsGripForTesting, "\(name) shows its capsule at rest")
+            pin(end, in: splitter)
+            splitter.refreshGripForTesting()
+            try expect(!splitter.showsGripForTesting,
+                       "\(name) shows its capsule with the pointer away from its middle")
+            try expect(hit(beside(end), in: splitter) === first,
+                       "\(name) took hold away from its middle")
+            pin(middle, in: splitter)
+            splitter.refreshGripForTesting()
+            try expect(splitter.showsGripForTesting,
+                       "\(name) hid its capsule with the pointer over its middle")
+            try expect(hit(beside(middle), in: splitter) === splitter,
+                       "\(name) did not take hold at its middle")
+
+            // Pressed away from the middle, it stays; pressed at the middle it
+            // moves, its capsule up the whole way even with the pointer gone.
+            let fraction = splitter.fraction
+            try expect(!splitter.pressForTesting(at: end, draggingTo: NSPoint(x: 120, y: 120)),
+                       "a press on \(name) away from its middle took hold of it")
+            try expect(splitter.fraction == fraction,
+                       "a press on \(name) away from its middle moved it")
+            pinPointer(at: pointerNowhere)
+            var hiddenWhileHeld = false
+            var events = [NSEvent.EventType.leftMouseDragged, .leftMouseUp].map {
+                NSEvent.mouseEvent(with: $0, location: splitter.convert(NSPoint(x: 120, y: 120), to: nil),
+                                   modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            try expect(splitter.trackDivider(from: middle) {
+                           hiddenWhileHeld = hiddenWhileHeld || !splitter.showsGripForTesting
+                           return events.isEmpty ? nil : events.removeFirst()
+                       },
+                       "a press at the middle of \(name) did not take hold of it")
+            try expect(splitter.fraction != fraction, "dragging \(name) did not move it")
+            try expect(!hiddenWhileHeld, "\(name) hid its capsule while it was held")
+            try expect(!splitter.showsGripForTesting,
+                       "\(name) kept its capsule up after it was let go")
+        }
+
+        // The line beside the panel: its handle runs the window's height,
+        // and takes hold only at the middle.
+        let handle = SplitDividerHandleView(
+            frame: NSRect(x: 100, y: 0, width: SplitDividerHandleView.hitWidth, height: 300))
+        host.subviews = [handle]
+        handle.layoutSubtreeIfNeeded()
+        let line = handle.paintedDividerRectForTesting
+        let lineMiddle = NSPoint(x: line.midX, y: line.midY)
+        let lineEnd = NSPoint(x: line.midX, y: 20)
+        let capsule = handle.gripRectForTesting
+        try expect(abs(capsule.midX - lineMiddle.x) <= 0.5 && abs(capsule.midY - lineMiddle.y) <= 0.5
+                    && capsule.width == DividerGrip.thickness
+                    && capsule.height == DividerGrip.length,
+                   "the capsule beside the panel is not across its line's middle: \(capsule)")
+        try expect(handle.grabRectForTesting.height == DividerGrip.reach,
+                   "the line beside the panel takes hold along \(handle.grabRectForTesting)")
+        try expect(hit(lineEnd, in: handle) !== handle,
+                   "the line beside the panel took hold away from its middle")
+        try expect(hit(lineMiddle, in: handle) === handle,
+                   "the line beside the panel did not take hold at its middle")
+        handle.refreshGripForTesting()
+        try expect(!handle.showsGripForTesting, "the line beside the panel shows its capsule at rest")
+        pin(lineEnd, in: handle)
+        handle.refreshGripForTesting()
+        try expect(!handle.showsGripForTesting,
+                   "the line beside the panel shows its capsule with the pointer away from its middle")
+        pin(lineMiddle, in: handle)
+        handle.refreshGripForTesting()
+        try expect(handle.showsGripForTesting,
+                   "the line beside the panel hid its capsule with the pointer over its middle")
+        let press = NSEvent.mouseEvent(with: .leftMouseDown, location: handle.convert(lineMiddle, to: nil),
+                                       modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                       context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        handle.mouseDown(with: press)
+        pinPointer(at: pointerNowhere)
+        handle.refreshGripForTesting()
+        try expect(handle.showsGripForTesting,
+                   "the line beside the panel hid its capsule while it was held")
+        handle.mouseUp(with: press)
+        try expect(!handle.showsGripForTesting,
+                   "the line beside the panel kept its capsule up after it was let go")
     }
 
     private static func testSplitterAndRowGestures() throws {

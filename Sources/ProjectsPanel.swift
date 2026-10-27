@@ -618,8 +618,9 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// A stacked pane keeps a couple of rows.
     static let minimumRow: CGFloat = 44
     var minimumPane: CGFloat = minimumColumn
-    /// How far either side of the line answers to a drag.
-    private static let grabRadius: CGFloat = 3
+    /// How far either side of the line answers to a drag — along the span
+    /// at its middle that does (see `DividerGrip`).
+    private static let grabRadius: CGFloat = DividerGrip.radius
 
     /// The line's place for a given share of a given length, kept inside the
     /// minimums and on a whole point so it draws as one crisp line.
@@ -651,9 +652,14 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// A scroller showing under the band — the left list's, against the
     /// line — is the scroller's, or it could not be caught.
     private func isOnGrabBand(_ point: NSPoint) -> Bool {
-        showsSecond && bounds.contains(point)
-            && abs(position(of: point) - divider) <= Self.grabRadius
+        showsSecond && grabRect.contains(point)
             && !PuzzleScroller.isShowing(at: convert(point, to: nil), in: window)
+    }
+
+    /// The band's middle, the only part of it that takes hold.
+    private var grabRect: NSRect {
+        DividerGrip.grabRect(in: dividerRect(radius: Self.grabRadius).intersection(bounds),
+                             lineIsVertical: axis == .horizontal)
     }
 
     /// Where a point falls along the axis, measured the way `divider` is: from
@@ -666,7 +672,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     override func resetCursorRects() {
         super.resetCursorRects()
         guard showsSecond else { return }
-        for rect in PuzzleScroller.uncovered(dividerRect(radius: Self.grabRadius), in: self) {
+        for rect in PuzzleScroller.uncovered(grabRect, in: self) {
             addCursorRect(rect, cursor: axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
         }
     }
@@ -677,6 +683,51 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
 
     @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
+
+    /// Rebuilt whenever the line moves, since the span that takes hold goes
+    /// with it.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let gripArea { removeTrackingArea(gripArea) }
+        gripArea = nil
+        guard showsSecond else { return }
+        let area = NSTrackingArea(rect: grabRect,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        gripArea = area
+    }
+    private var gripArea: NSTrackingArea?
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        refreshGrip()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        refreshGrip()
+    }
+
+    /// The capsule is up while the line is held, or while the pointer is
+    /// where a press would take hold of it.
+    private func refreshGrip() {
+        let shown: Bool
+        if isDraggingDivider {
+            shown = true
+        } else if let window, !isHiddenOrHasHiddenAncestor {
+            shown = isOnGrabBand(convert(window.pointerLocation, from: nil))
+        } else {
+            shown = false
+        }
+        grip.isHidden = !shown
+    }
+    private var isDraggingDivider = false
+
+    var showsGripForTesting: Bool { !grip.isHidden }
+    var gripRectForTesting: NSRect { grip.frame }
+    var grabRectForTesting: NSRect { grabRect }
+    func refreshGripForTesting() { refreshGrip() }
 
     /// The line itself at radius 0, the band that answers to a drag above it.
     private func dividerRect(radius: CGFloat) -> NSRect {
@@ -735,6 +786,12 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     @discardableResult
     func trackDivider(from start: NSPoint, nextEvent: () -> NSEvent?) -> Bool {
         guard isOnGrabBand(start) else { return false }
+        isDraggingDivider = true
+        refreshGrip()
+        defer {
+            isDraggingDivider = false
+            refreshGrip()
+        }
         var tracking = true
         while tracking, let next = nextEvent() {
             switch next.type {
@@ -805,11 +862,20 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     private final class DividerLine: FlatView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
+    /// Over the line's middle, and over the panes either side of it.
+    private let grip = DividerGrip.Capsule()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         line.fillColor = Theme.border
         addSubview(line)
+        addSubview(grip)
+    }
+
+    /// The panes are added after the capsule, which has to stay over them.
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        if subview !== grip { addSubview(grip, positioned: .above, relativeTo: nil) }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -847,8 +913,14 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refuseAnimations(on: first)
         refuseAnimations(on: second)
         refuseAnimations(on: line)
+        refuseAnimations(on: grip)
         line.isHidden = !showsSecond
         line.frame = dividerRect(radius: 0)
+        grip.frame = DividerGrip.capsuleRect(centredOn: NSPoint(x: line.frame.midX,
+                                                                y: line.frame.midY),
+                                             lineIsVertical: axis == .horizontal)
+        updateTrackingAreas()
+        refreshGrip()
         second?.isHidden = !showsSecond
         first?.frame = firstPaneRect
         first?.layoutSubtreeIfNeeded()

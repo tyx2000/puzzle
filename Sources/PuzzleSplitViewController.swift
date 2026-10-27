@@ -34,10 +34,13 @@ final class PuzzleSplitViewController: NSSplitViewController {
     /// Keep the divider visually thin while making it much easier to acquire.
     /// AppKit uses this rectangle for pointer hit-testing and cursor feedback.
     ///
+    /// Only the middle of the line takes hold, as on the handle laid over it
+    /// (see `DividerGrip`); along the rest a press is the panes'.
+    ///
     /// The band reaches into the panel, where its lists keep their scrollers
     /// against the line. A scroller showing there is the scroller's to catch:
-    /// the divider keeps the largest part of its band that none covers —
-    /// along its whole length, on the code's side.
+    /// the divider keeps the largest part of its band that none covers, on
+    /// the code's side.
     override func splitView(_ splitView: NSSplitView,
                             effectiveRect proposedEffectiveRect: NSRect,
                             forDrawnRect drawnRect: NSRect,
@@ -46,9 +49,12 @@ final class PuzzleSplitViewController: NSSplitViewController {
         let expanded = splitView.isVertical
             ? drawnRect.insetBy(dx: -dividerHitPadding, dy: 0)
             : drawnRect.insetBy(dx: 0, dy: -dividerHitPadding)
-        let band = proposedEffectiveRect.union(expanded).intersection(splitView.bounds)
+        let band = DividerGrip.grabRect(
+            in: proposedEffectiveRect.union(expanded).intersection(splitView.bounds),
+            lineIsVertical: splitView.isVertical)
         return PuzzleScroller.uncovered(band, in: splitView)
-            .max { $0.width * $0.height < $1.width * $1.height } ?? drawnRect
+            .max { $0.width * $0.height < $1.width * $1.height }
+            ?? DividerGrip.grabRect(in: drawnRect, lineIsVertical: splitView.isVertical)
     }
 
     override func viewDidLoad() {

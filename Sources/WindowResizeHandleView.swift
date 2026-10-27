@@ -1,33 +1,96 @@
 import AppKit
 
+/// Where a divider is taken hold of. Its line runs the whole length between
+/// two panes, but only a short span at the line's middle moves it — anywhere
+/// else a press is the pane's — and that span shows a capsule while the
+/// pointer is over it, and for the whole of a drag.
+enum DividerGrip {
+    /// The capsule: this long along the line, this thick across it.
+    static let length: CGFloat = 32
+    static let thickness: CGFloat = 4
+    /// How much of the line answers to the pointer: a little more than the
+    /// capsule, so it can be caught without aiming at it.
+    static let reach: CGFloat = 48
+    /// How far either side of the line it answers.
+    static let radius: CGFloat = 6
+
+    /// The part of `band` — the strip either side of a line — that takes
+    /// hold: `reach` of it, at the middle of the line's length.
+    static func grabRect(in band: NSRect, lineIsVertical: Bool) -> NSRect {
+        let span = lineIsVertical
+            ? NSRect(x: band.minX, y: (band.midY - reach / 2).rounded(),
+                     width: band.width, height: reach)
+            : NSRect(x: (band.midX - reach / 2).rounded(), y: band.minY,
+                     width: reach, height: band.height)
+        return span.intersection(band)
+    }
+
+    /// The capsule's frame, centred on `point` of a line.
+    static func capsuleRect(centredOn point: NSPoint, lineIsVertical: Bool) -> NSRect {
+        let size = lineIsVertical
+            ? NSSize(width: thickness, height: length)
+            : NSSize(width: length, height: thickness)
+        return NSRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    /// The capsule itself: one layer of one colour with round ends, so it
+    /// costs no bitmap. It never takes the pointer — the view under it does.
+    final class Capsule: FlatView {
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.cornerRadius = DividerGrip.thickness / 2
+            fillColor = Theme.dimText
+            isHidden = true
+            setAccessibilityElement(false)
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 /// An explicit invisible target over the sidebar/editor divider. Keeping this
 /// separate from the drawn one-pixel divider makes the interaction predictable
 /// even when AppKit's effective-divider rect varies between macOS releases.
 final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
-    static let hitWidth: CGFloat = 13
+    static let hitWidth: CGFloat = DividerGrip.radius * 2 + 1
 
     var onDragBegan: (() -> Void)?
     var onDrag: ((CGFloat) -> Void)?
     /// Width of the hairline this view paints over — AppKit's own divider,
     /// which has no colour API. Set from the split view's `dividerThickness`.
-    var dividerThickness: CGFloat = 1 { didSet { needsDisplay = true } }
+    var dividerThickness: CGFloat = 1 { didSet { needsDisplay = true; needsLayout = true } }
     private var initialMouseX: CGFloat = 0
+    private let capsule = DividerGrip.Capsule()
+    private var gripArea: NSTrackingArea?
+    private var isDragging = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setAccessibilityElement(false)
+        addSubview(capsule)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The handle runs the line's whole length, but only its middle takes
+    /// hold; past that the press goes to whatever is under it.
+    private var grabRect: NSRect {
+        DividerGrip.grabRect(in: bounds, lineIsVertical: true)
+    }
+
     /// The handle reaches into the panel either side of the line, where the
     /// panel's lists keep their scrollers. Where one is showing, the press is
     /// the scroller's — handed to it straight, since under this handle lies
     /// AppKit's own divider, which would take it otherwise.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let hit = super.hitTest(point) else { return nil }
+        guard let hit = super.hitTest(point),
+              grabRect.contains(convert(point, from: superview)) else { return nil }
         let inWindow = superview?.convert(point, to: nil) ?? point
         return PuzzleScroller.showing(at: inWindow, in: window) ?? hit
     }
@@ -44,8 +107,25 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     /// activity bar and the title band draw.
     override func draw(_ dirtyRect: NSRect) {
         Theme.border.setFill()
-        NSRect(x: bounds.midX, y: 0,
-               width: dividerThickness, height: bounds.height).fill()
+        paintedDividerRect.fill()
+    }
+
+    private var paintedDividerRect: NSRect {
+        NSRect(x: bounds.midX, y: 0, width: dividerThickness, height: bounds.height)
+    }
+
+    /// The constraints that size the handle do not always lay out what is
+    /// inside it, and the capsule keeps to the middle of the line.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let line = paintedDividerRect
+        capsule.frame = DividerGrip.capsuleRect(centredOn: NSPoint(x: line.midX, y: line.midY),
+                                                lineIsVertical: true)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -53,9 +133,11 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         needsDisplay = true
     }
 
-    var paintedDividerRectForTesting: NSRect {
-        NSRect(x: bounds.midX, y: 0, width: dividerThickness, height: bounds.height)
-    }
+    var paintedDividerRectForTesting: NSRect { paintedDividerRect }
+    var grabRectForTesting: NSRect { grabRect }
+    var showsGripForTesting: Bool { !capsule.isHidden }
+    var gripRectForTesting: NSRect { capsule.frame }
+    func refreshGripForTesting() { refreshGrip() }
 
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -65,18 +147,61 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         } else {
             cursor = .resizeLeftRight
         }
-        for rect in PuzzleScroller.uncovered(bounds, in: self) {
+        for rect in PuzzleScroller.uncovered(grabRect, in: self) {
             addCursorRect(rect, cursor: cursor)
         }
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let gripArea { removeTrackingArea(gripArea) }
+        let area = NSTrackingArea(rect: grabRect,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        gripArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        refreshGrip()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        refreshGrip()
+    }
+
+    /// Up while held, or while the pointer is where a press would take hold
+    /// — read from the pointer itself, which a drag may have carried off.
+    private func refreshGrip() {
+        guard !isDragging else {
+            capsule.isHidden = false
+            return
+        }
+        guard let window, !isHiddenOrHasHiddenAncestor else {
+            capsule.isHidden = true
+            return
+        }
+        let pointer = window.pointerLocation
+        capsule.isHidden = !grabRect.contains(convert(pointer, from: nil))
+            || PuzzleScroller.isShowing(at: pointer, in: window)
+    }
+
     override func mouseDown(with event: NSEvent) {
         initialMouseX = Pointer.location.x
+        isDragging = true
+        refreshGrip()
         onDragBegan?()
     }
 
     override func mouseDragged(with event: NSEvent) {
         onDrag?(Pointer.location.x - initialMouseX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+        refreshGrip()
     }
 }
 
