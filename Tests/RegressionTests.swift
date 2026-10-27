@@ -13706,7 +13706,7 @@ enum RegressionTests {
         try expect(caretLine() == 11, "stepping back from the first change did not wrap")
 
         // The change stepped to is lit, though it was already on screen: its
-        // rows, twice, and then not at all.
+        // rows, at once, fading away over 0.8s.
         let codeView = pane.textViewForTesting
         guard let lit = codeView.changeFlashRowsForTesting else {
             throw Failure(description: "the change stepped to is not lit")
@@ -13716,14 +13716,15 @@ enum RegressionTests {
         try expect(caretRow.map { lit.minY <= $0.minY && $0.maxY <= lit.maxY } ?? false
                     && lit.height >= 2 * (caretRow?.height ?? 0) - 0.5,
                    "the lit rows \(lit) are not the change's two")
-        try expect(ChangeFlash.strength(at: 0) == 0
-                    && ChangeFlash.strength(at: ChangeFlash.duration / 4) > 0.99
-                    && ChangeFlash.strength(at: ChangeFlash.duration / 2) < 0.01
-                    && ChangeFlash.strength(at: ChangeFlash.duration * 3 / 4) > 0.99
+        try expect(ChangeFlash.duration == 0.8 && ChangeFlash.peakAlpha == 0.35,
+                   "the flash is \(ChangeFlash.duration)s at \(ChangeFlash.peakAlpha), not 0.8s at 0.35")
+        let quarters = [0, 1, 2, 3].map { ChangeFlash.strength(at: ChangeFlash.duration * Double($0) / 4) }
+        try expect(quarters[0] == 1 && zip(quarters, quarters.dropFirst()).allSatisfy { $0 > $1 }
+                    && quarters[1] - quarters[2] > quarters[2] - quarters[3]
                     && ChangeFlash.strength(at: ChangeFlash.duration) == 0,
-                   "the change is not lit twice and let go")
-        // Painted: at the first pulse's height the rows are lit, and after
-        // the flash they are as they were.
+                   "the change is not lit at once and let fade, slowest at the end: \(quarters)")
+        // Painted: just after the step the rows are lit, and after the flash
+        // they are as they were.
         func paint(at y: CGFloat) -> NSColor? {
             let spot = NSRect(x: codeView.visibleRect.maxX - 30, y: y, width: 1, height: 1)
             guard let bitmap = codeView.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
@@ -13734,7 +13735,7 @@ enum RegressionTests {
         guard let lighting = codeView.changeFlashRowsForTesting else {
             throw Failure(description: "the change stepped to is not lit")
         }
-        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration / 4))
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration / 8))
         let flashing = paint(at: lighting.midY)
         RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration))
         let settled = paint(at: lighting.midY)

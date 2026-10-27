@@ -198,6 +198,7 @@ final class SideBySideDiffView: FlatView {
         let previous = flash?.rows
         flash = (lit, CACurrentMediaTime())
         if let previous { setFlash(0, on: previous) }
+        setFlash(ChangeFlash.strength(at: 0), on: lit)
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             guard let self, let flash = self.flash else {
                 timer.invalidate()

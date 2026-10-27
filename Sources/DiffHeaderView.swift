@@ -149,21 +149,21 @@ final class DiffHeaderView: FlatView {
     var summaryForTesting: String { summary }
 }
 
-/// The change just stepped to is lit, twice, and let go: a jump that landed
-/// where the eye already was — the next change already on screen — still
-/// shows where it landed. In the accent a search marks its current match with.
+/// The change just stepped to is lit the moment the step lands, and fades
+/// away: a jump that landed where the eye already was — the next change
+/// already on screen — still shows where it landed. Once, in the accent a
+/// search marks its current match with.
 enum ChangeFlash {
-    static let duration: TimeInterval = 0.6
-    static let pulses = 2
-    static let peakAlpha: CGFloat = 0.3
+    static let duration: TimeInterval = 0.8
+    static let peakAlpha: CGFloat = 0.35
     static var colour: NSColor { Theme.yellow }
 
-    /// How strongly it is lit, from 0 to 1, this long after the jump: two
-    /// rises and falls, and nothing once they are done.
+    /// How strongly it is lit, from 0 to 1, this long after the jump: fully at
+    /// once, then less and less — quickly at first, slowly at the end — and
+    /// nothing once the time is up.
     static func strength(at elapsed: TimeInterval) -> CGFloat {
-        guard elapsed > 0, elapsed < duration else { return 0 }
-        let phase = elapsed / duration * Double(pulses) * .pi
-        return CGFloat(pow(sin(phase), 2))
+        guard elapsed >= 0, elapsed < duration else { return 0 }
+        return CGFloat(pow(1 - elapsed / duration, 2))
     }
 
     /// The fill for that strength.

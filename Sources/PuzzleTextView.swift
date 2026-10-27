@@ -1570,7 +1570,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     // MARK: - The change stepped to
 
     /// The rows of the diff change just stepped to, and when the step was:
-    /// lit twice and let go — see `ChangeFlash`.
+    /// lit at once and let fade — see `ChangeFlash`.
     private var changeFlash: (rows: NSRect, started: CFTimeInterval)?
     private var changeFlashTimer: Timer?
     var changeFlashRowsForTesting: NSRect? { changeFlash?.rows }
@@ -1583,6 +1583,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
             return
         }
         changeFlash = (rows, CACurrentMediaTime())
+        setNeedsDisplay(rows)
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             guard let self, let flash = self.changeFlash else {
                 timer.invalidate()
