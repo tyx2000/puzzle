@@ -49,12 +49,17 @@ final class PuzzleSplitViewController: NSSplitViewController {
         let expanded = splitView.isVertical
             ? drawnRect.insetBy(dx: -dividerHitPadding, dy: 0)
             : drawnRect.insetBy(dx: 0, dy: -dividerHitPadding)
+        // Where the line across the panel meets this one, as on the handle.
+        let crossing = DividerGrip.crossing(in: splitView.window).map {
+            splitView.convert(NSPoint(x: 0, y: $0), from: nil).y
+        }
         let band = DividerGrip.grabRect(
             in: proposedEffectiveRect.union(expanded).intersection(splitView.bounds),
-            lineIsVertical: splitView.isVertical)
+            lineIsVertical: splitView.isVertical, centre: crossing)
         return PuzzleScroller.uncovered(band, in: splitView)
             .max { $0.width * $0.height < $1.width * $1.height }
-            ?? DividerGrip.grabRect(in: drawnRect, lineIsVertical: splitView.isVertical)
+            ?? DividerGrip.grabRect(in: drawnRect, lineIsVertical: splitView.isVertical,
+                                    centre: crossing)
     }
 
     override func viewDidLoad() {
@@ -62,9 +67,13 @@ final class PuzzleSplitViewController: NSSplitViewController {
         NotificationCenter.default.addObserver(
             self, selector: #selector(scrollersMoved(_:)),
             name: PuzzleScroller.showingDidChange, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrollersMoved(_:)),
+            name: DividerGrip.crossingDidMove, object: nil)
     }
 
-    /// A scroller came, went or moved: the band's cursor is worked out again.
+    /// A scroller, or the line across the panel, came, went or moved: the
+    /// band's cursor is worked out again.
     @objc private func scrollersMoved(_ notification: Notification) {
         guard let window = splitView.window, notification.object as? NSWindow === window else {
             return

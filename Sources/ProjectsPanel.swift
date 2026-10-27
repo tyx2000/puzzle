@@ -656,10 +656,69 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
             && !PuzzleScroller.isShowing(at: convert(point, to: nil), in: window)
     }
 
-    /// The band's middle, the only part of it that takes hold.
+    /// The band either side of the line, its whole length: the pointer
+    /// anywhere on it brings the capsule up.
+    private var band: NSRect { dividerRect(radius: Self.grabRadius).intersection(bounds) }
+
+    /// The only part of the band that takes hold: where the line across the
+    /// second pane meets this one, or the middle.
     private var grabRect: NSRect {
-        DividerGrip.grabRect(in: dividerRect(radius: Self.grabRadius).intersection(bounds),
-                             lineIsVertical: axis == .horizontal)
+        DividerGrip.grabRect(in: band, lineIsVertical: axis == .horizontal, centre: crossing)
+    }
+
+    /// Where the line across the second pane — between the changes and the
+    /// history — meets this one, in this view along the line; nil when there
+    /// is no such line on screen.
+    private var crossing: CGFloat? {
+        guard axis == .horizontal, showsSecond, let inner = second as? ProjectColumnsView,
+              let line = inner.crossingLine else { return nil }
+        return inner.convert(line, to: self).midY
+    }
+
+    /// This line, when it is one that runs across a column.
+    private var crossingLine: NSRect? {
+        guard axis == .vertical, showsSecond, !isHiddenOrHasHiddenAncestor,
+              !line.frame.isEmpty else { return nil }
+        return line.frame
+    }
+
+    /// The lines across a column, so the handle beside the code — outside the
+    /// panel — can find where this one meets it.
+    private static let crossings = NSHashTable<ProjectColumnsView>.weakObjects()
+
+    static func crossingY(in window: NSWindow?) -> CGFloat? {
+        guard let window else { return nil }
+        for view in crossings.allObjects where view.window === window {
+            if let line = view.crossingLine { return view.convert(line, to: nil).midY }
+        }
+        return nil
+    }
+
+    /// What was last said about where this line lies, and to which window.
+    private var announcedCrossing: CGFloat??
+    private weak var announcedWindow: NSWindow?
+
+    private func announceCrossing() {
+        guard axis == .vertical, let window else { return }
+        let now = crossingLine.map { convert($0, to: nil).midY }
+        guard announcedCrossing != .some(now) else { return }
+        announcedCrossing = .some(now)
+        NotificationCenter.default.post(name: DividerGrip.crossingDidMove, object: window)
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        announceCrossing()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        announceCrossing()
+    }
+
+    @objc private func crossingMoved() {
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
     }
 
     /// Where a point falls along the axis, measured the way `divider` is: from
@@ -680,18 +739,36 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         PuzzleScroller.rebuildCursors(of: self)
+        NotificationCenter.default.removeObserver(self, name: DividerGrip.crossingDidMove, object: nil)
+        if axis == .vertical {
+            Self.crossings.add(self)
+            // Gone from a window, it no longer crosses anything there.
+            if let old = announcedWindow, old !== window {
+                NotificationCenter.default.post(name: DividerGrip.crossingDidMove, object: old)
+            }
+            announcedWindow = window
+            announcedCrossing = nil
+        }
+        guard let window else { return }
+        if axis == .horizontal {
+            NotificationCenter.default.addObserver(self, selector: #selector(crossingMoved),
+                                                   name: DividerGrip.crossingDidMove, object: window)
+        }
+        announceCrossing()
     }
 
-    @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
+    @objc func scrollersMoved() {
+        window?.invalidateCursorRects(for: self)
+        refreshGrip()
+    }
 
-    /// Rebuilt whenever the line moves, since the span that takes hold goes
-    /// with it.
+    /// Rebuilt whenever the line moves, since the band goes with it.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let gripArea { removeTrackingArea(gripArea) }
         gripArea = nil
         guard showsSecond else { return }
-        let area = NSTrackingArea(rect: grabRect,
+        let area = NSTrackingArea(rect: band,
                                   options: [.mouseEnteredAndExited, .activeInKeyWindow],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
@@ -709,22 +786,34 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refreshGrip()
     }
 
-    /// The capsule is up while the line is held, or while the pointer is
-    /// where a press would take hold of it.
+    /// The capsule is up while the line is held, or while the pointer is on
+    /// the line and not on a scroller that is up there.
     private func refreshGrip() {
         let shown: Bool
         if isDraggingDivider {
             shown = true
-        } else if let window, !isHiddenOrHasHiddenAncestor {
-            shown = isOnGrabBand(convert(window.pointerLocation, from: nil))
+        } else if showsSecond, let window, !isHiddenOrHasHiddenAncestor {
+            let pointer = window.pointerLocation
+            shown = band.contains(convert(pointer, from: nil))
+                && !PuzzleScroller.isShowing(at: pointer, in: window)
         } else {
             shown = false
         }
-        grip.isHidden = !shown
+        placeGrip()
+        grip.show(shown)
     }
     private var isDraggingDivider = false
 
-    var showsGripForTesting: Bool { !grip.isHidden }
+    /// Across the line, where it takes hold.
+    private func placeGrip() {
+        let at = axis == .horizontal
+            ? NSPoint(x: line.frame.midX, y: grabRect.midY)
+            : NSPoint(x: grabRect.midX, y: line.frame.midY)
+        grip.frame = DividerGrip.capsuleRect(centredOn: at, lineIsVertical: axis == .horizontal)
+    }
+
+    var showsGripForTesting: Bool { grip.isShown }
+    var gripFadeForTesting: CAAnimation? { grip.fadeForTesting }
     var gripRectForTesting: NSRect { grip.frame }
     var grabRectForTesting: NSRect { grabRect }
     func refreshGripForTesting() { refreshGrip() }
@@ -916,17 +1005,19 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refuseAnimations(on: grip)
         line.isHidden = !showsSecond
         line.frame = dividerRect(radius: 0)
-        grip.frame = DividerGrip.capsuleRect(centredOn: NSPoint(x: line.frame.midX,
-                                                                y: line.frame.midY),
-                                             lineIsVertical: axis == .horizontal)
-        updateTrackingAreas()
-        refreshGrip()
         second?.isHidden = !showsSecond
         first?.frame = firstPaneRect
         first?.layoutSubtreeIfNeeded()
-        guard showsSecond else { return }
-        second?.frame = secondPaneRect
-        second?.layoutSubtreeIfNeeded()
+        if showsSecond {
+            second?.frame = secondPaneRect
+            second?.layoutSubtreeIfNeeded()
+        }
+        // After the panes: where the line across the second one lies decides
+        // where this one takes hold.
+        updateTrackingAreas()
+        refreshGrip()
+        window?.invalidateCursorRects(for: self)
+        announceCrossing()
     }
 
     /// A resize that does not come through the layout engine — an animated

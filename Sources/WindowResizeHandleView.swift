@@ -1,27 +1,40 @@
 import AppKit
 
 /// Where a divider is taken hold of. Its line runs the whole length between
-/// two panes, but only a short span at the line's middle moves it — anywhere
-/// else a press is the pane's — and that span shows a capsule while the
-/// pointer is over it, and for the whole of a drag.
+/// two panes; the pointer anywhere on it brings a capsule up, fading in, but
+/// only the capsule's own span moves it — anywhere else a press is the
+/// pane's. The capsule stays up for the whole of a drag.
+///
+/// The lines down the panel — beside the tree, beside the code — are taken
+/// hold of where the line across it, between the changes and the history,
+/// meets them; the line across keeps to its middle, as does any line with
+/// nothing crossing it.
 enum DividerGrip {
     /// The capsule: this long along the line, this thick across it.
-    static let length: CGFloat = 32
+    static let length: CGFloat = 48
     static let thickness: CGFloat = 4
-    /// How much of the line answers to the pointer: a little more than the
+    /// How much of the line answers to a press: a little more than the
     /// capsule, so it can be caught without aiming at it.
-    static let reach: CGFloat = 48
-    /// How far either side of the line it answers.
+    static let reach: CGFloat = 64
+    /// How far either side of the line it answers — to the pointer coming
+    /// onto it as well as to a press.
     static let radius: CGFloat = 6
+    /// How long the capsule takes to come up or go.
+    static let fade: TimeInterval = 0.15
+    /// Pale: there to be found, not looked at.
+    static var colour: NSColor { Theme.dimText.withAlphaComponent(0.6) }
 
     /// The part of `band` — the strip either side of a line — that takes
-    /// hold: `reach` of it, at the middle of the line's length.
-    static func grabRect(in band: NSRect, lineIsVertical: Bool) -> NSRect {
+    /// hold: `reach` of it, centred at `centre` along the line (its middle
+    /// when there is none), and kept within the band.
+    static func grabRect(in band: NSRect, lineIsVertical: Bool, centre: CGFloat? = nil) -> NSRect {
+        let length = lineIsVertical ? band.height : band.width
+        let start = lineIsVertical ? band.minY : band.minX
+        let wanted = centre ?? (start + length / 2)
+        let middle = min(max(wanted, start + reach / 2), start + length - reach / 2)
         let span = lineIsVertical
-            ? NSRect(x: band.minX, y: (band.midY - reach / 2).rounded(),
-                     width: band.width, height: reach)
-            : NSRect(x: (band.midX - reach / 2).rounded(), y: band.minY,
-                     width: reach, height: band.height)
+            ? NSRect(x: band.minX, y: (middle - reach / 2).rounded(), width: band.width, height: reach)
+            : NSRect(x: (middle - reach / 2).rounded(), y: band.minY, width: reach, height: band.height)
         return span.intersection(band)
     }
 
@@ -34,21 +47,50 @@ enum DividerGrip {
                       width: size.width, height: size.height)
     }
 
+    /// Where the line across the panel lies in `window`, in its coordinates;
+    /// nil when it is not on screen.
+    static func crossing(in window: NSWindow?) -> CGFloat? {
+        ProjectColumnsView.crossingY(in: window)
+    }
+
+    /// The line across the panel has moved, come or gone: the lines down it
+    /// take hold somewhere else. Posted with its window.
+    static let crossingDidMove = Notification.Name("DividerGripCrossingDidMove")
+
     /// The capsule itself: one layer of one colour with round ends, so it
     /// costs no bitmap. It never takes the pointer — the view under it does.
     final class Capsule: FlatView {
+        private(set) var isShown = false
+
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
             layer?.cornerRadius = DividerGrip.thickness / 2
-            fillColor = Theme.dimText
-            isHidden = true
+            fillColor = DividerGrip.colour
+            alphaValue = 0
             setAccessibilityElement(false)
         }
 
         required init?(coder: NSCoder) { fatalError() }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        /// Up or gone, fading. An explicit animation: the views that hold a
+        /// capsule refuse implicit ones, so their panes do not slide.
+        func show(_ shown: Bool) {
+            guard shown != isShown else { return }
+            isShown = shown
+            let from = layer?.presentation()?.opacity ?? Float(alphaValue)
+            alphaValue = shown ? 1 : 0
+            guard let layer else { return }
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = from
+            fade.toValue = Float(alphaValue)
+            fade.duration = DividerGrip.fade
+            layer.add(fade, forKey: "fade")
+        }
+
+        var fadeForTesting: CAAnimation? { layer?.animation(forKey: "fade") }
     }
 }
 
@@ -78,10 +120,16 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// The handle runs the line's whole length, but only its middle takes
-    /// hold; past that the press goes to whatever is under it.
+    /// The handle runs the line's whole length, but only the span where the
+    /// line across the panel meets it takes hold — its middle, when there is
+    /// none; past that the press goes to whatever is under it.
     private var grabRect: NSRect {
-        DividerGrip.grabRect(in: bounds, lineIsVertical: true)
+        DividerGrip.grabRect(in: bounds, lineIsVertical: true, centre: crossing)
+    }
+
+    /// Where the line across the panel meets this one, in this view.
+    private var crossing: CGFloat? {
+        DividerGrip.crossing(in: window).map { convert(NSPoint(x: 0, y: $0), from: nil).y }
     }
 
     /// The handle reaches into the panel either side of the line, where the
@@ -98,9 +146,21 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         PuzzleScroller.rebuildCursors(of: self)
+        NotificationCenter.default.removeObserver(self, name: DividerGrip.crossingDidMove, object: nil)
+        guard let window else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(crossingMoved),
+                                               name: DividerGrip.crossingDidMove, object: window)
     }
 
-    @objc func scrollersMoved() { window?.invalidateCursorRects(for: self) }
+    @objc func scrollersMoved() {
+        window?.invalidateCursorRects(for: self)
+        refreshGrip()
+    }
+
+    @objc private func crossingMoved() {
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
 
     /// The handle straddles the divider, so painting its middle column replaces
     /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
@@ -123,9 +183,13 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     override func layout() {
         super.layout()
-        let line = paintedDividerRect
-        capsule.frame = DividerGrip.capsuleRect(centredOn: NSPoint(x: line.midX, y: line.midY),
-                                                lineIsVertical: true)
+        placeCapsule()
+    }
+
+    /// Across the line, where it takes hold.
+    private func placeCapsule() {
+        capsule.frame = DividerGrip.capsuleRect(
+            centredOn: NSPoint(x: paintedDividerRect.midX, y: grabRect.midY), lineIsVertical: true)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -135,8 +199,9 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     var paintedDividerRectForTesting: NSRect { paintedDividerRect }
     var grabRectForTesting: NSRect { grabRect }
-    var showsGripForTesting: Bool { !capsule.isHidden }
+    var showsGripForTesting: Bool { capsule.isShown }
     var gripRectForTesting: NSRect { capsule.frame }
+    var gripFadeForTesting: CAAnimation? { capsule.fadeForTesting }
     func refreshGripForTesting() { refreshGrip() }
 
     override func resetCursorRects() {
@@ -152,11 +217,12 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         }
     }
 
+    /// The pointer anywhere on the line brings the capsule up.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let gripArea { removeTrackingArea(gripArea) }
-        let area = NSTrackingArea(rect: grabRect,
-                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         gripArea = area
@@ -172,20 +238,22 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         refreshGrip()
     }
 
-    /// Up while held, or while the pointer is where a press would take hold
-    /// — read from the pointer itself, which a drag may have carried off.
+    /// Up while held, or while the pointer is on the line and not on a
+    /// scroller that is up there — read from the pointer itself, which a drag
+    /// may have carried off.
     private func refreshGrip() {
         guard !isDragging else {
-            capsule.isHidden = false
+            capsule.show(true)
             return
         }
         guard let window, !isHiddenOrHasHiddenAncestor else {
-            capsule.isHidden = true
+            capsule.show(false)
             return
         }
         let pointer = window.pointerLocation
-        capsule.isHidden = !grabRect.contains(convert(pointer, from: nil))
-            || PuzzleScroller.isShowing(at: pointer, in: window)
+        placeCapsule()
+        capsule.show(bounds.contains(convert(pointer, from: nil))
+                        && !PuzzleScroller.isShowing(at: pointer, in: window))
     }
 
     override func mouseDown(with event: NSEvent) {

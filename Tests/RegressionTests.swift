@@ -9251,8 +9251,14 @@ enum RegressionTests {
                                        forDrawnRect: drawn, ofDividerAt: 0) ?? .zero
         let covered = PuzzleScroller.showingRects(in: window).map { split.convert($0, from: nil) }
             .filter { $0.intersection(band).width > 0 && $0.intersection(band).height > 0 }
-        try expect(covered.isEmpty && band.contains(NSPoint(x: drawn.midX, y: drawn.midY)),
-                   "the divider's band \(band) lies over scrollers \(covered), or lost the line")
+        // It takes hold where the line between the changes and the history
+        // meets it, as the handle over it does.
+        let crossing = DividerGrip.crossing(in: window)
+            .map { split.convert(NSPoint(x: 0, y: $0), from: nil).y } ?? drawn.midY
+        try expect(covered.isEmpty && band.contains(NSPoint(x: drawn.midX, y: crossing))
+                    && abs(band.midY - crossing) <= 1,
+                   "the divider's band \(band) lies over scrollers \(covered), or is not where "
+                     + "the line across the panel meets it (\(crossing))")
         try expect(band.height <= DividerGrip.reach,
                    "AppKit's band runs \(band.height)pt of the line, not just its middle")
 
@@ -13776,6 +13782,13 @@ enum RegressionTests {
     /// changes and the history, and the one beside the panel.
     private static func testDividersTakeHoldAtTheirMiddle() throws {
         defer { pinPointer(at: pointerNowhere) }
+        // The capsule: longer than it was, pale, fading in and out.
+        try expect(DividerGrip.length == 48 && DividerGrip.reach == 64 && DividerGrip.fade == 0.15,
+                   "the capsule is \(DividerGrip.length)pt, takes hold along \(DividerGrip.reach)pt "
+                     + "and fades in \(DividerGrip.fade)s, not 48, 64 and 0.15")
+        try expect(DividerGrip.colour.alphaComponent == 0.6
+                    && DividerGrip.Capsule().fillColor.alphaComponent == 0.6,
+                   "the capsule is not the dim text at 0.6, paler than it was")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -13834,10 +13847,14 @@ enum RegressionTests {
             pinPointer(at: pointerNowhere)
             splitter.refreshGripForTesting()
             try expect(!splitter.showsGripForTesting, "\(name) shows its capsule at rest")
+            // Anywhere on the line the capsule comes up, fading in — but a
+            // press there is still the pane's.
             pin(end, in: splitter)
             splitter.refreshGripForTesting()
-            try expect(!splitter.showsGripForTesting,
-                       "\(name) shows its capsule with the pointer away from its middle")
+            try expect(splitter.showsGripForTesting,
+                       "\(name) did not show its capsule with the pointer on it, away from its middle")
+            try expect(splitter.gripFadeForTesting?.duration == DividerGrip.fade,
+                       "\(name)'s capsule came up without fading in")
             try expect(hit(beside(end), in: splitter) === first,
                        "\(name) took hold away from its middle")
             pin(middle, in: splitter)
@@ -13896,8 +13913,8 @@ enum RegressionTests {
         try expect(!handle.showsGripForTesting, "the line beside the panel shows its capsule at rest")
         pin(lineEnd, in: handle)
         handle.refreshGripForTesting()
-        try expect(!handle.showsGripForTesting,
-                   "the line beside the panel shows its capsule with the pointer away from its middle")
+        try expect(handle.showsGripForTesting && handle.gripFadeForTesting?.duration == DividerGrip.fade,
+                   "the line beside the panel did not fade its capsule in with the pointer on it")
         pin(lineMiddle, in: handle)
         handle.refreshGripForTesting()
         try expect(handle.showsGripForTesting,
@@ -13913,6 +13930,59 @@ enum RegressionTests {
         handle.mouseUp(with: press)
         try expect(!handle.showsGripForTesting,
                    "the line beside the panel kept its capsule up after it was let go")
+
+        // Where the line across the panel — between the changes and the
+        // history — meets the lines down it, they take hold there, not at
+        // their middle.
+        let columns = ProjectColumnsView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let tree = NSView()
+        let gitColumn = ProjectColumnsView()
+        gitColumn.axis = .vertical
+        gitColumn.minimumPane = ProjectColumnsView.minimumRow
+        gitColumn.fraction = 0.2
+        let changes = NSView(), history = NSView()
+        gitColumn.first = changes
+        gitColumn.second = history
+        gitColumn.addSubview(changes)
+        gitColumn.addSubview(history)
+        columns.first = tree
+        columns.second = gitColumn
+        columns.addSubview(tree)
+        columns.addSubview(gitColumn)
+        let beside = SplitDividerHandleView(
+            frame: NSRect(x: 300, y: 0, width: SplitDividerHandleView.hitWidth, height: 300))
+        host.subviews = [columns, beside]
+        columns.layoutSubtreeIfNeeded()
+        beside.layoutSubtreeIfNeeded()
+        guard let crossing = DividerGrip.crossing(in: window) else {
+            throw Failure(description: "the line between the changes and the history was not found")
+        }
+        let crossingInColumns = columns.convert(NSPoint(x: 0, y: crossing), from: nil).y
+        try expect(abs(crossingInColumns - columns.bounds.midY) > DividerGrip.reach,
+                   "the fixture's crossing is too near the middle to tell them apart")
+        try expect(abs(columns.gripRectForTesting.midY - crossingInColumns) <= 0.5
+                    && abs(columns.grabRectForTesting.midY - crossingInColumns) <= 0.5,
+                   "the line beside the tree does not take hold where the line across meets it: "
+                     + "\(columns.grabRectForTesting) for a crossing at \(crossingInColumns)")
+        let lineX = columns.divider + 0.5
+        try expect(hit(NSPoint(x: lineX, y: crossingInColumns), in: columns) === columns,
+                   "the line beside the tree did not take hold where the line across meets it")
+        try expect(hit(NSPoint(x: lineX - 2, y: columns.bounds.midY), in: columns) === tree,
+                   "the line beside the tree still takes hold at its middle")
+        let crossingBeside = beside.convert(NSPoint(x: 0, y: crossing), from: nil).y
+        try expect(abs(beside.grabRectForTesting.midY - crossingBeside) <= 0.5
+                    && abs(beside.gripRectForTesting.midY - crossingBeside) <= 0.5,
+                   "the line beside the code does not take hold where the line across meets it: "
+                     + "\(beside.grabRectForTesting) for a crossing at \(crossingBeside)")
+        // The line across keeps to its own middle.
+        try expect(abs(gitColumn.grabRectForTesting.midX - gitColumn.bounds.midX) <= 0.5,
+                   "the line across the panel left its middle: \(gitColumn.grabRectForTesting)")
+        // With nothing crossing, the lines down the panel go back to their middle.
+        gitColumn.isHidden = true
+        try expect(DividerGrip.crossing(in: window) == nil,
+                   "a hidden line still counts as crossing the panel")
+        try expect(abs(beside.grabRectForTesting.midY - beside.bounds.midY) <= 0.5,
+                   "with nothing crossing it, the line beside the code left its middle")
     }
 
     private static func testSplitterAndRowGestures() throws {
