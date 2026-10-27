@@ -215,7 +215,7 @@ enum RegressionTests {
         try testSettingsGearLivesTopRight()
         try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
-        try testScrollersShowWheneverThereIsMoreToSee()
+        try testScrollersShowAsTheSystemsDo()
         try testScrollersAreCaughtWhereTheyShow()
         try testScrollerKnobTakesHoldWhereItIsPainted()
         try testDraggingAScrollerLightsNothing()
@@ -8939,102 +8939,146 @@ enum RegressionTests {
                    "the file tree kept AppKit's scroller")
     }
 
-    /// Every scroller is shown whenever there is more to scroll to, is the
-    /// same everywhere, and lies against the edge of what it scrolls. macOS
-    /// hid them until the content moved, so a list gave no sign it went on.
-    private static func testScrollersShowWheneverThereIsMoreToSee() throws {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
-        PuzzleScroller.adopt(scroll)
-        scroll.hasVerticalScroller = true
-        let document = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
-        scroll.documentView = document
-        scroll.tile()
-        scroll.reflectScrolledClipView(scroll.contentView)
-        guard let scroller = scroll.verticalScroller as? PuzzleScroller else {
+    /// Every scroller is shown and hidden as the system's own are. Set to
+    /// show only while scrolling — what macOS does by default — it floats
+    /// over the content, hidden and letting presses through to what is under
+    /// it, and comes up while the content scrolls or the pointer is on it,
+    /// fading a moment after; set to show always, it is a column beside the
+    /// content and always up. Either way it is the same everywhere, lies
+    /// against the edge of what it scrolls, and widens under the pointer.
+    private static func testScrollersShowAsTheSystemsDo() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        try expect(PuzzleScroller.thickness == 5 && PuzzleScroller.grabThickness == 8,
+                   "the knob is \(PuzzleScroller.thickness)pt at rest and "
+                     + "\(PuzzleScroller.grabThickness)pt under the pointer, not 5 and 8")
+        final class Page: NSView { override var isFlipped: Bool { true } }
+        func makeScroll(style: NSScroller.Style, alongWindowEdge: Bool = false)
+            -> (NSScrollView, PuzzleScroller, NSWindow)? {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+            PuzzleScroller.adopt(scroll, alongWindowEdge: alongWindowEdge)
+            scroll.scrollerStyle = style
+            scroll.hasVerticalScroller = true
+            scroll.documentView = Page(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+            scroll.wantsLayer = true
+            window.contentView = scroll
+            scroll.layoutSubtreeIfNeeded()
+            scroll.reflectScrolledClipView(scroll.contentView)
+            guard let scroller = scroll.verticalScroller as? PuzzleScroller else { return nil }
+            return (scroll, scroller, window)
+        }
+        func pressed(_ scroll: NSScrollView, _ scroller: NSScroller) -> NSView? {
+            scroll.hitTest(scroll.convert(NSPoint(x: scroller.frame.midX, y: scroller.frame.midY),
+                                          to: scroll.superview))
+        }
+
+        // Over the content: the content keeps its width, and the scroller is
+        // a strip at its edge, hidden until something brings it up.
+        guard let (scroll, scroller, window) = makeScroll(style: .overlay) else {
             throw Failure(description: "the scroll view kept AppKit's scroller")
         }
-        try expect(PuzzleScroller.thickness == 5,
-                   "scrollers are \(PuzzleScroller.thickness)pt across, not 5")
-        try expect(scroll.scrollerStyle == .legacy && scroller.scrollerStyle == .legacy,
-                   "the scroller is still one that shows only while scrolling")
-        try expect(!scroller.isHidden, "a long document has no scroller")
-        try expect(scroller.frame.width == PuzzleScroller.thickness
-                    && scroller.frame.maxX == scroll.bounds.maxX,
-                   "the scroller is not \(PuzzleScroller.thickness)pt against the right edge: "
-                     + "\(scroller.frame) in \(scroll.bounds)")
-        let knob = PuzzleScroller.knobPaintRect(for: scroller.rect(for: .knob),
-                                                in: scroller.bounds, vertical: true)
-        try expect(knob.height > 0 && knob.minX == scroller.bounds.minX
-                    && knob.maxX == scroller.bounds.maxX,
-                   "the knob stands off the edge: \(knob) in \(scroller.bounds)")
-        // And that is what is painted, in a layer-backed window as the app's
-        // are: AppKit keeps a layer of its own for the knob, laid out for its
-        // own scrollers' width, and drawing there showed 5pt of it, 3pt off
-        // the edge.
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
-                              styleMask: [.titled], backing: .buffered, defer: false)
         defer { window.close() }
-        scroll.wantsLayer = true
-        window.contentView = scroll
-        scroll.layoutSubtreeIfNeeded()
-        scroll.reflectScrolledClipView(scroll.contentView)
+        try expect(scroll.contentView.frame.width == scroll.bounds.width,
+                   "the content gave up \(scroll.bounds.width - scroll.contentView.frame.width)pt "
+                     + "to a scroller that floats over it")
+        try expect(scroller.frame.width == PuzzleScroller.grabThickness
+                    && scroller.frame.maxX == scroll.bounds.maxX,
+                   "the scroller's strip is \(scroller.frame) in \(scroll.bounds)")
+        try expect(!scroller.isRevealed && !(pressed(scroll, scroller) is PuzzleScroller),
+                   "a scroller at rest is up, or takes a press from the content under it")
+        // Scrolling brings it up, and it goes a moment after.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 200))
+        try expect(scroller.isRevealed && pressed(scroll, scroller) === scroller,
+                   "scrolling did not bring the scroller up")
+        RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
+        try expect(!scroller.isRevealed && !(pressed(scroll, scroller) is PuzzleScroller),
+                   "the scroller stayed up after the scrolling stopped")
+        // So does the pointer coming onto it — and it stays while the pointer
+        // does, wider, then goes once it has left.
+        pinPointer(at: window.convertPoint(toScreen: scroller.convert(
+            NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY), to: nil)))
+        scroller.refreshKnobStateForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
+        try expect(scroller.isRevealed && scroller.knobState == .hovered
+                    && pressed(scroll, scroller) === scroller,
+                   "the scroller under the pointer is not up to be caught")
+        pinPointer(at: pointerNowhere)
+        scroller.refreshKnobStateForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
+        try expect(!scroller.isRevealed, "the scroller stayed up after the pointer left")
+
+        // What is painted: the knob against the edge, wider under the pointer.
+        // AppKit keeps a layer of its own for the knob, laid out for its own
+        // scrollers' width, so it is painted in the scroller's own layer.
+        scroller.revealForTesting()
         func paint(x: CGFloat, y: CGFloat) -> NSColor? {
             let spot = NSRect(x: x, y: y, width: 1, height: 1)
             guard let bitmap = scroll.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
             scroll.cacheDisplay(in: spot, to: bitmap)
             return bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB)
         }
-        let knobInScroll = scroller.convert(knob, to: scroll)
-        let edge = paint(x: scroll.bounds.maxX - 0.5, y: knobInScroll.midY)
-        let inner = paint(x: scroller.frame.minX + 0.5, y: knobInScroll.midY)
-        let past = paint(x: scroll.bounds.maxX - 0.5,
-                         y: knobInScroll.maxY < scroll.bounds.maxY - 20
-                            ? knobInScroll.maxY + 10 : knobInScroll.minY - 10)
         func same(_ a: NSColor?, _ b: NSColor?) -> Bool {
             guard let a, let b else { return false }
             return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
                 + abs(a.blueComponent - b.blueComponent) < 0.02
         }
-        try expect(same(edge, inner) && !same(edge, past),
-                   "the knob is not painted against the edge: edge \(String(describing: edge)), "
-                     + "inner \(String(describing: inner)), past it \(String(describing: past))")
+        let knob = scroller.convert(PuzzleScroller.knobPaintRect(
+            for: scroller.rect(for: .knob), in: scroller.bounds, vertical: true), to: scroll)
+        let edge = paint(x: scroll.bounds.maxX - 0.5, y: knob.midY)
+        let inner = paint(x: knob.minX + 0.5, y: knob.midY)
+        let wider = paint(x: scroll.bounds.maxX - PuzzleScroller.grabThickness + 1, y: knob.midY)
+        let past = paint(x: scroll.bounds.maxX - 0.5,
+                         y: knob.maxY < scroll.bounds.maxY - 20 ? knob.maxY + 10 : knob.minY - 10)
+        try expect(same(edge, inner) && !same(edge, past) && !same(edge, wider),
+                   "the knob at rest is not \(PuzzleScroller.thickness)pt against the edge")
+        pinPointer(at: window.convertPoint(toScreen: scroller.convert(
+            NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY), to: nil)))
+        scroller.refreshKnobStateForTesting()
+        let widened = paint(x: scroll.bounds.maxX - PuzzleScroller.grabThickness + 1, y: knob.midY)
+        try expect(!same(widened, past) && !same(widened, wider),
+                   "the knob under the pointer did not widen")
+        pinPointer(at: pointerNowhere)
+        scroller.refreshKnobStateForTesting()
+
+        // Set to show always: a column beside the content, always up.
+        guard let (column, always, alwaysWindow) = makeScroll(style: .legacy) else {
+            throw Failure(description: "the scroll view kept AppKit's scroller")
+        }
+        defer { alwaysWindow.close() }
+        try expect(always.isRevealed && pressed(column, always) === always
+                    && column.contentView.frame.width
+                        == column.bounds.width - PuzzleScroller.grabThickness,
+                   "set to show always, the scroller is not a column beside the content, up")
 
         // Along the window's own edge, where its resize border takes the
-        // outermost points, the scroller is that much wider: the knob is as
-        // wide as any against the edge, and taken hold of across all of it.
-        let alongEdge = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
-        PuzzleScroller.adopt(alongEdge, alongWindowEdge: true)
-        alongEdge.hasVerticalScroller = true
-        alongEdge.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
-        alongEdge.tile()
-        alongEdge.reflectScrolledClipView(alongEdge.contentView)
-        if let edgeScroller = alongEdge.verticalScroller {
-            let reach = PuzzleScroller.thickness + PuzzleScroller.windowBorderReach
-            let painted = PuzzleScroller.knobPaintRect(for: edgeScroller.rect(for: .knob),
-                                                       in: edgeScroller.bounds, vertical: true)
-            let caught = PuzzleScroller.knobCatchRect(for: edgeScroller.rect(for: .knob),
-                                                      in: edgeScroller.bounds, vertical: true)
-            try expect(edgeScroller.frame.width == reach && edgeScroller.frame.maxX == alongEdge.bounds.maxX,
-                       "a scroller along the window's edge is \(edgeScroller.frame.width)pt, not \(reach)")
-            try expect(painted.width == PuzzleScroller.thickness
-                        && painted.maxX == edgeScroller.bounds.maxX && caught.width == reach,
-                       "the knob along the window's edge is \(painted), caught across \(caught)")
+        // outermost points, the strip is that much wider: the knob is as wide
+        // as any against the edge, and taken hold of across all of it.
+        guard let (alongEdge, edgeScroller, edgeWindow) = makeScroll(style: .overlay,
+                                                                     alongWindowEdge: true) else {
+            throw Failure(description: "the scroll view kept AppKit's scroller")
         }
+        defer { edgeWindow.close() }
+        let reach = PuzzleScroller.grabThickness + PuzzleScroller.windowBorderReach
+        let painted = PuzzleScroller.knobPaintRect(for: edgeScroller.rect(for: .knob),
+                                                   in: edgeScroller.bounds, vertical: true)
+        let caught = PuzzleScroller.knobCatchRect(for: edgeScroller.rect(for: .knob),
+                                                  in: edgeScroller.bounds, vertical: true)
+        try expect(edgeScroller.frame.width == reach && edgeScroller.frame.maxX == alongEdge.bounds.maxX,
+                   "a scroller along the window's edge is \(edgeScroller.frame.width)pt, not \(reach)")
+        try expect(painted.width == PuzzleScroller.thickness
+                    && painted.maxX == edgeScroller.bounds.maxX && caught.width == reach,
+                   "the knob along the window's edge is \(painted), caught across \(caught)")
 
-        // Nothing more to see, nothing shown — and the code gets the room.
-        document.frame.size.height = 100
+        // Nothing more to see, nothing shown.
+        scroll.documentView?.frame.size.height = 100
         scroll.tile()
         scroll.reflectScrolledClipView(scroll.contentView)
-        try expect(scroller.isHidden && scroll.contentView.frame.width == 300,
-                   "a document that fits still has a scroller beside it")
-        // The system's own setting does not take it back.
-        NotificationCenter.default.post(
-            name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
-        try expect(scroll.scrollerStyle == .legacy,
-                   "a change of the system's scroller setting turned it back into an overlay")
+        try expect(scroller.isHidden, "a document that fits still has a scroller")
 
-        // Every scroll view a project's window shows is one: the code, the
-        // tree, the changes and the history, the Git panel and search.
+        // Every scroll view a project's window shows is one, in the style the
+        // system is set to: the code, the tree, the changes and the history,
+        // the Git panel and search.
         let project = try temporaryDirectory("every-scroller")
         defer { try? FileManager.default.removeItem(at: project) }
         func git(_ args: [String]) throws {
@@ -9066,10 +9110,11 @@ enum RegressionTests {
         collect(content)
         try expect(all.count >= 5, "the window shows only \(all.count) scroll views")
         let foreign = all.filter {
-            !($0.verticalScroller is PuzzleScroller) || $0.scrollerStyle != .legacy
+            !($0.verticalScroller is PuzzleScroller)
+                || $0.scrollerStyle != NSScroller.preferredScrollerStyle
         }
         try expect(foreign.isEmpty,
-                   "scroll views with another scroller: "
+                   "scroll views with another scroller, or another style than the system's: "
                      + "\(foreign.map { String(describing: type(of: $0.documentView ?? $0)) })")
     }
 
@@ -9142,6 +9187,17 @@ enum RegressionTests {
         try expect(wanted.isSubset(of: Set(kinds())),
                    "the fixture does not show a scroller under each handle: \(kinds())")
         let scrollers = showing()
+        // Hidden over the content, a scroller takes no press: the row, the
+        // line or the window's edge under it does.
+        for scroller in scrollers where scroller.scrollerStyle == .overlay {
+            scroller.concealForTesting()
+            let middle = scroller.convert(NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY),
+                                          to: nil)
+            try expect(!(frameView.hitTest(middle) is PuzzleScroller),
+                       "a hidden scroller took a press from what is under it")
+        }
+        // Up, it is caught where it shows.
+        scrollers.forEach { $0.revealForTesting() }
         // Each takes a press across a knob's width, from its inner side —
         // along the window's edge, where the window's own border takes the
         // outermost points, the scroller is that much wider.

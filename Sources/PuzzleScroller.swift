@@ -18,24 +18,27 @@ protocol PointerHoverRefreshing: AnyObject {
 /// near black it is the brightest thing on screen. Drawing it ourselves keeps
 /// it in the palette.
 ///
-/// It is shown whenever there is something to scroll to, not only while
-/// scrolling — macOS hides overlay scrollers until the content moves, so a
-/// list gave no sign it went on past its foot. A legacy scroller is a column
-/// of its own beside the content, which also keeps the pointer that is
-/// dragging it off the rows it scrolls.
+/// It is shown and hidden as the system's own are: with scrollers set to show
+/// only while scrolling it floats over the content, hidden at rest, and comes
+/// up while the content scrolls or the pointer is on it; set to show always,
+/// it is a column of its own and always there. Under the pointer it widens,
+/// to be caught more easily.
 final class PuzzleScroller: NSScroller {
     /// Required, or AppKit silently falls back to its own scroller for the
     /// overlay style.
     override class var isCompatibleWithOverlayScrollers: Bool { true }
 
-    /// How far across a scroller is, wherever it is.
+    /// How far across the knob is at rest.
     static let thickness: CGFloat = 5
+    /// How far across it is under the pointer and while it is held — and so
+    /// the column a scroller takes, which is where it can be caught.
+    static let grabThickness: CGFloat = 8
 
     /// The knob is laid over the surface it scrolls at some of its colour:
     /// pale at rest, there to be found rather than to be looked at; stronger
-    /// under the pointer, which says it can be taken hold of; whole while it
-    /// is held. Only the colour changes — a knob that widened would move the
-    /// content beside it.
+    /// and wider under the pointer, which says it can be taken hold of; whole
+    /// while it is held. It widens within its own column, so nothing beside
+    /// it moves.
     enum KnobState { case resting, hovered, dragged }
     static func knobOpacity(_ state: KnobState) -> CGFloat {
         switch state {
@@ -45,7 +48,16 @@ final class PuzzleScroller: NSScroller {
         }
     }
     private(set) var knobState = KnobState.resting {
-        didSet { if knobState != oldValue { redrawKnob() } }
+        didSet {
+            guard knobState != oldValue else { return }
+            redrawKnob()
+            if knobState == .resting { concealLater() } else { reveal() }
+        }
+    }
+
+    /// How far across the knob is painted in a state.
+    static func knobThickness(_ state: KnobState) -> CGFloat {
+        state == .resting ? thickness : grabThickness
     }
 
     /// The window's own resize border reaches this far in from its edges,
@@ -56,12 +68,11 @@ final class PuzzleScroller: NSScroller {
     /// control size, which is how AppKit asks a scroller's class its width.
     static let windowBorderReach: CGFloat = 3
 
+    /// The same in either style: over the content, it is the strip where the
+    /// pointer brings the scroller up; beside it, the column it stands in.
     override class func scrollerWidth(for controlSize: NSControl.ControlSize,
                                       scrollerStyle: NSScroller.Style) -> CGFloat {
-        guard scrollerStyle == .legacy else {
-            return super.scrollerWidth(for: controlSize, scrollerStyle: scrollerStyle)
-        }
-        return controlSize == .large ? thickness + windowBorderReach : thickness
+        controlSize == .large ? grabThickness + windowBorderReach : grabThickness
     }
 
     /// No slot: the knob is drawn over the surface it scrolls, the way it was
@@ -80,7 +91,8 @@ final class PuzzleScroller: NSScroller {
 
     override func draw(_ dirtyRect: NSRect) {
         drawsForTesting += 1
-        let rect = Self.knobPaintRect(for: rect(for: .knob), in: bounds, vertical: isVertical)
+        let rect = Self.knobPaintRect(for: rect(for: .knob), in: bounds, vertical: isVertical,
+                                      width: Self.knobThickness(knobState))
         guard !rect.isEmpty else { return }
         let radius = min(rect.width, rect.height) / 2
         Theme.scrollerKnob.withAlphaComponent(Self.knobOpacity(knobState)).setFill()
@@ -113,7 +125,85 @@ final class PuzzleScroller: NSScroller {
             name: NSView.boundsDidChangeNotification, object: clip)
     }
 
-    @objc private func contentScrolled() { redrawKnob() }
+    @objc private func contentScrolled() {
+        redrawKnob()
+        reveal()
+        concealLater()
+    }
+
+    // MARK: - Shown and hidden
+
+    /// Over the content, the scroller is up while the content scrolls, while
+    /// the pointer is on it and while it is held, and fades this long after
+    /// the last of them — as the system's own do. Beside the content, in a
+    /// column of its own, it is always up.
+    static let lingering: TimeInterval = 1.0
+    static let fadingOut: TimeInterval = 0.25
+    private var isUpForNow = false
+    private var concealWork: DispatchWorkItem?
+
+    var isRevealed: Bool { scrollerStyle == .legacy || isUpForNow }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        applyVisibility(animated: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var scrollerStyle: NSScroller.Style {
+        didSet {
+            guard scrollerStyle != oldValue else { return }
+            applyVisibility(animated: false)
+            showingChanged()
+        }
+    }
+
+    private func reveal() {
+        concealWork?.cancel()
+        concealWork = nil
+        guard !isUpForNow else { return }
+        isUpForNow = true
+        applyVisibility(animated: false)
+        showingChanged()
+    }
+
+    private func concealLater() {
+        concealWork?.cancel()
+        concealWork = nil
+        guard isUpForNow, !isHeld, knobState == .resting else { return }
+        let work = DispatchWorkItem { [weak self] in self?.conceal() }
+        concealWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lingering, execute: work)
+    }
+
+    private func conceal() {
+        concealWork = nil
+        guard isUpForNow, !isHeld, knobState == .resting else { return }
+        isUpForNow = false
+        applyVisibility(animated: true)
+        showingChanged()
+    }
+
+    private func applyVisibility(animated: Bool) {
+        let alpha: CGFloat = isRevealed ? 1 : 0
+        guard animated else {
+            alphaValue = alpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.fadingOut
+            animator().alphaValue = alpha
+        }
+    }
+
+    /// Hidden, it takes no press: the row under it does. The pointer coming
+    /// onto it — which its tracking area hears of all the same — brings it
+    /// up, and then the press is its own. AppKit's own answer follows only
+    /// its own showing and hiding, which the pointer does not reach.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isRevealed && !isHidden && frame.contains(point) ? self : nil
+    }
 
     /// AppKit decides what a press is on from its own geometry, which puts
     /// its 11pt knob mostly off a scroller this narrow: only the knob's first
@@ -143,18 +233,19 @@ final class PuzzleScroller: NSScroller {
             : NSRect(x: knob.minX, y: bounds.minY, width: knob.width, height: bounds.height)
     }
 
-    /// The capsule to paint: the caught rect's outer `thickness` — against
-    /// the edge of the area it scrolls, the right or the foot, with nothing
+    /// The capsule to paint: the caught rect's outer `width` — against the
+    /// edge of the area it scrolls, the right or the foot, with nothing
     /// between them. The scroller is flipped, so the foot is its `maxY`.
-    static func knobPaintRect(for knob: NSRect, in bounds: NSRect, vertical: Bool) -> NSRect {
+    static func knobPaintRect(for knob: NSRect, in bounds: NSRect, vertical: Bool,
+                              width: CGFloat = thickness) -> NSRect {
         let caught = knobCatchRect(for: knob, in: bounds, vertical: vertical)
         guard !caught.isEmpty else { return .zero }
         if vertical {
-            let width = min(thickness, caught.width)
-            return NSRect(x: caught.maxX - width, y: caught.minY, width: width, height: caught.height)
+            let across = min(width, caught.width)
+            return NSRect(x: caught.maxX - across, y: caught.minY, width: across, height: caught.height)
         }
-        let height = min(thickness, caught.height)
-        return NSRect(x: caught.minX, y: caught.maxY - height, width: caught.width, height: height)
+        let across = min(width, caught.height)
+        return NSRect(x: caught.minX, y: caught.maxY - across, width: caught.width, height: across)
     }
 
     private var isVertical: Bool { bounds.height > bounds.width }
@@ -277,11 +368,12 @@ final class PuzzleScroller: NSScroller {
         NotificationCenter.default.post(name: Self.showingDidChange, object: window)
     }
 
-    /// Where scrollers are showing in `window`, in its coordinates.
+    /// Where scrollers are up in `window`, in its coordinates. One that is
+    /// hidden over the content leaves the handles over it as they were.
     static func showingRects(in window: NSWindow) -> [NSRect] {
         all.allObjects.compactMap { scroller in
             guard scroller.window === window, !scroller.isHiddenOrHasHiddenAncestor,
-                  !scroller.bounds.isEmpty else { return nil }
+                  scroller.isRevealed, !scroller.bounds.isEmpty else { return nil }
             return scroller.convert(scroller.bounds, to: nil)
         }
     }
@@ -291,7 +383,7 @@ final class PuzzleScroller: NSScroller {
         guard let window else { return nil }
         return all.allObjects.first { scroller in
             scroller.window === window && !scroller.isHiddenOrHasHiddenAncestor
-                && scroller.convert(scroller.bounds, to: nil).contains(point)
+                && scroller.isRevealed && scroller.convert(scroller.bounds, to: nil).contains(point)
         }
     }
 
@@ -322,8 +414,8 @@ final class PuzzleScroller: NSScroller {
         ].filter { $0.width > 0 && $0.height > 0 }
     }
 
-    /// Make a scroll view the app's own: themed scrollers, shown whenever
-    /// there is more to see, and none of AppKit's automatic content insets.
+    /// Make a scroll view the app's own: themed scrollers, in the style the
+    /// system is set to, and none of AppKit's automatic content insets.
     ///
     /// Those insets are meant for a scroll view running under a window's
     /// titlebar. Every list here sits below a header the app draws itself, so
@@ -341,7 +433,6 @@ final class PuzzleScroller: NSScroller {
             scrollView.verticalScroller?.controlSize = .large
             scrollView.horizontalScroller?.controlSize = .large
         }
-        scrollView.scrollerStyle = .legacy
         scrollView.autohidesScrollers = true
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentInsets = NSEdgeInsets()
@@ -379,4 +470,6 @@ final class PuzzleScroller: NSScroller {
     func beginDraggingForTesting() { beginDragging() }
     func endDraggingForTesting() { endDragging() }
     func refreshKnobStateForTesting() { refreshKnobState() }
+    func revealForTesting() { reveal() }
+    func concealForTesting() { conceal() }
 }
