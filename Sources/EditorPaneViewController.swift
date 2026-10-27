@@ -83,6 +83,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// results. The bar itself is at the top of the pane, a long way from what
     /// is being read.
     private let searchNavigator = SearchNavigatorView()
+    /// A diff's changes, stepped through with the same round buttons a search
+    /// uses, in the same place; there is nothing to close, so there are two.
+    private let diffNavigator = SearchNavigatorView(stepping: "change", closing: nil)
     private var findBarHeight: NSLayoutConstraint!
     private var findStates: [URL: FindBarView.State] = [:]
     /// The document actually bound to the shared bar, even while tab indices change.
@@ -266,8 +269,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         diffHeader.translatesAutoresizingMaskIntoConstraints = false
         diffHeader.isHidden = true
-        diffHeader.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
-        diffHeader.onNext = { [weak self] in self?.stepThroughDiff(forward: true) }
+        diffNavigator.translatesAutoresizingMaskIntoConstraints = false
+        diffNavigator.isHidden = true
+        diffNavigator.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
+        diffNavigator.onNext = { [weak self] in self?.stepThroughDiff(forward: true) }
+        diffNavigator.scrollTarget = scrollView
         diffHeader.onToggleMode = { [weak self] in self?.toggleDiffMode() }
         container.addSubview(diffHeader)
 
@@ -298,11 +304,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // area rather than the pane's: the bar and the tab strip above it are
         // not what these belong beside.
         container.addSubview(searchNavigator)
+        container.addSubview(diffNavigator)
         NSLayoutConstraint.activate([
             searchNavigator.trailingAnchor.constraint(
                 equalTo: scrollView.trailingAnchor,
                 constant: -SearchNavigatorView.trailingInset),
             searchNavigator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            diffNavigator.trailingAnchor.constraint(
+                equalTo: scrollView.trailingAnchor,
+                constant: -SearchNavigatorView.trailingInset),
+            diffNavigator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
         self.view = container
         reloadTabs()
@@ -579,6 +590,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             diffHeader.isHidden = true
             diffHeaderHeight.constant = 0
             hideSideBySideDiff()
+            refreshDiffNavigator()
             return
         }
         diffHeader.setMode(Self.diffMode)
@@ -586,6 +598,17 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffHeader.isHidden = false
         diffHeaderHeight.constant = DiffHeaderView.height
         applyDiffMode()
+        refreshDiffNavigator()
+    }
+
+    /// The diff's buttons are up while a diff with changes is on screen — and
+    /// give way to a search's, which sit in the same place, while a search has
+    /// results to step through.
+    private func refreshDiffNavigator() {
+        diffNavigator.isHidden = diffHeader.isHidden || diffHeader.changeCount == 0
+            || !searchNavigator.isHidden
+        diffNavigator.scrollTarget = sideBySideDiff.flatMap { $0.isHidden ? nil : $0.scrollingView }
+            ?? scrollView
     }
 
     private func toggleDiffMode() {
@@ -611,6 +634,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         view.isHidden = false
         scrollView.isHidden = true
         diffHeader.configure(path: diffHeader.pathForTesting, changes: view.changeCount)
+        refreshDiffNavigator()
     }
 
     private func hideSideBySideDiff() {
@@ -622,7 +646,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let view = SideBySideDiffView()
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
-        self.view.addSubview(view)
+        // Under the round buttons that float over the code, as the code is.
+        self.view.addSubview(view, positioned: .below, relativeTo: searchNavigator)
         NSLayoutConstraint.activate([
             view.topAnchor.constraint(equalTo: diffHeader.bottomAnchor),
             view.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
@@ -667,6 +692,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: target.location, length: 0))
         textView.scrollRangeToVisible(target)
         scrollView.verticalRulerView?.needsDisplay = true
+        textView.flashRows(of: target)
     }
 
     // MARK: - Regression-test surface
@@ -739,7 +765,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var sideBySideGeometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat)? {
         sideBySideDiff?.geometryForTesting
     }
-    var sideBySideCurrentRowForTesting: Int? { sideBySideDiff?.currentRowForTesting }
+    var sideBySideFlashRowsForTesting: Range<Int>? { sideBySideDiff?.flashRowsForTesting }
+    var diffNavigatorForTesting: SearchNavigatorView { diffNavigator }
     func toggleDiffModeForTesting() { toggleDiffMode() }
     var changeBlockCountForTesting: Int { changeBlocks().count }
 
@@ -972,6 +999,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// an empty query, or one that finds nothing, has nothing for them to do.
     private func refreshSearchNavigator() {
         searchNavigator.isHidden = findBar.isHidden || !findBar.hasMatches
+        refreshDiffNavigator()
     }
 
     private func saveFindState() {

@@ -13519,18 +13519,17 @@ enum RegressionTests {
         try expect(SideBySideDiff.changeBlockStarts(rows).count == 2,
                    "change blocks: \(SideBySideDiff.changeBlockStarts(rows))")
 
-        // The three controls are comfortable targets, not glyph-sized ones, and
-        // they do not overlap.
+        // The header keeps one control, the mode, a comfortable target rather
+        // than a glyph-sized one. Stepping is the round buttons' job now.
         let sized = DiffHeaderView()
         sized.frame = NSRect(x: 0, y: 0, width: 420, height: DiffHeaderView.height)
         sized.layoutSubtreeIfNeeded()
         let frames = sized.buttonFramesForTesting
+        try expect(frames.count == 1, "the header still has \(frames.count) buttons, not the mode's alone")
         try expect(frames.allSatisfy { $0.width >= 28 && $0.height >= 20 },
-                   "the header buttons are too small to hit: \(frames)")
-        try expect(zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX },
-                   "the header buttons overlap: \(frames)")
+                   "the header button is too small to hit: \(frames)")
         try expect(frames.allSatisfy { $0.maxX <= sized.bounds.width },
-                   "a header button hangs off the strip: \(frames)")
+                   "the header button hangs off the strip: \(frames)")
 
         // Hovering one gives it a background of its own.
         let button = DiffHeaderButton()
@@ -13558,6 +13557,7 @@ enum RegressionTests {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 400))
         defer { window.close() }
         let url = URL(string:
             "puzzle-diff:///repo/.puzzle-diff-preview?window=sbs&path=Sources/App.swift")!
@@ -13586,7 +13586,17 @@ enum RegressionTests {
                    "the table is shorter than its rows: \(geometry)")
         try expect(geometry.scrollOffset == 0,
                    "the diff opened scrolled to \(geometry.scrollOffset)")
-        pane.diffHeaderForTesting.clickNextForTesting()
+        // The round buttons float over the two columns, not under them.
+        let navigator = pane.diffNavigatorForTesting
+        try expect(!navigator.isHidden, "the side-by-side diff has no buttons to step with")
+        if let next = navigator.buttonsForTesting.last, let content = window.contentView {
+            let middle = next.convert(NSPoint(x: next.bounds.midX, y: next.bounds.midY), to: nil)
+            let hit = content.hitTest(content.superview?.convert(middle, from: nil) ?? middle)
+            try expect(hit === next || hit?.isDescendant(of: next) == true,
+                       "the side-by-side view lies over the buttons: a press went to "
+                         + "\(hit.map { String(describing: type(of: $0)) } ?? "nothing")")
+        }
+        navigator.clickNextForTesting()
         try expect(pane.sideBySideBlockForTesting == 0,
                    "stepping did not move to the first change")
 
@@ -13601,15 +13611,20 @@ enum RegressionTests {
         pane.open(url: url, replacingContent: true)
         pane.view.layoutSubtreeIfNeeded()
         let before = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
-        pane.diffHeaderForTesting.clickNextForTesting()
+        pane.diffNavigatorForTesting.clickNextForTesting()
         pane.view.layoutSubtreeIfNeeded()
         let after = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
         try expect(after > before,
                    "stepping in side-by-side did not scroll: \(before) -> \(after)")
-        try expect(pane.sideBySideCurrentRowForTesting != nil,
-                   "the change it stepped to is not marked")
-        pane.diffHeaderForTesting.clickNextForTesting()
-        pane.diffHeaderForTesting.clickNextForTesting()
+        // The change it stepped to is lit — its rows, the -/+ pair — and let go.
+        try expect(pane.sideBySideFlashRowsForTesting?.count == 1,
+                   "the change stepped to is not lit: "
+                     + "\(String(describing: pane.sideBySideFlashRowsForTesting))")
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration + 0.2))
+        try expect(pane.sideBySideFlashRowsForTesting == nil,
+                   "the change stayed lit after its flash")
+        pane.diffNavigatorForTesting.clickNextForTesting()
+        pane.diffNavigatorForTesting.clickNextForTesting()
         try expect(pane.sideBySideBlockForTesting == 0,
                    "stepping past the last change did not wrap")
 
@@ -13639,6 +13654,7 @@ enum RegressionTests {
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
         window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 600))
         defer { window.close() }
 
         let url = URL(string:
@@ -13657,8 +13673,13 @@ enum RegressionTests {
                    "the header counted \(pane.changeBlockCountForTesting) changes, not 2")
         try expect(pane.diffHeaderForTesting.summaryForTesting == "2 changes",
                    "the header summarised \(pane.diffHeaderForTesting.summaryForTesting)")
-        try expect(pane.diffHeaderForTesting.stepControlsEnabledForTesting,
-                   "the step controls were disabled on a diff that has changes")
+        // The changes are stepped through with round buttons beside the code,
+        // as a search's matches are: the one before and the one after, and no
+        // third — there is nothing to close.
+        let navigator = pane.diffNavigatorForTesting
+        try expect(!navigator.isHidden, "a diff with changes has no buttons to step with")
+        try expect(navigator.buttonsForTesting.map(\.toolTip) == ["Previous change", "Next change"],
+                   "the diff's buttons are \(navigator.buttonsForTesting.map(\.toolTip))")
 
         // Stepping forward lands on each change in turn and then wraps.
         let text = diff as NSString
@@ -13668,14 +13689,66 @@ enum RegressionTests {
             for i in 0..<min(caret, text.length) where text.character(at: i) == 10 { line += 1 }
             return line
         }
-        pane.diffHeaderForTesting.clickNextForTesting()
+        navigator.clickNextForTesting()
         try expect(caretLine() == 6, "the first step landed on line \(caretLine()), not the -/+ pair")
-        pane.diffHeaderForTesting.clickNextForTesting()
+        navigator.clickNextForTesting()
         try expect(caretLine() == 11, "the second step landed on line \(caretLine())")
-        pane.diffHeaderForTesting.clickNextForTesting()
+        navigator.clickNextForTesting()
         try expect(caretLine() == 6, "stepping past the last change did not wrap")
-        pane.diffHeaderForTesting.clickPreviousForTesting()
+        navigator.clickPreviousForTesting()
         try expect(caretLine() == 11, "stepping back from the first change did not wrap")
+
+        // The change stepped to is lit, though it was already on screen: its
+        // rows, twice, and then not at all.
+        let codeView = pane.textViewForTesting
+        guard let lit = codeView.changeFlashRowsForTesting else {
+            throw Failure(description: "the change stepped to is not lit")
+        }
+        let caretRow = codeView.currentLineBandRect()
+            ?? codeView.rowsBandRect(for: NSRange(location: pane.caretLocationForTesting, length: 1))
+        try expect(caretRow.map { lit.minY <= $0.minY && $0.maxY <= lit.maxY } ?? false
+                    && lit.height >= 2 * (caretRow?.height ?? 0) - 0.5,
+                   "the lit rows \(lit) are not the change's two")
+        try expect(ChangeFlash.strength(at: 0) == 0
+                    && ChangeFlash.strength(at: ChangeFlash.duration / 4) > 0.99
+                    && ChangeFlash.strength(at: ChangeFlash.duration / 2) < 0.01
+                    && ChangeFlash.strength(at: ChangeFlash.duration * 3 / 4) > 0.99
+                    && ChangeFlash.strength(at: ChangeFlash.duration) == 0,
+                   "the change is not lit twice and let go")
+        // Painted: at the first pulse's height the rows are lit, and after
+        // the flash they are as they were.
+        func paint(at y: CGFloat) -> NSColor? {
+            let spot = NSRect(x: codeView.visibleRect.maxX - 30, y: y, width: 1, height: 1)
+            guard let bitmap = codeView.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
+            codeView.cacheDisplay(in: spot, to: bitmap)
+            return bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB)
+        }
+        navigator.clickNextForTesting()
+        guard let lighting = codeView.changeFlashRowsForTesting else {
+            throw Failure(description: "the change stepped to is not lit")
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration / 4))
+        let flashing = paint(at: lighting.midY)
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration))
+        let settled = paint(at: lighting.midY)
+        try expect(codeView.changeFlashRowsForTesting == nil, "the change stayed lit after its flash")
+        if let flashing, let settled {
+            let difference = abs(flashing.redComponent - settled.redComponent)
+                + abs(flashing.greenComponent - settled.greenComponent)
+                + abs(flashing.blueComponent - settled.blueComponent)
+            try expect(difference > 0.05,
+                       "the lit change looks as it does after: \(flashing) and \(settled)")
+        }
+
+        // A search's buttons sit in the same place: while one has results to
+        // step through, the diff's give way, and come back when it closes.
+        pane.showFindBar(seed: "eleven")
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(!pane.searchNavigatorForTesting.isHidden && navigator.isHidden,
+                   "the diff's buttons lie over a search's")
+        pane.hideFindBar()
+        try expect(pane.searchNavigatorForTesting.isHidden && !navigator.isHidden,
+                   "the diff's buttons did not come back when the search closed")
 
         // An ordinary file has no header at all.
         let directory = try temporaryDirectory("diff-header")
@@ -13684,8 +13757,8 @@ enum RegressionTests {
         try Data("just text\n".utf8).write(to: plain)
         pane.open(url: plain)
         pane.view.layoutSubtreeIfNeeded()
-        try expect(!pane.diffHeaderIsVisibleForTesting,
-                   "a normal file showed the diff header")
+        try expect(!pane.diffHeaderIsVisibleForTesting && pane.diffNavigatorForTesting.isHidden,
+                   "a normal file showed the diff header or its buttons")
     }
 
     private static func testSplitterAndRowGestures() throws {

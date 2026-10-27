@@ -1,7 +1,9 @@
 import AppKit
 
-/// The strip above a git diff: which file the diff belongs to on the left, and
-/// the controls that step through its changes on the right.
+/// The strip above a git diff: which file the diff belongs to on the left, how
+/// many changes it holds and how it is laid out on the right. Stepping through
+/// the changes is done with the round buttons beside the code, the ones a
+/// search uses.
 final class DiffHeaderView: FlatView {
     /// How a diff is laid out. The choice sticks for the session, so switching
     /// files does not switch back.
@@ -18,14 +20,10 @@ final class DiffHeaderView: FlatView {
         }
     }
 
-    var onPrevious: (() -> Void)?
-    var onNext: (() -> Void)?
     var onToggleMode: (() -> Void)?
 
     static let height: CGFloat = 28
 
-    private let previousButton = DiffHeaderButton()
-    private let nextButton = DiffHeaderButton()
     private let modeButton = DiffHeaderButton()
     private var mode: Mode = .unified
     private var folder = ""
@@ -38,10 +36,6 @@ final class DiffHeaderView: FlatView {
         super.init(frame: .zero)
         fillColor = Theme.barBackground
         bottomBorder = true
-        configure(button: previousButton, symbol: "chevron.up",
-                  label: "Previous change", action: #selector(previousAction))
-        configure(button: nextButton, symbol: "chevron.down",
-                  label: "Next change", action: #selector(nextAction))
         configure(button: modeButton, symbol: mode.symbol,
                   label: mode.label, action: #selector(modeAction))
         setAccessibilityElement(true)
@@ -65,15 +59,17 @@ final class DiffHeaderView: FlatView {
         addSubview(button)
     }
 
+    /// How many separate blocks of added and removed lines the diff holds —
+    /// which decides whether there is anything to step through at all.
+    private(set) var changeCount = 0
+
     /// `path` is repository-relative; `changes` is how many separate blocks of
-    /// added/removed lines the buffer holds, which decides whether stepping
-    /// through them is possible at all.
+    /// added/removed lines the buffer holds.
     func configure(path: String, changes: Int) {
         folder = (path as NSString).deletingLastPathComponent
         name = (path as NSString).lastPathComponent
+        changeCount = changes
         summary = changes == 1 ? "1 change" : "\(changes) changes"
-        previousButton.isEnabled = changes > 0
-        nextButton.isEnabled = changes > 0
         toolTip = path
         setAccessibilityLabel("\(path), \(summary)")
         needsDisplay = true
@@ -97,13 +93,8 @@ final class DiffHeaderView: FlatView {
         let width: CGFloat = 30
         let height: CGFloat = 22
         let y = floor((bounds.height - height) / 2)
-        // Mode last, past the stepping controls it applies to.
         modeButton.frame = NSRect(x: max(0, bounds.width - 6 - width), y: y,
                                   width: width, height: height)
-        nextButton.frame = NSRect(x: max(0, modeButton.frame.minX - 6 - width), y: y,
-                                  width: width, height: height)
-        previousButton.frame = NSRect(x: max(0, nextButton.frame.minX - width), y: y,
-                                      width: width, height: height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -113,7 +104,7 @@ final class DiffHeaderView: FlatView {
         let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
         let summaryWidth = summary.isEmpty ? 0
             : ceil((summary as NSString).size(withAttributes: [.font: summaryFont]).width) + 10
-        let right = max(0, previousButton.frame.minX - 6 - summaryWidth)
+        let right = max(0, modeButton.frame.minX - 6 - summaryWidth)
         if !summary.isEmpty {
             SidebarCellDrawing.text(summary, font: summaryFont, color: Theme.dimText,
                                     baseline: baseline,
@@ -147,22 +138,38 @@ final class DiffHeaderView: FlatView {
     }
 
     @objc private func modeAction() { onToggleMode?() }
-    @objc private func previousAction() { onPrevious?() }
-    @objc private func nextAction() { onNext?() }
 
     // MARK: - Regression-test surface
 
     var pathForTesting: String { folder.isEmpty ? name : "\(folder)/\(name)" }
     var modeForTesting: Mode { mode }
-    var buttonFramesForTesting: [NSRect] {
-        [previousButton.frame, nextButton.frame, modeButton.frame]
-    }
+    var buttonFramesForTesting: [NSRect] { [modeButton.frame] }
     var modeLabelForTesting: String? { modeButton.toolTip }
     func toggleModeForTesting() { onToggleMode?() }
     var summaryForTesting: String { summary }
-    var stepControlsEnabledForTesting: Bool { nextButton.isEnabled && previousButton.isEnabled }
-    func clickNextForTesting() { onNext?() }
-    func clickPreviousForTesting() { onPrevious?() }
+}
+
+/// The change just stepped to is lit, twice, and let go: a jump that landed
+/// where the eye already was — the next change already on screen — still
+/// shows where it landed. In the accent a search marks its current match with.
+enum ChangeFlash {
+    static let duration: TimeInterval = 0.6
+    static let pulses = 2
+    static let peakAlpha: CGFloat = 0.3
+    static var colour: NSColor { Theme.yellow }
+
+    /// How strongly it is lit, from 0 to 1, this long after the jump: two
+    /// rises and falls, and nothing once they are done.
+    static func strength(at elapsed: TimeInterval) -> CGFloat {
+        guard elapsed > 0, elapsed < duration else { return 0 }
+        let phase = elapsed / duration * Double(pulses) * .pi
+        return CGFloat(pow(sin(phase), 2))
+    }
+
+    /// The fill for that strength.
+    static func fill(strength: CGFloat) -> NSColor {
+        colour.withAlphaComponent(peakAlpha * strength)
+    }
 }
 
 /// A borderless icon button that shows a rounded hover background, so the strip

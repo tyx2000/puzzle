@@ -20,9 +20,10 @@ final class SideBySideDiffView: FlatView {
     private var changeStarts: [Int] = []
     /// Where the ↑↓ buttons currently are, so stepping continues from there.
     private var currentBlock = -1
-    /// First row of that block, marked so the jump is visible even when the
-    /// change was already on screen.
-    private var currentRow: Int?
+    /// The rows of that block, lit as the step lands — see `ChangeFlash` — so
+    /// the jump is visible even when the change was already on screen.
+    private var flash: (rows: Range<Int>, started: CFTimeInterval)?
+    private var flashTimer: Timer?
 
     static let gutterWidth: CGFloat = 44
 
@@ -89,7 +90,8 @@ final class SideBySideDiffView: FlatView {
         rows = SideBySideDiff.rows(from: diff)
         changeStarts = SideBySideDiff.changeBlockStarts(rows)
         currentBlock = -1
-        currentRow = nil
+        flashTimer?.invalidate()
+        flash = nil
         horizontalOffset = 0
         measureTextWidths()
         table.reloadData()
@@ -178,13 +180,52 @@ final class SideBySideDiffView: FlatView {
             currentBlock = currentBlock <= 0 ? changeStarts.count - 1 : currentBlock - 1
         }
         let row = changeStarts[currentBlock]
-        currentRow = row
         // `scrollRowToVisible` does nothing when the row is already on screen,
         // which is why stepping looked like it was ignoring the buttons.
-        // Centre it instead, and mark it so a jump inside the visible area is
+        // Centre it instead, and light it so a jump inside the visible area is
         // still something you can see.
         centre(row: row)
-        table.reloadData()
+        var end = row
+        while end < rows.count, rows[end].kind == .change { end += 1 }
+        flash(rows: row..<max(end, row + 1))
+    }
+
+    /// The code a scroll over the round buttons floating above it should move.
+    var scrollingView: NSView { scroll }
+
+    private func flash(rows lit: Range<Int>) {
+        flashTimer?.invalidate()
+        let previous = flash?.rows
+        flash = (lit, CACurrentMediaTime())
+        if let previous { setFlash(0, on: previous) }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self, let flash = self.flash else {
+                timer.invalidate()
+                return
+            }
+            let elapsed = CACurrentMediaTime() - flash.started
+            self.setFlash(ChangeFlash.strength(at: elapsed), on: flash.rows)
+            if elapsed >= ChangeFlash.duration {
+                timer.invalidate()
+                self.flash = nil
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        flashTimer = timer
+    }
+
+    private func setFlash(_ strength: CGFloat, on lit: Range<Int>) {
+        for row in lit where row < table.numberOfRows {
+            (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SideBySideRowCell)?
+                .flash = strength
+        }
+    }
+
+    /// How strongly a row is lit now: a cell made while the flash runs starts
+    /// where the others are.
+    private func flashStrength(of row: Int) -> CGFloat {
+        guard let flash, flash.rows.contains(row) else { return 0 }
+        return ChangeFlash.strength(at: CACurrentMediaTime() - flash.started)
     }
 
     private func centre(row: Int) {
@@ -199,7 +240,7 @@ final class SideBySideDiffView: FlatView {
 
     // MARK: - Regression-test surface
 
-    var currentRowForTesting: Int? { currentRow }
+    var flashRowsForTesting: Range<Int>? { flash?.rows }
     /// Row count and scroll offset, so the table's own geometry stays checkable
     /// without a live window.
     var geometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat) {
@@ -229,19 +270,22 @@ extension SideBySideDiffView: NSTableViewDataSource, NSTableViewDelegate {
             ?? SideBySideRowCell()
         cell.identifier = id
         guard rows.indices.contains(row) else { return cell }
-        cell.configure(rows[row], isCurrent: row == currentRow, horizontalOffset: horizontalOffset)
+        cell.configure(rows[row], flash: flashStrength(of: row), horizontalOffset: horizontalOffset)
         return cell
     }
 }
 
 private final class SideBySideRowCell: DrawnSidebarCell {
     private var row: SideBySideDiff.Row?
-    private var isCurrent = false
     private var horizontalOffset: CGFloat = 0
+    /// The change the ↑↓ buttons stepped to, lit while its flash runs.
+    var flash: CGFloat = 0 {
+        didSet { if flash != oldValue { needsDisplay = true } }
+    }
 
-    func configure(_ row: SideBySideDiff.Row, isCurrent: Bool, horizontalOffset: CGFloat) {
+    func configure(_ row: SideBySideDiff.Row, flash: CGFloat, horizontalOffset: CGFloat) {
         self.row = row
-        self.isCurrent = isCurrent
+        self.flash = flash
         self.horizontalOffset = horizontalOffset
         switch row.kind {
         case .hunk: exposeToAccessibility(row.header ?? "")
@@ -290,12 +334,6 @@ private final class SideBySideRowCell: DrawnSidebarCell {
 
         Theme.border.setFill()
         NSRect(x: half, y: 0, width: 1, height: bounds.height).fill()
-
-        // The change the ↑↓ buttons are on, marked down both columns.
-        guard isCurrent else { return }
-        Theme.cursor.setFill()
-        NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
-        NSRect(x: half + 1, y: 0, width: 3, height: bounds.height).fill()
     }
 
     private func drawSide(_ rect: NSRect, number: Int?, text: NSAttributedString?, font: NSFont,
@@ -303,6 +341,10 @@ private final class SideBySideRowCell: DrawnSidebarCell {
         if let background {
             background.setFill()
             rect.fill()
+        }
+        if flash > 0 {
+            ChangeFlash.fill(strength: flash).setFill()
+            rect.fill(using: .sourceOver)
         }
         if let number {
             SidebarCellDrawing.text("\(number)", font: font, color: Theme.gutter,

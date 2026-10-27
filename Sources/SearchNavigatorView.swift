@@ -121,11 +121,13 @@ final class RoundIconButton: FlatView {
     func clickForTesting() { onClick?() }
 }
 
-/// Three round buttons down the right edge of the code area while a search has
-/// results: the match before, the match after, and done.
+/// Round buttons down the right edge of the code area: the one before, the one
+/// after, and — for a search — done. A search steps through its results with
+/// them; a diff through its changes, with no third button, since there is
+/// nothing to close.
 ///
-/// The find bar is at the top of the pane, which is a long way from the text
-/// being read; these sit beside it.
+/// The find bar and the diff's header are at the top of the pane, which is a
+/// long way from the text being read; these sit beside it.
 final class SearchNavigatorView: FlatView {
     static let buttonSize: CGFloat = 48
     static let spacing: CGFloat = 8
@@ -139,18 +141,24 @@ final class SearchNavigatorView: FlatView {
     /// so a scroll over them would otherwise climb to the pane and go nowhere.
     weak var scrollTarget: NSView?
 
-    private let previous = RoundIconButton(symbol: "chevron.up", label: "Previous match")
-    private let next = RoundIconButton(symbol: "chevron.down", label: "Next match")
-    private let clear = RoundIconButton(symbol: "xmark", label: "Close search")
+    private let previous: RoundIconButton
+    private let next: RoundIconButton
+    private let clear: RoundIconButton?
+    private var buttons: [RoundIconButton] { [previous, next] + (clear.map { [$0] } ?? []) }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    /// `stepping` names what the arrows move between; `closing`, when there is
+    /// one, labels the button that ends it.
+    init(stepping noun: String, closing: String?) {
+        previous = RoundIconButton(symbol: "chevron.up", label: "Previous \(noun)")
+        next = RoundIconButton(symbol: "chevron.down", label: "Next \(noun)")
+        clear = closing.map { RoundIconButton(symbol: "xmark", label: $0) }
+        super.init(frame: .zero)
         fillColor = .clear
         previous.onClick = { [weak self] in self?.onPrevious?() }
         next.onClick = { [weak self] in self?.onNext?() }
-        clear.onClick = { [weak self] in self?.onClear?() }
+        clear?.onClick = { [weak self] in self?.onClear?() }
 
-        let stack = NSStackView(views: [previous, next, clear])
+        let stack = NSStackView(views: buttons)
         stack.orientation = .vertical
         stack.spacing = Self.spacing
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -161,12 +169,17 @@ final class SearchNavigatorView: FlatView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
         ]
-        for button in [previous, next, clear] {
+        for button in buttons {
             constraints.append(button.widthAnchor.constraint(equalToConstant: Self.buttonSize))
             constraints.append(button.heightAnchor.constraint(equalToConstant: Self.buttonSize))
         }
         NSLayoutConstraint.activate(constraints)
     }
+    /// A search's: its matches, and a button to close it.
+    convenience override init(frame frameRect: NSRect) {
+        self.init(stepping: "match", closing: "Close search")
+    }
+
     required init?(coder: NSCoder) { fatalError("not used") }
 
     /// Only the buttons take clicks; the gaps between them belong to the code
@@ -175,7 +188,6 @@ final class SearchNavigatorView: FlatView {
     /// view itself.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
-        let buttons = [previous, next, clear]
         return buttons.contains { hit === $0 || hit.isDescendant(of: $0) } ? hit : nil
     }
 
@@ -188,8 +200,8 @@ final class SearchNavigatorView: FlatView {
         scrollTarget.scrollWheel(with: event)
     }
 
-    var buttonsForTesting: [RoundIconButton] { [previous, next, clear] }
+    var buttonsForTesting: [RoundIconButton] { buttons }
     func clickPreviousForTesting() { previous.clickForTesting() }
     func clickNextForTesting() { next.clickForTesting() }
-    func clickClearForTesting() { clear.clickForTesting() }
+    func clickClearForTesting() { clear?.clickForTesting() }
 }
