@@ -5,8 +5,8 @@ import AppKit
 /// knob's place brings the knob up, fading in, and a press there takes hold;
 /// anywhere else on the line the pointer and the press are the panes'. The
 /// knob stays up for the whole of a drag, and a double-click on it puts the
-/// line back where it started. A small dot stays on the line at the knob's
-/// place, so it can be found before it shows.
+/// line back where it started. At the knob's place the line is drawn a
+/// little thicker for a short stretch, so it can be found before it shows.
 ///
 /// The lines down the panel — beside the tree, beside the code — are taken
 /// hold of where the line across it, between the changes and the history,
@@ -28,8 +28,11 @@ enum DividerGrip {
     /// While the line is held: the hand closed on it. Pushed when the press
     /// takes hold and popped when it lets go.
     static var dragCursor: NSCursor { .closedHand }
-    /// The dot left on the line at the knob's place.
-    static let markerDiameter: CGFloat = 6
+    /// The mark left on the line at the knob's place: the 1pt line drawn
+    /// this thick…
+    static let markerThickness: CGFloat = 2
+    /// …for this short a stretch along it.
+    static let markerLength: CGFloat = 8
 
     /// The part of `band` — the strip either side of a line — that takes
     /// hold: `reach` of it, centred at `centre` along the line (its middle
@@ -51,20 +54,23 @@ enum DividerGrip {
                width: diameter, height: diameter)
     }
 
-    /// The dot's frame, on the same point as the knob.
-    static func markerRect(centredOn point: NSPoint) -> NSRect {
-        NSRect(x: point.x - markerDiameter / 2, y: point.y - markerDiameter / 2,
-               width: markerDiameter, height: markerDiameter)
+    /// The mark's frame, on the same point as the knob, lying along the line.
+    static func markerRect(centredOn point: NSPoint, lineIsVertical: Bool) -> NSRect {
+        let size = lineIsVertical
+            ? NSSize(width: markerThickness, height: markerLength)
+            : NSSize(width: markerLength, height: markerThickness)
+        return NSRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                      width: size.width, height: size.height)
     }
 
-    /// The dot: one layer of one colour, round, so it costs no bitmap — a
-    /// shade off the line, in the colour of the knob's own edge. The knob
-    /// covers it when it comes up. It never takes the pointer.
+    /// The mark: one layer of one colour with round ends, so it costs no
+    /// bitmap — a shade off the line, in the colour of the knob's own edge.
+    /// The knob covers it when it comes up. It never takes the pointer.
     final class Marker: FlatView {
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
-            layer?.cornerRadius = DividerGrip.markerDiameter / 2
+            layer?.cornerRadius = DividerGrip.markerThickness / 2
             fillColor = Theme.raisedEdge
             setAccessibilityElement(false)
         }
@@ -260,11 +266,11 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         updateTrackingAreas()
     }
 
-    /// On the line, where it takes hold, over the dot that marks the place.
+    /// On the line, where it takes hold, over the mark on the line there.
     private func placeKnob() {
         let centre = NSPoint(x: paintedDividerRect.midX, y: grabRect.midY)
         knob.frame = DividerGrip.knobRect(centredOn: centre)
-        marker.frame = DividerGrip.markerRect(centredOn: centre)
+        marker.frame = DividerGrip.markerRect(centredOn: centre, lineIsVertical: true)
     }
 
     override func viewDidChangeEffectiveAppearance() {

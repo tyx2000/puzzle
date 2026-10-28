@@ -808,14 +808,14 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
     private var isDraggingDivider = false
 
-    /// On the line, where it takes hold, over the dot that marks the place.
+    /// On the line, where it takes hold, over the mark on the line there.
     private func placeGrip() {
         let at = axis == .horizontal
             ? NSPoint(x: line.frame.midX, y: grabRect.midY)
             : NSPoint(x: grabRect.midX, y: line.frame.midY)
         grip.frame = DividerGrip.knobRect(centredOn: at)
         grip.movesVertically = axis == .vertical
-        marker.frame = DividerGrip.markerRect(centredOn: at)
+        marker.frame = DividerGrip.markerRect(centredOn: at, lineIsVertical: axis == .horizontal)
     }
 
     var showsGripForTesting: Bool { grip.isShown }
@@ -994,7 +994,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
     /// On the line where it takes hold, and over the panes either side of it.
     private let grip = DividerGrip.Knob()
-    /// The dot under the knob, which stays.
+    /// The mark on the line under the knob, which stays.
     private let marker = DividerGrip.Marker()
 
     override init(frame frameRect: NSRect) {
@@ -1005,7 +1005,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         addSubview(grip)
     }
 
-    /// The panes are added after the dot and the knob, which have to stay
+    /// The panes are added after the mark and the knob, which have to stay
     /// over them, the knob on top.
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)

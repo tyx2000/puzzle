@@ -11715,7 +11715,7 @@ enum RegressionTests {
         host.addSubview(swatch)
         let border = try rendered(swatch, at: NSPoint(x: 2, y: 2))
         swatch.removeFromSuperview()
-        // Clear of the knob's place, where a dot marks the line.
+        // Clear of the knob's place, where the line is marked.
         let gap = NSPoint(x: splitter.divider + 0.5, y: 40)
         let line = try rendered(splitter, at: gap)
         try expect(sameColor(line, border),
@@ -14004,15 +14004,16 @@ enum RegressionTests {
                    "with nothing crossing it, the line beside the code left its middle")
     }
 
-    /// Around a divider's knob: a dot stays on the line where it is, so it
-    /// can be found before it shows; while the line is held the hand is
+    /// Around a divider's knob: the line is a little thicker where it is,
+    /// for a short stretch, so it can be found before it shows; while the line is held the hand is
     /// closed on it; and a double-click on it puts the line back where it
     /// started — halves in the panel, half the window beside the code.
     private static func testDividerKnobMarksResetsAndHolds() throws {
         defer { pinPointer(at: pointerNowhere) }
-        try expect(DividerGrip.markerDiameter == 6 && DividerGrip.dragCursor === NSCursor.closedHand,
-                   "the dot is \(DividerGrip.markerDiameter)pt and the held hand "
-                     + "\(DividerGrip.dragCursor), not 6pt and closed")
+        try expect(DividerGrip.markerThickness == 2 && DividerGrip.markerLength == 8
+                    && DividerGrip.dragCursor === NSCursor.closedHand,
+                   "the mark is \(DividerGrip.markerThickness)×\(DividerGrip.markerLength)pt and "
+                     + "the held hand \(DividerGrip.dragCursor), not 2×8pt and closed")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -14039,16 +14040,19 @@ enum RegressionTests {
             let knob = splitter.gripRectForTesting
             let centre = NSPoint(x: knob.midX, y: knob.midY)
 
-            // The dot: on the knob's place, there at rest with the knob down,
-            // under the knob and over the panes.
+            // The mark: on the knob's place, lying along the line, there at
+            // rest with the knob down, under the knob and over the panes.
             let marker = splitter.markerRectForTesting
+            let along = axis == .horizontal ? marker.height : marker.width
+            let across = axis == .horizontal ? marker.width : marker.height
             try expect(abs(marker.midX - centre.x) <= 0.5 && abs(marker.midY - centre.y) <= 0.5
-                        && marker.width == DividerGrip.markerDiameter,
-                       "\(name)'s dot is not on its knob's place: \(marker) for \(knob)")
+                        && along == DividerGrip.markerLength && across == DividerGrip.markerThickness,
+                       "\(name)'s mark is not along its line at its knob's place: "
+                         + "\(marker) for \(knob)")
             try expect(!splitter.showsGripForTesting, "\(name)'s knob is up at rest")
             let top = splitter.subviews.suffix(2)
             try expect(top.first is DividerGrip.Marker && top.last is DividerGrip.Knob,
-                       "\(name)'s dot and knob are not over the panes, the knob on top: "
+                       "\(name)'s mark and knob are not over the panes, the knob on top: "
                          + "\(splitter.subviews.map { String(describing: type(of: $0)) })")
 
             // Held, the hand is closed on it; let go, it is not.
@@ -14079,7 +14083,7 @@ enum RegressionTests {
                        "a double-click on \(name) off its knob moved it")
         }
 
-        // The line beside the code: its dot, the closed hand, and a double-
+        // The line beside the code: its mark, the closed hand, and a double-
         // click back to half the window.
         let root = RootViewController(sidebar: SidebarViewController(),
                                       editor: EditorViewController())
@@ -14093,8 +14097,10 @@ enum RegressionTests {
         let knob = handle.gripRectForTesting
         let marker = handle.markerRectForTesting
         try expect(abs(marker.midX - knob.midX) <= 0.5 && abs(marker.midY - knob.midY) <= 0.5
-                    && marker.width == DividerGrip.markerDiameter,
-                   "the dot beside the panel is not on its knob's place: \(marker) for \(knob)")
+                    && marker.width == DividerGrip.markerThickness
+                    && marker.height == DividerGrip.markerLength,
+                   "the mark beside the panel is not along its line at its knob's place: "
+                     + "\(marker) for \(knob)")
         root.resizeSidebarForTesting(to: 400)
         root.view.layoutSubtreeIfNeeded()
         func click(_ type: NSEvent.EventType, _ count: Int) -> NSEvent {
