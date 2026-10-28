@@ -208,6 +208,9 @@ enum RegressionTests {
         try testBranchMenu()
         try testSplitterAndRowGestures()
         try testDividersTakeHoldAtTheirMiddle()
+        try testDividerKnobMarksResetsAndHolds()
+        try testCutHistoryRowsSayTheRest()
+        try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -11712,7 +11715,8 @@ enum RegressionTests {
         host.addSubview(swatch)
         let border = try rendered(swatch, at: NSPoint(x: 2, y: 2))
         swatch.removeFromSuperview()
-        let gap = NSPoint(x: splitter.divider + 0.5, y: 200)
+        // Clear of the knob's place, where a dot marks the line.
+        let gap = NSPoint(x: splitter.divider + 0.5, y: 40)
         let line = try rendered(splitter, at: gap)
         try expect(sameColor(line, border),
                    "the line is not between the panes: \(String(describing: line))")
@@ -14000,6 +14004,175 @@ enum RegressionTests {
                    "with nothing crossing it, the line beside the code left its middle")
     }
 
+    /// Around a divider's knob: a dot stays on the line where it is, so it
+    /// can be found before it shows; while the line is held the hand is
+    /// closed on it; and a double-click on it puts the line back where it
+    /// started — halves in the panel, half the window beside the code.
+    private static func testDividerKnobMarksResetsAndHolds() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        try expect(DividerGrip.markerDiameter == 6 && DividerGrip.dragCursor === NSCursor.closedHand,
+                   "the dot is \(DividerGrip.markerDiameter)pt and the held hand "
+                     + "\(DividerGrip.dragCursor), not 6pt and closed")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        window.contentView = host
+        pinPointer(at: pointerNowhere)
+
+        for axis in [ProjectColumnsView.Axis.horizontal, .vertical] {
+            let splitter = ProjectColumnsView(frame: host.bounds)
+            splitter.axis = axis
+            splitter.minimumPane = ProjectColumnsView.minimumRow
+            splitter.fraction = 0.3
+            let first = NSView(), second = NSView()
+            splitter.first = first
+            splitter.second = second
+            splitter.addSubview(first)
+            splitter.addSubview(second)
+            var told: CGFloat?
+            splitter.onFractionChanged = { told = $0 }
+            host.subviews = [splitter]
+            splitter.layoutSubtreeIfNeeded()
+            let name = axis == .horizontal ? "the line between the columns"
+                                           : "the line between the changes and the history"
+            let knob = splitter.gripRectForTesting
+            let centre = NSPoint(x: knob.midX, y: knob.midY)
+
+            // The dot: on the knob's place, there at rest with the knob down,
+            // under the knob and over the panes.
+            let marker = splitter.markerRectForTesting
+            try expect(abs(marker.midX - centre.x) <= 0.5 && abs(marker.midY - centre.y) <= 0.5
+                        && marker.width == DividerGrip.markerDiameter,
+                       "\(name)'s dot is not on its knob's place: \(marker) for \(knob)")
+            try expect(!splitter.showsGripForTesting, "\(name)'s knob is up at rest")
+            let top = splitter.subviews.suffix(2)
+            try expect(top.first is DividerGrip.Marker && top.last is DividerGrip.Knob,
+                       "\(name)'s dot and knob are not over the panes, the knob on top: "
+                         + "\(splitter.subviews.map { String(describing: type(of: $0)) })")
+
+            // Held, the hand is closed on it; let go, it is not.
+            var closedWhileHeld = false
+            var up = [NSEvent.mouseEvent(with: .leftMouseUp, location: splitter.convert(centre, to: nil),
+                                         modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                         context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!]
+            try expect(splitter.trackDivider(from: centre) {
+                           closedWhileHeld = NSCursor.current === DividerGrip.dragCursor
+                           return up.isEmpty ? nil : up.removeFirst()
+                       }, "a press on \(name)'s knob did not take hold")
+            try expect(closedWhileHeld, "\(name) did not close the hand while held")
+            try expect(NSCursor.current !== DividerGrip.dragCursor,
+                       "\(name) left the hand closed after it was let go")
+
+            // A double-click puts it back at halves, and says so.
+            try expect(splitter.doubleClickForTesting(at: centre),
+                       "a double-click on \(name)'s knob did not take hold")
+            try expect(splitter.fraction == ProjectColumnsView.defaultFraction
+                        && told == ProjectColumnsView.defaultFraction,
+                       "a double-click left \(name) at \(splitter.fraction), told "
+                         + "\(String(describing: told))")
+            // Away from the knob a double-click is the pane's.
+            splitter.fraction = 0.3
+            splitter.layoutSubtreeIfNeeded()
+            let away = axis == .horizontal ? NSPoint(x: centre.x, y: 20) : NSPoint(x: 20, y: centre.y)
+            try expect(!splitter.doubleClickForTesting(at: away) && splitter.fraction == 0.3,
+                       "a double-click on \(name) off its knob moved it")
+        }
+
+        // The line beside the code: its dot, the closed hand, and a double-
+        // click back to half the window.
+        let root = RootViewController(sidebar: SidebarViewController(),
+                                      editor: EditorViewController())
+        _ = root.view
+        root.view.frame = NSRect(x: 0, y: 0, width: 1200, height: 700)
+        root.view.layoutSubtreeIfNeeded()
+        guard let handle = root.view.subviews.compactMap({ $0 as? SplitDividerHandleView }).first else {
+            throw Failure(description: "the window has no handle beside the panel")
+        }
+        handle.layoutSubtreeIfNeeded()
+        let knob = handle.gripRectForTesting
+        let marker = handle.markerRectForTesting
+        try expect(abs(marker.midX - knob.midX) <= 0.5 && abs(marker.midY - knob.midY) <= 0.5
+                    && marker.width == DividerGrip.markerDiameter,
+                   "the dot beside the panel is not on its knob's place: \(marker) for \(knob)")
+        root.resizeSidebarForTesting(to: 400)
+        root.view.layoutSubtreeIfNeeded()
+        func click(_ type: NSEvent.EventType, _ count: Int) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                               windowNumber: 0, context: nil, eventNumber: 0,
+                               clickCount: count, pressure: 1)!
+        }
+        handle.mouseDown(with: click(.leftMouseDown, 1))
+        try expect(NSCursor.current === DividerGrip.dragCursor,
+                   "the line beside the panel did not close the hand while held")
+        handle.mouseUp(with: click(.leftMouseUp, 1))
+        try expect(NSCursor.current !== DividerGrip.dragCursor,
+                   "the line beside the panel left the hand closed after it was let go")
+        try expect(root.sidebarWidthForTesting == 400, "a single click moved the panel")
+        handle.mouseDown(with: click(.leftMouseDown, 2))
+        handle.mouseUp(with: click(.leftMouseUp, 2))
+        let opening = RootViewController.openingSidebarWidth(forWindowWidth: root.view.bounds.width)
+        try expect(root.sidebarWidthForTesting == opening,
+                   "a double-click left the panel at \(root.sidebarWidthForTesting), not \(opening)")
+    }
+
+    /// A history row that the column cut short says the rest under the
+    /// pointer: the whole message, the name and the time, and its branches.
+    /// A row that fits says nothing — a tip over every row only follows the
+    /// pointer down the list.
+    private static func testCutHistoryRowsSayTheRest() throws {
+        let commit = GitService.Commit(
+            shortHash: "abc1234",
+            subject: "A message long enough that a narrow column has to cut it short",
+            author: "Someone With A Long Name", absoluteDate: "2026-10-27 16:16",
+            email: "", parents: [], refs: "HEAD -> main")
+        let cell = GitCommitCell(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
+        cell.configure(commit: commit, pending: false, showsID: false, currentBranch: "main")
+        func tip(at width: CGFloat) -> String {
+            cell.setFrameSize(NSSize(width: width, height: 22))
+            if let bitmap = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                cell.cacheDisplay(in: cell.bounds, to: bitmap)
+            }
+            return cell.toolTipForTesting
+        }
+        let narrow = tip(at: 220)
+        try expect(narrow.contains(commit.subject) && narrow.contains(commit.author)
+                    && narrow.contains(commit.absoluteDate) && narrow.contains("main"),
+                   "a cut row does not say the rest: \(narrow)")
+        let wide = tip(at: 3000)
+        try expect(wide.isEmpty, "a row that fits has a tip: \(wide)")
+    }
+
+    /// An empty list says so where its first row would be, once it has been
+    /// read — never while it is still being read, which an empty list looked
+    /// just like.
+    private static func testEmptyListsSaySo() throws {
+        let directory = try temporaryDirectory("empty-lists")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let changes = ProjectChangesViewController()
+        try expect(!changes.showsEmptyNoteForTesting, "the changes said they were empty before a read")
+        changes.setEntries([], in: directory)
+        try expect(changes.showsEmptyNoteForTesting, "a read with nothing changed says nothing")
+        changes.setEntries([GitService.Status.Entry(code: " M", path: "a.swift", originalPath: nil)],
+                           in: directory)
+        try expect(!changes.showsEmptyNoteForTesting, "a list with a change still says it is empty")
+
+        // A repository with no commit yet.
+        let initialised = GitService.run(["init", "-q"], in: directory)
+        try expect(initialised.code == 0, "the fixture could not be made a repository")
+        let history = ProjectHistoryViewController()
+        try expect(!history.showsEmptyNoteForTesting, "the history said it was empty before a read")
+        history.setSource(directory: directory, state: .init(head: "(initial)"))
+        try expect(!history.showsEmptyNoteForTesting, "the history said it was empty while reading")
+        let deadline = Date().addingTimeInterval(5)
+        while !history.showsEmptyNoteForTesting, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(history.showsEmptyNoteForTesting,
+                   "a repository with no commit does not say its history is empty")
+    }
+
     private static func testSplitterAndRowGestures() throws {
         // A pane that passes a scroll it cannot use up the responder chain, the
         // way a list shorter than its pane does.
@@ -16013,7 +16186,8 @@ enum RegressionTests {
 
         // Neither list carries a strip of its own: both start at their first
         // row, under the headings the project's row already gives them.
-        try expect(projectsPanel.history.view.subviews.allSatisfy { $0 is NSScrollView },
+        try expect(projectsPanel.history.view.subviews.filter { !$0.isHidden }
+                    .allSatisfy { $0 is NSScrollView },
                    "the history list took a heading row back")
         // Both lists keep a little room above their first row and below their
         // last, inside the scrolling.

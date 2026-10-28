@@ -98,6 +98,10 @@ final class RootViewController: NSViewController {
             guard let self else { return }
             self.resizeSidebar(to: self.dividerDragStartWidth + deltaX)
         }
+        dividerHandle.onReset = { [weak self] in
+            guard let self else { return }
+            self.resizeSidebar(to: Self.openingSidebarWidth(forWindowWidth: self.view.bounds.width))
+        }
         dividerHandle.dividerThickness = split.splitView.dividerThickness
         root.addSubview(dividerHandle, positioned: .above, relativeTo: splitView)
         NSLayoutConstraint.activate([

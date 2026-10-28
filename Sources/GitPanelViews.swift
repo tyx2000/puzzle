@@ -10,9 +10,14 @@ import AppKit
 
 /// One commit on one line: graph (where the surface uses one), refs pointing
 /// exactly at it, id (in the Git panel), the message, who made it and when.
-final class GitCommitCell: DrawnSidebarCell {
+final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
     private var subject = ""
     private var author = ""
+    /// The name as Git has it, without the ↑ an unpushed commit carries.
+    private var commitAuthor = ""
+    /// The row's whole text, when the last draw had to cut any of it short;
+    /// nil when it all fit.
+    private var cutShort: String?
     private var date = ""
     private var commitID = ""
     private var showsID = true
@@ -73,16 +78,17 @@ final class GitCommitCell: DrawnSidebarCell {
         // The name gives way before the timestamp does: a truncated name still
         // reads, a truncated date does not.
         author = pending ? "↑  " + commit.author : commit.author
+        commitAuthor = commit.author
         date = commit.absoluteDate
         // Unpushed commits are the reason Push is enabled, so they still have
         // to be tellable apart at a glance — the arrow rides with the metadata
         // rather than taking room from the subject.
         metaColor = pending ? Theme.cursor : (inherited ? Theme.gutter : Theme.dimText)
         subjectColor = inherited ? Theme.dimText : Theme.foreground
-        // No bubble: the row carries everything it has to say itself, and a
-        // tip over every row is then only something that follows the pointer
-        // down the list.
-        toolTip = nil
+        // A tip only over a row the column cut short: one over every row is
+        // only something that follows the pointer down the list, but a row
+        // that lost part of its message has more to say than it shows.
+        cutShort = nil
         let graphDescription = graphRow.map {
             "\($0.isHead ? "HEAD, " : "")\($0.isMerge ? "Merge, " : "")"
         } ?? ""
@@ -111,6 +117,8 @@ final class GitCommitCell: DrawnSidebarCell {
         var content = NSRect(x: 8 + graphWidth, y: 0,
                              width: max(0, bounds.width - 16 - graphWidth),
                              height: bounds.height)
+        var refsCut = false
+        var idCut = false
         if !refDecorations.isEmpty, content.width > 0 {
             let naturalWidth = GitRefLabelsDrawing.width(refDecorations,
                                                          currentBranch: currentBranch)
@@ -118,6 +126,7 @@ final class GitCommitCell: DrawnSidebarCell {
             // must not erase the subject. The horizontal Git history can grow
             // to its minimum width and normally renders every label in full.
             let available = min(naturalWidth, floor(content.width * 0.42))
+            refsCut = available < naturalWidth
             drawnRefRectsForTesting = GitRefLabelsDrawing.draw(
                 refDecorations,
                 in: NSRect(x: content.minX, y: content.minY,
@@ -133,9 +142,9 @@ final class GitCommitCell: DrawnSidebarCell {
         if showsID, !commitID.isEmpty {
             let idFont = Theme.uiFont(9.5)
             // A quarter at most: the message is what the row is read for.
-            let idWidth = min(ceil((commitID as NSString)
-                                    .size(withAttributes: [.font: idFont]).width) + 2,
-                              floor(content.width * 0.25))
+            let idNatural = ceil((commitID as NSString).size(withAttributes: [.font: idFont]).width)
+            let idWidth = min(idNatural + 2, floor(content.width * 0.25))
+            idCut = idNatural > idWidth
             let box = NSRect(x: content.minX, y: content.minY,
                              width: idWidth, height: content.height)
             drawnHashRectForTesting = box
@@ -155,11 +164,43 @@ final class GitCommitCell: DrawnSidebarCell {
         drawnSubjectRectForTesting = drawn.leading
         drawnAuthorRectForTesting = drawn.trailing
         drawnDateRectForTesting = drawn.pinned
+
+        func cut(_ text: String, _ font: NSFont, _ box: NSRect) -> Bool {
+            !text.isEmpty
+                && ceil((text as NSString).size(withAttributes: [.font: font]).width) > box.width + 0.5
+        }
+        let anyCut = refsCut || idCut
+            || cut(subject, Theme.uiFont(11), drawn.leading)
+            || cut(author, Theme.uiFont(9.5), drawn.trailing)
+            || cut(date, Theme.uiFont(9.5), drawn.pinned)
+        cutShort = anyCut ? fullText : nil
+    }
+
+    /// Message; then id, name and time; then the branches, if any.
+    private var fullText: String {
+        let meta = [showsID ? commitID : "", commitAuthor, date]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        var lines = [subject, meta]
+        if !refDecorations.isEmpty { lines.append(refDecorations.map(\.name).joined(separator: ", ")) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The tip covers the whole row, and asks what to say only when it is
+    /// about to show — after the row has been drawn at the width it has.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        removeAllToolTips()
+        addToolTip(bounds, owner: self, userData: nil)
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
+              point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        cutShort ?? ""
     }
 
     var subjectForTesting: String { subject }
     var metaForTesting: String { "\(author)  ·  \(date)" }
-    var toolTipForTesting: String { toolTip ?? "" }
+    var toolTipForTesting: String { view(self, stringForToolTip: 0, point: .zero, userData: nil) }
     var graphWidthForTesting: CGFloat { graphWidth }
     var graphRowForTesting: GitHistoryGraph.Row? { graphRow }
     var refLabelsForTesting: [String] { refDecorations.map(\.name) }

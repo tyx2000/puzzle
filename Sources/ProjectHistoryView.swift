@@ -65,6 +65,9 @@ final class ProjectHistoryViewController: NSViewController {
     private var isBaseFolded: Bool { foldKey.map(Self.foldedBranches.contains) ?? false }
     private var rows: [Row] = []
     private var loading = false
+    /// Said once the log has been read and has nothing, as in a repository
+    /// with no commit yet — not while it is still being read.
+    private let emptyNote = ProjectChangesViewController.makeEmptyNote("No commits yet")
     /// Something moved while a read was already running. The reply in flight
     /// speaks for the state before it, so another read has to follow — without
     /// this the list sat one commit behind until the next thing moved.
@@ -109,6 +112,9 @@ final class ProjectHistoryViewController: NSViewController {
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(scroll)
+        root.addSubview(emptyNote)
+        NSLayoutConstraint.activate(ProjectChangesViewController.placeEmptyNote(emptyNote,
+                                                                                 over: scroll))
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -125,6 +131,7 @@ final class ProjectHistoryViewController: NSViewController {
         guard directory != self.directory || state != self.state else { return }
         prepare(for: directory)
         self.state = state
+        refreshEmptyNote()
         // No commit to read from: not a repository.
         guard let directory, !state.head.isEmpty else { return }
         load(directory)
@@ -169,6 +176,7 @@ final class ProjectHistoryViewController: NSViewController {
             return
         }
         loading = true
+        refreshEmptyNote()
         loadCountForTesting += 1
         // Read on the main thread, where it is set; the queue below only uses
         // the number.
@@ -184,6 +192,7 @@ final class ProjectHistoryViewController: NSViewController {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading = false
+                self.refreshEmptyNote()
                 defer {
                     if self.loadAgain, let current = self.directory {
                         self.loadAgain = false
@@ -249,8 +258,19 @@ final class ProjectHistoryViewController: NSViewController {
             }
         }
         rows = built
+        refreshEmptyNote()
         guard isViewLoaded else { return }
         table.reloadData()
+    }
+
+    /// Up once a project's state is known and its log read with nothing in
+    /// it; down while anything is still being read.
+    private func refreshEmptyNote() {
+        emptyNote.isHidden = state == nil || loading || !rows.isEmpty
+    }
+    var showsEmptyNoteForTesting: Bool {
+        _ = view
+        return !emptyNote.isHidden
     }
 
     private func isUnpushed(_ shortHash: String) -> Bool {
@@ -308,6 +328,7 @@ final class ProjectHistoryViewController: NSViewController {
 
     func refreshFonts() {
         guard isViewLoaded else { return }
+        emptyNote.font = Theme.uiFont(11)
         table.reloadData()
     }
 

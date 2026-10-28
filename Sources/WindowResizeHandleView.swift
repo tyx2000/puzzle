@@ -4,7 +4,9 @@ import AppKit
 /// two panes, but only a round knob across it moves it: the pointer on the
 /// knob's place brings the knob up, fading in, and a press there takes hold;
 /// anywhere else on the line the pointer and the press are the panes'. The
-/// knob stays up for the whole of a drag.
+/// knob stays up for the whole of a drag, and a double-click on it puts the
+/// line back where it started. A small dot stays on the line at the knob's
+/// place, so it can be found before it shows.
 ///
 /// The lines down the panel — beside the tree, beside the code — are taken
 /// hold of where the line across it, between the changes and the history,
@@ -23,6 +25,11 @@ enum DividerGrip {
     /// Over the knob: the hand, as over the app's other things to press.
     /// The knob is a thing to take hold of, not an edge to pull.
     static var cursor: NSCursor { .pointingHand }
+    /// While the line is held: the hand closed on it. Pushed when the press
+    /// takes hold and popped when it lets go.
+    static var dragCursor: NSCursor { .closedHand }
+    /// The dot left on the line at the knob's place.
+    static let markerDiameter: CGFloat = 6
 
     /// The part of `band` — the strip either side of a line — that takes
     /// hold: `reach` of it, centred at `centre` along the line (its middle
@@ -42,6 +49,29 @@ enum DividerGrip {
     static func knobRect(centredOn point: NSPoint) -> NSRect {
         NSRect(x: point.x - diameter / 2, y: point.y - diameter / 2,
                width: diameter, height: diameter)
+    }
+
+    /// The dot's frame, on the same point as the knob.
+    static func markerRect(centredOn point: NSPoint) -> NSRect {
+        NSRect(x: point.x - markerDiameter / 2, y: point.y - markerDiameter / 2,
+               width: markerDiameter, height: markerDiameter)
+    }
+
+    /// The dot: one layer of one colour, round, so it costs no bitmap — a
+    /// shade off the line, in the colour of the knob's own edge. The knob
+    /// covers it when it comes up. It never takes the pointer.
+    final class Marker: FlatView {
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.cornerRadius = DividerGrip.markerDiameter / 2
+            fillColor = Theme.raisedEdge
+            setAccessibilityElement(false)
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 
     /// Where the line across the panel lies in `window`, in its coordinates;
@@ -140,10 +170,13 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     var onDragBegan: (() -> Void)?
     var onDrag: ((CGFloat) -> Void)?
+    /// A double-click on the knob: put the panel back at its opening width.
+    var onReset: (() -> Void)?
     /// Width of the hairline this view paints over — AppKit's own divider,
     /// which has no colour API. Set from the split view's `dividerThickness`.
     var dividerThickness: CGFloat = 1 { didSet { needsDisplay = true; needsLayout = true } }
     private var initialMouseX: CGFloat = 0
+    private let marker = DividerGrip.Marker()
     private let knob = DividerGrip.Knob()
     private var gripArea: NSTrackingArea?
     private var isDragging = false
@@ -151,6 +184,7 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setAccessibilityElement(false)
+        addSubview(marker)
         addSubview(knob)
     }
 
@@ -226,10 +260,11 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         updateTrackingAreas()
     }
 
-    /// On the line, where it takes hold.
+    /// On the line, where it takes hold, over the dot that marks the place.
     private func placeKnob() {
-        knob.frame = DividerGrip.knobRect(
-            centredOn: NSPoint(x: paintedDividerRect.midX, y: grabRect.midY))
+        let centre = NSPoint(x: paintedDividerRect.midX, y: grabRect.midY)
+        knob.frame = DividerGrip.knobRect(centredOn: centre)
+        marker.frame = DividerGrip.markerRect(centredOn: centre)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -242,6 +277,7 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     var showsGripForTesting: Bool { knob.isShown }
     var gripRectForTesting: NSRect { knob.frame }
     var gripFadeForTesting: CAAnimation? { knob.fadeForTesting }
+    var markerRectForTesting: NSRect { marker.isHidden ? .zero : marker.frame }
     func refreshGripForTesting() { refreshGrip() }
 
     override func resetCursorRects() {
@@ -291,18 +327,26 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
                     && !PuzzleScroller.isShowing(at: pointer, in: window))
     }
 
+    /// A double-click puts the panel back first; a drag carried on from it
+    /// starts from there.
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { onReset?() }
         initialMouseX = Pointer.location.x
+        if !isDragging { DividerGrip.dragCursor.push() }
         isDragging = true
         refreshGrip()
         onDragBegan?()
     }
 
+    /// The window works the cursors out again as the pointer moves, and the
+    /// pointer can leave the knob sideways while the line follows it.
     override func mouseDragged(with event: NSEvent) {
+        DividerGrip.dragCursor.set()
         onDrag?(Pointer.location.x - initialMouseX)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isDragging { NSCursor.pop() }
         isDragging = false
         refreshGrip()
     }

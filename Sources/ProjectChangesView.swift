@@ -13,6 +13,28 @@ final class ProjectChangesViewController: NSViewController {
     /// history under it, so neither runs hard against the line or the strip
     /// over it. Inside the scrolling: the rows pass through it.
     static let listPadding: CGFloat = 6
+
+    /// A pale line where the first row would be, in this list and the
+    /// history under it, when there is nothing to list — so an empty list
+    /// does not read as one still loading.
+    static func makeEmptyNote(_ text: String) -> NSTextField {
+        let note = NSTextField(labelWithString: text)
+        note.font = Theme.uiFont(11)
+        note.textColor = Theme.dimText
+        note.isHidden = true
+        note.translatesAutoresizingMaskIntoConstraints = false
+        return note
+    }
+
+    /// The note's place: across the middle of the first row's slot.
+    static func placeEmptyNote(_ note: NSTextField, over scroll: NSScrollView) -> [NSLayoutConstraint] {
+        [note.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+         note.centerYAnchor.constraint(equalTo: scroll.topAnchor,
+                                       constant: listPadding + Theme.treeRowHeight() / 2)]
+    }
+
+    /// Said once the project's changes have been read and there are none.
+    private let emptyNote = makeEmptyNote("No changes")
     /// A changed file was clicked: show its diff.
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
     /// The open button on a row: the file itself, not its diff.
@@ -98,6 +120,8 @@ final class ProjectChangesViewController: NSViewController {
         // the tree's first row beside it, and the list starts under it.
         root.addSubview(commitBar)
         root.addSubview(scroll)
+        root.addSubview(emptyNote)
+        NSLayoutConstraint.activate(Self.placeEmptyNote(emptyNote, over: scroll))
         NSLayoutConstraint.activate([
             commitBar.topAnchor.constraint(equalTo: root.topAnchor),
             commitBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -110,6 +134,7 @@ final class ProjectChangesViewController: NSViewController {
         ])
         view = root
         refreshButtons()
+        refreshEmptyNote()
     }
 
     /// The project's changes, as the window's own Git refresh found them, and
@@ -131,6 +156,16 @@ final class ProjectChangesViewController: NSViewController {
         guard isViewLoaded else { return }
         table.reloadData()
         refreshButtons()
+        refreshEmptyNote()
+    }
+
+    /// Up for a repository read with nothing changed; not before it is read.
+    private func refreshEmptyNote() {
+        emptyNote.isHidden = directory == nil || !entries.isEmpty
+    }
+    var showsEmptyNoteForTesting: Bool {
+        _ = view
+        return !emptyNote.isHidden
     }
 
     /// Put away what was typed for the project leaving, and bring back what
@@ -158,6 +193,7 @@ final class ProjectChangesViewController: NSViewController {
     func refreshFonts() {
         guard isViewLoaded else { return }
         commitBar.refreshAppearance()
+        emptyNote.font = Theme.uiFont(11)
         table.reloadData()
     }
 

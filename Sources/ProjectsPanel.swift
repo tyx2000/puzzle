@@ -602,7 +602,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// Where the line sits, as a share of the length along the axis. A project
     /// row draws its own line from the same number, so the headings stay over
     /// the columns they name.
-    var fraction: CGFloat = 0.5 {
+    var fraction: CGFloat = defaultFraction {
         didSet {
             guard fraction != oldValue else { return }
             needsLayout = true
@@ -611,6 +611,9 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         }
     }
     var onFractionChanged: ((CGFloat) -> Void)?
+    /// Halves: where a pair starts, and where a double-click on the knob
+    /// puts the line back.
+    static let defaultFraction: CGFloat = 0.5
 
     /// Neither pane may be squeezed away. A column needs this much to say a
     /// name; a list stacked on another needs only a couple of rows.
@@ -805,18 +808,20 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
     private var isDraggingDivider = false
 
-    /// On the line, where it takes hold.
+    /// On the line, where it takes hold, over the dot that marks the place.
     private func placeGrip() {
         let at = axis == .horizontal
             ? NSPoint(x: line.frame.midX, y: grabRect.midY)
             : NSPoint(x: grabRect.midX, y: line.frame.midY)
         grip.frame = DividerGrip.knobRect(centredOn: at)
         grip.movesVertically = axis == .vertical
+        marker.frame = DividerGrip.markerRect(centredOn: at)
     }
 
     var showsGripForTesting: Bool { grip.isShown }
     var gripFadeForTesting: CAAnimation? { grip.fadeForTesting }
     var gripRectForTesting: NSRect { grip.frame }
+    var markerRectForTesting: NSRect { marker.isHidden ? .zero : marker.frame }
     var grabRectForTesting: NSRect { grabRect }
     func refreshGripForTesting() { refreshGrip() }
 
@@ -864,12 +869,34 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
 
     /// Tracked in its own event loop, like the rows' own drag: the panes are
     /// laid out as it travels, so what is on screen is the size being chosen.
+    /// A double-click on the knob puts the line back at halves first.
     override func mouseDown(with event: NSEvent) {
-        let tracked = trackDivider(from: convert(event.locationInWindow, from: nil)) {
-            [weak self] in
+        let tracked = press(at: convert(event.locationInWindow, from: nil),
+                            clicks: event.clickCount) { [weak self] in
             self?.window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp])
         }
         if !tracked { super.mouseDown(with: event) }
+    }
+
+    /// A press, the `clicks`th in a row, and what follows it. Returns whether
+    /// it took hold of the line.
+    private func press(at start: NSPoint, clicks: Int, nextEvent: () -> NSEvent?) -> Bool {
+        guard clicks == 2, isOnGrabBand(start) else {
+            return trackDivider(from: start, nextEvent: nextEvent)
+        }
+        resetDivider()
+        // The knob went with the line, out from under the pointer: what is
+        // left of this press is only its release.
+        while let next = nextEvent(), next.type != .leftMouseUp {}
+        return true
+    }
+
+    /// The line back at halves, and the panel told, as after a drag.
+    func resetDivider() {
+        guard fraction != Self.defaultFraction else { return }
+        fraction = Self.defaultFraction
+        layoutSubtreeIfNeeded()
+        onFractionChanged?(fraction)
     }
 
     /// The press, from the button going down to its release. Only a press on
@@ -878,9 +905,11 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     func trackDivider(from start: NSPoint, nextEvent: () -> NSEvent?) -> Bool {
         guard isOnGrabBand(start) else { return false }
         isDraggingDivider = true
+        DividerGrip.dragCursor.push()
         refreshGrip()
         defer {
             isDraggingDivider = false
+            NSCursor.pop()
             refreshGrip()
         }
         var tracking = true
@@ -893,6 +922,16 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
             }
         }
         return true
+    }
+
+    /// A double-click let go where it went down, scripted in this view's own
+    /// points.
+    @discardableResult
+    func doubleClickForTesting(at point: NSPoint) -> Bool {
+        var up = [NSEvent.mouseEvent(with: .leftMouseUp, location: convert(point, to: nil),
+                                     modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                     context: nil, eventNumber: 0, clickCount: 2, pressure: 1)!]
+        return press(at: point, clicks: 2) { up.isEmpty ? nil : up.removeFirst() }
     }
 
     /// A whole press, scripted in this view's own points.
@@ -955,18 +994,24 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
     /// On the line where it takes hold, and over the panes either side of it.
     private let grip = DividerGrip.Knob()
+    /// The dot under the knob, which stays.
+    private let marker = DividerGrip.Marker()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         line.fillColor = Theme.border
         addSubview(line)
+        addSubview(marker)
         addSubview(grip)
     }
 
-    /// The panes are added after the knob, which has to stay over them.
+    /// The panes are added after the dot and the knob, which have to stay
+    /// over them, the knob on top.
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
-        if subview !== grip { addSubview(grip, positioned: .above, relativeTo: nil) }
+        guard subview !== grip, subview !== marker else { return }
+        addSubview(marker, positioned: .above, relativeTo: nil)
+        addSubview(grip, positioned: .above, relativeTo: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -1005,7 +1050,9 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refuseAnimations(on: second)
         refuseAnimations(on: line)
         refuseAnimations(on: grip)
+        refuseAnimations(on: marker)
         line.isHidden = !showsSecond
+        marker.isHidden = !showsSecond
         line.frame = dividerRect(radius: 0)
         second?.isHidden = !showsSecond
         first?.frame = firstPaneRect
@@ -1081,7 +1128,7 @@ final class ProjectsPanelViewController: NSViewController {
 
     private static func storedFraction(_ key: String, in defaults: UserDefaults) -> CGFloat {
         let stored = defaults.object(forKey: key) as? Double
-        guard let stored, stored > 0.05, stored < 0.95 else { return 0.5 }
+        guard let stored, stored > 0.05, stored < 0.95 else { return ProjectColumnsView.defaultFraction }
         return CGFloat(stored)
     }
     /// The row being dragged and where it started, while a drag is running.
