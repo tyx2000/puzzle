@@ -8943,9 +8943,9 @@ enum RegressionTests {
     /// Every scroller is shown and hidden as the system's own are. Set to
     /// show only while scrolling — what macOS does by default — it floats
     /// over the content, hidden and letting presses through to what is under
-    /// it, and comes up while the content scrolls or the pointer is on it,
-    /// fading a moment after; set to show always, it is a column beside the
-    /// content and always up. Either way it is the same everywhere, lies
+    /// it, and comes up only when the content scrolls, fading a moment after
+    /// unless the pointer is on it; the pointer alone never brings it up. Set
+    /// to show always, it is a column beside the content and always up. Either way it is the same everywhere, lies
     /// against the edge of what it scrolls, and widens under the pointer.
     private static func testScrollersShowAsTheSystemsDo() throws {
         defer { pinPointer(at: pointerNowhere) }
@@ -8995,15 +8995,21 @@ enum RegressionTests {
         RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
         try expect(!scroller.isRevealed && !(pressed(scroll, scroller) is PuzzleScroller),
                    "the scroller stayed up after the scrolling stopped")
-        // So does the pointer coming onto it — and it stays while the pointer
-        // does, wider, then goes once it has left.
+        // The pointer coming onto it does not: hidden, it stays hidden under
+        // the pointer, and the press is still the content's.
         pinPointer(at: window.convertPoint(toScreen: scroller.convert(
             NSPoint(x: scroller.bounds.midX, y: scroller.bounds.midY), to: nil)))
         scroller.refreshKnobStateForTesting()
+        try expect(!scroller.isRevealed && scroller.knobState == .resting
+                    && !(pressed(scroll, scroller) is PuzzleScroller),
+                   "the pointer on a hidden scroller brought it up")
+        // Brought up by scrolling under the pointer, it stays while the
+        // pointer does, wider, then goes once it has left.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
         RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
         try expect(scroller.isRevealed && scroller.knobState == .hovered
                     && pressed(scroll, scroller) === scroller,
-                   "the scroller under the pointer is not up to be caught")
+                   "the scroller scrolled under the pointer is not up to be caught")
         pinPointer(at: pointerNowhere)
         scroller.refreshKnobStateForTesting()
         RunLoop.main.run(until: Date().addingTimeInterval(PuzzleScroller.lingering + 0.4))
@@ -9217,16 +9223,19 @@ enum RegressionTests {
         }
 
         // Away from the scrollers the handles still take hold: the line
-        // beside the panel at its middle, the window's right edge in the
-        // title band, above the code's scroller. The line takes hold nowhere
-        // else — not at the height of the project rows.
+        // beside the panel at its knob — where the line between the changes
+        // and the history meets it — the window's right edge in the title
+        // band, above the code's scroller. The line takes hold nowhere else —
+        // not at the height of the project rows.
         let panel = workspace.sidebar.view
-        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.midY), to: nil)
+        let knobY = DividerGrip.crossing(in: window)
+            .map { panel.convert(NSPoint(x: 0, y: $0), from: nil).y } ?? panel.bounds.midY
+        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: knobY), to: nil)
         try expect(frameView.hitTest(besidePanel) is SplitDividerHandleView,
                    "the line beside the panel no longer takes hold where no scroller is")
         let besideRows = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.maxY - 50), to: nil)
         try expect(!(frameView.hitTest(besideRows) is SplitDividerHandleView),
-                   "the line beside the panel took hold away from its middle")
+                   "the line beside the panel took hold away from its knob")
         let rightEdge = NSPoint(x: window.frame.width - 5, y: window.frame.height - 20)
         try expect(frameView.hitTest(rightEdge) is WindowResizeHandleView,
                    "the window's right edge no longer resizes it where no scroller is")
@@ -10775,10 +10784,13 @@ enum RegressionTests {
                    "the gutter drew no ribbons, so the geometry below proves nothing")
         // Three targets share the gutter and none may overlap: the split
         // divider's drag handle reaches in from the left, the fold arrow owns
-        // the right, and the ribbon plus the numbers sit between them.
+        // the right, and the ribbon plus the numbers sit between them. The
+        // handle takes hold at its knob, centred on the panel's edge; the
+        // code starts past the 1pt line there.
         let arrowColumn = ruler.ruleThickness - LineNumberRulerView.foldArrowColumn
         let dividerReach = LineNumberRulerView.dividerReach
-        try expect(dividerReach >= SplitDividerHandleView.hitWidth / 2,
+        try expect(dividerReach >= DividerGrip.diameter / 2
+                    && dividerReach >= SplitDividerHandleView.hitWidth / 2 - 1,
                    "the ribbon column starts inside the divider's drag handle")
         try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.maxX <= arrowColumn },
                    "a change target reaches into the fold arrow's column: "
@@ -13775,20 +13787,20 @@ enum RegressionTests {
                    "a normal file showed the diff header or its buttons")
     }
 
-    /// A divider is taken hold of only at the middle of its line, where a
-    /// capsule shows while the pointer is over it and for the whole of a
-    /// drag; along the rest of the line a press is the panes'. The same for
-    /// the line between the tree and the Git lists, the one between the
+    /// A divider is taken hold of only at a round knob on its line — its
+    /// middle, or where the line across the panel meets it. The knob shows
+    /// only while the pointer is on it, and for the whole of a drag; along
+    /// the rest of the line the pointer and a press are the panes'. The same
+    /// for the line between the tree and the Git lists, the one between the
     /// changes and the history, and the one beside the panel.
     private static func testDividersTakeHoldAtTheirMiddle() throws {
         defer { pinPointer(at: pointerNowhere) }
-        // The capsule: longer than it was, pale, fading in and out.
-        try expect(DividerGrip.length == 48 && DividerGrip.reach == 64 && DividerGrip.fade == 0.15,
-                   "the capsule is \(DividerGrip.length)pt, takes hold along \(DividerGrip.reach)pt "
-                     + "and fades in \(DividerGrip.fade)s, not 48, 64 and 0.15")
-        try expect(DividerGrip.colour.alphaComponent == 0.6
-                    && DividerGrip.Capsule().fillColor.alphaComponent == 0.6,
-                   "the capsule is not the dim text at 0.6, paler than it was")
+        // The knob: a 20pt disc, taking hold across its own span, fading in
+        // and out.
+        try expect(DividerGrip.diameter == 20 && DividerGrip.reach == DividerGrip.diameter
+                    && DividerGrip.radius == DividerGrip.diameter / 2 && DividerGrip.fade == 0.15,
+                   "the knob is \(DividerGrip.diameter)pt, takes hold along \(DividerGrip.reach)pt "
+                     + "and fades in \(DividerGrip.fade)s, not 20, 20 and 0.15")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -13835,37 +13847,45 @@ enum RegressionTests {
             func beside(_ point: NSPoint) -> NSPoint {
                 NSPoint(x: point.x + intoFirst.dx, y: point.y + intoFirst.dy)
             }
+            // Just past the knob's edge, along the line.
+            let pastKnob = axis == .horizontal
+                ? NSPoint(x: middle.x, y: middle.y + DividerGrip.reach / 2 + 2)
+                : NSPoint(x: middle.x + DividerGrip.reach / 2 + 2, y: middle.y)
 
-            try expect(splitter.subviews.last is DividerGrip.Capsule,
-                       "\(name)'s capsule lies under the panes")
-            let capsule = splitter.gripRectForTesting
-            try expect(abs(capsule.midX - middle.x) <= 0.5 && abs(capsule.midY - middle.y) <= 0.5
-                        && min(capsule.width, capsule.height) == DividerGrip.thickness
-                        && max(capsule.width, capsule.height) == DividerGrip.length,
-                       "\(name)'s capsule is not across its middle: \(capsule)")
+            try expect(splitter.subviews.last is DividerGrip.Knob,
+                       "\(name)'s knob lies under the panes")
+            let knob = splitter.gripRectForTesting
+            try expect(abs(knob.midX - middle.x) <= 0.5 && abs(knob.midY - middle.y) <= 0.5
+                        && knob.width == DividerGrip.diameter && knob.height == DividerGrip.diameter,
+                       "\(name)'s knob is not on its middle: \(knob)")
+            try expect(splitter.grabRectForTesting.insetBy(dx: -0.5, dy: -0.5).contains(knob),
+                       "\(name) takes hold along \(splitter.grabRectForTesting), short of its knob \(knob)")
 
             pinPointer(at: pointerNowhere)
             splitter.refreshGripForTesting()
-            try expect(!splitter.showsGripForTesting, "\(name) shows its capsule at rest")
-            // Anywhere on the line the capsule comes up, fading in — but a
-            // press there is still the pane's.
-            pin(end, in: splitter)
-            splitter.refreshGripForTesting()
-            try expect(splitter.showsGripForTesting,
-                       "\(name) did not show its capsule with the pointer on it, away from its middle")
-            try expect(splitter.gripFadeForTesting?.duration == DividerGrip.fade,
-                       "\(name)'s capsule came up without fading in")
-            try expect(hit(beside(end), in: splitter) === first,
-                       "\(name) took hold away from its middle")
+            try expect(!splitter.showsGripForTesting, "\(name) shows its knob at rest")
+            // On the line away from the knob nothing comes up, and a press
+            // there is the pane's.
+            for away in [end, pastKnob] {
+                pin(away, in: splitter)
+                splitter.refreshGripForTesting()
+                try expect(!splitter.showsGripForTesting,
+                           "\(name) showed its knob with the pointer on the line at \(away), off the knob")
+                try expect(hit(beside(away), in: splitter) === first,
+                           "\(name) took hold at \(away), off its knob")
+            }
+            // On the knob it comes up, fading in, and takes hold.
             pin(middle, in: splitter)
             splitter.refreshGripForTesting()
             try expect(splitter.showsGripForTesting,
-                       "\(name) hid its capsule with the pointer over its middle")
+                       "\(name) hid its knob with the pointer on it")
+            try expect(splitter.gripFadeForTesting?.duration == DividerGrip.fade,
+                       "\(name)'s knob came up without fading in")
             try expect(hit(beside(middle), in: splitter) === splitter,
-                       "\(name) did not take hold at its middle")
+                       "\(name) did not take hold at its knob")
 
             // Pressed away from the middle, it stays; pressed at the middle it
-            // moves, its capsule up the whole way even with the pointer gone.
+            // moves, its knob up the whole way even with the pointer gone.
             let fraction = splitter.fraction
             try expect(!splitter.pressForTesting(at: end, draggingTo: NSPoint(x: 120, y: 120)),
                        "a press on \(name) away from its middle took hold of it")
@@ -13884,9 +13904,9 @@ enum RegressionTests {
                        },
                        "a press at the middle of \(name) did not take hold of it")
             try expect(splitter.fraction != fraction, "dragging \(name) did not move it")
-            try expect(!hiddenWhileHeld, "\(name) hid its capsule while it was held")
+            try expect(!hiddenWhileHeld, "\(name) hid its knob while it was held")
             try expect(!splitter.showsGripForTesting,
-                       "\(name) kept its capsule up after it was let go")
+                       "\(name) kept its knob up after it was let go")
         }
 
         // The line beside the panel: its handle runs the window's height,
@@ -13898,11 +13918,12 @@ enum RegressionTests {
         let line = handle.paintedDividerRectForTesting
         let lineMiddle = NSPoint(x: line.midX, y: line.midY)
         let lineEnd = NSPoint(x: line.midX, y: 20)
-        let capsule = handle.gripRectForTesting
-        try expect(abs(capsule.midX - lineMiddle.x) <= 0.5 && abs(capsule.midY - lineMiddle.y) <= 0.5
-                    && capsule.width == DividerGrip.thickness
-                    && capsule.height == DividerGrip.length,
-                   "the capsule beside the panel is not across its line's middle: \(capsule)")
+        let knob = handle.gripRectForTesting
+        try expect(abs(knob.midX - lineMiddle.x) <= 0.5 && abs(knob.midY - lineMiddle.y) <= 0.5
+                    && knob.width == DividerGrip.diameter && knob.height == DividerGrip.diameter,
+                   "the knob beside the panel is not on its line's middle: \(knob)")
+        try expect(handle.bounds.contains(knob),
+                   "the handle beside the panel cuts its knob: \(knob) in \(handle.bounds)")
         try expect(handle.grabRectForTesting.height == DividerGrip.reach,
                    "the line beside the panel takes hold along \(handle.grabRectForTesting)")
         try expect(hit(lineEnd, in: handle) !== handle,
@@ -13910,15 +13931,15 @@ enum RegressionTests {
         try expect(hit(lineMiddle, in: handle) === handle,
                    "the line beside the panel did not take hold at its middle")
         handle.refreshGripForTesting()
-        try expect(!handle.showsGripForTesting, "the line beside the panel shows its capsule at rest")
+        try expect(!handle.showsGripForTesting, "the line beside the panel shows its knob at rest")
         pin(lineEnd, in: handle)
         handle.refreshGripForTesting()
-        try expect(handle.showsGripForTesting && handle.gripFadeForTesting?.duration == DividerGrip.fade,
-                   "the line beside the panel did not fade its capsule in with the pointer on it")
+        try expect(!handle.showsGripForTesting,
+                   "the line beside the panel showed its knob with the pointer on the line, off the knob")
         pin(lineMiddle, in: handle)
         handle.refreshGripForTesting()
-        try expect(handle.showsGripForTesting,
-                   "the line beside the panel hid its capsule with the pointer over its middle")
+        try expect(handle.showsGripForTesting && handle.gripFadeForTesting?.duration == DividerGrip.fade,
+                   "the line beside the panel did not fade its knob in with the pointer on it")
         let press = NSEvent.mouseEvent(with: .leftMouseDown, location: handle.convert(lineMiddle, to: nil),
                                        modifierFlags: [], timestamp: 0, windowNumber: 0,
                                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
@@ -13926,10 +13947,10 @@ enum RegressionTests {
         pinPointer(at: pointerNowhere)
         handle.refreshGripForTesting()
         try expect(handle.showsGripForTesting,
-                   "the line beside the panel hid its capsule while it was held")
+                   "the line beside the panel hid its knob while it was held")
         handle.mouseUp(with: press)
         try expect(!handle.showsGripForTesting,
-                   "the line beside the panel kept its capsule up after it was let go")
+                   "the line beside the panel kept its knob up after it was let go")
 
         // Where the line across the panel — between the changes and the
         // history — meets the lines down it, they take hold there, not at

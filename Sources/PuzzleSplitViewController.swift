@@ -15,7 +15,8 @@ final class PuzzleSplitView: NSSplitView {
 /// NSSplitViewController is its own split view's delegate, so we subclass it to
 /// observe divider drags instead of replacing the delegate.
 final class PuzzleSplitViewController: NSSplitViewController {
-    private let dividerHitPadding: CGFloat = 6
+    /// As far either side of the line as the knob laid over it reaches.
+    private let dividerHitPadding: CGFloat = DividerGrip.radius
 
     /// Called continuously while the user drags the divider, with the proposed
     /// sidebar width. Return value is passed straight through.
@@ -34,8 +35,8 @@ final class PuzzleSplitViewController: NSSplitViewController {
     /// Keep the divider visually thin while making it much easier to acquire.
     /// AppKit uses this rectangle for pointer hit-testing and cursor feedback.
     ///
-    /// Only the middle of the line takes hold, as on the handle laid over it
-    /// (see `DividerGrip`); along the rest a press is the panes'.
+    /// Only the knob's place on the line takes hold, as on the handle laid
+    /// over it (see `DividerGrip`); along the rest a press is the panes'.
     ///
     /// The band reaches into the panel, where its lists keep their scrollers
     /// against the line. A scroller showing there is the scroller's to catch:

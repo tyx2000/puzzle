@@ -66,8 +66,10 @@ final class LineNumberRulerView: NSRulerView {
     /// centred on the boundary and reaches into the editor; anything drawn or
     /// clicked there is really the resize target. The last belongs to the fold
     /// arrow. The ribbon and the numbers live between them, so all three
-    /// targets are reachable without fighting each other.
-    static let dividerReach: CGFloat = 8
+    /// targets are reachable without fighting each other. The handle takes
+    /// hold only at its knob, which is centred on the line and reaches half
+    /// its width past it.
+    static let dividerReach: CGFloat = DividerGrip.radius
     /// The ribbon's one width. It was 3pt and grew to this under the pointer;
     /// it is this wide throughout now, so the target never has to be found
     /// first. Stops short of the numbers, which keep their column.

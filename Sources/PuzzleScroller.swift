@@ -20,9 +20,10 @@ protocol PointerHoverRefreshing: AnyObject {
 ///
 /// It is shown and hidden as the system's own are: with scrollers set to show
 /// only while scrolling it floats over the content, hidden at rest, and comes
-/// up while the content scrolls or the pointer is on it; set to show always,
-/// it is a column of its own and always there. Under the pointer it widens,
-/// to be caught more easily.
+/// up only when the content scrolls — the pointer passing over where it
+/// would be leaves it hidden; set to show always, it is a column of its own
+/// and always there. Up, it stays while the pointer is on it, and widens to
+/// be caught more easily.
 final class PuzzleScroller: NSScroller {
     /// Required, or AppKit silently falls back to its own scroller for the
     /// overlay style.
@@ -68,8 +69,8 @@ final class PuzzleScroller: NSScroller {
     /// control size, which is how AppKit asks a scroller's class its width.
     static let windowBorderReach: CGFloat = 3
 
-    /// The same in either style: over the content, it is the strip where the
-    /// pointer brings the scroller up; beside it, the column it stands in.
+    /// The same in either style: over the content, it is the strip the
+    /// scroller comes up in; beside it, the column it stands in.
     override class func scrollerWidth(for controlSize: NSControl.ControlSize,
                                       scrollerStyle: NSScroller.Style) -> CGFloat {
         controlSize == .large ? grabThickness + windowBorderReach : grabThickness
@@ -125,18 +126,21 @@ final class PuzzleScroller: NSScroller {
             name: NSView.boundsDidChangeNotification, object: clip)
     }
 
+    /// Up, and caught by the pointer if it was already resting there: the
+    /// pointer did not bring it up, but now it is, it keeps it.
     @objc private func contentScrolled() {
         redrawKnob()
         reveal()
+        refreshKnobState()
         concealLater()
     }
 
     // MARK: - Shown and hidden
 
-    /// Over the content, the scroller is up while the content scrolls, while
-    /// the pointer is on it and while it is held, and fades this long after
-    /// the last of them — as the system's own do. Beside the content, in a
-    /// column of its own, it is always up.
+    /// Over the content, the scroller comes up when the content scrolls, stays
+    /// while the pointer is on it and while it is held, and fades this long
+    /// after the last of them — as the system's own do. Beside the content,
+    /// in a column of its own, it is always up.
     static let lingering: TimeInterval = 1.0
     static let fadingOut: TimeInterval = 0.25
     private var isUpForNow = false
@@ -197,10 +201,10 @@ final class PuzzleScroller: NSScroller {
         }
     }
 
-    /// Hidden, it takes no press: the row under it does. The pointer coming
-    /// onto it — which its tracking area hears of all the same — brings it
-    /// up, and then the press is its own. AppKit's own answer follows only
-    /// its own showing and hiding, which the pointer does not reach.
+    /// Hidden, it takes no press: the row under it does, and the pointer
+    /// coming onto it — which its tracking area hears of all the same —
+    /// leaves it hidden. Up, the press is its own. AppKit's own answer
+    /// follows only its own showing and hiding, which this does not reach.
     override func hitTest(_ point: NSPoint) -> NSView? {
         isRevealed && !isHidden && frame.contains(point) ? self : nil
     }
@@ -301,13 +305,17 @@ final class PuzzleScroller: NSScroller {
     }
 
     /// Held, under the pointer, or at rest — read from the pointer itself,
-    /// which a drag may have carried off the scroller.
+    /// which a drag may have carried off the scroller. Only a scroller that
+    /// is up is under the pointer: one hidden over the content stays hidden
+    /// however long the pointer rests there, as the system's own do. Coming
+    /// up for it, every list's scroller showed wherever the pointer crossed
+    /// the edge it lies against — beside a divider, on the way to its knob.
     private func refreshKnobState() {
         guard !isHeld else {
             knobState = .dragged
             return
         }
-        guard let window, !isHiddenOrHasHiddenAncestor else {
+        guard let window, !isHiddenOrHasHiddenAncestor, isRevealed else {
             knobState = .resting
             return
         }

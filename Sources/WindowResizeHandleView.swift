@@ -1,28 +1,25 @@
 import AppKit
 
 /// Where a divider is taken hold of. Its line runs the whole length between
-/// two panes; the pointer anywhere on it brings a capsule up, fading in, but
-/// only the capsule's own span moves it — anywhere else a press is the
-/// pane's. The capsule stays up for the whole of a drag.
+/// two panes, but only a round knob across it moves it: the pointer on the
+/// knob's place brings the knob up, fading in, and a press there takes hold;
+/// anywhere else on the line the pointer and the press are the panes'. The
+/// knob stays up for the whole of a drag.
 ///
 /// The lines down the panel — beside the tree, beside the code — are taken
 /// hold of where the line across it, between the changes and the history,
 /// meets them; the line across keeps to its middle, as does any line with
 /// nothing crossing it.
 enum DividerGrip {
-    /// The capsule: this long along the line, this thick across it.
-    static let length: CGFloat = 48
-    static let thickness: CGFloat = 4
-    /// How much of the line answers to a press: a little more than the
-    /// capsule, so it can be caught without aiming at it.
-    static let reach: CGFloat = 64
-    /// How far either side of the line it answers — to the pointer coming
-    /// onto it as well as to a press.
-    static let radius: CGFloat = 6
-    /// How long the capsule takes to come up or go.
+    /// The knob: a disc this wide, centred on the line.
+    static let diameter: CGFloat = 20
+    /// How much of the line answers to the pointer and to a press: the
+    /// knob's own span along it…
+    static let reach: CGFloat = diameter
+    /// …and how far either side of the line: the knob's own half.
+    static let radius: CGFloat = diameter / 2
+    /// How long the knob takes to come up or go.
     static let fade: TimeInterval = 0.15
-    /// Pale: there to be found, not looked at.
-    static var colour: NSColor { Theme.dimText.withAlphaComponent(0.6) }
 
     /// The part of `band` — the strip either side of a line — that takes
     /// hold: `reach` of it, centred at `centre` along the line (its middle
@@ -38,13 +35,10 @@ enum DividerGrip {
         return span.intersection(band)
     }
 
-    /// The capsule's frame, centred on `point` of a line.
-    static func capsuleRect(centredOn point: NSPoint, lineIsVertical: Bool) -> NSRect {
-        let size = lineIsVertical
-            ? NSSize(width: thickness, height: length)
-            : NSSize(width: length, height: thickness)
-        return NSRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
-                      width: size.width, height: size.height)
+    /// The knob's frame, centred on `point` of a line.
+    static func knobRect(centredOn point: NSPoint) -> NSRect {
+        NSRect(x: point.x - diameter / 2, y: point.y - diameter / 2,
+               width: diameter, height: diameter)
     }
 
     /// Where the line across the panel lies in `window`, in its coordinates;
@@ -57,16 +51,19 @@ enum DividerGrip {
     /// take hold somewhere else. Posted with its window.
     static let crossingDidMove = Notification.Name("DividerGripCrossingDidMove")
 
-    /// The capsule itself: one layer of one colour with round ends, so it
-    /// costs no bitmap. It never takes the pointer — the view under it does.
-    final class Capsule: FlatView {
+    /// The knob itself: a raised disc, with arrows the way the line moves.
+    /// It never takes the pointer — the view under it does.
+    final class Knob: NSView {
         private(set) var isShown = false
+        /// The line runs across, so it moves up and down; otherwise it runs
+        /// down and moves from side to side.
+        var movesVertically = false {
+            didSet { if movesVertically != oldValue { needsDisplay = true } }
+        }
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
-            layer?.cornerRadius = DividerGrip.thickness / 2
-            fillColor = DividerGrip.colour
             alphaValue = 0
             setAccessibilityElement(false)
         }
@@ -75,8 +72,46 @@ enum DividerGrip {
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+        override func draw(_ dirtyRect: NSRect) {
+            let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+            Theme.raisedSurface.setFill()
+            disc.fill()
+            Theme.raisedEdge.setStroke()
+            disc.lineWidth = 1
+            disc.stroke()
+
+            // A shaft with a head at each end, 10pt from tip to tip.
+            let half: CGFloat = 5
+            let head: CGFloat = 2.5
+            let centre = NSPoint(x: bounds.midX, y: bounds.midY)
+            func at(_ along: CGFloat, _ across: CGFloat) -> NSPoint {
+                movesVertically
+                    ? NSPoint(x: centre.x + across, y: centre.y + along)
+                    : NSPoint(x: centre.x + along, y: centre.y + across)
+            }
+            let arrows = NSBezierPath()
+            arrows.move(to: at(-half, 0))
+            arrows.line(to: at(half, 0))
+            for end in [-half, half] {
+                let back = end < 0 ? head : -head
+                arrows.move(to: at(end + back, head))
+                arrows.line(to: at(end, 0))
+                arrows.line(to: at(end + back, -head))
+            }
+            arrows.lineWidth = 1.25
+            arrows.lineCapStyle = .round
+            arrows.lineJoinStyle = .round
+            Theme.foreground.setStroke()
+            arrows.stroke()
+        }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            needsDisplay = true
+        }
+
         /// Up or gone, fading. An explicit animation: the views that hold a
-        /// capsule refuse implicit ones, so their panes do not slide.
+        /// knob refuse implicit ones, so their panes do not slide.
         func show(_ shown: Bool) {
             guard shown != isShown else { return }
             isShown = shown
@@ -106,23 +141,23 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     /// which has no colour API. Set from the split view's `dividerThickness`.
     var dividerThickness: CGFloat = 1 { didSet { needsDisplay = true; needsLayout = true } }
     private var initialMouseX: CGFloat = 0
-    private let capsule = DividerGrip.Capsule()
+    private let knob = DividerGrip.Knob()
     private var gripArea: NSTrackingArea?
     private var isDragging = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setAccessibilityElement(false)
-        addSubview(capsule)
+        addSubview(knob)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// The handle runs the line's whole length, but only the span where the
-    /// line across the panel meets it takes hold — its middle, when there is
-    /// none; past that the press goes to whatever is under it.
+    /// The handle runs the line's whole length, but only the knob takes hold,
+    /// where the line across the panel meets this one — its middle, when
+    /// there is none; past that the press goes to whatever is under it.
     private var grabRect: NSRect {
         DividerGrip.grabRect(in: bounds, lineIsVertical: true, centre: crossing)
     }
@@ -175,7 +210,7 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     }
 
     /// The constraints that size the handle do not always lay out what is
-    /// inside it, and the capsule keeps to the middle of the line.
+    /// inside it, and the knob keeps to its place on the line.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsLayout = true
@@ -183,13 +218,15 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     override func layout() {
         super.layout()
-        placeCapsule()
+        placeKnob()
+        // The knob's place may have moved, and the pointer is watched only there.
+        updateTrackingAreas()
     }
 
-    /// Across the line, where it takes hold.
-    private func placeCapsule() {
-        capsule.frame = DividerGrip.capsuleRect(
-            centredOn: NSPoint(x: paintedDividerRect.midX, y: grabRect.midY), lineIsVertical: true)
+    /// On the line, where it takes hold.
+    private func placeKnob() {
+        knob.frame = DividerGrip.knobRect(
+            centredOn: NSPoint(x: paintedDividerRect.midX, y: grabRect.midY))
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -199,9 +236,9 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     var paintedDividerRectForTesting: NSRect { paintedDividerRect }
     var grabRectForTesting: NSRect { grabRect }
-    var showsGripForTesting: Bool { capsule.isShown }
-    var gripRectForTesting: NSRect { capsule.frame }
-    var gripFadeForTesting: CAAnimation? { capsule.fadeForTesting }
+    var showsGripForTesting: Bool { knob.isShown }
+    var gripRectForTesting: NSRect { knob.frame }
+    var gripFadeForTesting: CAAnimation? { knob.fadeForTesting }
     func refreshGripForTesting() { refreshGrip() }
 
     override func resetCursorRects() {
@@ -217,12 +254,14 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         }
     }
 
-    /// The pointer anywhere on the line brings the capsule up.
+    /// Only the pointer on the knob's place brings it up: along the rest of
+    /// the line it came up over the lists' own scrollers, which the pointer
+    /// there was meant for.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let gripArea { removeTrackingArea(gripArea) }
-        let area = NSTrackingArea(rect: .zero,
-                                  options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+        let area = NSTrackingArea(rect: grabRect,
+                                  options: [.mouseEnteredAndExited, .activeInKeyWindow],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         gripArea = area
@@ -238,22 +277,21 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
         refreshGrip()
     }
 
-    /// Up while held, or while the pointer is on the line and not on a
-    /// scroller that is up there — read from the pointer itself, which a drag
-    /// may have carried off.
+    /// Up while held, or while the pointer is where a press would take hold
+    /// — read from the pointer itself, which a drag may have carried off.
     private func refreshGrip() {
         guard !isDragging else {
-            capsule.show(true)
+            knob.show(true)
             return
         }
         guard let window, !isHiddenOrHasHiddenAncestor else {
-            capsule.show(false)
+            knob.show(false)
             return
         }
         let pointer = window.pointerLocation
-        placeCapsule()
-        capsule.show(bounds.contains(convert(pointer, from: nil))
-                        && !PuzzleScroller.isShowing(at: pointer, in: window))
+        placeKnob()
+        knob.show(grabRect.contains(convert(pointer, from: nil))
+                    && !PuzzleScroller.isShowing(at: pointer, in: window))
     }
 
     override func mouseDown(with event: NSEvent) {

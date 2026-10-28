@@ -618,8 +618,8 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// A stacked pane keeps a couple of rows.
     static let minimumRow: CGFloat = 44
     var minimumPane: CGFloat = minimumColumn
-    /// How far either side of the line answers to a drag — along the span
-    /// at its middle that does (see `DividerGrip`).
+    /// How far either side of the line answers to a drag — at the knob's
+    /// place on it, the only part that does (see `DividerGrip`).
     private static let grabRadius: CGFloat = DividerGrip.radius
 
     /// The line's place for a given share of a given length, kept inside the
@@ -656,12 +656,12 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
             && !PuzzleScroller.isShowing(at: convert(point, to: nil), in: window)
     }
 
-    /// The band either side of the line, its whole length: the pointer
-    /// anywhere on it brings the capsule up.
+    /// The band either side of the line, its whole length.
     private var band: NSRect { dividerRect(radius: Self.grabRadius).intersection(bounds) }
 
-    /// The only part of the band that takes hold: where the line across the
-    /// second pane meets this one, or the middle.
+    /// The only part of the band that takes hold, or brings the knob up:
+    /// the knob's place, where the line across the second pane meets this
+    /// one, or the middle.
     private var grabRect: NSRect {
         DividerGrip.grabRect(in: band, lineIsVertical: axis == .horizontal, centre: crossing)
     }
@@ -762,13 +762,16 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refreshGrip()
     }
 
-    /// Rebuilt whenever the line moves, since the band goes with it.
+    /// Only the pointer on the knob's place brings it up: along the rest of
+    /// the line it came up over the lists' own scrollers, which the pointer
+    /// there was meant for. Rebuilt whenever the line moves, since the knob
+    /// goes with it.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let gripArea { removeTrackingArea(gripArea) }
         gripArea = nil
         guard showsSecond else { return }
-        let area = NSTrackingArea(rect: band,
+        let area = NSTrackingArea(rect: grabRect,
                                   options: [.mouseEnteredAndExited, .activeInKeyWindow],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
@@ -786,16 +789,14 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refreshGrip()
     }
 
-    /// The capsule is up while the line is held, or while the pointer is on
-    /// the line and not on a scroller that is up there.
+    /// The knob is up while the line is held, or while the pointer is where
+    /// a press would take hold of it.
     private func refreshGrip() {
         let shown: Bool
         if isDraggingDivider {
             shown = true
-        } else if showsSecond, let window, !isHiddenOrHasHiddenAncestor {
-            let pointer = window.pointerLocation
-            shown = band.contains(convert(pointer, from: nil))
-                && !PuzzleScroller.isShowing(at: pointer, in: window)
+        } else if let window, !isHiddenOrHasHiddenAncestor {
+            shown = isOnGrabBand(convert(window.pointerLocation, from: nil))
         } else {
             shown = false
         }
@@ -804,12 +805,13 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
     private var isDraggingDivider = false
 
-    /// Across the line, where it takes hold.
+    /// On the line, where it takes hold.
     private func placeGrip() {
         let at = axis == .horizontal
             ? NSPoint(x: line.frame.midX, y: grabRect.midY)
             : NSPoint(x: grabRect.midX, y: line.frame.midY)
-        grip.frame = DividerGrip.capsuleRect(centredOn: at, lineIsVertical: axis == .horizontal)
+        grip.frame = DividerGrip.knobRect(centredOn: at)
+        grip.movesVertically = axis == .vertical
     }
 
     var showsGripForTesting: Bool { grip.isShown }
@@ -951,8 +953,8 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     private final class DividerLine: FlatView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
-    /// Over the line's middle, and over the panes either side of it.
-    private let grip = DividerGrip.Capsule()
+    /// On the line where it takes hold, and over the panes either side of it.
+    private let grip = DividerGrip.Knob()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -961,7 +963,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         addSubview(grip)
     }
 
-    /// The panes are added after the capsule, which has to stay over them.
+    /// The panes are added after the knob, which has to stay over them.
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
         if subview !== grip { addSubview(grip, positioned: .above, relativeTo: nil) }
