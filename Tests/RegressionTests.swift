@@ -9240,8 +9240,9 @@ enum RegressionTests {
         try expect(frameView.hitTest(rightEdge) is WindowResizeHandleView,
                    "the window's right edge no longer resizes it where no scroller is")
 
-        // AppKit's own band beside the panel — where it shows its resize
-        // cursor — leaves out the scrollers too, and keeps the line.
+        // AppKit's own divider beside the panel takes no hold, and so shows
+        // no resize cursor of its own: the handle over it is the one target,
+        // at its knob, under the hand.
         var splitViews: [NSSplitView] = []
         func findSplits(_ view: NSView) {
             if let split = view as? NSSplitView, split.delegate is PuzzleSplitViewController {
@@ -9258,18 +9259,8 @@ enum RegressionTests {
                            height: split.bounds.height)
         let band = delegate.splitView?(split, effectiveRect: drawn.insetBy(dx: -2, dy: 0),
                                        forDrawnRect: drawn, ofDividerAt: 0) ?? .zero
-        let covered = PuzzleScroller.showingRects(in: window).map { split.convert($0, from: nil) }
-            .filter { $0.intersection(band).width > 0 && $0.intersection(band).height > 0 }
-        // It takes hold where the line between the changes and the history
-        // meets it, as the handle over it does.
-        let crossing = DividerGrip.crossing(in: window)
-            .map { split.convert(NSPoint(x: 0, y: $0), from: nil).y } ?? drawn.midY
-        try expect(covered.isEmpty && band.contains(NSPoint(x: drawn.midX, y: crossing))
-                    && abs(band.midY - crossing) <= 1,
-                   "the divider's band \(band) lies over scrollers \(covered), or is not where "
-                     + "the line across the panel meets it (\(crossing))")
-        try expect(band.height <= DividerGrip.reach,
-                   "AppKit's band runs \(band.height)pt of the line, not just its middle")
+        try expect(band.width == 0 || band.height == 0,
+                   "AppKit's own divider takes hold across \(band)")
 
         // The cursors say the same: the handles leave out what a scroller covers.
         let rect = NSRect(x: 0, y: 0, width: 10, height: 100)
@@ -13801,6 +13792,9 @@ enum RegressionTests {
                     && DividerGrip.radius == DividerGrip.diameter / 2 && DividerGrip.fade == 0.15,
                    "the knob is \(DividerGrip.diameter)pt, takes hold along \(DividerGrip.reach)pt "
                      + "and fades in \(DividerGrip.fade)s, not 20, 20 and 0.15")
+        // A thing to press, under the hand — not an edge to pull.
+        try expect(DividerGrip.cursor === NSCursor.pointingHand,
+                   "the knob shows \(DividerGrip.cursor), not the hand")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -15964,9 +15958,10 @@ enum RegressionTests {
         try expect(barTop != nil && treeTop != nil && abs(barTop! - treeTop!) <= 0.5,
                    "the commit line does not start level with the tree: "
                      + "\(String(describing: barTop)) vs \(String(describing: treeTop))")
+        let padding = ProjectChangesViewController.listPadding
         try expect(changesTop != nil && treeTop != nil
-                    && abs(changesTop! - (treeTop! + ProjectCommitBar.height)) <= 0.5,
-                   "the changes list does not start under the commit line: "
+                    && abs(changesTop! - (treeTop! + ProjectCommitBar.height + padding)) <= 0.5,
+                   "the changes list does not start a padding under the commit line: "
                      + "\(String(describing: changesTop)) vs \(String(describing: treeTop))")
         var openedDiff: String?
         let realDiffHandler = workspace.sidebar.onGitDiff
@@ -16020,6 +16015,26 @@ enum RegressionTests {
         // row, under the headings the project's row already gives them.
         try expect(projectsPanel.history.view.subviews.allSatisfy { $0 is NSScrollView },
                    "the history list took a heading row back")
+        // Both lists keep a little room above their first row and below their
+        // last, inside the scrolling.
+        for (name, list) in [("changes", projectsPanel.changes.view),
+                             ("history", projectsPanel.history.view)] {
+            guard let scroll = list.subviews.compactMap({ $0 as? NSScrollView }).first else {
+                throw Failure(description: "the \(name) list has no scroll view")
+            }
+            let insets = scroll.contentInsets
+            try expect(insets.top == padding && insets.bottom == padding
+                        && insets.left == 0 && insets.right == 0,
+                       "the \(name) list is padded \(insets), not \(padding)pt above and below")
+            guard let rows = scroll.documentView as? NSTableView, rows.numberOfRows > 0 else {
+                continue
+            }
+            rows.layoutSubtreeIfNeeded()
+            let firstRow = rows.convert(rows.rect(ofRow: 0), to: scroll)
+            let top = scroll.isFlipped ? firstRow.minY : scroll.bounds.height - firstRow.maxY
+            try expect(abs(top - padding) <= 0.5,
+                       "the \(name) list's first row starts \(top)pt down, not \(padding)pt")
+        }
 
         // A commit moves HEAD and the list follows without being asked: the
         // window's own status refresh carries the commit it is on, and the log

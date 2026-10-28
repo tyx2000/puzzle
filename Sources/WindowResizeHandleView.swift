@@ -20,6 +20,9 @@ enum DividerGrip {
     static let radius: CGFloat = diameter / 2
     /// How long the knob takes to come up or go.
     static let fade: TimeInterval = 0.15
+    /// Over the knob: the hand, as over the app's other things to press.
+    /// The knob is a thing to take hold of, not an edge to pull.
+    static var cursor: NSCursor { .pointingHand }
 
     /// The part of `band` — the strip either side of a line — that takes
     /// hold: `reach` of it, centred at `centre` along the line (its middle
@@ -243,14 +246,8 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        let cursor: NSCursor
-        if #available(macOS 15.0, *) {
-            cursor = .columnResize
-        } else {
-            cursor = .resizeLeftRight
-        }
         for rect in PuzzleScroller.uncovered(grabRect, in: self) {
-            addCursorRect(rect, cursor: cursor)
+            addCursorRect(rect, cursor: DividerGrip.cursor)
         }
     }
 

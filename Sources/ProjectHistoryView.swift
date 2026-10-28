@@ -93,6 +93,10 @@ final class ProjectHistoryViewController: NSViewController {
 
         let scroll = NSScrollView()
         PuzzleScroller.adopt(scroll)
+        // The changes' padding, set before the list goes in so it starts
+        // below it.
+        let padding = ProjectChangesViewController.listPadding
+        scroll.contentInsets = NSEdgeInsets(top: padding, left: 0, bottom: padding, right: 0)
         scroll.documentView = table
         // Reaching the end asks for the next page.
         scroll.contentView.postsBoundsChangedNotifications = true

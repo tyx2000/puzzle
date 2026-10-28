@@ -15,9 +15,6 @@ final class PuzzleSplitView: NSSplitView {
 /// NSSplitViewController is its own split view's delegate, so we subclass it to
 /// observe divider drags instead of replacing the delegate.
 final class PuzzleSplitViewController: NSSplitViewController {
-    /// As far either side of the line as the knob laid over it reaches.
-    private let dividerHitPadding: CGFloat = DividerGrip.radius
-
     /// Called continuously while the user drags the divider, with the proposed
     /// sidebar width. Return value is passed straight through.
     var onDividerDrag: ((CGFloat) -> Void)?
@@ -32,53 +29,17 @@ final class PuzzleSplitViewController: NSSplitViewController {
         return proposedPosition
     }
 
-    /// Keep the divider visually thin while making it much easier to acquire.
     /// AppKit uses this rectangle for pointer hit-testing and cursor feedback.
     ///
-    /// Only the knob's place on the line takes hold, as on the handle laid
-    /// over it (see `DividerGrip`); along the rest a press is the panes'.
-    ///
-    /// The band reaches into the panel, where its lists keep their scrollers
-    /// against the line. A scroller showing there is the scroller's to catch:
-    /// the divider keeps the largest part of its band that none covers, on
-    /// the code's side.
+    /// The divider beside the panel takes no hold of its own: the handle laid
+    /// over it (`SplitDividerHandleView`) is its one target, at its knob. A
+    /// band here put AppKit's resize cursor over that knob, which is a thing
+    /// to press and shows the hand.
     override func splitView(_ splitView: NSSplitView,
                             effectiveRect proposedEffectiveRect: NSRect,
                             forDrawnRect drawnRect: NSRect,
                             ofDividerAt dividerIndex: Int) -> NSRect {
         guard dividerIndex == 0 else { return proposedEffectiveRect }
-        let expanded = splitView.isVertical
-            ? drawnRect.insetBy(dx: -dividerHitPadding, dy: 0)
-            : drawnRect.insetBy(dx: 0, dy: -dividerHitPadding)
-        // Where the line across the panel meets this one, as on the handle.
-        let crossing = DividerGrip.crossing(in: splitView.window).map {
-            splitView.convert(NSPoint(x: 0, y: $0), from: nil).y
-        }
-        let band = DividerGrip.grabRect(
-            in: proposedEffectiveRect.union(expanded).intersection(splitView.bounds),
-            lineIsVertical: splitView.isVertical, centre: crossing)
-        return PuzzleScroller.uncovered(band, in: splitView)
-            .max { $0.width * $0.height < $1.width * $1.height }
-            ?? DividerGrip.grabRect(in: drawnRect, lineIsVertical: splitView.isVertical,
-                                    centre: crossing)
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(scrollersMoved(_:)),
-            name: PuzzleScroller.showingDidChange, object: nil)
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(scrollersMoved(_:)),
-            name: DividerGrip.crossingDidMove, object: nil)
-    }
-
-    /// A scroller, or the line across the panel, came, went or moved: the
-    /// band's cursor is worked out again.
-    @objc private func scrollersMoved(_ notification: Notification) {
-        guard let window = splitView.window, notification.object as? NSWindow === window else {
-            return
-        }
-        window.invalidateCursorRects(for: splitView)
+        return NSRect(x: drawnRect.midX, y: drawnRect.midY, width: 0, height: 0)
     }
 }

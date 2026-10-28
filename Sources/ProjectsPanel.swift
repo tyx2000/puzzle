@@ -732,7 +732,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         super.resetCursorRects()
         guard showsSecond else { return }
         for rect in PuzzleScroller.uncovered(grabRect, in: self) {
-            addCursorRect(rect, cursor: axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
+            addCursorRect(rect, cursor: DividerGrip.cursor)
         }
     }
 

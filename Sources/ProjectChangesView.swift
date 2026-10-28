@@ -9,6 +9,10 @@ import AppKit
 /// that file's diff, as it does there, and ⌘↩ / ⇧⌘↩ in the message do what they
 /// do in the panel's own box.
 final class ProjectChangesViewController: NSViewController {
+    /// Room above the first row and below the last, in this list and the
+    /// history under it, so neither runs hard against the line or the strip
+    /// over it. Inside the scrolling: the rows pass through it.
+    static let listPadding: CGFloat = 6
     /// A changed file was clicked: show its diff.
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
     /// The open button on a row: the file itself, not its diff.
@@ -73,6 +77,9 @@ final class ProjectChangesViewController: NSViewController {
 
         let scroll = NSScrollView()
         PuzzleScroller.adopt(scroll)
+        // Before the list goes in, so it starts below the padding.
+        scroll.contentInsets = NSEdgeInsets(top: Self.listPadding, left: 0,
+                                            bottom: Self.listPadding, right: 0)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = true
