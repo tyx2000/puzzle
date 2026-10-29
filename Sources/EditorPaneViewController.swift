@@ -953,6 +953,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     var pdfPreviewForTesting: PDFPreviewView? { pdfPreview }
 
+    /// The PDF on screen, which the zoom commands act on; nil while this pane
+    /// shows anything else, including a PDF it could not open.
+    var zoomablePreview: PDFPreviewView? {
+        guard let pdfPreview, !pdfPreview.isHidden, pdfPreview.canZoom else { return nil }
+        return pdfPreview
+    }
+
     private func ensureFileHistoryView() -> FileHistoryView {
         if let fileHistoryView { return fileHistoryView }
         let history = FileHistoryView()

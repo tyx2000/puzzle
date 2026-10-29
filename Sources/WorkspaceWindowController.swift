@@ -1630,6 +1630,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     @objc func findAndReplace(_ sender: Any?) { editor.showFindBar(replacing: true) }
     @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
 
+    // Named apart from PDFView's own zoomIn(_:), which would otherwise take
+    // the command whenever the pages have focus and step by its own factor.
+    @objc func zoomInPreview(_ sender: Any?) { editor.zoomablePreview?.zoomIn() }
+    @objc func zoomOutPreview(_ sender: Any?) { editor.zoomablePreview?.zoomOut() }
+    @objc func zoomPreviewToFit(_ sender: Any?) { editor.zoomablePreview?.zoomToFit() }
+
     @objc func showSettings(_ sender: Any?) { openSettings() }
 
     /// ⌘W. With nothing open the window itself closes, so the shortcut never
@@ -1682,7 +1688,16 @@ extension WorkspaceWindowController: NSMenuItemValidation {
     /// there is no directory to open a shell in, so the item greys out instead
     /// of being clickable and doing nothing.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        guard menuItem.action == #selector(openProjectInTerminal(_:)) else { return true }
-        return projectURL != nil
+        switch menuItem.action {
+        case #selector(openProjectInTerminal(_:)):
+            return projectURL != nil
+        // Only a PDF zooms. Unavailable anywhere else, the keys fall through
+        // to whatever else might want them.
+        case #selector(zoomInPreview(_:)), #selector(zoomOutPreview(_:)),
+             #selector(zoomPreviewToFit(_:)):
+            return editor.zoomablePreview != nil
+        default:
+            return true
+        }
     }
 }

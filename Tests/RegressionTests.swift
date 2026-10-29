@@ -42,6 +42,13 @@ enum RegressionTests {
             print("Project replace regression tests passed (6)")
             return
         }
+        if CommandLine.arguments.contains("--reader-regressions") {
+            try testPDFPreview()
+            try testEPUBReading()
+            try testStartingErrandsAreOnTheMenuBar()
+            print("Reader regression tests passed (3)")
+            return
+        }
         if CommandLine.arguments.contains("--wrapping-regressions") {
             try testCodeAndDiffKeepHardLines()
             try testGutterRibbonRunsUnbroken()
@@ -4298,13 +4305,49 @@ enum RegressionTests {
                    "an indefinite duration was written into the caption")
     }
 
+    /// The vertical middle of what is drawn inside `rect` of `view`, in the
+    /// view's coordinates: where the eye puts a label or a symbol, whatever
+    /// frame it happens to sit in. The view's top row is taken as background.
+    private static func inkMidY(in view: NSView, _ rect: NSRect) throws -> CGFloat {
+        guard let pixels = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw Failure(description: "\(type(of: view)) could not be drawn")
+        }
+        view.cacheDisplay(in: view.bounds, to: pixels)
+        let scale = CGFloat(pixels.pixelsHigh) / view.bounds.height
+        func color(_ x: Int, _ y: Int) -> NSColor? {
+            pixels.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+        }
+        guard let background = color(Int(view.bounds.midX * scale), 0) else {
+            throw Failure(description: "no background pixel in \(type(of: view))")
+        }
+        func inked(_ c: NSColor?) -> Bool {
+            guard let c else { return false }
+            return abs(c.redComponent - background.redComponent)
+                + abs(c.greenComponent - background.greenComponent)
+                + abs(c.blueComponent - background.blueComponent) > 0.12
+        }
+        // Bitmap rows run down from the top.
+        let top = view.isFlipped ? rect.minY : view.bounds.height - rect.maxY
+        let rows = Int(top * scale)..<Int(((top + rect.height) * scale).rounded(.up))
+        let columns = Int(rect.minX * scale)..<Int((rect.maxX * scale).rounded(.up))
+        let inkedRows = rows.filter { y in columns.contains { inked(color($0, y)) } }
+        guard let first = inkedRows.first, let last = inkedRows.last else {
+            throw Failure(description: "nothing drawn in \(rect) of \(type(of: view))")
+        }
+        let middle = (CGFloat(first) + CGFloat(last + 1)) / 2 / scale
+        return view.isFlipped ? middle : view.bounds.height - middle
+    }
+
     private static func testPDFPreview() throws {
         let directory = try temporaryDirectory("pdf-preview")
         let previousPositions = UserDefaults.standard.object(forKey: "PuzzlePDFPages")
+        let previousZooms = UserDefaults.standard.object(forKey: "PuzzlePDFZoom")
         defer {
             try? FileManager.default.removeItem(at: directory)
             UserDefaults.standard.set(previousPositions, forKey: "PuzzlePDFPages")
+            UserDefaults.standard.set(previousZooms, forKey: "PuzzlePDFZoom")
         }
+        UserDefaults.standard.removeObject(forKey: "PuzzlePDFZoom")
         let url = directory.appendingPathComponent("guide.PDF")
         let pdf = PDFDocument()
         for index in 0..<2 {
@@ -4358,6 +4401,68 @@ enum RegressionTests {
             try bitmap.representation(using: .png, properties: [:])?.write(
                 to: URL(fileURLWithPath: "/tmp/puzzle-pdf-preview.png"))
         }
+
+        // The page number is level with the arrows beside it. A label given
+        // the buttons' height draws its text at the top, above their symbols.
+        let header = preview.headerForTesting
+        let arrowInk = try inkMidY(in: header, preview.previousButtonFrameForTesting)
+        let pageInk = try inkMidY(in: header, preview.pageLabelFrameForTesting)
+        try expect(abs(pageInk - arrowInk) <= 1,
+                   "the page number is \(pageInk - arrowInk)pt off the arrows' middle")
+        // The zoom rides on the same line, between the title and the page.
+        let zoomFrames = preview.zoomControlFramesForTesting
+        try expect(zip(zoomFrames, zoomFrames.dropFirst()).allSatisfy { $0.maxX <= $1.minX }
+                    && zoomFrames[2].maxX < preview.pageLabelFrameForTesting.minX,
+                   "the zoom controls overlap each other or the page: \(zoomFrames)")
+        for frame in zoomFrames {
+            let ink = try inkMidY(in: header, frame)
+            try expect(abs(ink - arrowInk) <= 1,
+                       "a zoom control at \(frame) is \(ink - arrowInk)pt off the arrows' middle")
+        }
+
+        // Zoom starts fitted to the pane and steps through round numbers.
+        let fitted = preview.zoomForTesting
+        func percent(_ zoom: CGFloat) -> String { "\(Int((zoom * 100).rounded()))%" }
+        try expect(preview.fitsPageForTesting && preview.zoomLabelForTesting == percent(fitted),
+                   "a newly opened PDF is not fitted: \(preview.zoomLabelForTesting)")
+        try expect(pane.zoomablePreview === preview, "the zoom commands cannot reach the PDF")
+        // A step clears the fitted size by more than a rounding: 66% goes to
+        // 75%, not to 67%.
+        let firstStep = PDFPreviewView.zoomSteps.first { $0 > fitted * 1.05 }!
+        let secondStep = PDFPreviewView.zoomSteps.first { $0 > firstStep * 1.05 }!
+        preview.zoomIn()
+        preview.zoomIn()
+        try expect(!preview.fitsPageForTesting && abs(preview.zoomForTesting - secondStep) < 0.001
+                    && preview.zoomLabelForTesting == percent(secondStep),
+                   "zooming in twice from \(fitted) went to \(preview.zoomForTesting), "
+                     + "not \(secondStep)")
+        preview.zoomOut()
+        try expect(abs(preview.zoomForTesting - firstStep) < 0.001
+                    && preview.pageIndexForTesting == 0,
+                   "zooming out did not step back, or lost the page: \(preview.zoomForTesting)")
+        try expect(PDFPreviewView.savedZoom(for: url).map { abs($0 - firstStep) < 0.001 } == true,
+                   "a chosen zoom was not remembered")
+        preview.zoomToFit()
+        try expect(preview.fitsPageForTesting && abs(preview.zoomForTesting - fitted) < 0.01
+                    && PDFPreviewView.savedZoom(for: url) == nil,
+                   "zoom to fit did not go back to the fitted page and forget the zoom")
+
+        // A pinch is PDFKit's scroll view magnifying, which it reports as no
+        // scale change. The header follows it all the same, and it is kept.
+        preview.pinchForTesting(by: 1.5)
+        let pinched = preview.zoomForTesting
+        try expect(abs(pinched - fitted * 1.5) < 0.01 && !preview.fitsPageForTesting,
+                   "a pinch did not zoom, or left the page fitting the pane: \(pinched)")
+        try expect(preview.zoomLabelForTesting == percent(pinched),
+                   "the header shows \(preview.zoomLabelForTesting) after a pinch to \(pinched)")
+        try expect(PDFPreviewView.savedZoom(for: url).map { abs($0 - pinched) < 0.001 } == true,
+                   "a pinched zoom was not remembered")
+        preview.pinchForTesting(by: 100)
+        try expect(preview.zoomForTesting <= PDFPreviewView.zoomSteps.last! + 0.001,
+                   "a pinch zoomed past the last step, to \(preview.zoomForTesting)")
+        preview.zoomToFit()
+        preview.zoomIn()
+
         preview.goToNextPageForTesting()
         try expect(preview.pageIndexForTesting == 1 && preview.pageLabelForTesting == "2 / 2",
                    "PDF page navigation did not advance")
@@ -4368,16 +4473,22 @@ enum RegressionTests {
         pane.open(url: text)
         try expect(preview.isHidden && preview.pageCountForTesting == 0,
                    "leaving a PDF retained visible pages or rendering resources")
+        try expect(pane.zoomablePreview == nil, "the zoom commands still act with a text file open")
         pane.activate(index: 0)
         try expect(preview.superview == nil, "inactive PDF view remained attached")
         preview = pane.pdfPreviewForTesting!
         try expect(!preview.showsThumbnailsForTesting, "PDF sidebar preference was lost on rebuild")
         try expect(preview.pageIndexForTesting == 1, "PDF reading position was not restored")
+        try expect(!preview.fitsPageForTesting && abs(preview.zoomForTesting - firstStep) < 0.001
+                    && preview.zoomLabelForTesting == percent(firstStep),
+                   "the zoom was not restored: \(preview.zoomLabelForTesting)")
         let invalid = directory.appendingPathComponent("invalid.pdf")
         try Data("not a PDF".utf8).write(to: invalid)
         pane.open(url: invalid)
         try expect(preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 0,
                    "an invalid PDF left stale pages instead of an error notice")
+        try expect(pane.zoomablePreview == nil && preview.zoomLabelForTesting.isEmpty,
+                   "a PDF that could not be opened still offers to zoom")
         let locked = directory.appendingPathComponent("locked.pdf")
         try expect(pdf.write(to: locked, withOptions: [.ownerPasswordOption: "owner",
                                                       .userPasswordOption: "reader"]),
@@ -4388,6 +4499,24 @@ enum RegressionTests {
         pane.activate(index: 0)
         try expect(!preview.noticeIsVisibleForTesting && preview.pageCountForTesting == 2,
                    "returning from a locked PDF did not restore readable pages")
+
+        // A browser's keys: ⌘= or ⌘+ (which is ⇧⌘=) in, ⌘- out, ⌘0 to fit.
+        let viewMenu = AppDelegate().buildMainMenuForTesting().items
+            .first { $0.submenu?.title == "View" }?.submenu
+        let zoomKeys: [(String, Selector)] = [
+            ("=", #selector(WorkspaceWindowController.zoomInPreview(_:))),
+            ("+", #selector(WorkspaceWindowController.zoomInPreview(_:))),
+            ("-", #selector(WorkspaceWindowController.zoomOutPreview(_:))),
+            ("0", #selector(WorkspaceWindowController.zoomPreviewToFit(_:))),
+        ]
+        for (key, action) in zoomKeys {
+            try expect(viewMenu?.items.contains {
+                        $0.keyEquivalent == key && $0.action == action
+                            && $0.keyEquivalentModifierMask == .command
+                            && (!$0.isHidden || $0.allowsKeyEquivalentWhenHidden)
+                       } == true,
+                       "⌘\(key) does not reach the PDF's zoom")
+        }
     }
 
     private static func testIncrementalParsing() throws {
@@ -4983,6 +5112,16 @@ enum RegressionTests {
                    "the reader did not show the book's title")
         try expect(reader.chapterTextForTesting.contains("First Chapter"),
                    "the reader did not render the opening chapter")
+        // The chapter number is level with the arrows beside it, as a PDF's
+        // page number is.
+        reader.layoutSubtreeIfNeeded()
+        let readerHeader = reader.headerForTesting
+        try expect(reader.previousButtonFrameForTesting.size == NSSize(width: 28, height: 22),
+                   "the chapter arrows shrank to \(reader.previousButtonFrameForTesting.size)")
+        let chapterInk = try inkMidY(in: readerHeader, reader.positionLabelFrameForTesting)
+        let chapterArrowInk = try inkMidY(in: readerHeader, reader.previousButtonFrameForTesting)
+        try expect(abs(chapterInk - chapterArrowInk) <= 1,
+                   "the chapter number is \(chapterInk - chapterArrowInk)pt off the arrows' middle")
         reader.goToNextChapterForTesting()
         try expect(reader.chapterIndexForTesting == 1
                     && reader.chapterTextForTesting.contains("The end."),

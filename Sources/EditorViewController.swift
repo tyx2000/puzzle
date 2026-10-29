@@ -396,6 +396,7 @@ final class EditorViewController: NSViewController {
 
     /// Whether there is a document to act on (⌘L has nothing to do without).
     var hasOpenDocument: Bool { pane?.currentURL != nil }
+    var zoomablePreview: PDFPreviewView? { pane?.zoomablePreview }
 
     /// Re-apply font / line-height settings.
     func refreshDisplay() {

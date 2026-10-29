@@ -45,13 +45,11 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         titleLabel.font = Theme.uiFont(11.5)
         titleLabel.textColor = Theme.foreground
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(titleLabel)
 
         positionLabel.font = Theme.uiFont(10.5)
         positionLabel.textColor = Theme.dimText
         positionLabel.alignment = .right
-        positionLabel.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(positionLabel)
 
         configure(contentsButton, symbol: "list.bullet", label: "Contents",
@@ -134,14 +132,18 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         button.imageScaling = .scaleProportionallyDown
         button.bezelStyle = .inline
         button.isBordered = false
+        button.contentTintColor = Theme.dimText
         button.toolTip = label
         button.setAccessibilityLabel(label)
         button.target = self
         button.action = action
-        button.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(button)
     }
 
+    /// The header's buttons and labels are placed here by hand, so they keep
+    /// their autoresizing masks: handed to Auto Layout with no constraints,
+    /// each shrank to its own content — 8×12 arrows sitting at the bottom of
+    /// the bar, and a right-aligned chapter count that was no longer right.
     override func layout() {
         super.layout()
         let size = NSSize(width: 28, height: 22)
@@ -154,11 +156,10 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         let labelLeft = contentsButton.frame.maxX + 8
         let labelRight = previousButton.frame.minX - 8
         let positionWidth: CGFloat = 78
-        titleLabel.frame = NSRect(x: labelLeft, y: y,
-                                  width: max(0, labelRight - labelLeft - positionWidth - 8),
-                                  height: size.height)
-        positionLabel.frame = NSRect(x: max(labelLeft, labelRight - positionWidth), y: y,
-                                     width: positionWidth, height: size.height)
+        titleLabel.frame = titleLabel.centeredFrame(
+            x: labelLeft, width: max(0, labelRight - labelLeft - positionWidth - 8), in: header)
+        positionLabel.frame = positionLabel.centeredFrame(
+            x: max(labelLeft, labelRight - positionWidth), width: positionWidth, in: header)
         applyReadingInset()
     }
 
@@ -393,6 +394,9 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
         titleLabel.textColor = Theme.foreground
         positionLabel.font = Theme.uiFont(10.5)
         positionLabel.textColor = Theme.dimText
+        for button in [contentsButton, previousButton, nextButton] {
+            button.contentTintColor = Theme.dimText
+        }
         contentsTable.backgroundColor = Theme.panelBackground
         contentsTable.rowHeight = max(24, Theme.treeRowHeight())
         contentsScroll.backgroundColor = Theme.panelBackground
@@ -411,6 +415,10 @@ final class EPUBReaderView: FlatView, NSTableViewDataSource, NSTableViewDelegate
     var contentsRowCountForTesting: Int { book?.contents.count ?? 0 }
     var chapterTextForTesting: String { textView.string }
     var titleForTesting: String { titleLabel.stringValue }
+    var headerForTesting: NSView { header }
+    /// The chapter number and the arrow beside it, for checking that they line up.
+    var positionLabelFrameForTesting: NSRect { positionLabel.frame }
+    var previousButtonFrameForTesting: NSRect { previousButton.frame }
     func goToNextChapterForTesting() { nextChapter() }
     func selectContentsRowForTesting(_ row: Int) {
         guard let book, book.contents.indices.contains(row) else { return }

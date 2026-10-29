@@ -527,6 +527,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          action: #selector(PuzzleTextView.toggleMarkdownSource(_:)),
                          keyEquivalent: "M")
         viewMenu.addItem(.separator())
+        // A PDF's zoom, with a browser's keys: ⌘= or ⌘+ in, ⌘- out, ⌘0 back
+        // to the page fitted to the pane. Greyed out for anything else.
+        viewMenu.addItem(withTitle: "Zoom In",
+                         action: #selector(WorkspaceWindowController.zoomInPreview(_:)),
+                         keyEquivalent: "=")
+        let zoomInPlus = NSMenuItem(title: "Zoom In",
+                                    action: #selector(WorkspaceWindowController.zoomInPreview(_:)),
+                                    keyEquivalent: "+")
+        zoomInPlus.isHidden = true
+        zoomInPlus.allowsKeyEquivalentWhenHidden = true
+        viewMenu.addItem(zoomInPlus)
+        viewMenu.addItem(withTitle: "Zoom Out",
+                         action: #selector(WorkspaceWindowController.zoomOutPreview(_:)),
+                         keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Zoom to Fit",
+                         action: #selector(WorkspaceWindowController.zoomPreviewToFit(_:)),
+                         keyEquivalent: "0")
+        viewMenu.addItem(.separator())
         // The shortcut every tabbed editor and browser uses; without it the
         // tabs could only be reached with the mouse.
         let nextTab = NSMenuItem(title: "Next Tab",

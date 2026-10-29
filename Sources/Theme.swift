@@ -494,6 +494,17 @@ extension NSView {
     }
 }
 
+extension NSTextField {
+    /// A frame for a label in a bar of buttons: exactly its text's height,
+    /// centred in the bar. A label draws its line at the top of a taller frame,
+    /// so given the buttons' height its text rides above their symbols.
+    func centeredFrame(x: CGFloat, width: CGFloat, in bar: NSView) -> NSRect {
+        let height = ceil(intrinsicContentSize.height)
+        return NSRect(x: x, y: floor((bar.bounds.height - height) / 2),
+                      width: width, height: height)
+    }
+}
+
 /// A column of rendered prose, centred in a pane of any width.
 struct MarkdownColumn: Equatable {
     let minimum: CGFloat
