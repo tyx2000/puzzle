@@ -1,4 +1,4 @@
-# Puzzle — a minimal native code editor
+# Puzzle — a minimal native code editor[viewer]
 
 A tiny AppKit code editor in Swift, styled after Zed, with real tree-sitter
 syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
