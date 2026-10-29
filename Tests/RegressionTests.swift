@@ -42,6 +42,13 @@ enum RegressionTests {
             print("Project replace regression tests passed (6)")
             return
         }
+        if CommandLine.arguments.contains("--sidebar-regressions") {
+            try testSidebarTogglesAndFloats()
+            try testFullScreenStripTakesTheLightsPlace()
+            try testStartPageHasTheWindowToItself()
+            print("Sidebar regression tests passed (3)")
+            return
+        }
         if CommandLine.arguments.contains("--reader-regressions") {
             try testPDFPreview()
             try testEPUBReading()
@@ -113,6 +120,7 @@ enum RegressionTests {
         try testStartingErrandsAreOnTheMenuBar()
         try testStartingErrandsAreTitleBandButtons()
         try testStartPageHasTheWindowToItself()
+        try testSidebarTogglesAndFloats()
         try testCollapsingTheLastProjectKeepsThePanel()
         try testCollapsedProjectsEndInALine()
         try testReplacedContentSettlesIn()
@@ -2700,6 +2708,157 @@ enum RegressionTests {
         panel.endDragForTesting()
     }
 
+    /// The toggle beside the traffic lights puts the sidebar away and brings
+    /// it back. Away, the pointer resting on the toggle floats the sidebar out
+    /// over the editor, which does not move, until the pointer leaves it.
+    private static func testSidebarTogglesAndFloats() throws {
+        let directory = try temporaryDirectory("sidebar-toggle")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let file = project.appendingPathComponent("notes.txt")
+        try Data("Notes\n".utf8).write(to: file)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        guard let window = workspace.window,
+              let lastLight = window.standardWindowButton(.zoomButton) else {
+            throw Failure(description: "the window has no traffic lights")
+        }
+        window.setContentSize(NSSize(width: 1200, height: 760))
+        workspace.openSelection([project])
+        workspace.editor.open(url: file)
+        func settle(_ seconds: TimeInterval = 0.45) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+            window.contentView?.layoutSubtreeIfNeeded()
+        }
+        func inWindow(_ view: NSView) -> NSRect { view.convert(view.bounds, to: nil) }
+        // The lights are measured a turn later.
+        settle()
+        let root = workspace.rootForTesting
+        let toggle = root.sidebarToggle
+        let sidebar = workspace.sidebar.view
+        guard let pane = workspace.editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        defer { root.setPointerOnToggleForTesting(false) }
+
+        // Past the lights, on their centre line, and before the project's name.
+        let toggleFrame = inWindow(toggle)
+        let lights = inWindow(lastLight)
+        try expect(!toggle.isHidden && toggleFrame.minX > lights.maxX
+                    && toggleFrame.size == SidebarToggleButton.size
+                    && abs(toggleFrame.midY - lights.midY) <= 1,
+                   "the toggle is not beside the lights: \(toggleFrame) after \(lights)")
+        try expect(workspace.sidebar.titlebarLeadingInsetForTesting >= toggleFrame.maxX,
+                   "the project's name starts under the toggle: "
+                    + "\(workspace.sidebar.titlebarLeadingInsetForTesting)")
+        let width = sidebar.frame.width
+        try expect(width >= RootViewController.minimumSidebarWidth
+                    && (pane.tabFramesInWindowForTesting.first?.minX ?? 0) > width,
+                   "the tabs do not start after the sidebar: \(pane.tabFramesInWindowForTesting)")
+
+        // Away: the editor has the window, its tabs start after the toggle,
+        // and the sidebar slid out at its own width rather than being squeezed.
+        root.toggleClickForTesting()
+        settle()
+        try expect(root.sidebarIsHiddenForTesting && root.sidebarCollapsed,
+                   "the toggle did not put the sidebar away")
+        try expect(inWindow(workspace.editor.view).minX <= 1,
+                   "the editor did not take the window: \(inWindow(workspace.editor.view))")
+        try expect(sidebar.frame.width == width,
+                   "the sidebar was squeezed on its way out: \(sidebar.frame.width) of \(width)")
+        try expect(inWindow(toggle) == toggleFrame, "the toggle moved: \(inWindow(toggle))")
+        let firstTab = pane.tabFramesInWindowForTesting.first ?? .zero
+        try expect(firstTab.minX >= toggleFrame.maxX && firstTab.minX <= toggleFrame.maxX + 8,
+                   "the first tab is not just after the toggle: \(firstTab) after \(toggleFrame)")
+
+        // Resting on the toggle floats it out, over the editor.
+        let editorFrame = inWindow(workspace.editor.view)
+        root.setPointerOnToggleForTesting(true)
+        settle(0.04)
+        try expect(!root.isFloating, "the sidebar floated before the pointer had rested")
+        settle()
+        try expect(root.isFloating && sidebar.isDescendant(of: root.floatViewForTesting),
+                   "resting on the toggle did not float the sidebar out")
+        let float = inWindow(root.floatViewForTesting)
+        try expect(float.minX == 0 && float.width == width
+                    && float.height == window.contentView?.bounds.height,
+                   "the sidebar floats at \(float), not at its own width from the edge")
+        try expect(inWindow(workspace.editor.view) == editorFrame && root.sidebarIsHiddenForTesting,
+                   "floating moved the editor: \(inWindow(workspace.editor.view))")
+
+        // Over it, it stays; left, it goes after a pause.
+        root.setPointerOnToggleForTesting(false)
+        root.setPointerOnFloatForTesting(true)
+        settle(0.5)
+        try expect(root.isFloating, "the sidebar went while the pointer was over it")
+        root.setPointerOnFloatForTesting(false)
+        settle(0.1)
+        try expect(root.isFloating, "the sidebar went the moment the pointer left")
+        settle()
+        try expect(!root.isFloating && root.floatViewForTesting.isHidden
+                    && sidebar.isDescendant(of: root.sidebarHostForTesting),
+                   "the sidebar stayed out after the pointer had left it")
+
+        // Esc sends it away at once.
+        root.setPointerOnToggleForTesting(true)
+        settle()
+        try expect(root.isFloating, "the sidebar did not float out again")
+        try expect(root.pressEscapeForTesting() && !root.isFloating, "Esc left the sidebar out")
+
+        // The toggle clicked while it floats keeps it there, as the sidebar.
+        root.setPointerOnToggleForTesting(false)
+        root.setPointerOnToggleForTesting(true)
+        settle()
+        root.toggleClickForTesting()
+        settle()
+        try expect(!root.sidebarIsHiddenForTesting && !root.isFloating && !root.sidebarCollapsed
+                    && sidebar.isDescendant(of: root.sidebarHostForTesting)
+                    && inWindow(sidebar).minX == 0 && sidebar.frame.width == width,
+                   "clicking the toggle on the floating sidebar did not keep it out: "
+                    + "\(inWindow(sidebar))")
+        try expect((pane.tabFramesInWindowForTesting.first?.minX ?? 0) > width,
+                   "the tabs kept the toggle's room with the sidebar out")
+
+        // Put away under the pointer, it does not float straight back out.
+        root.toggleClickForTesting()
+        settle()
+        try expect(root.sidebarIsHiddenForTesting && !root.isFloating,
+                   "the sidebar floated out as soon as it was put away")
+        root.setPointerOnToggleForTesting(false)
+        root.setPointerOnToggleForTesting(true)
+        settle()
+        try expect(root.isFloating, "the sidebar did not float once the pointer came back")
+        root.setPointerOnToggleForTesting(false)
+
+        // ⌘B brings it back and puts it away; a panel asked for brings it back.
+        workspace.toggleSidebar(nil)
+        settle()
+        try expect(!root.sidebarIsHiddenForTesting && !root.isFloating, "⌘B left the sidebar away")
+        workspace.toggleSidebar(nil)
+        settle()
+        try expect(root.sidebarIsHiddenForTesting, "⌘B did not put the sidebar away")
+        workspace.showFiles(nil)
+        settle()
+        try expect(!root.sidebarIsHiddenForTesting, "⌘1 left the sidebar away")
+
+        guard let item = AppDelegate().buildMainMenuForTesting().items
+            .compactMap(\.submenu).flatMap(\.items)
+            .first(where: { $0.action == #selector(WorkspaceWindowController.toggleSidebar(_:)) })
+        else { throw Failure(description: "no menu item toggles the sidebar") }
+        try expect(item.keyEquivalent == "b" && item.keyEquivalentModifierMask == .command
+                    && workspace.validateMenuItem(item),
+                   "the sidebar is not toggled by ⌘B")
+
+        // The start page has no sidebar to bring out.
+        let empty = WorkspaceWindowController()
+        defer { empty.window?.close() }
+        empty.window?.contentView?.layoutSubtreeIfNeeded()
+        try expect(empty.rootForTesting.sidebarToggle.isHidden && !empty.validateMenuItem(item),
+                   "the start page offers a sidebar toggle with nothing behind it")
+    }
+
     private static func testStartPageHasTheWindowToItself() throws {
         let directory = try temporaryDirectory("start-page")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -3941,10 +4100,17 @@ enum RegressionTests {
         let beside = workspace.sidebar.titlebarLeadingInsetForTesting
         try expect(beside > lastLight, "the strip does not start past the lights: \(beside) \(lastLight)")
 
+        // The sidebar's toggle comes first, and the strip after it.
+        let toggle = workspace.rootForTesting.sidebarToggle
+        let afterToggle = SidebarToggleButton.size.width + SidebarToggleButton.trailingGap
         workspace.windowWillEnterFullScreen(
             Notification(name: NSWindow.willEnterFullScreenNotification, object: window))
-        try expect(workspace.sidebar.titlebarLeadingInsetForTesting == firstLight,
-                   "in full screen the strip leaves the lights' place empty: "
+        window.contentView?.layoutSubtreeIfNeeded()
+        try expect(toggle.convert(toggle.bounds, to: nil).minX == firstLight,
+                   "in full screen the toggle leaves the lights' place empty: "
+                    + "\(toggle.convert(toggle.bounds, to: nil).minX) vs \(firstLight)")
+        try expect(workspace.sidebar.titlebarLeadingInsetForTesting == firstLight + afterToggle,
+                   "in full screen the strip does not follow the toggle: "
                     + "\(workspace.sidebar.titlebarLeadingInsetForTesting) vs \(firstLight)")
         workspace.windowWillExitFullScreen(
             Notification(name: NSWindow.willExitFullScreenNotification, object: window))

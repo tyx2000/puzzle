@@ -313,11 +313,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var titlebarLeadingInsets = (besideLights: CGFloat(78), withoutLights: CGFloat(20))
 
     func windowWillEnterFullScreen(_ notification: Notification) {
-        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.withoutLights)
+        root.setTitlebarLeadingInset(titlebarLeadingInsets.withoutLights)
     }
 
     func windowWillExitFullScreen(_ notification: Notification) {
-        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
+        root.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
     }
 
     /// Taking away the display a full-screen window is on strands it: AppKit
@@ -371,12 +371,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         let fileTabHeight = top * 2 + height
         editor.setTabRowHeight(fileTabHeight)
         sidebar.setFileTabHeight(fileTabHeight)
-        // The project/branch strip starts after the last traffic light rather
-        // than at a guessed offset — the buttons move with the system metrics.
+        root.setTabRowHeight(fileTabHeight)
+        // The sidebar's toggle, and the project/branch strip after it, start
+        // after the last traffic light rather than at a guessed offset — the
+        // buttons move with the system metrics.
         let lastButton = window.standardWindowButton(.zoomButton) ?? closeButton
         let trailing = lastButton.convert(lastButton.bounds, to: nil).maxX
         titlebarLeadingInsets = (trailing + 10, buttonRect.minX)
-        sidebar.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
+        root.setTitlebarLeadingInset(titlebarLeadingInsets.besideLights)
     }
 
     func releaseTransientMemory() {
@@ -1628,7 +1630,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     @objc func saveDocument(_ sender: Any?) { editor.save() }
     @objc func findInFile(_ sender: Any?) { editor.showFindBar() }
     @objc func findAndReplace(_ sender: Any?) { editor.showFindBar(replacing: true) }
-    @objc func showSidebar(_ sender: Any?) { root.showSidebar() }
+    /// ⌘B: put the sidebar away, or bring it back.
+    @objc func toggleSidebar(_ sender: Any?) { root.toggleSidebar() }
 
     // Named apart from PDFView's own zoomIn(_:), which would otherwise take
     // the command whenever the pages have focus and step by its own factor.
@@ -1691,6 +1694,9 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         switch menuItem.action {
         case #selector(openProjectInTerminal(_:)):
             return projectURL != nil
+        // The start page has no sidebar to put away.
+        case #selector(toggleSidebar(_:)):
+            return root.canToggleSidebar
         // Only a PDF zooms. Unavailable anywhere else, the keys fall through
         // to whatever else might want them.
         case #selector(zoomInPreview(_:)), #selector(zoomOutPreview(_:)),

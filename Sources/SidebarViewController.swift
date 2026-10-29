@@ -412,8 +412,9 @@ final class TitleLetterButton: NSButton {
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
     private var hintWork: DispatchWorkItem?
-    /// One card for all four: only one is ever under the pointer.
-    private static let hintCard = TitleButtonHintCard()
+    /// One card for all four, and the sidebar's toggle: only one is ever
+    /// under the pointer.
+    private static var hintCard: TitleButtonHintCard { .shared }
 
     init(letter: String, word: String, hint: String, shortcut: String? = nil) {
         self.letter = letter
@@ -557,6 +558,8 @@ final class TitleLetterButton: NSButton {
 /// it names a button in: it is gone as soon as the pointer leaves the button,
 /// so it never has to move with the window.
 final class TitleButtonHintCard {
+    static let shared = TitleButtonHintCard()
+
     private let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
     private let label = HintLabelView()

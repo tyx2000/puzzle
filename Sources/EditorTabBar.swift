@@ -30,6 +30,16 @@ final class EditorTabBar: NSView {
     /// window with no tabs at all.
     static let actionAreaWidth: CGFloat = 34
     private var contentHeight: CGFloat = EditorTabBar.defaultRowHeight
+    /// Room kept at the start of the first row for what stands over it once
+    /// the sidebar is away: the traffic lights and the sidebar's toggle. Set
+    /// inside the sidebar's slide, the tabs move with it.
+    var leadingInset: CGFloat = 0 {
+        didSet {
+            guard leadingInset != oldValue else { return }
+            needsLayout = true
+            layoutPills()
+        }
+    }
 
     /// Rows are laid out top-down.
     override var isFlipped: Bool { true }
@@ -67,6 +77,7 @@ final class EditorTabBar: NSView {
         (Theme.selectedControl, Theme.selectedControlText)
     }
     var titlesForTesting: [String] { pills.map(\.titleForTesting) }
+    var tabFramesForTesting: [NSRect] { pills.map(\.frame) }
 
     func reload(tabs: [TabInfo], active: Int) {
         while pills.count > tabs.count {
@@ -101,13 +112,15 @@ final class EditorTabBar: NSView {
 
     private func layoutPills() {
         let available = max(80, bounds.width - Self.actionAreaWidth - padding)
-        var x = padding
+        var rowStart = padding + leadingInset
+        var x = rowStart
         var y = padding
         var rows = 1
         for pill in pills {
             let width = min(pill.preferredWidth, available - padding)
-            if x + width > available, x > padding {
-                x = padding
+            if x + width > available, x > rowStart {
+                rowStart = padding
+                x = rowStart
                 y += rowHeight + gap
                 rows += 1
             }

@@ -30,6 +30,7 @@ final class EditorViewController: NSViewController {
     private let settingsButton = NSButton()
     private var settingsButtonTop: NSLayoutConstraint!
     private var tabRowHeight = EditorTabBar.defaultRowHeight
+    private var tabLeadingInset: CGFloat = 0
     private var fileHistories: [URL: FileHistoryModel] = [:]
 
     var currentURL: URL? { pane?.currentURL }
@@ -39,6 +40,13 @@ final class EditorViewController: NSViewController {
         tabRowHeight = height
         settingsButtonTop?.constant = (height - 20) / 2
         pane?.setTabRowHeight(height)
+    }
+
+    /// Where the first tab starts: after the traffic lights and the sidebar's
+    /// toggle while the sidebar is away, which leaves the editor under them.
+    func setTabLeadingInset(_ inset: CGFloat) {
+        tabLeadingInset = inset
+        pane?.setTabLeadingInset(inset)
     }
 
     override func loadView() {
@@ -118,6 +126,7 @@ final class EditorViewController: NSViewController {
     private func makePane() -> EditorPaneViewController {
         let pane = EditorPaneViewController()
         pane.setTabRowHeight(tabRowHeight)
+        pane.setTabLeadingInset(tabLeadingInset)
         pane.repositoryRoot = repositoryRoot
         pane.fileHistoryProvider = { [weak self] url in self?.fileHistories[url] }
         pane.onDocumentSaved = { [weak self] url in
