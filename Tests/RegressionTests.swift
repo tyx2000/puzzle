@@ -233,7 +233,6 @@ enum RegressionTests {
         try testTabKeyboardNavigation()
         try testBundleDeclaresDocumentTypes()
         try testSettingsGearLivesTopRight()
-        try testActivityBarUsesTextLabels()
         try testScrollersFollowTheTheme()
         try testScrollersShowAsTheSystemsDo()
         try testScrollersAreCaughtWhereTheyShow()
@@ -3013,11 +3012,15 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
 
         let buttons = workspace.sidebar.titleButtonsForTesting
-        try expect(buttons.map(\.letterForTesting) == ["O", "R", "T", "W"],
-                   "the title band does not carry O, R, T, W")
+        try expect(buttons.map(\.letterForTesting) == ["O", "R", "T", "W", "S", "G"],
+                   "the title band does not carry O, R, T, W, S, G")
         try expect(buttons.map(\.wordForTesting)
-                    == ["Open", "Recent", "Terminal", "Window"],
-                   "a letter unrolls into the wrong word: \(buttons.map(\.wordForTesting))")
+                    == ["Open", "Recent", "Terminal", "Window", "Search", "Git"],
+                   "a button carries the wrong name: \(buttons.map(\.wordForTesting))")
+        // Drawn as the file tree's own coloured icons.
+        try expect(buttons.map(\.iconForTesting)
+                    == ["folder-import", "changelog", "console", "virtual", "search", "git"],
+                   "the buttons are not drawn as their icons: \(buttons.map(\.iconForTesting))")
         for button in buttons {
             // Hovering spells the letter out, so a tooltip would land on top of
             // the word a moment later saying the same thing.
@@ -3027,29 +3030,28 @@ enum RegressionTests {
                        "a title-band button has no name for VoiceOver")
         }
 
-        // At rest each is outlined — a dim letter on the bare band went
-        // unnoticed — but not filled, which stood out from the band; a dead T
-        // is not outlined either.
+        // At rest a button is its icon and nothing else: no edge, and no
+        // ground, which stood out from the band. Sampled clear of the icon.
         func capPixels(_ button: TitleLetterButton)
-            -> (ring: NSColor?, inside: NSColor?, outside: NSColor?) {
+            -> (edge: NSColor?, inside: NSColor?, outside: NSColor?) {
             guard let pixels = button.bitmapImageRepForCachingDisplay(in: button.bounds)
             else { return (nil, nil, nil) }
             button.cacheDisplay(in: button.bounds, to: pixels)
             let scale = CGFloat(pixels.pixelsWide) / button.bounds.width
             let middle = Int(button.bounds.height / 2 * scale)
-            let ring = TitleLetterButton.capInset + 0.5
-            return (pixels.colorAt(x: Int(ring * scale), y: middle),
-                    pixels.colorAt(x: Int(5 * scale), y: middle),
+            let edge = TitleLetterButton.capInset + 0.5
+            return (pixels.colorAt(x: Int(edge * scale), y: middle),
+                    pixels.colorAt(x: Int(4.5 * scale), y: Int(4.5 * scale)),
                     pixels.colorAt(x: Int(0.5 * scale), y: middle))
         }
-        let resting = capPixels(buttons[0])
-        try expect((resting.ring?.alphaComponent ?? 0) > 0.5
-                    && (resting.outside?.alphaComponent ?? 1) < 0.1,
-                   "a title-band button is not outlined at rest")
-        try expect((resting.inside?.alphaComponent ?? 1) < 0.1,
-                   "a title-band button is filled at rest, standing out from the band")
-        try expect((capPixels(buttons[2]).ring?.alphaComponent ?? 1) < 0.1,
-                   "a dead button is drawn as live")
+        for button in buttons {
+            let resting = capPixels(button)
+            try expect((resting.edge?.alphaComponent ?? 1) < 0.1
+                        && (resting.outside?.alphaComponent ?? 1) < 0.1,
+                       "\(button.letterForTesting) is drawn with an edge at rest")
+            try expect((resting.inside?.alphaComponent ?? 1) < 0.1,
+                       "\(button.letterForTesting) has a ground at rest, standing out from the band")
+        }
 
         // A terminal needs a directory, so T is dead until a project is open.
         try expect(buttons[2].isEnabled == false,
@@ -3058,7 +3060,7 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(buttons[2].isEnabled, "T stayed dead after a project opened")
 
-        // The hover background is what makes a letter read as a target.
+        // The ground under the pointer is what says it is about to be pressed.
         let open = buttons[0]
         try expect(!open.isHoveredForTesting, "a button starts out hovered")
         open.setHoveredForTesting(true)
@@ -3072,14 +3074,16 @@ enum RegressionTests {
         // window — W at the band's end too. Passing over shows nothing.
         let card = TitleLetterButton.hintCardForTesting
         try expect(buttons.map(\.hint) == ["Open Project", "Recent Projects",
-                                            "Open in Terminal", "New Window"]
-                    && buttons[0].shortcut == "⌘O" && buttons[3].shortcut == "⌘N",
+                                            "Open in Terminal", "New Window",
+                                            "Search Project", "Git"]
+                    && buttons[0].shortcut == "⌘O" && buttons[3].shortcut == "⌘N"
+                    && buttons[4].shortcut == "⌘2" && buttons[5].shortcut == "⌘3",
                    "the buttons are not named for what they do: \(buttons.map(\.hint))")
         open.setHoveredForTesting(true)
         open.setHoveredForTesting(false)
         RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
         try expect(!card.isVisible, "passing over a button put its name up")
-        for button in [buttons[0], buttons[3]] {
+        for button in [buttons[0], buttons[5]] {
             button.setHoveredForTesting(true)
             try expect(!card.isVisible, "the name came up before the pointer had rested")
             RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
@@ -3100,8 +3104,31 @@ enum RegressionTests {
             try expect(!card.isVisible, "the name stayed after the pointer left")
         }
 
-        // The hit area is bigger than the glyph, and the four do not run
-        // together into one strip of letters.
+        // The last two switch panels: each is marked while its panel is open,
+        // says so when rested on, and a second click goes back to the
+        // projects.
+        let search = buttons[4], git = buttons[5]
+        try expect(workspace.sidebar.visiblePanel == .project && !search.isOn && !git.isOn,
+                   "a switch is marked with the projects showing")
+        search.performClick(nil)
+        try expect(workspace.sidebar.visiblePanel == .search && search.isOn && !git.isOn,
+                   "S did not open Search, or is not marked: \(workspace.sidebar.visiblePanel)")
+        try expect((capPixels(search).inside?.alphaComponent ?? 0) > 0.5,
+                   "the switch for the open panel has no ground")
+        search.setHoveredForTesting(true)
+        RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
+        try expect(card.textForTesting == "Back to Projects  ⌘1",
+                   "resting on the open panel's switch says '\(card.textForTesting)'")
+        search.setHoveredForTesting(false)
+        git.performClick(nil)
+        try expect(workspace.sidebar.visiblePanel == .git && git.isOn && !search.isOn,
+                   "G did not open Git in Search's place: \(workspace.sidebar.visiblePanel)")
+        git.performClick(nil)
+        try expect(workspace.sidebar.visiblePanel == .project && !git.isOn,
+                   "a second click on G did not go back to the projects")
+
+        // The hit area is bigger than the icon, and the buttons do not run
+        // together into one strip.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         let boxes = buttons.map { $0.convert($0.bounds, to: workspace.sidebar.view) }
         for box in boxes {
@@ -3113,14 +3140,17 @@ enum RegressionTests {
                        "two buttons are touching: \(left.maxX) then \(right.minX)")
         }
 
-        // They sit at the end of the band, in order, inside it.
+        // They sit at the end of the band, in order, inside it, the switches
+        // a little apart from the errands.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         let frames = buttons.map { $0.convert($0.bounds, to: workspace.sidebar.view) }
-        try expect(frames[0].maxX <= frames[1].minX + 1
-                    && frames[1].maxX <= frames[2].minX + 1,
+        try expect(zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX + 1 },
                    "the buttons are out of order: \(frames.map(\.minX))")
-        try expect(frames[2].maxX <= workspace.sidebar.view.bounds.maxX,
-                   "T hangs off the end of the band: \(frames[2])")
+        try expect(frames[5].maxX <= workspace.sidebar.view.bounds.maxX,
+                   "G hangs off the end of the band: \(frames[5])")
+        try expect(abs(frames[4].minX - frames[3].maxX - TitleLetterButton.groupGap) < 0.5,
+                   "the switches are not set apart from the errands: "
+                     + "\(frames[3].maxX) then \(frames[4].minX)")
 
         var opened = 0
         workspace.sidebar.onOpenProject = { opened += 1 }
@@ -9043,8 +9073,8 @@ enum RegressionTests {
     }
 
     private static func testSettingsGearLivesTopRight() throws {
-        try expect(!ActivityBarView.Action.allCases.contains { "\($0)" == "settings" },
-                   "the activity bar still offers a Settings panel")
+        try expect(!SidebarPanel.allCases.contains { "\($0)" == "settings" },
+                   "the sidebar still offers a Settings panel")
 
         let editor = EditorViewController()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
@@ -9078,22 +9108,6 @@ enum RegressionTests {
         // gear occupies, so a long tab title cannot run underneath it.
         try expect(EditorTabBar.actionAreaWidth >= 32,
                    "the tab strip stopped reserving room for the window's actions")
-    }
-
-    private static func testActivityBarUsesTextLabels() throws {
-        let bar = ActivityBarView(frame: NSRect(x: 0, y: 0, width: 320, height: 40))
-        bar.layoutSubtreeIfNeeded()
-        // One button per panel. Settings is not a panel — it opens a file — so
-        // it sits with the editor's actions at the top right instead.
-        try expect(bar.buttonTitlesForTesting == ["Projects", "Search", "Git"],
-                   "the activity bar reads \(bar.buttonTitlesForTesting)")
-
-        // The changed-file count is not here: it belongs to a project, and a
-        // window holds several. Each project's own row carries its own count,
-        // so the button answers for none of them.
-        // The label is the affordance, so nothing waits for a hover to explain it.
-        try expect(bar.buttonTooltipsForTesting.allSatisfy { $0 == nil },
-                   "a text button still carries a tooltip")
     }
 
     private static func testMaterialFileIcons() throws {
@@ -10455,11 +10469,11 @@ enum RegressionTests {
                    "re-clicking the open project did not collapse it")
         try expect(!host.editor.hasProject && host.editor.openURLs.isEmpty,
                    "the collapsed window still claims a project")
-        // The Git button never carries a count: it would have to answer for
+        // The Git switch never carries a count: it would have to answer for
         // one of several projects, and each chip answers for its own.
-        try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git",
-                   "the Git button carries a count: "
-                     + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
+        try expect(host.sidebar.titleButtonsForTesting.last?.wordForTesting == "Git",
+                   "the Git switch carries a count: "
+                     + "\(String(describing: host.sidebar.titleButtonsForTesting.last?.wordForTesting))")
         try expect(panel.chipsForTesting.allSatisfy { !$0.isActiveForTesting }
                     && panel.headingForTesting == nil,
                    "a project is still marked as showing after collapsing")
@@ -10800,7 +10814,6 @@ enum RegressionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let panel = GitPanelViewController()
         _ = panel.view
-        let bar = ActivityBarView(frame: NSRect(x: 0, y: 0, width: 320, height: 40))
 
         func entry(_ path: String) -> GitService.Status.Entry {
             GitService.Status.Entry(code: " M", path: path, originalPath: nil)
@@ -10818,8 +10831,6 @@ enum RegressionTests {
                     && panel.changesTabBadgeForTesting == "2",
                    "the tab reads \(panel.changesTabLabelForTesting) "
                     + "/ \(panel.changesTabBadgeForTesting)")
-        try expect(bar.buttonTitlesForTesting[2] == "Git",
-                   "the activity bar reads \(bar.buttonTitlesForTesting[2])")
         try expect(panel.pushLabelForTesting == "Push" && panel.pushBadgeForTesting == "3",
                    "Push reads \(panel.pushLabelForTesting) / \(panel.pushBadgeForTesting)")
         // The count belongs to Push, not to the line above the commit box.
@@ -13802,8 +13813,7 @@ enum RegressionTests {
         }
 
         do {
-            let strips = [ActivityBarView.selectedColoursForTesting,
-                          EditorTabBar.selectedColoursForTesting,
+            let strips = [EditorTabBar.selectedColoursForTesting,
                           GitPanelViewController.selectedTabColoursForTesting]
             for strip in strips.dropFirst() {
                 try expect(sameColor(strip.surface, strips[0].surface)

@@ -116,7 +116,7 @@ enum SidebarCellDrawing {
     ///
     /// The circle is placed by its centre and the digits are rendered through an
     /// offscreen image, so the badge lands identically in flipped views (the
-    /// sidebar cells) and unflipped ones (the activity bar). Deriving the
+    /// sidebar cells) and unflipped ones (the Git panel's tabs). Deriving the
     /// position from a text baseline instead had it drawn on three different
     /// lines depending on the host.
     enum Badge {

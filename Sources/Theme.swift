@@ -96,7 +96,6 @@ enum Theme {
     static let editorBackground = token(\.editorBackground)
     static let panelBackground = token(\.panelBackground)
     static let barBackground = token(\.barBackground)
-    static let activityBar = token(\.activityBar)
     /// Scrollbars. AppKit's dark knob is a fixed light grey, which near-black
     /// surfaces turn into the brightest thing on screen.
     static let scrollerKnob = token(\.scrollerKnob)
@@ -109,8 +108,8 @@ enum Theme {
     // lighter, which is the only thing marking which tab is open.
     static let activeTab = token(\.activeTab)
     /// Behind whatever is selected in a strip of controls: the panel tab, the
-    /// activity-bar button, the open file's tab. One token so the three read as
-    /// the same state, and far enough from the bar behind them to be seen —
+    /// title band's switch for the open panel, the open file's tab. One token
+    /// so the three read as the same state, and far enough from the bar behind them to be seen —
     /// `activeTab` sits a couple of percent off its background, which was
     /// barely a shadow.
     /// Kept in the same family as `activeRow`, the tone the file tree already

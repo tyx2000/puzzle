@@ -188,7 +188,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             // one it ran in still counts the changes it committed.
             if directory != self.projectURL { self.refreshProjectSummaries(all: true) }
         }
-        sidebar.activityBar.onAction = { [weak self] action in self?.handleActivity(action) }
         // The name goes back to the list it was chosen from; the terminal has
         // its own button at the end of the band.
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
@@ -1671,19 +1670,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// Open settings.json in this window's editor (creating it if needed).
     func openSettings() {
         editor.open(url: Settings.shared.ensureFileExists())
-    }
-
-    /// Activity-bar routing: the sidebar is always visible; tapping an action
-    /// selects the requested panel.
-    private func handleActivity(_ action: ActivityBarView.Action) {
-        // Tapping an action selects its panel; the sidebar remains visible.
-        root.showSidebar()
-        switch action {
-        case .project:  sidebar.showFiles()
-        case .search:   sidebar.showSearch()
-        case .git:      sidebar.showGit()
-        }
-        root.preserveSidebarWidth()
     }
 }
 

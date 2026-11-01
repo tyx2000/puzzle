@@ -1,7 +1,7 @@
 import AppKit
 
 /// Window content: sidebar | editor split. There is no status bar — the panel
-/// buttons live in the sidebar's bottom action bar (Zed layout).
+/// switches live in the sidebar's title band.
 ///
 /// The sidebar can be put away with the toggle beside the traffic lights (or
 /// ⌘B). Away, the pointer resting on the toggle brings it out over the editor

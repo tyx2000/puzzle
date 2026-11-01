@@ -17,7 +17,6 @@ struct ThemePalette {
     let editorBackground: UInt32
     let panelBackground: UInt32
     let barBackground: UInt32
-    let activityBar: UInt32
     let scrollerKnob: UInt32
     let scrollerSlot: UInt32
     let border: UInt32
@@ -127,7 +126,7 @@ extension ThemePalette {
     static let ayuDark = ThemePalette(
         id: "ayu-dark", summary: "dark, warm accents — the default", isDark: true,
         editorBackground: 0x0d1017, panelBackground: 0x0d1017, barBackground: 0x0d1017,
-        activityBar: 0x0d1017, scrollerKnob: 0x39404e, scrollerSlot: 0x11151d, border: 0x1b1f29,
+        scrollerKnob: 0x39404e, scrollerSlot: 0x11151d, border: 0x1b1f29,
         selection: 0x193155, lineHighlight: 0x232a36, activeTab: 0x161a24,
         selectedControl: 0x232a36, selectedControlText: 0xe6e9ef, inactiveTab: 0x0d1017,
         hover: 0x1c212b, stripedRow: 0x131721, activeRow: 0x232a36, foreground: 0xbfbdb6,
@@ -150,7 +149,7 @@ extension ThemePalette {
     static let ayuLight = ThemePalette(
         id: "ayu-light", summary: "light, Ayu's warm hues, flat", isDark: false,
         editorBackground: 0xfcfcfc, panelBackground: 0xfcfcfc, barBackground: 0xfcfcfc,
-        activityBar: 0xfcfcfc, scrollerKnob: 0xcdd1d6, scrollerSlot: 0xf0f1f3, border: 0xe6e8eb,
+        scrollerKnob: 0xcdd1d6, scrollerSlot: 0xf0f1f3, border: 0xe6e8eb,
         selection: 0xd3e1f5, lineHighlight: 0xeceff2, activeTab: 0xf1f3f5,
         selectedControl: 0xeceff2, selectedControlText: 0x33373c, inactiveTab: 0xfcfcfc,
         hover: 0xf0f2f4, stripedRow: 0xf7f8f9, activeRow: 0xeceff2, foreground: 0x3c4045,
@@ -172,7 +171,7 @@ extension ThemePalette {
     static let githubLight = ThemePalette(
         id: "github-light", summary: "light, a white editor, high contrast", isDark: false,
         editorBackground: 0xffffff, panelBackground: 0xf6f8fa, barBackground: 0xf6f8fa,
-        activityBar: 0xf6f8fa, scrollerKnob: 0xc5cbd2, scrollerSlot: 0xeef1f4, border: 0xd8dee4,
+        scrollerKnob: 0xc5cbd2, scrollerSlot: 0xeef1f4, border: 0xd8dee4,
         selection: 0xc8e1ff, lineHighlight: 0xf3f5f7, activeTab: 0xffffff,
         selectedControl: 0xe6eaef, selectedControlText: 0x1f2328, inactiveTab: 0xf6f8fa,
         hover: 0xeaeef2, stripedRow: 0xfafbfc, activeRow: 0xddf4ff, foreground: 0x1f2328,
@@ -193,7 +192,7 @@ extension ThemePalette {
     static let materialTeal = ThemePalette(
         id: "material-teal", summary: "light, mint surfaces, teal accents", isDark: false,
         editorBackground: 0xfbfefd, panelBackground: 0xeef6f5, barBackground: 0xeef6f5,
-        activityBar: 0xeef6f5, scrollerKnob: 0xb9cdca, scrollerSlot: 0xe6f0ee, border: 0xd9e6e4,
+        scrollerKnob: 0xb9cdca, scrollerSlot: 0xe6f0ee, border: 0xd9e6e4,
         selection: 0xc6e9e5, lineHighlight: 0xecf6f4, activeTab: 0xfbfefd,
         selectedControl: 0xd4ece9, selectedControlText: 0x1c2b2a, inactiveTab: 0xeef6f5,
         hover: 0xe2efed, stripedRow: 0xf5faf9, activeRow: 0xd4ece9, foreground: 0x263238,
@@ -214,7 +213,7 @@ extension ThemePalette {
     static let materialIndigo = ThemePalette(
         id: "material-indigo", summary: "light, a white editor, indigo and pink", isDark: false,
         editorBackground: 0xffffff, panelBackground: 0xf4f5fa, barBackground: 0xf4f5fa,
-        activityBar: 0xf4f5fa, scrollerKnob: 0xc3c8dc, scrollerSlot: 0xeceef6, border: 0xdfe2ee,
+        scrollerKnob: 0xc3c8dc, scrollerSlot: 0xeceef6, border: 0xdfe2ee,
         selection: 0xd6daf2, lineHighlight: 0xf3f4fb, activeTab: 0xffffff,
         selectedControl: 0xe3e6f6, selectedControlText: 0x1a1c2e, inactiveTab: 0xf4f5fa,
         hover: 0xeaecf7, stripedRow: 0xf9f9fd, activeRow: 0xe3e6f6, foreground: 0x212121,
@@ -235,7 +234,7 @@ extension ThemePalette {
     static let materialYou = ThemePalette(
         id: "material-you", summary: "light, lavender tones (Material 3)", isDark: false,
         editorBackground: 0xfffbff, panelBackground: 0xf3edf7, barBackground: 0xf3edf7,
-        activityBar: 0xf3edf7, scrollerKnob: 0xcbc3d6, scrollerSlot: 0xece6f0, border: 0xe7e0ec,
+        scrollerKnob: 0xcbc3d6, scrollerSlot: 0xece6f0, border: 0xe7e0ec,
         selection: 0xeaddff, lineHighlight: 0xf6f1fa, activeTab: 0xfffbff,
         selectedControl: 0xe8def8, selectedControlText: 0x1d192b, inactiveTab: 0xf3edf7,
         hover: 0xece5f3, stripedRow: 0xf9f5fb, activeRow: 0xe8def8, foreground: 0x1d1b20,

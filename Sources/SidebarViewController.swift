@@ -1,11 +1,14 @@
 import AppKit
 
-/// Left panel: file tree or search, with Zed's 40pt action bar pinned at the
-/// bottom (its width is the panel's width). Swapping panels never changes the
-/// panel width.
+/// What the sidebar can be showing: the window's projects, a search across
+/// the one on show, or its Git panel.
+enum SidebarPanel: CaseIterable { case project, search, git }
+
+/// Left panel: the projects, a search or Git, running the whole height under
+/// the title band, whose buttons switch between them. Swapping panels never
+/// changes the panel width.
 final class SidebarViewController: NSViewController {
     let fileTree = FileTreeViewController()
-    let activityBar = ActivityBarView()
     /// Project name + branch beside the traffic lights (the panel owns that
     /// strip of the titlebar because it is the view underneath it).
     let projectTitle = ProjectTitleView()
@@ -42,20 +45,28 @@ final class SidebarViewController: NSViewController {
     /// repository — the project on screen, or one the user has since left.
     var onProjectGitChanged: ((URL) -> Void)?
 
-    /// The three errands that start a session, at the end of the title band:
-    /// open a project, go back to a recent one, get a shell in this one. They
-    /// were on the menu bar, where macOS would not let them act on one click —
-    /// a top-level item with no submenu is never drawn at all.
-    private let openButton = TitleLetterButton(letter: "O", word: "Open",
-                                               hint: "Open Project", shortcut: "⌘O")
+    /// The errands that start a session, at the end of the title band: open
+    /// a project, go back to a recent one, get a shell in this one, open
+    /// another window. They were on the menu bar, where macOS would not let
+    /// them act on one click — a top-level item with no submenu is never drawn
+    /// at all.
+    private let openButton = TitleLetterButton(letter: "O", word: "Open", hint: "Open Project",
+                                               shortcut: "⌘O", icon: "folder-import")
     private let recentButton = TitleLetterButton(letter: "R", word: "Recent",
-                                                 hint: "Recent Projects")
+                                                 hint: "Recent Projects", icon: "changelog")
     private let terminalButton = TitleLetterButton(letter: "T", word: "Terminal",
-                                                   hint: "Open in Terminal")
-    private let windowButton = TitleLetterButton(letter: "W", word: "Window",
-                                                 hint: "New Window", shortcut: "⌘N")
+                                                   hint: "Open in Terminal", icon: "console")
+    private let windowButton = TitleLetterButton(letter: "W", word: "Window", hint: "New Window",
+                                                 shortcut: "⌘N", icon: "virtual")
+    /// After them, a little apart, the two panels other than the projects:
+    /// switches rather than errands, each marked while its panel is open, and
+    /// a second click on one goes back to the projects.
+    private let searchButton = TitleLetterButton(letter: "S", word: "Search", hint: "Search Project",
+                                                 shortcut: "⌘2", icon: "search")
+    private let gitButton = TitleLetterButton(letter: "G", word: "Git", hint: "Git",
+                                              shortcut: "⌘3", icon: "git")
     private var titleButtons: [TitleLetterButton] {
-        [openButton, recentButton, terminalButton, windowButton]
+        [openButton, recentButton, terminalButton, windowButton, searchButton, gitButton]
     }
     var onOpenProject: (() -> Void)?
     var onNewWindow: (() -> Void)?
@@ -65,30 +76,29 @@ final class SidebarViewController: NSViewController {
     var onOpenTerminal: (() -> Void)?
 
     private let containerView = NSView()
-    /// The 1pt line under the traffic-light band — the same boundary the
-    /// activity bar draws at the bottom of the panel.
+    /// The 1pt line under the traffic-light band.
     private let titleSeparator = FlatView()
     private var containerTopConstraint: NSLayoutConstraint!
     private var projectTitleLeadingConstraint: NSLayoutConstraint!
     /// Which panel is currently visible.
-    private(set) var visiblePanel: ActivityBarView.Action = .project
+    private(set) var visiblePanel: SidebarPanel = .project
 
     override func loadView() {
         let root = FlatView()
         root.fillColor = Theme.panelBackground
 
         containerView.translatesAutoresizingMaskIntoConstraints = false
-        activityBar.translatesAutoresizingMaskIntoConstraints = false
         projectTitle.translatesAutoresizingMaskIntoConstraints = false
         titleSeparator.translatesAutoresizingMaskIntoConstraints = false
         titleSeparator.fillColor = Theme.border
         root.addSubview(containerView)
-        root.addSubview(activityBar)
         root.addSubview(projectTitle)
         for (button, action) in [(openButton, #selector(openProjectAction)),
                                  (recentButton, #selector(showRecentAction)),
                                  (terminalButton, #selector(openTerminalAction)),
-                                 (windowButton, #selector(newWindowAction))] {
+                                 (windowButton, #selector(newWindowAction)),
+                                 (searchButton, #selector(searchAction)),
+                                 (gitButton, #selector(gitAction))] {
             button.target = self
             button.action = action
             root.addSubview(button)
@@ -125,7 +135,11 @@ final class SidebarViewController: NSViewController {
                                                    constant: -TitleLetterButton.gap),
             terminalButton.trailingAnchor.constraint(equalTo: windowButton.leadingAnchor,
                                                      constant: -TitleLetterButton.gap),
-            windowButton.trailingAnchor.constraint(
+            windowButton.trailingAnchor.constraint(equalTo: searchButton.leadingAnchor,
+                                                   constant: -TitleLetterButton.groupGap),
+            searchButton.trailingAnchor.constraint(equalTo: gitButton.leadingAnchor,
+                                                   constant: -TitleLetterButton.gap),
+            gitButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -6),
             openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
@@ -139,6 +153,12 @@ final class SidebarViewController: NSViewController {
             windowButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             windowButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             windowButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            searchButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            searchButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            searchButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            gitButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
+            gitButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
+            gitButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -146,12 +166,13 @@ final class SidebarViewController: NSViewController {
 
             containerView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             containerView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            containerView.bottomAnchor.constraint(equalTo: activityBar.topAnchor),
-
-            activityBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            activityBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            activityBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            // Down to the window's foot: the panels have nothing under them.
+            containerView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        // Back to the projects, from either switch while it is on.
+        for button in [searchButton, gitButton] {
+            button.onHint = (text: "Back to Projects", shortcut: "⌘1")
+        }
         self.view = root
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
@@ -209,6 +230,19 @@ final class SidebarViewController: NSViewController {
     @objc private func showRecentAction() {
         onShowRecent?(recentButton.convert(recentButton.bounds, to: view))
     }
+    /// A switch: its panel, or back to the projects if that is what is open.
+    @objc private func searchAction() {
+        if visiblePanel == .search { showFiles() } else { showSearch() }
+    }
+    @objc private func gitAction() {
+        if visiblePanel == .git { showFiles() } else { showGit() }
+    }
+
+    /// The switch for the panel on show is marked; the projects have none.
+    private func markVisiblePanel() {
+        searchButton.isOn = visiblePanel == .search
+        gitButton.isOn = visiblePanel == .git
+    }
 
     var titleButtonsForTesting: [TitleLetterButton] { titleButtons }
 
@@ -229,7 +263,7 @@ final class SidebarViewController: NSViewController {
     func showFiles() {
         visiblePanel = .project
         reveal(projectsPanel)
-        activityBar.setSelected(.project)
+        markVisiblePanel()
     }
 
     /// The window's projects, newest last, and which one is showing.
@@ -268,7 +302,7 @@ final class SidebarViewController: NSViewController {
         let search = ensureSearch()
         visiblePanel = .search
         reveal(search)
-        activityBar.setSelected(.search)
+        markVisiblePanel()
         search.focusSearchField()
     }
     /// Reveal the Git panel already switched to its Branch tab.
@@ -281,14 +315,13 @@ final class SidebarViewController: NSViewController {
         let gitPanel = ensureGit()
         visiblePanel = .git
         reveal(gitPanel)
-        activityBar.setSelected(.git)
+        markVisiblePanel()
     }
 
     /// Re-apply the UI font (`ui_font_*`) across every panel in the sidebar.
     func refreshFonts() {
         (view as? FlatView)?.fillColor = Theme.panelBackground
         titleSeparator.fillColor = Theme.border
-        activityBar.refreshAppearance()
         projectTitle.refreshAppearance()
         titleButtons.forEach { $0.refreshFonts() }
         fileTree.refreshAppearance()
@@ -384,43 +417,55 @@ final class SidebarViewController: NSViewController {
 
 }
 
-/// A single-letter button for the title band: O, R, T, W.
+/// A button for the title band, drawn as one of the coloured icons the file
+/// tree uses: open a project, the recents, a terminal, a new window, and the
+/// Search and Git switches. Each keeps a letter as its short name.
 ///
-/// Letters rather than glyphs because these four are not obviously pictureable
-/// — opening a project, the recents, a terminal and a new window all reach for
-/// the same folder-ish and window-ish symbols.
-///
-/// At rest each is outlined, in the band's own border colour: enough to make
-/// four letters read as four buttons — a dim letter on the bare band went
-/// unnoticed — without the filled squares that stood out from the band.
-/// Under the pointer the square fills. Resting on one names it, with its
-/// shortcut, in a card under it: the letter alone did not say what it does.
+/// No edge of its own: the icon's colour is enough to read as a target. Under
+/// the pointer a ground comes up behind it; a switch keeps that ground while
+/// its panel is open. Resting on one names it, with its shortcut, in a card
+/// under it: the icon alone did not say what it does.
 final class TitleLetterButton: NSButton {
-    /// The hit area, which is deliberately wider than the letter: a 22pt box
-    /// around an 11pt character was a poke rather than a button.
+    /// The hit area, which is deliberately wider than the icon.
     static let side: CGFloat = 26
-    /// Gap between neighbours, so four of them read as four targets instead of
-    /// one strip of letters.
+    /// Gap between neighbours, so they read as separate targets instead of
+    /// one strip of icons.
     static let gap: CGFloat = 3
-    /// The cap inside the hit area.
+    /// Between the errands and the switches after them.
+    static let groupGap: CGFloat = 8
+    /// The ground inside the hit area.
     static let capInset: CGFloat = 2
+    static let iconSide: CGFloat = 16
     /// How long the pointer rests before the name shows: long enough that
     /// passing over the band shows nothing.
     static let hintDelay: TimeInterval = 0.4
 
     private let letter: String
+    /// The Material icon it is drawn as.
+    private let icon: String
     /// What it does, said in full, and its shortcut.
     let hint: String
     let shortcut: String?
+    /// A switch whose panel is open: marked with the ground, and its card says
+    /// what a click on it now does.
+    var isOn = false {
+        didSet {
+            guard isOn != oldValue else { return }
+            setAccessibilityValue(isOn ? "on" : "off")
+            needsDisplay = true
+        }
+    }
+    var onHint: (text: String, shortcut: String?)?
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
     private var hintWork: DispatchWorkItem?
-    /// One card for all four, and the sidebar's toggle: only one is ever
+    /// One card for all of them, and the sidebar's toggle: only one is ever
     /// under the pointer.
     private static var hintCard: TitleButtonHintCard { .shared }
 
-    init(letter: String, word: String, hint: String, shortcut: String? = nil) {
+    init(letter: String, word: String, hint: String, shortcut: String? = nil, icon: String) {
         self.letter = letter
+        self.icon = icon
         self.hint = hint
         self.shortcut = shortcut
         super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
@@ -503,7 +548,8 @@ final class TitleLetterButton: NSButton {
     private func showHint() {
         guard isHovered, isEnabled, let window else { return }
         let onScreen = window.convertToScreen(convert(bounds, to: nil))
-        Self.hintCard.show(hint, shortcut: shortcut, below: onScreen, in: window, owner: self)
+        let said = isOn ? onHint ?? (hint, shortcut) : (hint, shortcut)
+        Self.hintCard.show(said.0, shortcut: said.1, below: onScreen, in: window, owner: self)
     }
 
     private func hideHint() {
@@ -518,26 +564,16 @@ final class TitleLetterButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let capRect = bounds.insetBy(dx: Self.capInset, dy: Self.capInset)
-        if isEnabled, isHovered {
+        if isEnabled, isHovered || isOn {
             Theme.selectedControl.setFill()
-            NSBezierPath(roundedRect: capRect, xRadius: 5, yRadius: 5).fill()
-        } else if isEnabled {
-            let ring = NSBezierPath(roundedRect: capRect.insetBy(dx: 0.5, dy: 0.5),
-                                    xRadius: 4.5, yRadius: 4.5)
-            ring.lineWidth = 1
-            Theme.border.setStroke()
-            ring.stroke()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: Self.capInset, dy: Self.capInset),
+                         xRadius: 5, yRadius: 5).fill()
         }
-        let colour: NSColor = !isEnabled ? Theme.gutter
-            : (isHovered ? Theme.foreground : Theme.punct)
-        let attributes: [NSAttributedString.Key: Any] = [.font: Theme.uiFont(11.5),
-                                                         .foregroundColor: colour]
-        let text = letter as NSString
-        let size = text.size(withAttributes: attributes)
-        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
-                              y: (bounds.height - size.height) / 2),
-                  withAttributes: attributes)
+        let side = Self.iconSide
+        // A dead one keeps its icon, faded: a terminal with nowhere to open.
+        SidebarCellDrawing.icon(.material(icon), in: NSRect(
+            x: (bounds.width - side) / 2, y: (bounds.height - side) / 2,
+            width: side, height: side), opacity: isEnabled ? 1 : 0.35)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -551,6 +587,7 @@ final class TitleLetterButton: NSButton {
     /// The pointer arriving or leaving, as the tracking area reports it.
     func setHoveredForTesting(_ hovered: Bool) { setHovered(hovered) }
     var letterForTesting: String { letter }
+    var iconForTesting: String { icon }
     var wordForTesting: String { accessibilityLabel() ?? "" }
     static var hintCardForTesting: TitleButtonHintCard { hintCard }
 }

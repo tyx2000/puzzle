@@ -632,7 +632,7 @@ final class GitBranchCell: DrawnSidebarCell {
 }
 
 /// Two-state tab strip with the same full-height selection treatment as the
-/// bottom action bar. Native buttons preserve keyboard and VoiceOver behavior.
+/// editor's tabs. Native buttons preserve keyboard and VoiceOver behavior.
 final class FlatPanelTabBar: NSView {
     override var isFlipped: Bool { true }
     var onChange: (() -> Void)?

@@ -20,8 +20,8 @@ final class ProjectRowView: NSView {
 
     var onClose: (() -> Void)?
     /// The branch name is its own target: it shows the project's Git panel,
-    /// which otherwise costs a second trip to the Git button at the foot of
-    /// the sidebar.
+    /// which otherwise costs a second trip to the Git switch in the title
+    /// band.
     var onSelectBranch: (() -> Void)?
     /// The Git mark is a button of its own: it pulls this project.
     var onPull: (() -> Void)? {

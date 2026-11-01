@@ -242,7 +242,7 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
 
     /// The handle straddles the divider, so painting its middle column replaces
     /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
-    /// activity bar and the title band draw.
+    /// title band and the project strip draw.
     override func draw(_ dirtyRect: NSRect) {
         Theme.border.setFill()
         paintedDividerRect.fill()
