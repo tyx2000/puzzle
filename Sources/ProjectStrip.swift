@@ -46,12 +46,25 @@ enum SyncShimmer {
 /// how many files it has changed but not committed. The one on show is marked
 /// with the selection's ground and an edge in the accent; a click on another
 /// shows that one instead, and a click on the one showing folds it away.
+///
+/// Under the pointer a remove button slides in over the chip's right end, and
+/// a card above gives the branch. The chip keeps its width throughout.
 final class ProjectChipView: NSView {
     static let padding: CGFloat = 10
     /// Far enough that a shaky click is not a drag.
     static let dragThreshold: CGFloat = 4
-    /// How long the pointer rests before the branch shows.
-    static let hintDelay: TimeInterval = 0.4
+    /// How long the pointer rests before the card above gives the branch.
+    static let hintDelay: TimeInterval = 0.25
+    /// The remove button: its size, and how far in from the right edge it
+    /// comes to rest.
+    static let closeSide: CGFloat = 16
+    static let closeInset: CGFloat = 5
+    /// How far past the edge it starts, and how long it takes to come in.
+    static let closeTravel: CGFloat = 22
+    static let closeDuration: TimeInterval = 0.18
+    /// The fade of the chip's own ground laid under it, which the count and
+    /// the end of the name go under. Nothing on the chip moves for it.
+    static let veilWidth: CGFloat = 46
 
     static func height() -> CGFloat {
         let line = NSLayoutManager().defaultLineHeight(for: font())
@@ -79,6 +92,14 @@ final class ProjectChipView: NSView {
     private var isHovered = false
     private var tracking: NSTrackingArea?
     private var hintWork: DispatchWorkItem?
+    /// How far the remove button has come in: 0 away past the edge, 1 at
+    /// rest. It slides to `closeTarget` from `closeFrom`.
+    private var closeShown: CGFloat = 0
+    private var closeFrom: CGFloat = 0
+    private var closeTarget: CGFloat = 0
+    private var closeStarted: CFTimeInterval = 0
+    private var closeTimer: Timer?
+    private var closeIsHovered = false
 
     /// A fetch or a pull is running for this project.
     var isSyncing = false {
@@ -100,7 +121,10 @@ final class ProjectChipView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    deinit { shimmerTimer?.invalidate() }
+    deinit {
+        shimmerTimer?.invalidate()
+        closeTimer?.invalidate()
+    }
 
     func configure(name: String, branch: String, user: String, changes: Int,
                    path: String, isActive: Bool) {
@@ -152,7 +176,8 @@ final class ProjectChipView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let shape = outline
-        (isActive || isHovered ? Theme.selectedControl : Theme.hover).setFill()
+        let ground = isActive || isHovered ? Theme.selectedControl : Theme.hover
+        ground.setFill()
         shape.fill()
         if isSyncing {
             NSGraphicsContext.saveGraphicsState()
@@ -169,13 +194,96 @@ final class ProjectChipView: NSView {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
+        SidebarCellDrawing.attributedText(
+            label(), in: bounds.insetBy(dx: Self.padding, dy: 0))
+        if closeShown > 0.001 { drawClose(over: ground) }
+        // Last, so nothing laid over the chip ever covers its edge.
         if isActive {
             Theme.cursor.setStroke()
             shape.lineWidth = 1
             shape.stroke()
         }
-        SidebarCellDrawing.attributedText(
-            label(), in: bounds.insetBy(dx: Self.padding, dy: 0))
+    }
+
+    /// Where the remove button comes to rest.
+    private var closeRect: NSRect {
+        NSRect(x: bounds.width - Self.closeInset - Self.closeSide,
+               y: (bounds.height - Self.closeSide) / 2,
+               width: Self.closeSide, height: Self.closeSide)
+    }
+    /// What a press lands on it in: the button, and a little round it.
+    private var closeHitRect: NSRect {
+        closeShown > 0.5 ? closeRect.insetBy(dx: -3, dy: -4) : .zero
+    }
+
+    /// The button on its way in, `closeShown` of the way from past the right
+    /// edge, over a fade of the chip's own ground. Both stay inside the
+    /// border, which is drawn after them.
+    private func drawClose(over ground: NSColor) {
+        let shown = closeShown
+        let inner = bounds.insetBy(dx: 1, dy: 1)
+        let radius = inner.height / 2
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: inner, xRadius: radius, yRadius: radius).addClip()
+        // Solid from just left of the count's badge, so none of its rim is
+        // left showing beside the button.
+        NSGradient(colorsAndLocations: (ground.withAlphaComponent(0), 0),
+                   (ground.withAlphaComponent(shown), 0.4),
+                   (ground.withAlphaComponent(shown), 1))?
+            .draw(in: NSRect(x: inner.maxX - Self.veilWidth, y: inner.minY,
+                             width: Self.veilWidth, height: inner.height),
+                  angle: 0)
+        let box = closeRect.offsetBy(dx: Self.closeTravel * (1 - shown), dy: 0)
+        let alpha = min(1, shown * 1.4)
+        let hot = closeIsHovered && shown > 0.5
+        if hot {
+            Theme.red.withAlphaComponent(0.18).setFill()
+            NSBezierPath(ovalIn: box).fill()
+        }
+        let arm: CGFloat = 3.5
+        let cross = NSBezierPath()
+        cross.move(to: NSPoint(x: box.midX - arm, y: box.midY - arm))
+        cross.line(to: NSPoint(x: box.midX + arm, y: box.midY + arm))
+        cross.move(to: NSPoint(x: box.midX + arm, y: box.midY - arm))
+        cross.line(to: NSPoint(x: box.midX - arm, y: box.midY + arm))
+        cross.lineWidth = 1.4
+        cross.lineCapStyle = .round
+        (hot ? Theme.red : ink).withAlphaComponent(alpha).setStroke()
+        cross.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// Bring the button in, or send it back out, from wherever it is now.
+    private func slideClose(to target: CGFloat) {
+        guard target != closeTarget else { return }
+        closeFrom = closeShown
+        closeTarget = target
+        closeStarted = CACurrentMediaTime()
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            settleClose()
+            return
+        }
+        guard closeTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.advanceClose()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        closeTimer = timer
+    }
+
+    private func advanceClose() {
+        let t = CGFloat(min(1, (CACurrentMediaTime() - closeStarted) / Self.closeDuration))
+        closeShown = closeFrom + (closeTarget - closeFrom) * (1 - pow(1 - t, 3))
+        needsDisplay = true
+        if t >= 1 { settleClose() }
+    }
+
+    private func settleClose() {
+        closeTimer?.invalidate()
+        closeTimer = nil
+        closeShown = closeTarget
+        if closeShown == 0 { closeIsHovered = false }
+        needsDisplay = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -231,7 +339,17 @@ final class ProjectChipView: NSView {
         PointerCursor.enter()
     }
 
-    override func mouseMoved(with event: NSEvent) { PointerCursor.enter() }
+    override func mouseMoved(with event: NSEvent) {
+        PointerCursor.enter()
+        pointerMoved(to: convert(event.locationInWindow, from: nil))
+    }
+
+    private func pointerMoved(to point: NSPoint) {
+        let onClose = closeHitRect.contains(point)
+        guard onClose != closeIsHovered else { return }
+        closeIsHovered = onClose
+        needsDisplay = true
+    }
     override func cursorUpdate(with event: NSEvent) { PointerCursor.enter() }
 
     override func mouseExited(with event: NSEvent) {
@@ -243,6 +361,7 @@ final class ProjectChipView: NSView {
         guard hovered != isHovered else { return }
         isHovered = hovered
         needsDisplay = true
+        slideClose(to: hovered ? 1 : 0)
         hideHint()
         guard hovered else { return }
         let work = DispatchWorkItem { [weak self] in self?.showHint() }
@@ -250,21 +369,22 @@ final class ProjectChipView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.hintDelay, execute: work)
     }
 
-    /// The branch, in the card the title band's buttons use. The name is on
-    /// the chip already; it leads the card only to say whose branch it is.
-    /// Nothing for the project on show, whose branch heads its changes just
-    /// below — unless its name had to be cut to fit.
+    /// The card above the chip: its branch, and after it how many files are
+    /// changed — the count the remove button covers while the pointer is
+    /// here. A folder that is not a repository gives its name instead, and
+    /// only when there is a count to give.
     private var hint: (text: String, detail: String?)? {
-        let cut = naturalWidth > bounds.width + 0.5
-        guard cut || (!isActive && !branch.isEmpty) else { return nil }
-        return (name, branch.isEmpty ? nil : branch)
+        guard !branch.isEmpty || changes > 0 else { return nil }
+        return (branch.isEmpty ? name : branch, changes > 0 ? "· \(changes) changed" : nil)
     }
 
     private func showHint() {
         guard isHovered, let window, let hint else { return }
         let onScreen = window.convertToScreen(convert(bounds, to: nil))
-        TitleButtonHintCard.shared.show(hint.text, shortcut: hint.detail, below: onScreen,
-                                        in: window, owner: self)
+        TitleButtonHintCard.shared.show(
+            hint.text, detail: hint.detail,
+            icon: branch.isEmpty ? nil : Theme.symbol("arrow.triangle.branch"),
+            above: onScreen, in: window, owner: self)
     }
 
     private func hideHint() {
@@ -289,6 +409,18 @@ final class ProjectChipView: NSView {
     /// meant. `nextEvent` hands over the rest of the gesture — the window's
     /// own queue in the app, a scripted sequence in a test.
     func trackPress(inWindow start: NSPoint, nextEvent: () -> NSEvent?) {
+        // On the remove button: a click on it, never a drag or a choice.
+        if closeHitRect.contains(convert(start, from: nil)) {
+            var released: NSPoint?
+            while let next = nextEvent() {
+                guard next.type == .leftMouseDragged else {
+                    released = next.locationInWindow
+                    break
+                }
+            }
+            if let released, closeHitRect.contains(convert(released, from: nil)) { onClose?() }
+            return
+        }
         var dragging = false
         var released: NSPoint?
         while let next = nextEvent() {
@@ -371,6 +503,14 @@ final class ProjectChipView: NSView {
     /// Whether the light is moving — it is not for a chip off screen.
     var isShimmeringForTesting: Bool { shimmerTimer != nil }
     var hintForTesting: (text: String, detail: String?)? { hint }
+    /// How far the remove button has come in, and where it comes to rest.
+    var closeShownForTesting: CGFloat { closeShown }
+    var closeRectForTesting: NSRect { closeRect }
+    var isCloseHoveredForTesting: Bool { closeIsHovered }
+    /// Finish the slide now, rather than over its duration.
+    func settleCloseForTesting() { settleClose() }
+    /// The pointer at `point`, in the chip's own coordinates.
+    func pointerMovedForTesting(to point: NSPoint) { pointerMoved(to: point) }
     var menuTitlesForTesting: [String] {
         contextMenu().items.filter { !$0.isSeparatorItem }.map(\.title)
     }

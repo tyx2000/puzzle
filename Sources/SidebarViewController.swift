@@ -556,10 +556,11 @@ final class TitleLetterButton: NSButton {
 }
 
 /// The card under a title-band button that names it: what it does, and its
-/// shortcut, dimmer, after it. A window of its own so the band's edge does not
-/// cut it off, and one the pointer passes through. Not a child of the window
-/// it names a button in: it is gone as soon as the pointer leaves the button,
-/// so it never has to move with the window.
+/// shortcut, dimmer, after it. Over a project in the strip, the card above it
+/// that gives its branch. A window of its own so the band's edge does not cut
+/// it off, and one the pointer passes through. Not a child of the window it
+/// names a button in: it is gone as soon as the pointer leaves the button, so
+/// it never has to move with the window.
 final class TitleButtonHintCard {
     static let shared = TitleButtonHintCard()
 
@@ -568,6 +569,9 @@ final class TitleButtonHintCard {
     private let label = HintLabelView()
     private weak var owner: NSView?
     static let gap: CGFloat = 6
+    /// How far a card shown above rises as it fades in.
+    static let rise: CGFloat = 3
+    static let riseDuration: TimeInterval = 0.12
 
     init() {
         panel.isOpaque = false
@@ -582,22 +586,62 @@ final class TitleButtonHintCard {
     var isVisible: Bool { panel.isVisible }
     var screenFrame: NSRect { panel.frame }
     var textForTesting: String { label.text + (label.shortcut.map { "  " + $0 } ?? "") }
+    var hasIconForTesting: Bool { label.icon != nil }
+    /// The card itself, to be drawn off screen.
+    var contentForTesting: NSView { label }
 
     /// Centred under `anchor`, in screen coordinates — and kept inside the
     /// window, which W, at the band's end, would otherwise run out of.
     func show(_ text: String, shortcut: String?, below anchor: NSRect, in parent: NSWindow,
               owner: NSView) {
-        self.owner = owner
-        label.text = text
-        label.shortcut = shortcut
+        place(text, detail: shortcut, icon: nil, owner: owner)
         let size = label.fittingCardSize
-        var origin = NSPoint(x: (anchor.midX - size.width / 2).rounded(),
+        let origin = NSPoint(x: Self.centred(size, on: anchor, in: parent),
                              y: anchor.minY - Self.gap - size.height)
-        let bounds = parent.frame.insetBy(dx: 6, dy: 0)
-        origin.x = min(max(bounds.minX, origin.x), bounds.maxX - size.width)
+        panel.alphaValue = 1
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
         panel.orderFront(nil)
+    }
+
+    /// Centred over `anchor`, with a mark before the text: the card a project
+    /// in the strip shows its branch in. It fades in rising a few points, so
+    /// it reads as coming off the project rather than appearing over it.
+    func show(_ text: String, detail: String?, icon: NSImage?, above anchor: NSRect,
+              in parent: NSWindow, owner: NSView) {
+        place(text, detail: detail, icon: icon, owner: owner)
+        let size = label.fittingCardSize
+        let frame = NSRect(origin: NSPoint(x: Self.centred(size, on: anchor, in: parent),
+                                           y: anchor.maxY + Self.gap),
+                           size: size)
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            panel.alphaValue = 1
+            panel.setFrame(frame, display: false)
+            panel.orderFront(nil)
+            return
+        }
+        panel.alphaValue = 0
+        panel.setFrame(frame.offsetBy(dx: 0, dy: -Self.rise), display: false)
+        panel.orderFront(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.riseDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func place(_ text: String, detail: String?, icon: NSImage?, owner: NSView) {
+        self.owner = owner
+        label.text = text
+        label.shortcut = detail
+        label.icon = icon
         label.needsDisplay = true
+    }
+
+    private static func centred(_ size: NSSize, on anchor: NSRect, in parent: NSWindow) -> CGFloat {
+        let bounds = parent.frame.insetBy(dx: 6, dy: 0)
+        let x = (anchor.midX - size.width / 2).rounded()
+        return min(max(bounds.minX, x), bounds.maxX - size.width)
     }
 
     /// Only the button that showed it takes it down: the next one along may
@@ -612,7 +656,11 @@ final class TitleButtonHintCard {
 private final class HintLabelView: NSView {
     var text = ""
     var shortcut: String?
+    /// A mark before the text, in the dimmer ink.
+    var icon: NSImage?
     static let padding = NSSize(width: 8, height: 4)
+    static let iconSide: CGFloat = 10
+    static let iconGap: CGFloat = 4
 
     override var isFlipped: Bool { true }
 
@@ -623,11 +671,12 @@ private final class HintLabelView: NSView {
         [.font: Theme.uiFont(11), .foregroundColor: Theme.dimText]
     }
     private var shortcutText: String? { shortcut.map { "  " + $0 } }
+    private var iconRoom: CGFloat { icon == nil ? 0 : Self.iconSide + Self.iconGap }
 
     var fittingCardSize: NSSize {
         let main = (text as NSString).size(withAttributes: textAttributes)
         let extra = shortcutText.map { ($0 as NSString).size(withAttributes: shortcutAttributes) }
-        return NSSize(width: ceil(main.width + (extra?.width ?? 0)) + Self.padding.width * 2,
+        return NSSize(width: ceil(iconRoom + main.width + (extra?.width ?? 0)) + Self.padding.width * 2,
                       height: ceil(main.height) + Self.padding.height * 2)
     }
 
@@ -639,8 +688,13 @@ private final class HintLabelView: NSView {
         Theme.border.setStroke()
         body.lineWidth = 1
         body.stroke()
+        if let icon {
+            SidebarCellDrawing.image(icon, tint: Theme.dimText, in: NSRect(
+                x: Self.padding.width, y: (bounds.height - Self.iconSide) / 2,
+                width: Self.iconSide, height: Self.iconSide))
+        }
         let main = text as NSString
-        let origin = NSPoint(x: Self.padding.width, y: Self.padding.height)
+        let origin = NSPoint(x: Self.padding.width + iconRoom, y: Self.padding.height)
         main.draw(at: origin, withAttributes: textAttributes)
         if let shortcutText {
             let width = main.size(withAttributes: textAttributes).width

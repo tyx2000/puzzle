@@ -16518,6 +16518,27 @@ enum RegressionTests {
                     == "\(root.lastPathComponent)  1",
                    "the chip does not carry the change count: "
                      + "\(String(describing: projectsPanel.chipsForTesting.first?.titleForTesting))")
+        // Resting on it puts its branch, and that count, in a card above it;
+        // the card that used to come up under it is gone.
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        guard let firstChip = projectsPanel.chipsForTesting.first,
+              let chipWindow = firstChip.window else {
+            throw Failure(description: "the project's chip is not in a window")
+        }
+        let card = TitleButtonHintCard.shared
+        firstChip.setHoveredForTesting(true)
+        try expect(!card.isVisible, "the card came up before the pointer had rested")
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            ProjectChipView.hintDelay + TitleButtonHintCard.riseDuration + 0.25))
+        let chipOnScreen = chipWindow.convertToScreen(firstChip.convert(firstChip.bounds, to: nil))
+        try expect(card.isVisible && card.textForTesting == "trunk  · 1 changed"
+                    && card.hasIconForTesting,
+                   "resting on the project did not give its branch and count above it: "
+                     + "'\(card.textForTesting)'")
+        try expect(card.screenFrame.minY >= chipOnScreen.maxY + TitleButtonHintCard.gap - 0.5,
+                   "the card is not above the project: \(card.screenFrame) for \(chipOnScreen)")
+        firstChip.setHoveredForTesting(false)
+        try expect(!card.isVisible, "the card stayed after the pointer left")
         // Drawn in the round badge a count takes everywhere else in the
         // sidebar, not as loose digits after the branch.
         let badge = projectsPanel.headingForTesting?.badgeImageForTesting
@@ -16605,13 +16626,49 @@ enum RegressionTests {
         let liftedGround = try pixel(backdrop, x: groundAt.x, y: groundAt.y)
         try expect(nearer(liftedGround, to: Theme.selectedControl, than: Theme.hover),
                    "a project under the pointer does not lift: \(liftedGround)")
-        // Its branch is a rest away, in the card the title band's buttons use;
-        // the name is on the chip already and only says whose branch it is.
-        try expect(sample.hintForTesting?.text == "project"
-                    && sample.hintForTesting?.detail == "trunk",
-                   "a project's card does not give its branch: "
+        // Its branch is a rest away, in a card above it, and after it the
+        // count the remove button is about to cover.
+        try expect(sample.hintForTesting?.text == "trunk"
+                    && sample.hintForTesting?.detail == "· 2 changed",
+                   "a project's card does not give its branch and count: "
                      + "\(String(describing: sample.hintForTesting))")
+
+        // Under the pointer a remove button comes in over the right end. The
+        // chip keeps its width: nothing in the strip moves for it.
+        let restingWidth = sample.frame.width
+        sample.settleCloseForTesting()
+        let closeBox = sample.closeRectForTesting
+        try expect(sample.closeShownForTesting == 1 && sample.frame.width == restingWidth,
+                   "the remove button did not come in, or the chip changed width: "
+                     + "\(sample.closeShownForTesting), \(sample.frame.width)")
+        try expect(closeBox.width == ProjectChipView.closeSide
+                    && abs(closeBox.maxX - (sample.bounds.width - ProjectChipView.closeInset)) < 0.5
+                    && abs(closeBox.midY - sample.bounds.midY) < 0.5,
+                   "the remove button does not rest at the right end: \(closeBox)")
+        // Over it, it says so; a press on it closes the project and never
+        // chooses it, and a press anywhere else still does.
+        var closedFromChip = 0, chosenFromChip = 0
+        sample.onClose = { closedFromChip += 1 }
+        sample.onSelect = { chosenFromChip += 1 }
+        sample.pointerMovedForTesting(to: NSPoint(x: closeBox.midX, y: closeBox.midY))
+        try expect(sample.isCloseHoveredForTesting, "the remove button does not answer the pointer")
+        sample.pressForTesting(at: NSPoint(x: closeBox.midX, y: closeBox.midY))
+        sample.pressForTesting(at: NSPoint(x: 20, y: closeBox.midY))
+        try expect(closedFromChip == 1 && chosenFromChip == 1,
+                   "the remove button and the rest of the chip lost their own clicks: "
+                     + "\(closedFromChip) closed, \(chosenFromChip) chosen")
+        // Laid over the chip's end, it stays inside the edge: the accent the
+        // project on show is ringed with runs whole round the button.
+        sample.configure(name: "project", branch: "trunk", user: "Ada",
+                         changes: 2, path: "/tmp/project", isActive: true)
+        let rightEdge = try pixel(backdrop, x: backdrop.bounds.width - 0.25, y: chipHeight / 2)
+        try expect(matches(rightEdge, Theme.cursor),
+                   "the remove button covers the chip's edge: \(rightEdge)")
+        // And it slides away with the pointer.
         sample.setHoveredForTesting(false)
+        sample.settleCloseForTesting()
+        try expect(sample.closeShownForTesting == 0 && !sample.isCloseHoveredForTesting,
+                   "the remove button stayed after the pointer left")
 
         let headingSample = ProjectRowView()
         headingSample.configure(name: "project", branch: "trunk", user: "Ada",
