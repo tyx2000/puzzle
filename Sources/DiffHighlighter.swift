@@ -58,6 +58,7 @@ enum DiffHighlighter {
     static func apply(to storage: NSTextStorage) -> [(range: NSRange, color: NSColor)] {
         var bands: [(range: NSRange, color: NSColor)] = []
         let text = storage.string as NSString
+        let wholeFile = isWholeFileBody(storage.string)
         let full = NSRange(location: 0, length: text.length)
         storage.beginEditing()
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground), range: full)
@@ -68,7 +69,7 @@ enum DiffHighlighter {
             let lineRange = NSIntersectionRange(enclosingRange, full)
             guard lineRange.length > 0 else { return }
             let line = text.substring(with: lineRange)
-            let kind = kind(of: line)
+            let kind = wholeFile ? bodyKind(of: line) : kind(of: line)
             lines.append((lineRange, kind))
 
             storage.addAttribute(.foregroundColor, value: kind.foreground, range: lineRange)
@@ -272,9 +273,10 @@ enum DiffHighlighter {
     /// line up directly instead of counting hunks itself.
     static func lineNumbers(in text: String) -> [Int?] {
         var numbers: [Int?] = []
-        var oldNext = 0
-        var newNext = 0
-        var inHunk = false
+        // A whole file's body is one hunk from the first line of both sides.
+        var inHunk = isWholeFileBody(text)
+        var oldNext = inHunk ? 1 : 0
+        var newNext = inHunk ? 1 : 0
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(raw)
             if line.hasPrefix("@@") {
@@ -315,6 +317,45 @@ enum DiffHighlighter {
             }
         }
         return numbers
+    }
+
+    // MARK: - A whole file
+
+    /// A diff tab shows the whole file. Git is asked for every line as context,
+    /// which makes one hunk of it, and the lines above that hunk — `diff --git`,
+    /// `index`, `---`, `+++` and the `@@` line itself — are left off: the
+    /// header over the tab already names the file and counts the changes. What
+    /// is left is the body, every line starting with its marker, numbered from
+    /// line 1 on both sides.
+    ///
+    /// A diff that is not one hunk from the top of the file — binary, a mode
+    /// change, a note that there is nothing to show — comes back as it went in.
+    static func wholeFileBody(of diff: String) -> String {
+        let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
+        let hunks = lines.indices.filter { lines[$0].hasPrefix("@@") }
+        guard hunks.count == 1, let start = hunkStart(String(lines[hunks[0]])),
+              start.old <= 1, start.new <= 1 else { return diff }
+        let body = lines[(hunks[0] + 1)...]
+        guard body.contains(where: { !$0.isEmpty }) else { return diff }
+        return body.joined(separator: "\n")
+    }
+
+    /// Whether `text` is such a body. A diff starts with a header; a body
+    /// starts with a line's marker. Only diffs Git wrote come this way, and
+    /// those always open with `diff --git`.
+    static func isWholeFileBody(_ text: String) -> Bool {
+        guard let first = text.first else { return false }
+        return first == "+" || first == "-" || first == " " || first == "\\"
+    }
+
+    /// A body line is what its first character says, and nothing else: with
+    /// no headers left, an added line reading "++x" is an addition.
+    private static func bodyKind(of line: String) -> LineKind {
+        switch line.first {
+        case "+": return .added
+        case "-": return .removed
+        default: return .context
+        }
     }
 
     /// First old/new line of a hunk header, e.g. `@@ -12,7 +14,9 @@ func f()`.

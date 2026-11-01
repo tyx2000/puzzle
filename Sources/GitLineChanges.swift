@@ -15,13 +15,7 @@ enum GitLineChanges {
         /// What is there now.
         let added: [String]
 
-        var colour: NSColor {
-            switch kind {
-            case .added: return Theme.diffAddedText
-            case .modified: return Theme.blue
-            case .deleted: return Theme.diffRemovedText
-            }
-        }
+        var colour: NSColor { kind.colour }
     }
 
     /// `git diff -U0` for one path, parsed into per-line marks. Returns an empty
@@ -275,5 +269,26 @@ enum GitLineChanges {
     /// The change covering a line, if any.
     static func change(at line: Int, in changes: [Change]) -> Change? {
         changes.first { $0.lines.contains(line) }
+    }
+}
+
+extension GitLineChanges.Change.Kind {
+    /// The gutter's mark for this kind of change, and the frame a diff puts
+    /// round one: the same three colours, so a change reads the same in both.
+    var colour: NSColor {
+        switch self {
+        case .added: return Theme.diffAddedText
+        case .modified: return Theme.blue
+        case .deleted: return Theme.diffRemovedText
+        }
+    }
+
+    /// Lines only taken out, only put in, or both.
+    init(removesLines: Bool, addsLines: Bool) {
+        switch (removesLines, addsLines) {
+        case (true, false): self = .deleted
+        case (false, true): self = .added
+        default: self = .modified
+        }
     }
 }

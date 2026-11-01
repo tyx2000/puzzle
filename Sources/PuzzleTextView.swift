@@ -833,7 +833,6 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         drawHoverLineBand()
         drawCurrentLineBand()
         drawGitChangeHighlight()
-        drawChangeFlash()
         drawScopeEndTint()
     }
 
@@ -1565,46 +1564,6 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
                       y: rows.minY + textContainerOrigin.y,
                       width: max(bounds.width, visibleRect.maxX - bounds.minX),
                       height: rows.height)
-    }
-
-    // MARK: - The change stepped to
-
-    /// The rows of the diff change just stepped to, and when the step was:
-    /// lit at once and let fade — see `ChangeFlash`.
-    private var changeFlash: (rows: NSRect, started: CFTimeInterval)?
-    private var changeFlashTimer: Timer?
-    var changeFlashRowsForTesting: NSRect? { changeFlash?.rows }
-
-    func flashRows(of lines: NSRange) {
-        changeFlashTimer?.invalidate()
-        if let old = changeFlash { setNeedsDisplay(old.rows) }
-        guard let rows = rowsBandRect(for: lines) else {
-            changeFlash = nil
-            return
-        }
-        changeFlash = (rows, CACurrentMediaTime())
-        setNeedsDisplay(rows)
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
-            guard let self, let flash = self.changeFlash else {
-                timer.invalidate()
-                return
-            }
-            self.setNeedsDisplay(flash.rows)
-            if CACurrentMediaTime() - flash.started >= ChangeFlash.duration {
-                timer.invalidate()
-                self.changeFlash = nil
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        changeFlashTimer = timer
-    }
-
-    private func drawChangeFlash() {
-        guard let flash = changeFlash else { return }
-        let strength = ChangeFlash.strength(at: CACurrentMediaTime() - flash.started)
-        guard strength > 0 else { return }
-        ChangeFlash.fill(strength: strength).setFill()
-        flash.rows.fill(using: .sourceOver)
     }
 
     /// Where the code is seen from: the clip's left edge past the gutter it

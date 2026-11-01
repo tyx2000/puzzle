@@ -61,9 +61,10 @@ enum SideBySideDiff {
         var rows: [Row] = []
         var removed: [(Int, String)] = []
         var added: [(Int, String)] = []
-        var oldNext = 0
-        var newNext = 0
-        var inHunk = false
+        // A whole file's body is one hunk from the first line of both sides.
+        var inHunk = DiffHighlighter.isWholeFileBody(diff)
+        var oldNext = inHunk ? 1 : 0
+        var newNext = inHunk ? 1 : 0
 
         /// A run of -/+ lines becomes one block of paired rows.
         func flushChanges() {

@@ -85,8 +85,9 @@ enum RegressionTests {
             try testDiffGutterUsesFileLineNumbers()
             try testDiffHeaderStepsThroughChanges()
             try testSideBySideDiff()
+            try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (21)")
+            print("Editor regression tests passed (22)")
             return
         }
         try testProcessDrain()
@@ -245,6 +246,7 @@ enum RegressionTests {
         try testLightThemesReadClearly()
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
+        try testWholeFileDiffsFrameEachKind()
         try testGitLineChangeMarks()
         try testThemeIsReadyBeforeAnyView()
         try testGutterMarksUncommittedChanges()
@@ -13897,7 +13899,7 @@ enum RegressionTests {
         pane.view.layoutSubtreeIfNeeded()
         try expect(pane.sideBySideVisibleForTesting,
                    "the mode button did not bring up the two-column view")
-        try expect(pane.diffHeaderForTesting.summaryForTesting == "2 changes",
+        try expect(pane.diffHeaderForTesting.summaryForTesting == "1/2 changes",
                    "the header lost its count in side-by-side: "
                     + pane.diffHeaderForTesting.summaryForTesting)
         // A fresh diff starts at its first line: a clip view left alone keeps
@@ -13921,13 +13923,19 @@ enum RegressionTests {
                        "the side-by-side view lies over the buttons: a press went to "
                          + "\(hit.map { String(describing: type(of: $0)) } ?? "nothing")")
         }
+        // The same change is framed on this side, and a step moves on from it.
+        try expect(pane.sideBySideBlockForTesting == 0
+                    && pane.sideBySideChangeFrameForTesting?.rows != nil
+                    && pane.diffHeaderForTesting.summaryForTesting == "1/2 changes",
+                   "side by side did not frame the change the diff was on")
         navigator.clickNextForTesting()
-        try expect(pane.sideBySideBlockForTesting == 0,
-                   "stepping did not move to the first change")
+        try expect(pane.sideBySideBlockForTesting == 1
+                    && pane.diffHeaderForTesting.summaryForTesting == "2/2 changes",
+                   "stepping did not move to the second change")
 
         // A diff taller than the view must actually scroll when stepping, not
         // merely move an index.
-        var long = "@@ -1,200 +1,200 @@\n"
+        var long = "@@ -1,200 +1,200 @@\n-old head\n+new head\n"
         for index in 1...120 { long += " context line \(index)\n" }
         long += "-old tail\n+new tail\n"
         for index in 1...40 { long += " trailing \(index)\n" }
@@ -13937,18 +13945,20 @@ enum RegressionTests {
         pane.view.layoutSubtreeIfNeeded()
         let before = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
         pane.diffNavigatorForTesting.clickNextForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            ChangeFrameOverlay.scrollingMoveDuration + 0.2))
         pane.view.layoutSubtreeIfNeeded()
         let after = pane.sideBySideGeometryForTesting?.scrollOffset ?? -1
         try expect(after > before,
                    "stepping in side-by-side did not scroll: \(before) -> \(after)")
-        // The change it stepped to is lit — its rows, the -/+ pair — and let go.
-        try expect(pane.sideBySideFlashRowsForTesting?.count == 1,
-                   "the change stepped to is not lit: "
-                     + "\(String(describing: pane.sideBySideFlashRowsForTesting))")
-        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration + 0.2))
-        try expect(pane.sideBySideFlashRowsForTesting == nil,
-                   "the change stayed lit after its flash")
-        pane.diffNavigatorForTesting.clickNextForTesting()
+        // Framed: the -/+ pair, one row, on screen once the step has landed.
+        guard let sideFrame = pane.sideBySideChangeFrameForTesting,
+              let framed = sideFrame.rows else {
+            throw Failure(description: "the change stepped to is not framed")
+        }
+        try expect(abs(framed.height - Theme.lineMetrics().target) < 0.5
+                    && framed.minY >= after && framed.maxY <= after + 400,
+                   "the frame is round \(framed), not the change's row on screen at \(after)")
         pane.diffNavigatorForTesting.clickNextForTesting()
         try expect(pane.sideBySideBlockForTesting == 0,
                    "stepping past the last change did not wrap")
@@ -13957,6 +13967,110 @@ enum RegressionTests {
         pane.view.layoutSubtreeIfNeeded()
         try expect(!pane.sideBySideVisibleForTesting,
                    "switching back did not restore the single-file view")
+    }
+
+    /// A diff tab shows the whole file, with the lines above it Git writes
+    /// left off, and frames each change in the colour the gutter marks that
+    /// kind of change with. The header counts which change the frame is on.
+    private static func testWholeFileDiffsFrameEachKind() throws {
+        let root = try temporaryDirectory("whole-file-diff")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) {
+            _ = GitService.run(args, in: root)
+        }
+        git(["init", "-q", "-b", "main"])
+        git(["config", "user.name", "Puzzle Test"])
+        git(["config", "user.email", "puzzle@example.invalid"])
+        let file = root.appendingPathComponent("notes.txt")
+        let original = (1...30).map { "line \($0)" }
+        try Data((original.joined(separator: "\n") + "\n").utf8).write(to: file)
+        git(["add", "notes.txt"])
+        git(["commit", "-q", "-m", "notes"])
+        var edited = original
+        edited[2] = "line 3, changed"
+        edited.insert("a new line", at: 15)
+        edited.remove(at: 25)
+        try Data((edited.joined(separator: "\n") + "\n").utf8).write(to: file)
+
+        // Every line of the file, and nothing of Git's above it.
+        let entry = GitService.Status.Entry(code: " M", path: "notes.txt", originalPath: nil)
+        let body = GitService.diff(for: entry, in: root, wholeFile: true)
+        let lines = body.split(separator: "\n").map(String.init)
+        try expect(DiffHighlighter.isWholeFileBody(body)
+                    && !lines.contains { $0.hasPrefix("diff --git") || $0.hasPrefix("@@")
+                                         || $0.hasPrefix("index ") || $0.hasPrefix("+++ ") },
+                   "the whole-file diff kept Git's header lines: \(lines.prefix(3))")
+        try expect(lines.contains(" line 1") && lines.contains(" line 30")
+                    && lines.contains("-line 3") && lines.contains("+line 3, changed")
+                    && lines.contains("+a new line") && lines.contains("-line 25"),
+                   "the whole-file diff is not the whole file: \(lines.count) lines")
+        try expect(lines.count == original.count + 2,
+                   "the whole-file diff has \(lines.count) lines, not \(original.count + 2)")
+        // Numbered from line 1, as the file is.
+        let numbers = DiffHighlighter.lineNumbers(in: body)
+        try expect(numbers.first == 1 && numbers[lines.firstIndex(of: " line 30")!] == 30,
+                   "the whole file is numbered \(numbers.prefix(4))…")
+        // A history panel still shows the changes with a few lines round them.
+        try expect(GitService.diff(for: entry, in: root).contains("@@"),
+                   "an ordinary diff lost its hunks")
+        // A file Git does not track is all additions, with no header either.
+        try Data("fresh\n".utf8).write(to: root.appendingPathComponent("new.txt"))
+        let untracked = GitService.diff(
+            for: GitService.Status.Entry(code: "??", path: "new.txt", originalPath: nil),
+            in: root, wholeFile: true)
+        try expect(untracked == "+fresh\n" || untracked == "+fresh",
+                   "an untracked file's diff is \(untracked.debugDescription)")
+        // A diff that is not one hunk from the top comes back as it went in.
+        let twoHunks = "diff --git a/x b/x\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n@@ -10,2 +10,2 @@\n x\n-y\n+z\n"
+        try expect(DiffHighlighter.wholeFileBody(of: twoHunks) == twoHunks,
+                   "a diff of two hunks was cut down")
+
+        // In a body a line's marker decides: "+++x" is a line put in, not a
+        // header, and the side-by-side view numbers it with no hunk row.
+        let tricky = " keep\n+++x\n--- y\n"
+        try expect(DiffHighlighter.apply(to: NSTextStorage(string: tricky)).count == 2,
+                   "a body line reading +++ or --- was taken for a header")
+        try expect(DiffHighlighter.lineNumbers(in: tricky) == [1, 2, 2, nil],
+                   "the body is numbered \(DiffHighlighter.lineNumbers(in: tricky))")
+        let sideRows = SideBySideDiff.rows(from: tricky)
+        try expect(sideRows.count == 2 && !sideRows.contains { $0.kind == .hunk }
+                    && sideRows[1].leftNumber == 2 && sideRows[1].rightNumber == 2,
+                   "side by side read the body as \(sideRows)")
+
+        // Opened: the frame takes the gutter's colour for each kind of change.
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 600))
+        defer { window.close() }
+        let url = URL(string:
+            "puzzle-diff:///repo/.puzzle-diff-preview?window=kinds&path=notes.txt")!
+        DocumentStore.shared.setVirtualDocument(
+            url: url, text: " a\n+b\n c\n-d\n e\n-f\n+g\n h\n", displayName: "notes.txt (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        let frame = pane.changeFrameForTesting
+        let header = pane.diffHeaderForTesting
+        typealias Kind = GitLineChanges.Change.Kind
+        for (step, kind) in [Kind.added, .deleted, .modified].enumerated() {
+            if step > 0 { pane.diffNavigatorForTesting.clickNextForTesting() }
+            try expect(frame.colour == kind.colour && header.summaryForTesting == "\(step + 1)/3 changes",
+                       "change \(step + 1) is framed in the wrong colour, or counted \(header.summaryForTesting)")
+        }
+        try expect(pane.lineNumberRulerForTesting != nil
+                    && pane.textViewForTesting.diffLineNumbers.prefix(3) == [1, 2, 3],
+                   "the open body is numbered \(pane.textViewForTesting.diffLineNumbers.prefix(3))")
+
+        // The count, as the header writes it.
+        let counted = DiffHeaderView()
+        counted.configure(path: "Sources/App.swift", changes: 7)
+        try expect(counted.summaryForTesting == "7 changes", "no change framed reads \(counted.summaryForTesting)")
+        counted.setCurrentChange(2)
+        try expect(counted.summaryForTesting == "3/7 changes", "the third of seven reads \(counted.summaryForTesting)")
+        counted.configure(path: "Sources/App.swift", changes: 1)
+        counted.setCurrentChange(0)
+        try expect(counted.summaryForTesting == "1/1 change", "the only change reads \(counted.summaryForTesting)")
     }
 
     private static func testDiffHeaderStepsThroughChanges() throws {
@@ -13996,7 +14110,8 @@ enum RegressionTests {
         // Touching +/- lines are one change, so this diff holds two.
         try expect(pane.changeBlockCountForTesting == 2,
                    "the header counted \(pane.changeBlockCountForTesting) changes, not 2")
-        try expect(pane.diffHeaderForTesting.summaryForTesting == "2 changes",
+        // The first change is framed as the diff opens, and the header says so.
+        try expect(pane.diffHeaderForTesting.summaryForTesting == "1/2 changes",
                    "the header summarised \(pane.diffHeaderForTesting.summaryForTesting)")
         // The changes are stepped through with round buttons beside the code,
         // as a search's matches are: the one before and the one after, and no
@@ -14006,65 +14121,73 @@ enum RegressionTests {
         try expect(navigator.buttonsForTesting.map(\.toolTip) == ["Previous change", "Next change"],
                    "the diff's buttons are \(navigator.buttonsForTesting.map(\.toolTip))")
 
-        // Stepping forward lands on each change in turn and then wraps.
+        // Framed: the first change's rows, the -/+ pair, in the colour a
+        // change that both takes out and puts in is marked with in the gutter.
         let text = diff as NSString
+        let frame = pane.changeFrameForTesting
+        let codeView = pane.textViewForTesting
+        let firstRows = codeView.rowsBandRect(for: text.range(of: "-removed eleven\n+added eleven\n"))
+        let secondRows = codeView.rowsBandRect(for: text.range(of: "-gone forty-one\n+back forty-one"))
+        try expect(!frame.isHidden && frame.rows != nil && frame.rows == firstRows,
+                   "the frame is round \(String(describing: frame.rows)), not the first "
+                    + "change's rows \(String(describing: firstRows))")
+        try expect(frame.colour == GitLineChanges.Change.Kind.modified.colour,
+                   "a change of both kinds is not framed in the gutter's colour for it")
+
+        // Stepping moves the frame from the change it is on, wrapping at the
+        // ends, and takes the caret to the change.
         func caretLine() -> Int {
             let caret = pane.caretLocationForTesting
             var line = 1
             for i in 0..<min(caret, text.length) where text.character(at: i) == 10 { line += 1 }
             return line
         }
+        func summary() -> String { pane.diffHeaderForTesting.summaryForTesting }
         navigator.clickNextForTesting()
-        try expect(caretLine() == 6, "the first step landed on line \(caretLine()), not the -/+ pair")
+        try expect(caretLine() == 11 && summary() == "2/2 changes",
+                   "the first step landed on line \(caretLine()), counted \(summary())")
+        // It moves there, rather than jumping, and stays once it has.
+        try expect(frame.isMovingForTesting, "the frame jumped to the change instead of moving")
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            ChangeFrameOverlay.scrollingMoveDuration + 0.2))
+        try expect(!frame.isMovingForTesting && frame.rows == secondRows,
+                   "the frame did not settle on the second change: \(String(describing: frame.rows))")
         navigator.clickNextForTesting()
-        try expect(caretLine() == 11, "the second step landed on line \(caretLine())")
-        navigator.clickNextForTesting()
-        try expect(caretLine() == 6, "stepping past the last change did not wrap")
+        try expect(caretLine() == 6 && summary() == "1/2 changes",
+                   "stepping past the last change did not wrap: line \(caretLine()), \(summary())")
         navigator.clickPreviousForTesting()
-        try expect(caretLine() == 11, "stepping back from the first change did not wrap")
+        try expect(caretLine() == 11 && summary() == "2/2 changes",
+                   "stepping back from the first change did not wrap: line \(caretLine())")
+        RunLoop.main.run(until: Date().addingTimeInterval(
+            ChangeFrameOverlay.scrollingMoveDuration + 0.2))
 
-        // The change stepped to is lit, though it was already on screen: its
-        // rows, at once, fading away over 0.8s.
-        let codeView = pane.textViewForTesting
-        guard let lit = codeView.changeFlashRowsForTesting else {
-            throw Failure(description: "the change stepped to is not lit")
+        // Drawn: a line in the frame's colour down its left edge, over the
+        // code and clear of the gutter.
+        guard let box = frame.boxRect,
+              let bitmap = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else {
+            throw Failure(description: "the frame has no box to draw")
         }
-        let caretRow = codeView.currentLineBandRect()
-            ?? codeView.rowsBandRect(for: NSRange(location: pane.caretLocationForTesting, length: 1))
-        try expect(caretRow.map { lit.minY <= $0.minY && $0.maxY <= lit.maxY } ?? false
-                    && lit.height >= 2 * (caretRow?.height ?? 0) - 0.5,
-                   "the lit rows \(lit) are not the change's two")
-        try expect(ChangeFlash.duration == 0.8 && ChangeFlash.peakAlpha == 0.35,
-                   "the flash is \(ChangeFlash.duration)s at \(ChangeFlash.peakAlpha), not 0.8s at 0.35")
-        let quarters = [0, 1, 2, 3].map { ChangeFlash.strength(at: ChangeFlash.duration * Double($0) / 4) }
-        try expect(quarters[0] == 1 && zip(quarters, quarters.dropFirst()).allSatisfy { $0 > $1 }
-                    && quarters[1] - quarters[2] > quarters[2] - quarters[3]
-                    && ChangeFlash.strength(at: ChangeFlash.duration) == 0,
-                   "the change is not lit at once and let fade, slowest at the end: \(quarters)")
-        // Painted: just after the step the rows are lit, and after the flash
-        // they are as they were.
-        func paint(at y: CGFloat) -> NSColor? {
-            let spot = NSRect(x: codeView.visibleRect.maxX - 30, y: y, width: 1, height: 1)
-            guard let bitmap = codeView.bitmapImageRepForCachingDisplay(in: spot) else { return nil }
-            codeView.cacheDisplay(in: spot, to: bitmap)
-            return bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB)
+        frame.cacheDisplay(in: frame.bounds, to: bitmap)
+        let scale = CGFloat(bitmap.pixelsWide) / frame.bounds.width
+        func pixel(_ x: CGFloat) -> NSColor? {
+            bitmap.colorAt(x: Int(x * scale), y: Int(box.midY * scale))?.usingColorSpace(.sRGB)
         }
-        navigator.clickNextForTesting()
-        guard let lighting = codeView.changeFlashRowsForTesting else {
-            throw Failure(description: "the change stepped to is not lit")
-        }
-        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration / 8))
-        let flashing = paint(at: lighting.midY)
-        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFlash.duration))
-        let settled = paint(at: lighting.midY)
-        try expect(codeView.changeFlashRowsForTesting == nil, "the change stayed lit after its flash")
-        if let flashing, let settled {
-            let difference = abs(flashing.redComponent - settled.redComponent)
-                + abs(flashing.greenComponent - settled.greenComponent)
-                + abs(flashing.blueComponent - settled.blueComponent)
-            try expect(difference > 0.05,
-                       "the lit change looks as it does after: \(flashing) and \(settled)")
-        }
+        // The line itself, solid and blue rather than the green or red of the
+        // other kinds; a faint glow outside it; nothing over the rows inside.
+        let line = pixel(box.minX), glow = pixel(box.minX - 2.5), inside = pixel(box.minX + 3)
+        try expect((line?.alphaComponent ?? 0) > 0.8
+                    && (line?.blueComponent ?? 0) > (line?.redComponent ?? 1) + 0.2,
+                   "the frame's edge is drawn \(String(describing: line))")
+        try expect((0.05...0.4).contains(glow?.alphaComponent ?? 0),
+                   "the frame has no faint glow outside it: \(String(describing: glow))")
+        try expect((inside?.alphaComponent ?? 1) < 0.05,
+                   "the frame covers the rows inside it: \(String(describing: inside))")
+        let gutterEdge = frame.convert(NSPoint(x: codeView.visibleCodeMinX, y: 0), from: codeView).x
+        try expect(box.minX >= gutterEdge && box.maxX <= frame.bounds.maxX - 5,
+                   "the frame \(box) is not over the code, between \(gutterEdge) and the edge")
+        // Still there long after the step: it marks where the reader is.
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+        try expect(frame.rows == secondRows && !frame.isHidden, "the frame went away by itself")
 
         // A search's buttons sit in the same place: while one has results to
         // step through, the diff's give way, and come back when it closes.

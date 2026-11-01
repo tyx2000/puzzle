@@ -94,6 +94,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// its changes.
     private let diffHeader = DiffHeaderView()
     private var diffHeaderHeight: NSLayoutConstraint!
+    /// The box round the diff change the ↑↓ buttons are on.
+    private let changeFrame = ChangeFrameOverlay()
+    /// Which change that is, from 0, for each diff open in a tab: a tab come
+    /// back to keeps its place.
+    private var diffChanges: [URL: Int] = [:]
     /// Side-by-side diffs, built the first time the mode is used.
     private var sideBySideDiff: SideBySideDiffView?
     /// The mode is a preference, not a property of the file: it sticks for the
@@ -300,12 +305,27 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
+        // Over the code, under the round buttons below; clear of the gutter,
+        // which it asks the code view where it ends.
+        changeFrame.translatesAutoresizingMaskIntoConstraints = false
+        changeFrame.isHidden = true
+        changeFrame.scrollView = scrollView
+        changeFrame.codeMinX = { [weak self] in
+            guard let self else { return 0 }
+            return self.changeFrame.convert(NSPoint(x: self.textView.visibleCodeMinX, y: 0),
+                                            from: self.textView).x
+        }
+        container.addSubview(changeFrame)
         // Added last so it floats over the text, and pinned to the text's own
         // area rather than the pane's: the bar and the tab strip above it are
         // not what these belong beside.
         container.addSubview(searchNavigator)
         container.addSubview(diffNavigator)
         NSLayoutConstraint.activate([
+            changeFrame.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            changeFrame.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            changeFrame.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            changeFrame.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
             searchNavigator.trailingAnchor.constraint(
                 equalTo: scrollView.trailingAnchor,
                 constant: -SearchNavigatorView.trailingInset),
@@ -591,6 +611,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             diffHeaderHeight.constant = 0
             hideSideBySideDiff()
             refreshDiffNavigator()
+            placeChangeFrame(revealing: false)
             return
         }
         diffHeader.setMode(Self.diffMode)
@@ -599,6 +620,61 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffHeaderHeight.constant = DiffHeaderView.height
         applyDiffMode()
         refreshDiffNavigator()
+        // A diff opened afresh shows its first change, framed; a tab come
+        // back to is where it was left.
+        placeChangeFrame(revealing: diffChanges[url] == nil)
+    }
+
+    /// The frame on the change this diff is at — its first, until a step
+    /// moves it — in whichever view is showing the diff.
+    private func placeChangeFrame(revealing: Bool) {
+        view.layoutSubtreeIfNeeded()
+        guard let url = currentURL, !diffHeader.isHidden, diffHeader.changeCount > 0 else {
+            changeFrame.clear()
+            changeFrame.isHidden = true
+            diffHeader.setCurrentChange(nil)
+            return
+        }
+        let index = min(diffChanges[url] ?? 0, diffHeader.changeCount - 1)
+        diffChanges[url] = index
+        diffHeader.setCurrentChange(index)
+        if let sideBySideDiff, !sideBySideDiff.isHidden {
+            changeFrame.clear()
+            changeFrame.isHidden = true
+            sideBySideDiff.frameChange(index, animated: false, revealing: revealing)
+        } else {
+            changeFrame.isHidden = false
+            frameChange(index, animated: false, revealing: revealing)
+        }
+    }
+
+    /// The unified view's frame round change `index`, in its kind's colour.
+    private func frameChange(_ index: Int, animated: Bool, revealing: Bool = true) {
+        let blocks = changeBlocks()
+        guard blocks.indices.contains(index),
+              let rows = textView.rowsBandRect(for: blocks[index]) else {
+            changeFrame.clear()
+            return
+        }
+        changeFrame.frame(rows: rows, colour: changeKind(of: blocks[index]).colour,
+                          animated: animated, revealing: revealing)
+    }
+
+    /// Lines only taken out, only put in, or both: what each line's marker says.
+    private func changeKind(of block: NSRange) -> GitLineChanges.Change.Kind {
+        let text = textView.string as NSString
+        var removes = false
+        var adds = false
+        text.enumerateSubstrings(in: block, options: [.byLines, .substringNotRequired]) {
+            _, line, _, _ in
+            guard line.length > 0 else { return }
+            switch text.character(at: line.location) {
+            case 0x2D: removes = true   // "-"
+            case 0x2B: adds = true      // "+"
+            default: break
+            }
+        }
+        return GitLineChanges.Change.Kind(removesLines: removes, addsLines: adds)
     }
 
     /// The diff's buttons are up while a diff with changes is on screen — and
@@ -615,6 +691,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         Self.diffMode = Self.diffMode.next
         diffHeader.setMode(Self.diffMode)
         applyDiffMode()
+        // The other layout frames the same change.
+        placeChangeFrame(revealing: true)
     }
 
     /// Swap the code view for the two-column one (or back), leaving everything
@@ -627,6 +705,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard Self.diffMode == .sideBySide else {
             hideSideBySideDiff()
             scrollView.isHidden = false
+            diffHeader.configure(path: diffHeader.pathForTesting, changes: changeBlocks().count)
             return
         }
         let view = ensureSideBySideDiff()
@@ -646,6 +725,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let view = SideBySideDiffView()
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
+        view.onCurrentChange = { [weak self] index in
+            guard let self else { return }
+            if let url = self.currentURL { self.diffChanges[url] = index }
+            self.diffHeader.setCurrentChange(index)
+        }
         // Under the round buttons that float over the code, as the code is.
         self.view.addSubview(view, positioned: .below, relativeTo: searchNavigator)
         NSLayoutConstraint.activate([
@@ -673,26 +757,26 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return blocks
     }
 
-    /// Move to the next (or previous) block of changed lines, wrapping around at
-    /// the ends the way the find bar does.
+    /// Move the frame to the next (or previous) block of changed lines,
+    /// wrapping around at the ends the way the find bar does. It steps from
+    /// the change it is on, the one the header counts, wherever the caret is.
     private func stepThroughDiff(forward: Bool) {
         if let sideBySideDiff, !sideBySideDiff.isHidden {
             sideBySideDiff.step(forward: forward)
             return
         }
         let blocks = changeBlocks()
-        guard !blocks.isEmpty else { return }
-        let caret = textView.selectedRange().location
-        let target: NSRange
-        if forward {
-            target = blocks.first { $0.location > caret } ?? blocks[0]
-        } else {
-            target = blocks.last { NSMaxRange($0) <= caret } ?? blocks[blocks.count - 1]
-        }
-        textView.setSelectedRange(NSRange(location: target.location, length: 0))
-        textView.scrollRangeToVisible(target)
+        guard !blocks.isEmpty, let url = currentURL else { return }
+        let count = blocks.count
+        let current = diffChanges[url] ?? -1
+        let index = current < 0
+            ? (forward ? 0 : count - 1)
+            : (min(current, count - 1) + (forward ? 1 : -1) + count) % count
+        diffChanges[url] = index
+        diffHeader.setCurrentChange(index)
+        textView.setSelectedRange(NSRange(location: blocks[index].location, length: 0))
+        frameChange(index, animated: true)
         scrollView.verticalRulerView?.needsDisplay = true
-        textView.flashRows(of: target)
     }
 
     // MARK: - Regression-test surface
@@ -765,7 +849,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var sideBySideGeometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat)? {
         sideBySideDiff?.geometryForTesting
     }
-    var sideBySideFlashRowsForTesting: Range<Int>? { sideBySideDiff?.flashRowsForTesting }
+    var changeFrameForTesting: ChangeFrameOverlay { changeFrame }
+    var sideBySideChangeFrameForTesting: ChangeFrameOverlay? { sideBySideDiff?.changeFrameForTesting }
     var diffNavigatorForTesting: SearchNavigatorView { diffNavigator }
     func toggleDiffModeForTesting() { toggleDiffMode() }
     var changeBlockCountForTesting: Int { changeBlocks().count }
@@ -1039,7 +1124,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if let existing = openURLs.firstIndex(of: url) {
             // The document behind this URL may have been swapped (a refreshed
             // git diff), so rebind the layout manager rather than just selecting.
-            if replacingContent { rebindStorage(for: url) }
+            if replacingContent {
+                rebindStorage(for: url)
+                // A diff made again starts again at its first change.
+                diffChanges.removeValue(forKey: url)
+            }
             activate(index: existing); return
         }
         openURLs.append(url)
@@ -1789,6 +1878,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         textView.needsDisplay = true
         scrollView.verticalRulerView?.needsDisplay = true
         reloadTabs()
+        // A new row height moves every change; the frame goes with its own.
+        if !diffHeader.isHidden { placeChangeFrame(revealing: false) }
     }
 
     /// A file's tab is labelled from its buffer only when that is in memory

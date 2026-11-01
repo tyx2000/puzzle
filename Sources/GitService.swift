@@ -1345,12 +1345,14 @@ enum GitService {
     /// This runs when a diff tab whose buffer was dropped is opened again, on
     /// the main thread, so it asks Git about one path rather than scanning the
     /// repository. Nil when the path no longer has a change to show.
-    static func diff(forPath path: String, in directory: URL) -> String? {
-        for args in [["--no-pager", "diff", "--no-color", "--", path],
-                     ["--no-pager", "diff", "--no-color", "--cached", "--", path]] {
+    static func diff(forPath path: String, in directory: URL,
+                     wholeFile: Bool = false) -> String? {
+        let context = wholeFile ? [wholeFileContext] : []
+        for args in [["--no-pager", "diff", "--no-color"] + context + ["--", path],
+                     ["--no-pager", "diff", "--no-color", "--cached"] + context + ["--", path]] {
             let result = runDiff(args, in: directory)
             if !result.out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return result.out
+                return wholeFile ? DiffHighlighter.wholeFileBody(of: result.out) : result.out
             }
         }
         // Git prints nothing for an untracked file; the panel shows the whole
@@ -1359,10 +1361,24 @@ enum GitService {
                             in: directory)
         guard untracked.code == 0 else { return nil }
         return diff(for: Status.Entry(code: "??", path: path, originalPath: nil),
-                    in: directory)
+                    in: directory, wholeFile: wholeFile)
     }
 
-    static func diff(for entry: Status.Entry, in directory: URL) -> String {
+    /// Every line of the file as context, for a diff tab that shows the whole
+    /// file rather than the changes and a few lines round each. Far more lines
+    /// than the 8 MB a diff is held to can hold.
+    private static let wholeFileContext = "--unified=1000000"
+
+    /// `wholeFile`: the whole file, as `DiffHighlighter.wholeFileBody` makes
+    /// it, for a diff tab. Without it, the changes and the lines round them.
+    static func diff(for entry: Status.Entry, in directory: URL,
+                     wholeFile: Bool = false) -> String {
+        let text = diffText(for: entry, in: directory, wholeFile: wholeFile)
+        return wholeFile ? DiffHighlighter.wholeFileBody(of: text) : text
+    }
+
+    private static func diffText(for entry: Status.Entry, in directory: URL,
+                                 wholeFile: Bool) -> String {
         if entry.isUntracked {
             let url = directory.appendingPathComponent(entry.path)
             guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
@@ -1412,7 +1428,8 @@ enum GitService {
 
         // Staged changes live in the index; unstaged in the worktree. Show
         // whichever this entry actually has (staged takes precedence).
-        var args = ["--no-pager", "diff", "--no-color"]
+        let context = wholeFile ? [wholeFileContext] : []
+        var args = ["--no-pager", "diff", "--no-color"] + context
         if entry.isStaged && entry.worktreeStatus == " " { args.append("--cached") }
         args += ["--", entry.path]
         let result = runDiff(args, in: directory)
@@ -1420,7 +1437,7 @@ enum GitService {
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // e.g. a staged-only change when we asked the worktree, or no change.
             let cached = runDiff(
-                ["--no-pager", "diff", "--no-color", "--cached", "--", entry.path],
+                ["--no-pager", "diff", "--no-color", "--cached"] + context + ["--", entry.path],
                 in: directory)
             return cached.out.isEmpty ? "No changes to show for \(entry.path)\n" : cached.out
         }
@@ -1533,16 +1550,20 @@ enum GitService {
         return out
     }
 
-    /// Diff a single file as it changed in one commit.
-    static func diff(inCommit hash: String, path: String, in directory: URL) -> String {
+    /// Diff a single file as it changed in one commit — the whole file, for a
+    /// diff tab, with `wholeFile`.
+    static func diff(inCommit hash: String, path: String, in directory: URL,
+                     wholeFile: Bool = false) -> String {
         let result = runDiff(
-            ["--no-pager", "show", "--no-color", "-m", "--first-parent",
-             "--format=", hash, "--", path],
+            ["--no-pager", "show", "--no-color", "-m", "--first-parent"]
+                + (wholeFile ? [wholeFileContext] : [])
+                + ["--format=", hash, "--", path],
             in: directory)
         let text = result.out
-        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "No changes recorded for \(path) in \(hash).\n"
-            : text
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "No changes recorded for \(path) in \(hash).\n"
+        }
+        return wholeFile ? DiffHighlighter.wholeFileBody(of: text) : text
     }
 
     /// Changed paths split by kind, for colouring the file tree the way git

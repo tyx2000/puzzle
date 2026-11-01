@@ -62,6 +62,8 @@ final class DiffHeaderView: FlatView {
     /// How many separate blocks of added and removed lines the diff holds —
     /// which decides whether there is anything to step through at all.
     private(set) var changeCount = 0
+    /// The change the frame is on, from 0; nil before there is one.
+    private(set) var currentChange: Int?
 
     /// `path` is repository-relative; `changes` is how many separate blocks of
     /// added/removed lines the buffer holds.
@@ -69,9 +71,24 @@ final class DiffHeaderView: FlatView {
         folder = (path as NSString).deletingLastPathComponent
         name = (path as NSString).lastPathComponent
         changeCount = changes
-        summary = changes == 1 ? "1 change" : "\(changes) changes"
         toolTip = path
-        setAccessibilityLabel("\(path), \(summary)")
+        updateSummary()
+    }
+
+    /// Which change the frame is on, counted in the summary as "3/7 changes".
+    func setCurrentChange(_ index: Int?) {
+        currentChange = index
+        updateSummary()
+    }
+
+    private func updateSummary() {
+        let noun = changeCount == 1 ? "change" : "changes"
+        if let currentChange, changeCount > 0 {
+            summary = "\(min(max(0, currentChange), changeCount - 1) + 1)/\(changeCount) \(noun)"
+        } else {
+            summary = "\(changeCount) \(noun)"
+        }
+        setAccessibilityLabel("\(pathForTesting), \(summary)")
         needsDisplay = true
     }
 
@@ -147,29 +164,6 @@ final class DiffHeaderView: FlatView {
     var modeLabelForTesting: String? { modeButton.toolTip }
     func toggleModeForTesting() { onToggleMode?() }
     var summaryForTesting: String { summary }
-}
-
-/// The change just stepped to is lit the moment the step lands, and fades
-/// away: a jump that landed where the eye already was — the next change
-/// already on screen — still shows where it landed. Once, in the accent a
-/// search marks its current match with.
-enum ChangeFlash {
-    static let duration: TimeInterval = 0.8
-    static let peakAlpha: CGFloat = 0.35
-    static var colour: NSColor { Theme.yellow }
-
-    /// How strongly it is lit, from 0 to 1, this long after the jump: fully at
-    /// once, then less and less — quickly at first, slowly at the end — and
-    /// nothing once the time is up.
-    static func strength(at elapsed: TimeInterval) -> CGFloat {
-        guard elapsed >= 0, elapsed < duration else { return 0 }
-        return CGFloat(pow(1 - elapsed / duration, 2))
-    }
-
-    /// The fill for that strength.
-    static func fill(strength: CGFloat) -> NSColor {
-        colour.withAlphaComponent(peakAlpha * strength)
-    }
 }
 
 /// A borderless icon button that shows a rounded hover background, so the strip

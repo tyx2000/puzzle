@@ -573,7 +573,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     private func showTextDiff(for entry: GitService.Status.Entry, in directory: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let text = GitService.diff(for: entry, in: directory)
+            let text = GitService.diff(for: entry, in: directory, wholeFile: true)
             // A picture that is also source: the diff tab shows both versions
             // above the diff itself.
             let sides = GitService.svgDiffSides(for: entry.path, in: directory)
@@ -731,7 +731,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             if let commit, !commit.isEmpty {
                 return commitDiffContent(commit: commit, path: path, in: directory)
             }
-            guard let text = GitService.diff(forPath: path, in: directory) else { return nil }
+            guard let text = GitService.diff(forPath: path, in: directory,
+                                             wholeFile: true) else { return nil }
             return DocumentStore.VirtualContent(
                 text: text, displayName: "\(name) (diff)",
                 svgSides: GitService.svgDiffSides(for: path, in: directory))
@@ -754,7 +755,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 text: text, displayName: "\(name) @ \(commit)", svgSides: sides)
         }
         return DocumentStore.VirtualContent(
-            text: GitService.diff(inCommit: commit, path: path, in: directory),
+            text: GitService.diff(inCommit: commit, path: path, in: directory, wholeFile: true),
             displayName: "\(name) @ \(commit)", svgSides: sides)
     }
 
