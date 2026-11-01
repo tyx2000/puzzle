@@ -12,18 +12,13 @@ final class SidebarViewController: NSViewController {
     /// Project name + branch beside the traffic lights (the panel owns that
     /// strip of the titlebar because it is the view underneath it).
     let projectTitle = ProjectTitleView()
-    /// The Projects panel: the window's projects across its top, with the one
-    /// on show's tree and changes under them.
+    /// The Projects panel: the project on show's heading, tree and changes.
     private(set) lazy var projectsPanel = ProjectsPanelViewController(fileTree: fileTree)
-    /// A project in the strip was chosen, or closed — from its menu, or the
-    /// ✕ in the heading of the one on show.
-    var onSelectProjectRow: ((Int) -> Void)?
+    /// The ✕ in the heading of the project on show was clicked.
     var onCloseProjectRow: ((Int) -> Void)?
     /// The branch in the heading was clicked, which goes to its Git panel.
     var onSelectProjectBranchRow: ((Int) -> Void)?
-    var onReorderProjectRows: ((Int, Int) -> Void)?
-    /// The Git mark in the heading, or a project's Pull in the strip: pull
-    /// that project.
+    /// The Git mark in the heading: pull that project.
     var onPullProjectRow: ((Int) -> Void)?
     // Search and Git each own an outline/table view, scroll view, controls and
     // (for Git) another NSTextView. Most windows never show both panels, so do
@@ -45,35 +40,15 @@ final class SidebarViewController: NSViewController {
     /// repository — the project on screen, or one the user has since left.
     var onProjectGitChanged: ((URL) -> Void)?
 
-    /// The errands that start a session, at the end of the title band: open
-    /// a project, go back to a recent one, get a shell in this one, open
-    /// another window. They were on the menu bar, where macOS would not let
-    /// them act on one click — a top-level item with no submenu is never drawn
-    /// at all.
-    private let openButton = TitleLetterButton(letter: "O", word: "Open", hint: "Open Project",
-                                               shortcut: "⌘O", icon: "folder-import")
-    private let recentButton = TitleLetterButton(letter: "R", word: "Recent",
-                                                 hint: "Recent Projects", icon: "changelog")
-    private let terminalButton = TitleLetterButton(letter: "T", word: "Terminal",
-                                                   hint: "Open in Terminal", icon: "console")
-    private let windowButton = TitleLetterButton(letter: "W", word: "Window", hint: "New Window",
-                                                 shortcut: "⌘N", icon: "virtual")
-    /// After them, a little apart, the two panels other than the projects:
-    /// switches rather than errands, each marked while its panel is open, and
-    /// a second click on one goes back to the projects.
+    /// At the end of the title band, the two panels other than the projects:
+    /// switches, each marked while its panel is open, and a second click on
+    /// one goes back to the projects. The errands that start a session are in
+    /// the project bar along the window's foot.
     private let searchButton = TitleLetterButton(letter: "S", word: "Search", hint: "Search Project",
                                                  shortcut: "⌘2", icon: "search")
     private let gitButton = TitleLetterButton(letter: "G", word: "Git", hint: "Git",
                                               shortcut: "⌘3", icon: "git")
-    private var titleButtons: [TitleLetterButton] {
-        [openButton, recentButton, terminalButton, windowButton, searchButton, gitButton]
-    }
-    var onOpenProject: (() -> Void)?
-    var onNewWindow: (() -> Void)?
-    /// Carries the button's rect in this view's coordinates, so the window can
-    /// drop the recents menu directly under it.
-    var onShowRecent: ((NSRect) -> Void)?
-    var onOpenTerminal: (() -> Void)?
+    private var titleButtons: [TitleLetterButton] { [searchButton, gitButton] }
 
     private let containerView = NSView()
     /// The 1pt line under the traffic-light band.
@@ -93,21 +68,12 @@ final class SidebarViewController: NSViewController {
         titleSeparator.fillColor = Theme.border
         root.addSubview(containerView)
         root.addSubview(projectTitle)
-        for (button, action) in [(openButton, #selector(openProjectAction)),
-                                 (recentButton, #selector(showRecentAction)),
-                                 (terminalButton, #selector(openTerminalAction)),
-                                 (windowButton, #selector(newWindowAction)),
-                                 (searchButton, #selector(searchAction)),
+        for (button, action) in [(searchButton, #selector(searchAction)),
                                  (gitButton, #selector(gitAction))] {
             button.target = self
             button.action = action
             root.addSubview(button)
         }
-        // No tooltips: hovering already spells the letter out, and a tooltip
-        // would arrive a second later on top of the word it duplicates. The
-        // accessibility label carries the name for VoiceOver instead.
-        // Nothing to open a shell in until a project is showing.
-        terminalButton.isEnabled = false
         root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
@@ -128,31 +94,11 @@ final class SidebarViewController: NSViewController {
             // The name truncates against the buttons rather than pushing them
             // off the end of the band.
             projectTitle.trailingAnchor.constraint(
-                lessThanOrEqualTo: openButton.leadingAnchor, constant: -6),
-            openButton.trailingAnchor.constraint(equalTo: recentButton.leadingAnchor,
-                                                 constant: -TitleLetterButton.gap),
-            recentButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor,
-                                                   constant: -TitleLetterButton.gap),
-            terminalButton.trailingAnchor.constraint(equalTo: windowButton.leadingAnchor,
-                                                     constant: -TitleLetterButton.gap),
-            windowButton.trailingAnchor.constraint(equalTo: searchButton.leadingAnchor,
-                                                   constant: -TitleLetterButton.groupGap),
+                lessThanOrEqualTo: searchButton.leadingAnchor, constant: -6),
             searchButton.trailingAnchor.constraint(equalTo: gitButton.leadingAnchor,
                                                    constant: -TitleLetterButton.gap),
             gitButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -6),
-            openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            openButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            recentButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            recentButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            recentButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            terminalButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            terminalButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            terminalButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            windowButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            windowButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            windowButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             searchButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             searchButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             searchButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
@@ -175,7 +121,6 @@ final class SidebarViewController: NSViewController {
         }
         self.view = root
 
-        projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
         projectsPanel.onSelectBranch = { [weak self] in self?.onSelectProjectBranchRow?($0) }
         projectsPanel.onPull = { [weak self] in self?.onPullProjectRow?($0) }
@@ -198,9 +143,6 @@ final class SidebarViewController: NSViewController {
         projectsPanel.history.onOpenCommitDiff = { [weak self] commit, file, directory in
             self?.onGitCommitDiff?(commit, file, directory)
         }
-        projectsPanel.onReorder = { [weak self] from, to in
-            self?.onReorderProjectRows?(from, to)
-        }
         mount(projectsPanel)
         showFiles()
     }
@@ -219,17 +161,6 @@ final class SidebarViewController: NSViewController {
         projectTitle.configure(project: project, branch: branch)
     }
 
-    /// A terminal needs a directory to open in.
-    func setHasProject(_ hasProject: Bool) {
-        terminalButton.isEnabled = hasProject
-    }
-
-    @objc private func openProjectAction() { onOpenProject?() }
-    @objc private func newWindowAction() { onNewWindow?() }
-    @objc private func openTerminalAction() { onOpenTerminal?() }
-    @objc private func showRecentAction() {
-        onShowRecent?(recentButton.convert(recentButton.bounds, to: view))
-    }
     /// A switch: its panel, or back to the projects if that is what is open.
     @objc private func searchAction() {
         if visiblePanel == .search { showFiles() } else { showSearch() }
@@ -417,9 +348,10 @@ final class SidebarViewController: NSViewController {
 
 }
 
-/// A button for the title band, drawn as one of the coloured icons the file
-/// tree uses: open a project, the recents, a terminal, a new window, and the
-/// Search and Git switches. Each keeps a letter as its short name.
+/// A small button drawn as one of the coloured icons the file tree uses: the
+/// Search and Git switches in the title band, and the errands at the end of
+/// the project bar — open a project, the recents, a terminal, a new window.
+/// Each keeps a letter as its short name.
 ///
 /// No edge of its own: the icon's colour is enough to read as a target. Under
 /// the pointer a ground comes up behind it; a switch keeps that ground while
@@ -431,8 +363,6 @@ final class TitleLetterButton: NSButton {
     /// Gap between neighbours, so they read as separate targets instead of
     /// one strip of icons.
     static let gap: CGFloat = 3
-    /// Between the errands and the switches after them.
-    static let groupGap: CGFloat = 8
     /// The ground inside the hit area.
     static let capInset: CGFloat = 2
     static let iconSide: CGFloat = 16
@@ -456,6 +386,9 @@ final class TitleLetterButton: NSButton {
         }
     }
     var onHint: (text: String, shortcut: String?)?
+    /// Name it in a card above rather than under: for a button along the
+    /// window's foot.
+    var hintAbove = false
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
     private var hintWork: DispatchWorkItem?
@@ -549,7 +482,12 @@ final class TitleLetterButton: NSButton {
         guard isHovered, isEnabled, let window else { return }
         let onScreen = window.convertToScreen(convert(bounds, to: nil))
         let said = isOn ? onHint ?? (hint, shortcut) : (hint, shortcut)
-        Self.hintCard.show(said.0, shortcut: said.1, below: onScreen, in: window, owner: self)
+        if hintAbove {
+            Self.hintCard.show(said.0, detail: said.1, icon: nil, above: onScreen,
+                               in: window, owner: self)
+        } else {
+            Self.hintCard.show(said.0, shortcut: said.1, below: onScreen, in: window, owner: self)
+        }
     }
 
     private func hideHint() {
@@ -593,8 +531,8 @@ final class TitleLetterButton: NSButton {
 }
 
 /// The card under a title-band button that names it: what it does, and its
-/// shortcut, dimmer, after it. Over a project in the strip, the card above it
-/// that gives its branch. A window of its own so the band's edge does not cut
+/// shortcut, dimmer, after it; over a button in the project bar, since that
+/// is at the window's foot. A window of its own so the band's edge does not cut
 /// it off, and one the pointer passes through. Not a child of the window it
 /// names a button in: it is gone as soon as the pointer leaves the button, so
 /// it never has to move with the window.
@@ -640,9 +578,10 @@ final class TitleButtonHintCard {
         panel.orderFront(nil)
     }
 
-    /// Centred over `anchor`, with a mark before the text: the card a project
-    /// in the strip shows its branch in. It fades in rising a few points, so
-    /// it reads as coming off the project rather than appearing over it.
+    /// Centred over `anchor`, with an optional mark before the text: the card
+    /// a button in the project bar names itself in. It fades in rising a few
+    /// points, so it reads as coming off the button rather than appearing
+    /// over it.
     func show(_ text: String, detail: String?, icon: NSImage?, above anchor: NSRect,
               in parent: NSWindow, owner: NSView) {
         place(text, detail: detail, icon: icon, owner: owner)

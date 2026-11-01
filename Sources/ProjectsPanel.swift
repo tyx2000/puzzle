@@ -1,6 +1,6 @@
 import AppKit
 
-/// The project on show, heading its two columns under the strip of projects:
+/// The project on show, heading its two columns in the sidebar:
 /// its name over the file tree, the branch over its changes, and the button
 /// that takes it out of the window.
 final class ProjectRowView: NSView {
@@ -28,7 +28,7 @@ final class ProjectRowView: NSView {
         didSet { refreshAccessibilityActions() }
     }
     /// A fetch or a pull is running for this project. The Git mark says so
-    /// with the light its name in the strip carries, running across it.
+    /// with the light its pebble in the project bar carries, running across it.
     var isSyncing = false {
         didSet {
             guard isSyncing != oldValue else { return }
@@ -238,7 +238,7 @@ final class ProjectRowView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // No ground of its own: the strip above already marks which project
+        // No ground of its own: the project bar already marks which project
         // this is, and a wash under the pointer read as a third list laid
         // over the two these head.
         SidebarCellDrawing.icon(.material(Self.nameIcon), in: nameIconRect)
@@ -980,8 +980,9 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
 }
 
-/// The Projects panel: the window's projects across its top, and under them
-/// the one on show — its heading, then its file tree beside its changes.
+/// The Projects panel: the project on show — its heading, then its file tree
+/// beside its changes. The window's projects themselves are in the bar along
+/// its foot.
 ///
 /// The tree is the same controller the panel always used; only where it sits
 /// changes, so nothing about browsing a project moves.
@@ -993,26 +994,20 @@ final class ProjectsPanelViewController: NSViewController {
     /// changed, over the commits behind it.
     let changes = ProjectChangesViewController()
     let history = ProjectHistoryViewController()
-    var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     /// The branch in the heading was clicked: show the project's Git panel.
     var onSelectBranch: ((Int) -> Void)?
-    /// A pull was asked for: from the heading's Git mark, or a project's own
-    /// menu in the strip.
+    /// The heading's Git mark was clicked: pull the project.
     var onPull: ((Int) -> Void)?
-    /// A project was dragged to another place in the strip.
-    var onReorder: ((Int, Int) -> Void)?
     /// The projects, by path, with a fetch or a pull running.
     private var syncingPaths: Set<String> = []
 
     func setSyncing(_ paths: Set<String>) {
         syncingPaths = paths
-        strip.setSyncing(paths)
         heading.isSyncing = activePath.map(paths.contains) ?? false
     }
 
     private let stack = NSStackView()
-    private let strip = ProjectStripView()
     /// The project on show, heading its two columns.
     private let heading = ProjectRowView()
     private let columns = ProjectColumnsView()
@@ -1038,9 +1033,6 @@ final class ProjectsPanelViewController: NSViewController {
         guard let stored, stored > 0.05, stored < 0.95 else { return ProjectColumnsView.defaultFraction }
         return CGFloat(stored)
     }
-    /// What a refresh asked the strip to show while a project was being
-    /// dragged across it.
-    private var pendingConfiguration: (projects: [Project], active: Int?)?
     private var activeIndex: Int?
     private var activePath: String?
 
@@ -1053,8 +1045,8 @@ final class ProjectsPanelViewController: NSViewController {
     override func loadView() {
         let root = FlatView()
         root.fillColor = Theme.panelBackground
-        // Layer-backed for one reason: the strip's chips slide to make room
-        // when a project comes or goes, which needs implicit animation.
+        // Layer-backed, so the columns below can refuse implicit animation on
+        // their own geometry — see ProjectColumnsView.
         root.wantsLayer = true
         addChild(fileTree)
         addChild(changes)
@@ -1093,7 +1085,7 @@ final class ProjectsPanelViewController: NSViewController {
         stack.spacing = 0
         stack.distribution = .fill
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for item in [strip, heading, columns] as [NSView] { stack.addArrangedSubview(item) }
+        for item in [heading, columns] as [NSView] { stack.addArrangedSubview(item) }
         root.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: root.topAnchor),
@@ -1101,38 +1093,16 @@ final class ProjectsPanelViewController: NSViewController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        // The columns take whatever the strip and the heading leave.
+        // The columns take whatever the heading leaves.
         columns.setContentHuggingPriority(.init(1), for: .vertical)
         columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
         view = root
         // Nothing open yet: the space is left as the panel's own ground.
-        strip.isHidden = true
         heading.isHidden = true
         showRegions(forRepository: nil)
     }
 
-    override func viewWillLayout() {
-        super.viewWillLayout()
-        // The strip runs the panel's width, and how many lines its names take
-        // there decides its height.
-        strip.fit(width: view.bounds.width)
-    }
-
     private func wire() {
-        strip.onSelect = { [weak self] in self?.onSelect?($0) }
-        strip.onClose = { [weak self] in self?.onClose?($0) }
-        strip.onPull = { [weak self] in self?.onPull?($0) }
-        strip.onReorder = { [weak self] from, to in
-            // The reorder redraws the strip from the model, which already
-            // holds anything a refresh held back during the drag would say.
-            self?.pendingConfiguration = nil
-            self?.onReorder?(from, to)
-        }
-        strip.onDragEnded = { [weak self] in
-            guard let self, let pending = self.pendingConfiguration else { return }
-            self.pendingConfiguration = nil
-            self.configure(projects: pending.projects, active: pending.active)
-        }
         heading.onClose = { [weak self] in
             guard let self, let index = self.activeIndex else { return }
             self.onClose?(index)
@@ -1149,7 +1119,7 @@ final class ProjectsPanelViewController: NSViewController {
 
     /// The Git column belongs to an open project that is a repository. The
     /// columns stay in the stack with none open, since they are what takes
-    /// up the height the strip leaves, but show no second column.
+    /// up the height the heading leaves, but show no second column.
     ///
     /// `forRepository` is nil for no open project, and otherwise whether the
     /// open one is a repository — which is what decides the Git column.
@@ -1157,20 +1127,10 @@ final class ProjectsPanelViewController: NSViewController {
         columns.showsSecond = isRepository == true
     }
 
-    /// Bring the strip and the heading in line with the window's projects.
+    /// Bring the heading in line with the window's projects and the one on
+    /// show.
     func configure(projects: [Project], active: Int?) {
         _ = view
-        // A refresh can land in the middle of a drag — the drag's own event
-        // loop still runs the main queue. Rearranging then put the chip back
-        // where it started, or rebuilt the strip out from under it; the newest
-        // state waits until the chip is put down.
-        guard !strip.isDragging else {
-            pendingConfiguration = (projects, active)
-            return
-        }
-        let hadProjects = !strip.chips.isEmpty
-        let moved = strip.configure(projects: projects, active: active)
-        strip.isHidden = projects.isEmpty
         activeIndex = active.flatMap { projects.indices.contains($0) ? $0 : nil }
         if let index = activeIndex {
             let project = projects[index]
@@ -1186,36 +1146,10 @@ final class ProjectsPanelViewController: NSViewController {
         // A project with no branch is not a repository: nothing to head the
         // right column with, and nothing to put in it.
         showRegions(forRepository: activeIndex.map { !projects[$0].branch.isEmpty })
-        // A project come, gone or moved: the chips that make room slide
-        // there, a new one fades in, and what is under the strip follows its
-        // height. Switching moves nothing, and a window opening finds its
-        // projects already in place.
-        guard moved, hadProjects, view.window != nil,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            lastLayoutDurationForTesting = 0
-            return
-        }
-        lastLayoutDurationForTesting = Self.switchDuration
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.switchDuration
-            context.allowsImplicitAnimation = true
-            strip.fadeInArrivals()
-            // Only the strip and the heading travel. The file tree and the two
-            // Git lists below veto animation on their own geometry — see
-            // ProjectColumnsView — so they take their new height at once
-            // instead of being resized a frame at a time.
-            stack.layoutSubtreeIfNeeded()
-        }
     }
 
-    /// Long enough to be followed, short enough not to be waited for.
-    static let switchDuration: TimeInterval = 0.3
-    private(set) var lastLayoutDurationForTesting: TimeInterval?
-
-    /// The UI font changed: the chips' widths, and so the strip's lines, with
-    /// it.
+    /// The UI font changed.
     func refreshFonts() {
-        strip.refreshFonts()
         heading.needsDisplay = true
     }
 
@@ -1227,9 +1161,6 @@ final class ProjectsPanelViewController: NSViewController {
         dividerDefaults.set(Double(fraction), forKey: Self.dividerKey)
     }
 
-    var stripForTesting: ProjectStripView { strip }
-    /// One a project, in the window's order.
-    var chipsForTesting: [ProjectChipView] { strip.chips }
     /// The heading over the project on show; nil while none is.
     var headingForTesting: ProjectRowView? { heading.isHidden ? nil : heading }
     var columnsForTesting: ProjectColumnsView { columns }
@@ -1239,6 +1170,4 @@ final class ProjectsPanelViewController: NSViewController {
     var dividerFractionForTesting: CGFloat { dividerFraction }
     /// Drag the line to `x`, the way a pointer moves it.
     func dragDividerForTesting(to x: CGFloat) { columns.moveDivider(to: x) }
-    /// The projects' names in the order the strip shows them.
-    var visualOrderForTesting: [String] { strip.visualOrderForTesting }
 }

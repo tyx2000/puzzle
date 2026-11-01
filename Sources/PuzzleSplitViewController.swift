@@ -2,7 +2,7 @@ import AppKit
 
 /// A split view whose divider takes its colour from the theme. AppKit's default
 /// hairline is a fixed system grey, unrelated to the line the title band and
-/// the project strip draw.
+/// the project bar draw.
 ///
 /// Only usable where Puzzle creates the split view itself (the editor panes).
 /// `NSSplitViewController` insists on building its own, and assigning over it

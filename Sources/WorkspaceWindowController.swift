@@ -107,12 +107,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersChanged(_:)),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        sidebar.onSelectProjectRow = { [weak self] index in
+        let bar = root.projectBar
+        bar.onSelect = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             let wanted = self.projects[index]
             // Clicking the project already showing collapses it: the tree
-            // folds away and the start page comes back, which is where the
-            // other projects are chosen from.
+            // folds away and the start page comes back, and the bar still
+            // holds the project to click open again.
             if self.projectURL == wanted {
                 self.deactivateProject()
             } else {
@@ -128,16 +129,22 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             if self.projectURL != wanted { self.activateProject(wanted) }
             self.sidebar.showGit()
         }
-        sidebar.onPullProjectRow = { [weak self] index in
+        // A pull and a close come from the heading of the project on show, and
+        // from any project's pebble in the bar.
+        let pull: (Int) -> Void = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             self.pullProject(self.projects[index])
         }
-        sidebar.onReorderProjectRows = { [weak self] from, to in
-            self?.moveProject(from: from, to: to)
-        }
-        sidebar.onCloseProjectRow = { [weak self] index in
+        sidebar.onPullProjectRow = pull
+        bar.onPull = pull
+        let close: (Int) -> Void = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             self.closeProject(self.projects[index])
+        }
+        sidebar.onCloseProjectRow = close
+        bar.onClose = close
+        bar.onReorder = { [weak self] from, to in
+            self?.moveProject(from: from, to: to)
         }
         onProjectsChanged = { [weak self] in self?.refreshProjectTabs() }
         sidebar.fileTree.onOpenFile = { [weak self] url in self?.editor.open(url: url) }
@@ -197,10 +204,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.projectTitle.onBranchClick = { [weak self] rect in
             self?.showBranchMenu(from: rect)
         }
-        sidebar.onOpenProject = { [weak self] in self?.openFolder(nil) }
-        sidebar.onNewWindow = { (NSApp.delegate as? AppDelegate)?.newWindow(nil) }
-        sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
-        sidebar.onShowRecent = { [weak self] rect in self?.showRecentProjectsMenu(from: rect) }
+        bar.onOpenProject = { [weak self] in self?.openFolder(nil) }
+        bar.onNewWindow = { (NSApp.delegate as? AppDelegate)?.newWindow(nil) }
+        bar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
+        bar.onShowRecent = { [weak self] rect in self?.showRecentProjectsMenu(from: rect) }
         editor.onOpenFolder = { [weak self] in self?.openFolder(nil) }
         editor.onWelcomeVisibilityChanged = { [weak self] _ in
             self?.updateSidebarVisibility()
@@ -394,7 +401,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// The projects this window holds, in the order their tabs appear. A window
     /// shows one at a time; `projectURL` is whichever that is.
     private(set) var projects: [URL] = []
-    /// Told when the list or the active project changes, so the strip redraws.
+    /// Told when the list or the active project changes, so the bar redraws.
     var onProjectsChanged: (() -> Void)?
 
     /// Add a project to this window and switch to it. One already here just
@@ -471,7 +478,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.setDirectory(url)
         // Show the name straight away; the branch follows the Git refresh.
         sidebar.setProjectTitle(project: url.lastPathComponent, branch: "")
-        sidebar.setHasProject(true)
+        root.projectBar.setHasProject(true)
         refreshWindowTitle(activeFile: nil)
         refreshGit()
         // Opened or switched to: find out what its remote has now. This
@@ -849,7 +856,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func publishSyncing() {
-        sidebar.setSyncingProjects(Set(syncing.keys.map(\.path)))
+        let syncingPaths = Set(syncing.keys.map(\.path))
+        sidebar.setSyncingProjects(syncingPaths)
+        root.projectBar.setSyncing(syncingPaths)
     }
 
     /// The Git mark on a project's row: bring the remote's commits into the
@@ -1029,7 +1038,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// a simulated click left AppKit routing later keys away from a window
     /// that was not key, which a later test types into on purpose.
     func showRecentProjectsForTesting() {
-        let button = sidebar.titleButtonsForTesting[1]
+        let button = root.projectBar.recentButton
         if let action = button.action { NSApp.sendAction(action, to: button.target, from: button) }
     }
 
@@ -1043,6 +1052,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// back to the project it still has.
     private func updateSidebarVisibility() {
         root.setSidebarHidden(editor.showsWelcome && projects.isEmpty)
+        root.setProjectBarHidden(projects.isEmpty)
     }
 
     @objc func openProjectInTerminal(_ sender: Any?) {
@@ -1434,7 +1444,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// Reorder the strip. Which project is showing does not change: the order
+    /// Reorder the project bar. Which project is showing does not change: the order
     /// is a convenience, not a switch.
     func moveProject(from: Int, to: Int) {
         guard projects.indices.contains(from), from != to else { return }
@@ -1518,7 +1528,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.clearChanges(for: nil)
         sidebar.setDirectory(nil)
         sidebar.setProjectTitle(project: "", branch: "")
-        sidebar.setHasProject(false)
+        root.projectBar.setHasProject(false)
         // Bumping the generation discards a refresh that is already in flight,
         // which would otherwise arrive and speak for a project that is no
         // longer on screen.
@@ -1546,13 +1556,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func refreshProjectTabs() {
-        sidebar.setProjects(
-            projects.map { (name: $0.lastPathComponent,
-                            branch: projectSummaries[$0]?.branch ?? "",
-                            user: projectSummaries[$0]?.user ?? "",
-                            changes: projectSummaries[$0]?.changes ?? 0,
-                            path: $0.path) },
-            active: projectURL.flatMap { projects.firstIndex(of: $0) })
+        let listed = projects.map { (name: $0.lastPathComponent,
+                                     branch: projectSummaries[$0]?.branch ?? "",
+                                     user: projectSummaries[$0]?.user ?? "",
+                                     changes: projectSummaries[$0]?.changes ?? 0,
+                                     path: $0.path) }
+        let active = projectURL.flatMap { projects.firstIndex(of: $0) }
+        sidebar.setProjects(listed, active: active)
+        root.projectBar.configure(projects: listed, active: active)
         refreshProjectSummaries()
     }
 

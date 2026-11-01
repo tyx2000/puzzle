@@ -1,7 +1,8 @@
 import AppKit
 
-/// Window content: sidebar | editor split. There is no status bar — the panel
-/// switches live in the sidebar's title band.
+/// Window content: sidebar | editor split, over the bar of the window's
+/// projects along its foot. The panel switches live in the sidebar's title
+/// band.
 ///
 /// The sidebar can be put away with the toggle beside the traffic lights (or
 /// ⌘B). Away, the pointer resting on the toggle brings it out over the editor
@@ -10,6 +11,11 @@ final class RootViewController: NSViewController {
     let split = PuzzleSplitViewController()
     let sidebar: SidebarViewController
     let editor: EditorViewController
+    /// The window's projects, and the errands that start a session, along the
+    /// foot of the whole window: there whether the sidebar is out, away or
+    /// floating.
+    let projectBar = ProjectBarView()
+    private var projectBarHeight: NSLayoutConstraint!
 
     /// Panel width is preserved across panel switches. The floor is what the
     /// Git panel's rows need before names start truncating.
@@ -146,6 +152,12 @@ final class RootViewController: NSViewController {
         let splitView = split.view
         splitView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(splitView)
+        projectBar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(projectBar)
+        // Away until the window holds a project: a new window is the start
+        // page's alone.
+        projectBar.isHidden = true
+        projectBarHeight = projectBar.heightAnchor.constraint(equalToConstant: 0)
         dividerHandle.translatesAutoresizingMaskIntoConstraints = false
         dividerHandle.onDragBegan = { [weak self] in
             guard let self else { return }
@@ -186,13 +198,17 @@ final class RootViewController: NSViewController {
             splitView.topAnchor.constraint(equalTo: root.topAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            splitView.bottomAnchor.constraint(equalTo: projectBar.topAnchor),
+            projectBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            projectBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            projectBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            projectBarHeight,
             dividerHandle.centerXAnchor.constraint(equalTo: sidebarHost.view.trailingAnchor),
             dividerHandle.topAnchor.constraint(equalTo: root.topAnchor),
-            dividerHandle.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            dividerHandle.bottomAnchor.constraint(equalTo: projectBar.topAnchor),
             dividerHandle.widthAnchor.constraint(equalToConstant: SplitDividerHandleView.hitWidth),
             floatView.topAnchor.constraint(equalTo: root.topAnchor),
-            floatView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            floatView.bottomAnchor.constraint(equalTo: projectBar.topAnchor),
             floatLeading,
             floatWidth,
             toggleLeading,
@@ -234,7 +250,17 @@ final class RootViewController: NSViewController {
         dividerHandle.needsDisplay = true
         sidebarToggle.refreshAppearance()
         floatView.refreshAppearance()
+        projectBar.refreshFonts()
     }
+
+    /// The bar goes with the projects: a window holding none is the start
+    /// page's alone.
+    func setProjectBarHidden(_ hidden: Bool) {
+        guard projectBar.isHidden != hidden else { return }
+        projectBar.isHidden = hidden
+        projectBarHeight.constant = hidden ? 0 : ProjectBarView.height
+    }
+    var projectBarIsHiddenForTesting: Bool { projectBar.isHidden }
 
     /// Until the window is on screen its width is still being decided — the
     /// default frame, then a restored or requested one — so the panel follows
