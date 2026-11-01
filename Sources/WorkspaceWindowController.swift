@@ -193,8 +193,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // its own button at the end of the band.
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
         // The branch in the title band drops the list of branches to switch
-        // to, anchored under the name. (The branch on a project row is the
-        // one that goes to the Git panel.)
+        // to, anchored under the name. (The branch in the Projects panel's
+        // heading is the one that goes to the Git panel.)
         sidebar.projectTitle.onBranchClick = { [weak self] rect in
             self?.showBranchMenu(from: rect)
         }

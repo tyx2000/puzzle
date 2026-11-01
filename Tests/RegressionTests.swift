@@ -123,7 +123,7 @@ enum RegressionTests {
         try testStartPageHasTheWindowToItself()
         try testSidebarTogglesAndFloats()
         try testCollapsingTheLastProjectKeepsThePanel()
-        try testCollapsedProjectsEndInALine()
+        try testProjectStripWrapsAndReorders()
         try testReplacedContentSettlesIn()
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
@@ -2676,38 +2676,108 @@ enum RegressionTests {
                    "the panel did not end up hidden")
     }
 
-    /// With every project collapsed the list ends above empty panel, and a
-    /// line under the last row closes it off. With one open, its tree fills
-    /// that space and no row needs one. The lines follow a row being dragged:
-    /// the list on screen is the order being dropped.
-    private static func testCollapsedProjectsEndInALine() throws {
+    /// The projects run across the top of the panel at their own widths and
+    /// wrap onto another line where the panel runs out; the strip is as tall
+    /// as its lines, closed off by a line along its foot. A chip dragged
+    /// across it moves the others aside as it goes: the strip on screen is
+    /// the order being dropped.
+    private static func testProjectStripWrapsAndReorders() throws {
+        let chip = ProjectChipView.height()
+        try expect(ProjectStripView.height(lines: 1) == 44 && chip == 26,
+                   "one line of projects is \(ProjectStripView.height(lines: 1))pt, chips "
+                     + "\(chip)pt")
+        try expect(ProjectStripView.height(lines: 2) == 44 + chip + ProjectStripView.gap,
+                   "a second line does not add a chip and a gap: "
+                     + "\(ProjectStripView.height(lines: 2))")
+        // Each at its own width, on the line it fits, from the left.
+        let frames = ProjectStripView.frames(widths: [100, 100, 100], in: 300)
+        try expect(frames.map(\.minX) == [8, 114, 8]
+                    && frames.map(\.minY) == [9, 9, 9 + chip + ProjectStripView.gap]
+                    && frames.allSatisfy { $0.width == 100 },
+                   "the chips do not wrap at their own widths: \(frames)")
+        // One wider than the strip takes a line of its own, cut to fit.
+        let wide = ProjectStripView.frames(widths: [40, 500, 40], in: 300)
+        try expect(wide.map(\.minY) == [9, 9 + chip + 6, 9 + (chip + 6) * 2]
+                    && wide[1].width == 284,
+                   "a name wider than the strip did not get a line to itself: \(wide)")
+
         let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
         _ = panel.view
-        let projects = ["a", "b", "c"].map {
+        panel.view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        let projects = ["alpha", "bravo", "charlie"].map {
             (name: $0, branch: "", user: "", changes: 0, path: "/\($0)")
         }
-        func lines() -> (above: [Bool], below: [Bool]) {
-            (panel.rowsForTesting.map(\.showsDivider), panel.rowsForTesting.map(\.showsBottomLine))
+        panel.configure(projects: projects, active: nil)
+        panel.view.layoutSubtreeIfNeeded()
+        let strip = panel.stripForTesting
+        try expect(panel.chipsForTesting.map(\.titleForTesting) == ["alpha", "bravo", "charlie"]
+                    && panel.chipsForTesting.allSatisfy { !$0.isActiveForTesting }
+                    && panel.headingForTesting == nil,
+                   "collapsed, the strip does not list every project with none marked")
+        try expect(strip.linesForTesting == 1 && strip.frame.height == 44,
+                   "three short names took \(strip.linesForTesting) lines, "
+                     + "\(strip.frame.height)pt")
+        // The foot of the strip is the border's line, whether or not a
+        // project is open under it.
+        func footPixel() throws -> NSColor {
+            guard let rep = strip.bitmapImageRepForCachingDisplay(in: strip.bounds) else {
+                throw Failure(description: "the strip would not render")
+            }
+            strip.cacheDisplay(in: strip.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / max(1, strip.bounds.width)
+            guard let colour = rep.colorAt(x: Int(strip.bounds.width * scale) - 2,
+                                           y: rep.pixelsHigh - 1) else {
+                throw Failure(description: "no pixel to read")
+            }
+            return colour.usingColorSpace(.sRGB) ?? colour
         }
-        panel.configure(projects: projects, active: nil)
-        try expect(lines().above == [false, true, true] && lines().below == [false, false, true],
-                   "collapsed, the list is not closed by a line under its last row: \(lines())")
+        func near(_ colour: NSColor, _ wanted: NSColor) -> Bool {
+            guard let wanted = wanted.usingColorSpace(.sRGB) else { return false }
+            return abs(colour.redComponent - wanted.redComponent) < 0.02
+                && abs(colour.greenComponent - wanted.greenComponent) < 0.02
+                && abs(colour.blueComponent - wanted.blueComponent) < 0.02
+        }
+        let collapsedFoot = try footPixel()
+        try expect(near(collapsedFoot, Theme.border),
+                   "the strip is not closed by a line: \(collapsedFoot)")
         panel.configure(projects: projects, active: 1)
-        try expect(lines().below == [false, false, false],
-                   "with a project open, a row still has a line under it: \(lines())")
-        panel.configure(projects: projects, active: nil)
-        try expect(lines().below == [false, false, true],
-                   "collapsing again did not close the list: \(lines())")
+        panel.view.layoutSubtreeIfNeeded()
+        try expect(panel.chipsForTesting.map(\.isActiveForTesting) == [false, true, false]
+                    && panel.headingForTesting?.titleForTesting == "bravo",
+                   "the project on show is not marked, or not headed under the strip")
+        let openFoot = try footPixel()
+        try expect(near(openFoot, Theme.border),
+                   "with a project open, the strip lost its line: \(openFoot)")
 
-        // Dragged to the bottom, the first row takes the line under the list
-        // and the row now on top gives up the one above it.
-        try expect(panel.beginDragForTesting(0), "a collapsed list could not be reordered")
-        panel.moveDragForTesting(0, by: ProjectRowView.height * 2)
-        try expect(panel.visualOrderForTesting.map { $0.prefix(1) } == ["b", "c", "a"],
-                   "the drag did not move the row: \(panel.visualOrderForTesting)")
-        try expect(lines().above == [true, false, true] && lines().below == [true, false, false],
-                   "the lines stayed with the rows instead of their places: \(lines())")
-        panel.endDragForTesting()
+        // Narrower, the names run on to a second line and the strip grows to
+        // hold it, pushing what is under it down.
+        panel.view.frame = NSRect(x: 0, y: 0, width: 160, height: 400)
+        panel.view.layoutSubtreeIfNeeded()
+        try expect(strip.linesForTesting >= 2
+                    && strip.frame.height == ProjectStripView.height(lines: strip.linesForTesting),
+                   "a narrow panel did not wrap the names: \(strip.linesForTesting) lines, "
+                     + "\(strip.frame.height)pt")
+        let lastChip = panel.chipsForTesting[2].frame
+        try expect(lastChip.maxY <= strip.bounds.height - 1 && lastChip.maxX <= 160 - 8,
+                   "a chip spilled out of the strip: \(lastChip) in \(strip.bounds)")
+        panel.view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        panel.view.layoutSubtreeIfNeeded()
+
+        // Dragged past the others, the first chip goes last; the others move
+        // up as it passes.
+        var reordered: (Int, Int)?
+        panel.onReorder = { reordered = ($0, $1) }
+        try expect(strip.beginDragForTesting(0), "a chip could not be picked up")
+        let end = panel.chipsForTesting[2].frame
+        strip.moveDragForTesting(to: NSPoint(x: end.maxX + 4, y: end.midY))
+        try expect(panel.visualOrderForTesting == ["bravo", "charlie", "alpha"],
+                   "the drag did not move the chip: \(panel.visualOrderForTesting)")
+        strip.endDragForTesting()
+        try expect(reordered?.0 == 0 && reordered?.1 == 2,
+                   "the drop was not reported: \(String(describing: reordered))")
+        // A strip of one has nothing to reorder.
+        panel.configure(projects: [projects[0]], active: 0)
+        try expect(!strip.beginDragForTesting(0), "a lone chip could be dragged")
     }
 
     /// The toggle beside the traffic lights puts the sidebar away and brings
@@ -10319,8 +10389,8 @@ enum RegressionTests {
                     && app.window(showingProject: inner)?.editor.currentURL == file.resolvingSymlinksInPath(),
                    "the picker ignored the deepest open project")
 
-        // One window, several projects: the Projects panel lists them down the
-        // side and switching loads the chosen one from scratch. Nothing of the
+        // One window, several projects: the Projects panel lists them across
+        // its top and switching loads the chosen one from scratch. Nothing of the
         // project being left is kept — its tabs close, which is the design.
         let host = app.window(showingProject: outer) ?? outerWindow
         host.editor.open(url: sibling)
@@ -10333,42 +10403,38 @@ enum RegressionTests {
 
         let panel = host.sidebar.projectsPanel
         _ = panel.view
-        let rows = panel.rowsForTesting
-        try expect(rows.count == 2,
-                   "the panel lists \(rows.count) projects, not 2")
-        try expect(rows.map(\.titleForTesting).contains { $0.hasPrefix("outer") }
-                    && rows.map(\.titleForTesting).contains { $0.hasPrefix("other") },
-                   "the rows do not name the projects: \(rows.map(\.titleForTesting))")
-        try expect(rows[1].isActiveForTesting && !rows[0].isActiveForTesting,
-                   "the panel does not mark the project being shown")
-        // The tree is expanded directly under the row that is selected.
-        try expect(panel.treePositionForTesting == 2,
-                   "the tree sits at \(String(describing: panel.treePositionForTesting)), "
-                     + "not under the selected project")
+        host.window?.contentView?.layoutSubtreeIfNeeded()
+        let chips = panel.chipsForTesting
+        try expect(chips.count == 2,
+                   "the strip lists \(chips.count) projects, not 2")
+        try expect(chips.map(\.titleForTesting).contains { $0.hasPrefix("outer") }
+                    && chips.map(\.titleForTesting).contains { $0.hasPrefix("other") },
+                   "the chips do not name the projects: \(chips.map(\.titleForTesting))")
+        try expect(chips[1].isActiveForTesting && !chips[0].isActiveForTesting,
+                   "the strip does not mark the project being shown")
+        // The project on show is headed under the strip, its tree under that.
+        try expect(panel.headingForTesting?.titleForTesting.hasPrefix("other") == true,
+                   "the heading does not name the project on show: "
+                     + "\(String(describing: panel.headingForTesting?.titleForTesting))")
         try expect(ProjectRowView.height == 32,
-                   "a project row is \(ProjectRowView.height)pt, not 32")
-        // Lines between the rows, but none between a project and the tree that
-        // belongs to it.
-        try expect(!rows[0].showsDivider && rows[1].showsDivider,
-                   "the rows are not separated: \(rows.map(\.showsDivider))")
-        // A band down the leading edge of the project being shown, and only it.
-        rows.forEach { $0.frame = NSRect(x: 0, y: 0, width: 300,
-                                         height: ProjectRowView.height) }
-        try expect(rows[1].markerRectForTesting?.width == 5
-                    && rows[0].markerRectForTesting == nil,
-                   "the selected project is not banded: "
-                     + "\(rows.map { $0.markerRectForTesting?.width })")
+                   "the heading is \(ProjectRowView.height)pt, not 32")
 
-        rows[0].clickForTesting()
+        // Switching marks the project chosen and moves nothing in the strip:
+        // every name stays where the reader found it.
+        let framesBefore = chips.map(\.frame)
+        chips[0].clickForTesting()
+        host.window?.contentView?.layoutSubtreeIfNeeded()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
-                   "clicking a project row did not switch to it")
-        // The rows below the chosen project travel the height of a whole file
-        // tree. They slide there rather than jumping, or the list reads as
-        // having been rebuilt rather than as one project opening.
-        try expect(panel.lastLayoutDurationForTesting.map { $0 > 0 } == true,
-                   "switching projects moved the rows without a transition: "
+                   "clicking a project in the strip did not switch to it")
+        try expect(chips[0].isActiveForTesting && !chips[1].isActiveForTesting,
+                   "the mark did not move to the project chosen")
+        try expect(panel.chipsForTesting.map(\.frame) == framesBefore,
+                   "switching moved the projects in the strip: "
+                     + "\(panel.chipsForTesting.map(\.frame)) were \(framesBefore)")
+        try expect(panel.lastLayoutDurationForTesting == 0,
+                   "switching slid the strip: "
                      + "\(String(describing: panel.lastLayoutDurationForTesting))")
-        // But a window opening finds its project already there.
+        // And a window opening finds its projects already there.
         let freshPanel = ProjectsPanelViewController(fileTree: FileTreeViewController())
         _ = freshPanel.view
         freshPanel.configure(projects: [(name: "a", branch: "", user: "",
@@ -10383,109 +10449,100 @@ enum RegressionTests {
                    "a project with no branch was given a Git column")
 
         // Clicking the project already showing folds it away: the tree goes,
-        // the start page comes back, and the row stays for coming back to.
-        rows[0].clickForTesting()
+        // the start page comes back, and the chip stays for coming back to.
+        chips[0].clickForTesting()
         try expect(host.projectURL == nil && host.projects.count == 2,
                    "re-clicking the open project did not collapse it")
         try expect(!host.editor.hasProject && host.editor.openURLs.isEmpty,
                    "the collapsed window still claims a project")
         // The Git button never carries a count: it would have to answer for
-        // one of several projects, and each row answers for its own.
+        // one of several projects, and each chip answers for its own.
         try expect(host.sidebar.activityBar.buttonTitlesForTesting.last == "Git",
                    "the Git button carries a count: "
                      + "\(host.sidebar.activityBar.buttonTitlesForTesting)")
-        try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
+        try expect(panel.chipsForTesting.allSatisfy { !$0.isActiveForTesting }
+                    && panel.headingForTesting == nil,
                    "a project is still marked as showing after collapsing")
-        // Under a list of collapsed projects the space is left blank.
+        // Under the strip of collapsed projects the space is left blank.
         try expect(!panel.columnsForTesting.showsSecond,
-                   "collapsed projects leave a Git column under their rows")
-        rows[0].clickForTesting()
+                   "collapsed projects leave a Git column under the strip")
+        chips[0].clickForTesting()
         try expect(host.projectURL == outer.resolvingSymlinksInPath(),
                    "the collapsed project could not be opened again")
-        try expect(panel.treePositionForTesting == 1,
-                   "the tree did not move under the newly selected project")
 
-        // Reordering is offered only with every project collapsed: with one
-        // expanded the tree sits between the rows, and "where will it land"
-        // has no honest answer. A drag then means nothing — and a press let go
-        // away from the row is not a click either: selecting then closed every
-        // tab of the project being left, for a press already abandoned.
+        // A chip carried past the other takes its place, and what is on
+        // screen during the drag is what gets committed: the other moves over
+        // as it goes rather than snapping at the drop. Reordering does not
+        // wait for the projects to be collapsed, and carrying a chip is not
+        // choosing it.
         host.window?.contentView?.layoutSubtreeIfNeeded()
-        let grip = NSPoint(x: 200, y: ProjectRowView.height / 2)
-        let travel = [NSPoint(x: 200, y: grip.y + ProjectRowView.height),
-                      NSPoint(x: 200, y: grip.y + ProjectRowView.height * 1.5)]
-        let expandedOrder = host.projects.map(\.lastPathComponent)
-        let expandedProject = host.projectURL
-        rows[0].pressForTesting(at: grip, draggingThrough: travel)
-        try expect(host.projects.map(\.lastPathComponent) == expandedOrder,
-                   "a row was dragged while a project was expanded")
-        try expect(host.projectURL == expandedProject && expandedProject != nil,
-                   "a press released away from the row still counted as a click")
-        // Let go on the row itself, it is the click it started out as.
-        rows[0].pressForTesting(at: grip, draggingThrough: [
-            NSPoint(x: grip.x + 30, y: grip.y + 2),
-        ])
-        try expect(host.projectURL == nil,
-                   "a press released on the row did not land as a click")
-
-        // Everything collapsed, the row travels. What is on screen during the
-        // drag is what gets committed: the rows change places as it goes
-        // rather than snapping at the drop.
-        host.window?.contentView?.layoutSubtreeIfNeeded()
+        let showing = host.projectURL
+        func carry(_ index: Int, by distance: CGFloat,
+                   watching: (() -> Void)? = nil) {
+            let chip = panel.chipsForTesting[index]
+            let grip = NSPoint(x: chip.bounds.midX, y: chip.bounds.midY)
+            chip.pressForTesting(at: grip, draggingThrough: [
+                NSPoint(x: grip.x + (distance < 0 ? -10 : 10), y: grip.y),
+                NSPoint(x: grip.x + distance / 2, y: grip.y),
+                NSPoint(x: grip.x + distance, y: grip.y),
+            ], between: watching)
+        }
         let before = panel.visualOrderForTesting
         var whileMoving: [[String]] = []
-        panel.rowsForTesting[0].pressForTesting(at: grip, draggingThrough: travel) {
-            whileMoving.append(panel.visualOrderForTesting)
-        }
+        let pastSecond = panel.chipsForTesting[1].frame.maxX
+            - panel.chipsForTesting[0].frame.minX + 8
+        carry(0, by: pastSecond) { whileMoving.append(panel.visualOrderForTesting) }
         try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
                    "dragging did not reorder: \(host.projects.map(\.lastPathComponent))")
         try expect(whileMoving.contains { $0 != before },
-                   "the list did not preview the new order while the row was moving: "
+                   "the strip did not preview the new order while the chip was moving: "
                      + "\(whileMoving)")
-        // A press that turns into a drag is carrying the row, not clicking it.
-        // Selecting on the press expanded the project the drag started from,
-        // which then took reordering away in the middle of the gesture.
-        try expect(host.projectURL == nil,
-                   "dragging a row into place also selected its project")
-
-        // And it travels the other way just as well: a stack lays its rows out
-        // top-down but counts its own coordinates bottom-up, and measuring the
-        // drop against the stack's origin let a row move only downwards.
+        try expect(host.projectURL == showing,
+                   "dragging a chip into place also chose its project")
+        // And back the other way.
         host.window?.contentView?.layoutSubtreeIfNeeded()
-        panel.rowsForTesting[1].pressForTesting(at: grip, draggingThrough: [
-            NSPoint(x: 200, y: grip.y - ProjectRowView.height),
-            NSPoint(x: 200, y: grip.y - ProjectRowView.height * 1.5),
-        ])
+        let pastFirst = panel.chipsForTesting[1].frame.maxX
+            - panel.chipsForTesting[0].frame.minX
+        carry(1, by: -pastFirst)
         try expect(host.projects.map(\.lastPathComponent) == ["outer", "other"],
-                   "a row could not be dragged upwards: "
+                   "a chip could not be dragged back to the front: "
                      + "\(host.projects.map(\.lastPathComponent))")
 
-        // The same press without the travel is an ordinary click.
+        // The same press without the travel is an ordinary click, and so is
+        // one that wandered a point or two before it was let go.
         host.window?.contentView?.layoutSubtreeIfNeeded()
-        panel.rowsForTesting[0].pressForTesting(at: grip)
+        let otherChip = panel.chipsForTesting[1]
+        let middle = NSPoint(x: otherChip.bounds.midX, y: otherChip.bounds.midY)
+        otherChip.pressForTesting(at: middle)
+        try expect(host.projectURL == host.projects[1],
+                   "releasing a press that never moved did not choose the project")
+        let outerChip = panel.chipsForTesting[0]
+        outerChip.pressForTesting(at: middle, draggingThrough: [
+            NSPoint(x: middle.x + 2, y: middle.y + 1),
+        ])
         try expect(host.projectURL == host.projects[0],
-                   "releasing a press that never moved did not select the project")
-        panel.rowsForTesting[0].clickForTesting()
-        try expect(host.projectURL == nil, "the fixture did not collapse")
+                   "a press that barely moved did not land as a click")
 
-        // The branch name is a target of its own: it brings the project
-        // forward and opens its Git panel, rather than sending the reader to
-        // the Git button at the foot of the sidebar.
+        // The branch name in the heading is a target of its own: it opens the
+        // project's Git panel, rather than sending the reader to the Git
+        // button at the foot of the sidebar.
         host.sidebar.setProjects(host.projects.map {
             (name: $0.lastPathComponent, branch: "main", user: "", changes: 0,
              path: $0.path)
-        }, active: nil)
-        let branchRow = panel.rowsForTesting[0]
-        branchRow.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
-        let branchBox = branchRow.branchRectForTesting
-        try expect(branchBox.width > 0 && branchBox.minX > ProjectRowView.markerWidth
-                    && branchBox.maxX < branchRow.closeRectForTesting.minX,
+        }, active: 0)
+        guard let heading = panel.headingForTesting else {
+            throw Failure(description: "the project on show has no heading")
+        }
+        heading.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
+        let branchBox = heading.branchRectForTesting
+        try expect(branchBox.width > 0 && branchBox.minX > ProjectRowView.leadingInset
+                    && branchBox.maxX < heading.closeRectForTesting.minX,
                    "the branch name has no hit box between the name and the ✕: \(branchBox)")
         // Under the pointer the branch underlines itself, the way a link does —
         // and only itself: the underline once ran back across the gap between
         // the project's name and its branch.
-        branchRow.hoverForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
-        let hovered = branchRow.labelForTesting
+        heading.hoverForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        let hovered = heading.labelForTesting
         var underlined: [String] = []
         hovered.enumerateAttribute(.underlineStyle,
                                    in: NSRange(location: 0, length: hovered.length)) {
@@ -10496,47 +10553,47 @@ enum RegressionTests {
         try expect(underlined == ["main"],
                    "the hover underline covers \(underlined), not the branch name alone")
         // The underline says where it goes; a bubble saying it again does not.
-        try expect(branchRow.toolTip == branchRow.pathForTesting,
+        try expect(heading.toolTip == heading.pathForTesting,
                    "hovering the branch put a tip over it: "
-                     + "\(String(describing: branchRow.toolTip))")
-        branchRow.hoverForTesting(at: NSPoint(x: 20, y: branchBox.midY))
-        let plain = branchRow.labelForTesting
+                     + "\(String(describing: heading.toolTip))")
+        heading.hoverForTesting(at: NSPoint(x: 20, y: branchBox.midY))
+        let plain = heading.labelForTesting
         try expect(plain.attribute(.underlineStyle, at: plain.length - 1,
                                    effectiveRange: nil) == nil,
                    "the branch stays underlined with the pointer elsewhere")
-
-        branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
-        try expect(host.projectURL == host.projects[0],
-                   "clicking the branch did not bring its project forward")
+        heading.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.sidebar.visiblePanel == .git,
                    "clicking the branch did not open the Git panel: "
                      + "\(host.sidebar.visiblePanel)")
-        // Clicking the branch of the project already showing must not fold it
-        // away — that would take back the panel it just asked for.
-        branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
+        // It never folds the project away — that would take back the panel
+        // it just asked for.
+        heading.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.projectURL == host.projects[0],
                    "clicking the branch again collapsed the project")
+        // Anywhere else on the heading is not a target at all.
+        heading.pressForTesting(at: NSPoint(x: 40, y: branchBox.midY))
+        try expect(host.projectURL == host.projects[0],
+                   "a click on the heading's name changed the project on show")
         host.sidebar.showFiles()
-        panel.rowsForTesting[0].clickForTesting()
-        try expect(host.projectURL == nil,
-                   "the fixture did not collapse after the branch check")
 
-        // The ✕ is always there, at the row's trailing end, so the name's room
-        // never changes as the pointer crosses the panel.
-        let row = panel.rowsForTesting[1]
-        row.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
-        let closeBox = row.closeRectForTesting
-        try expect(closeBox.width > 0 && closeBox.maxX <= row.bounds.maxX - 4
-                    && closeBox.minX > row.bounds.midX,
-                   "the close button is not at the row's trailing end: \(closeBox)")
-        // The list has been reordered above, so this closes the second of
-        // ["outer", "other"].
-        row.clickCloseForTesting()
-        try expect(host.projects.map(\.lastPathComponent) == ["outer"],
-                   "closing did not remove the project: \(host.projects)")
+        // The ✕ is always there, at the heading's trailing end, so the name's
+        // room never changes as the pointer crosses the panel.
+        let closeBox = heading.closeRectForTesting
+        try expect(closeBox.width > 0 && closeBox.maxX <= heading.bounds.maxX - 4
+                    && closeBox.minX > heading.bounds.midX,
+                   "the close button is not at the heading's trailing end: \(closeBox)")
+        // A project not on show is closed from its own menu in the strip,
+        // which offers the pull the heading's mark does.
+        let notShowing = panel.chipsForTesting[1]
+        try expect(notShowing.menuTitlesForTesting == ["Pull", "Close Project"],
+                   "a project's menu offers \(notShowing.menuTitlesForTesting)")
+        notShowing.chooseMenuItemForTesting("Close Project")
+        try expect(host.projects.map(\.lastPathComponent) == ["outer"]
+                    && host.projectURL == host.projects.first,
+                   "closing from the menu did not remove that project alone: \(host.projects)")
         // Closing the last one empties the window rather than leaving a tree
         // and a Git panel pointing at a project that is no longer here.
-        panel.rowsForTesting[0].clickCloseForTesting()
+        panel.headingForTesting?.clickCloseForTesting()
         try expect(host.projects.isEmpty && host.projectURL == nil,
                    "the window kept a project after the last one closed")
         try expect(host.editor.openURLs.isEmpty && !host.editor.hasProject,
@@ -14668,10 +14725,10 @@ enum RegressionTests {
                     && unsizedPane.frame.width >= 0 && unsizedPane.frame.height >= 0,
                    "a pane with no room was given a null frame: \(unsizedPane.frame)")
 
-        // A refresh that lands while a row is being carried waits for it to be
-        // put down: rearranging then put the row back where it started, and
-        // rebuilding the rows left the drag holding one that was no longer in
-        // the list.
+        // A refresh that lands while a chip is being carried waits for it to
+        // be put down: rearranging then put the chip back where it started,
+        // and rebuilding the strip left the drag holding one that was no
+        // longer in it.
         let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
         _ = panel.view
         panel.view.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
@@ -14681,35 +14738,39 @@ enum RegressionTests {
             (name: $0, branch: "", user: "", changes: 0, path: "/\($0)")
         }
         panel.configure(projects: listed, active: nil)
+        panel.view.layoutSubtreeIfNeeded()
         var reordered: (Int, Int)?
         panel.onReorder = { reordered = ($0, $1) }
-        let rowsBefore = panel.rowsForTesting
-        try expect(panel.beginDragForTesting(0), "the fixture row could not be picked up")
-        panel.moveDragForTesting(0, by: ProjectRowView.height)
+        let strip = panel.stripForTesting
+        let chipsBefore = panel.chipsForTesting
+        try expect(strip.beginDragForTesting(0), "the fixture chip could not be picked up")
+        let second = panel.chipsForTesting[1].frame
+        strip.moveDragForTesting(to: NSPoint(x: second.maxX - 2, y: second.midY))
         let preview = panel.visualOrderForTesting
-        // New branches change the rows' identity, which rebuilds them.
+        try expect(preview.first == "b", "the drag did not move the chip: \(preview)")
         let refreshed: [Listed] = listed.map {
             (name: $0.name, branch: "main", user: $0.user, changes: $0.changes, path: $0.path)
         }
         panel.configure(projects: refreshed, active: nil)
         try expect(panel.visualOrderForTesting == preview,
-                   "a refresh in the middle of a drag put the row back")
-        try expect(panel.rowsForTesting.count == rowsBefore.count
-                    && zip(panel.rowsForTesting, rowsBefore).allSatisfy { $0 === $1 },
-                   "a refresh in the middle of a drag rebuilt the rows under it")
-        panel.endDragForTesting()
+                   "a refresh in the middle of a drag put the chip back")
+        try expect(panel.chipsForTesting.count == chipsBefore.count
+                    && zip(panel.chipsForTesting, chipsBefore).allSatisfy { $0 === $1 }
+                    && panel.chipsForTesting.allSatisfy { $0.branchForTesting.isEmpty },
+                   "a refresh in the middle of a drag reached the strip under it")
+        strip.endDragForTesting()
         try expect(reordered?.0 == 0 && reordered?.1 == 1,
                    "the drop was lost to the refresh: \(String(describing: reordered))")
         // A drag that ends where it began still delivers the refresh it held.
         reordered = nil
         panel.configure(projects: listed, active: nil)
-        try expect(panel.beginDragForTesting(1), "the fixture row could not be picked up again")
+        try expect(strip.beginDragForTesting(1), "the fixture chip could not be picked up again")
         panel.configure(projects: refreshed, active: nil)
-        panel.endDragForTesting()
+        strip.endDragForTesting()
         try expect(reordered == nil
-                    && panel.rowsForTesting.allSatisfy { $0.titleForTesting.hasSuffix("main") },
+                    && panel.chipsForTesting.allSatisfy { $0.branchForTesting == "main" },
                    "the refresh held during a drag was never applied: "
-                     + "\(panel.rowsForTesting.map(\.titleForTesting))")
+                     + "\(panel.chipsForTesting.map(\.branchForTesting))")
 
         // A tinted symbol is made once and kept: every visible tree row draws
         // its chevron on every redraw.
@@ -15149,7 +15210,7 @@ enum RegressionTests {
         _ = projectsPanel.view
         func row(_ directory: URL) -> String? {
             let path = directory.standardizedFileURL.resolvingSymlinksInPath().path
-            return projectsPanel.rowsForTesting.first { $0.pathForTesting == path }?.titleForTesting
+            return projectsPanel.chipsForTesting.first { $0.pathForTesting == path }?.titleForTesting
         }
         try expect(waitUntil { projectsPanel.changes.rowCountForTesting == 1
                                 && row(second)?.hasSuffix("  1") == true },
@@ -15193,7 +15254,7 @@ enum RegressionTests {
                    "the second project's commit failed")
         workspace.sidebar.onProjectGitChanged?(second.standardizedFileURL.resolvingSymlinksInPath())
         try expect(waitUntil { row(second)?.hasSuffix("  1") == false },
-                   "the row of a project left behind still counts what was committed: "
+                   "the chip of a project left behind still counts what was committed: "
                      + "\(String(describing: row(second)))")
     }
 
@@ -15992,28 +16053,28 @@ enum RegressionTests {
     }
 
     private static func testGitMarkPulls() throws {
-        // The row: the Git mark is a target of its own, beside the branch.
+        // The heading: the Git mark is a target of its own, beside the branch.
         let row = ProjectRowView(frame: NSRect(x: 0, y: 0, width: 420, height: ProjectRowView.height))
-        var pulled = 0, selected = 0, branchSelected = 0
+        var pulled = 0, branchSelected = 0
         row.onPull = { pulled += 1 }
-        row.onSelect = { selected += 1 }
         row.onSelectBranch = { branchSelected += 1 }
         row.configure(name: "project", branch: "main", user: "", changes: 0,
-                      path: "/tmp/project", isActive: false)
+                      path: "/tmp/project")
         let mark = row.columnIconsForTesting.branch.1
         let pullBox = row.pullRectForTesting
         try expect(pullBox.contains(mark) && !pullBox.intersects(row.branchRectForTesting),
                    "the pull target does not cover the mark, or reaches the branch: "
                      + "\(pullBox) / \(mark) / \(row.branchRectForTesting)")
         row.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
-        try expect(pulled == 1 && selected == 0 && branchSelected == 0,
+        try expect(pulled == 1 && branchSelected == 0,
                    "a click on the Git mark did not pull, or did more: "
-                     + "\(pulled) \(selected) \(branchSelected)")
+                     + "\(pulled) \(branchSelected)")
         let branchBox = row.branchRectForTesting
         row.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         row.pressForTesting(at: NSPoint(x: 60, y: branchBox.midY))
-        try expect(pulled == 1 && branchSelected == 1 && selected == 1,
-                   "the branch and the rest of the row lost their own clicks")
+        try expect(pulled == 1 && branchSelected == 1,
+                   "the branch lost its own click, or the name took one: "
+                     + "\(pulled) \(branchSelected)")
         // It says what it does, and what it is doing.
         row.hoverForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
         try expect(row.toolTipForTesting?.hasPrefix("Pull") == true,
@@ -16021,21 +16082,20 @@ enum RegressionTests {
         // A folder that is not a repository draws no mark, and has no target.
         let plain = ProjectRowView(frame: row.frame)
         plain.onPull = { pulled += 1 }
-        plain.onSelect = { selected += 1 }
         plain.configure(name: "folder", branch: "", user: "", changes: 0,
-                        path: "/tmp/folder", isActive: false)
+                        path: "/tmp/folder")
         try expect(plain.pullRectForTesting == .zero, "a folder has a pull target")
         plain.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
-        try expect(pulled == 1 && selected == 2, "a click where no mark is drawn pulled")
+        try expect(pulled == 1, "a click where no mark is drawn pulled")
 
-        // Syncing: the mark dims and a band runs down it, only while the row
-        // is on screen to be seen.
+        // Syncing: the mark dims and a light runs across it, left to right,
+        // only while the row is on screen to be seen.
         func pixels(_ image: NSImage) -> NSBitmapImageRep? {
             image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
         }
-        func differ(_ a: NSImage, _ b: NSImage, row y: Int) -> Bool {
+        func differ(_ a: NSImage, _ b: NSImage, column x: Int) -> Bool {
             guard let a = pixels(a), let b = pixels(b) else { return false }
-            return (0..<a.pixelsWide).contains { x in
+            return (0..<a.pixelsHigh).contains { y in
                 guard let p = a.colorAt(x: x, y: y), let q = b.colorAt(x: x, y: y) else { return false }
                 return abs(p.redComponent - q.redComponent) > 0.05
                     || abs(p.greenComponent - q.greenComponent) > 0.05
@@ -16043,7 +16103,7 @@ enum RegressionTests {
         }
         let middle = Int(ProjectRowView.iconSize / 2)
         // A solid square stands in for the artwork, which the tests do not
-        // load: the sweep only paints where the mark is.
+        // load: the light only paints where the mark is.
         let square: (NSRect) -> Void = { rect in
             NSColor(srgbRed: 0.9, green: 0.29, blue: 0.1, alpha: 1).setFill()
             rect.fill()
@@ -16057,13 +16117,22 @@ enum RegressionTests {
             NSBezierPath(ovalIn: rect.insetBy(dx: 4, dy: 4)).fill()
         }
         try expect(pixels(dot)?.colorAt(x: 0, y: middle)?.alphaComponent ?? 1 < 0.01,
-                   "the sweep painted outside the mark")
-        try expect(differ(still, early, row: middle),
+                   "the light painted outside the mark")
+        try expect(differ(still, early, column: middle),
                    "a syncing mark is drawn the same as a still one")
-        // The band moves down: early and late differ near the top and the
-        // bottom, where it has been and where it is going.
-        try expect(differ(early, late, row: 3) && differ(early, late, row: middle + 3),
-                   "the band does not move down the mark")
+        // The light moves across: early and late differ near the left and the
+        // right, where it has been and where it is going.
+        try expect(differ(early, late, column: 3) && differ(early, late, column: middle + 3),
+                   "the light does not move across the mark")
+        // It passes, then rests before the next pass.
+        let start = Date()
+        let halfway = SyncShimmer.phase(since: start, now: start + SyncShimmer.sweep / 2)
+        try expect(SyncShimmer.phase(since: start, now: start) == 0
+                    && abs((halfway ?? -1) - 0.5) < 0.001
+                    && SyncShimmer.phase(since: start,
+                                         now: start + (SyncShimmer.sweep + SyncShimmer.period) / 2)
+                        == nil,
+                   "the light does not cross and then rest")
         let window = NSWindow(contentRect: row.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)
         defer { window.close() }
@@ -16079,6 +16148,19 @@ enum RegressionTests {
         try expect(row.isSweepingForTesting, "a syncing row put back on screen did not sweep")
         row.isSyncing = false
         try expect(!row.isSweepingForTesting, "the sweep outlived the sync")
+
+        // The project's chip in the strip carries the same light: a faint
+        // band of the accent across its ground, under the name.
+        let chip = ProjectChipView(frame: NSRect(x: 0, y: 0, width: 160,
+                                                 height: ProjectChipView.height()))
+        chip.configure(name: "project", branch: "main", user: "", changes: 0,
+                       path: "/tmp/project", isActive: false)
+        window.contentView?.addSubview(chip)
+        chip.isSyncing = true
+        try expect(chip.isShimmeringForTesting, "a syncing chip on screen does not shimmer")
+        chip.removeFromSuperview()
+        try expect(!chip.isShimmeringForTesting, "a chip taken off screen kept its clock running")
+        chip.isSyncing = false
 
         // In a window, against real remotes.
         let scratch = try temporaryDirectory("git-mark-pulls")
@@ -16145,23 +16227,34 @@ enum RegressionTests {
         workspace.presentSyncError = { errors.append(($0, $1)) }
         let panel = workspace.sidebar.projectsPanel
         _ = panel.view
-        func rowOf(_ url: URL) -> ProjectRowView? {
-            panel.rowsForTesting.first { $0.pathForTesting == url.path }
+        func chipOf(_ url: URL) -> ProjectChipView? {
+            panel.chipsForTesting.first { $0.pathForTesting == url.path }
         }
-        func syncing(_ url: URL) -> Bool { rowOf(url)?.isSyncingForTesting == true }
+        func syncing(_ url: URL) -> Bool { chipOf(url)?.isSyncingForTesting == true }
+        /// The project on show pulls from its heading's Git mark; another one
+        /// from its own menu in the strip.
         func press(_ url: URL) throws {
+            guard workspace.projectURL == url else {
+                // Offered once Git has said which branch the project is on.
+                _ = waitUntil { chipOf(url)?.menuTitlesForTesting.contains("Pull") == true }
+                guard let chip = chipOf(url), chip.menuTitlesForTesting.contains("Pull") else {
+                    throw Failure(description: "no Pull for \(url.lastPathComponent)")
+                }
+                chip.chooseMenuItemForTesting("Pull")
+                return
+            }
             // The mark is drawn once Git has said which branch the project is
-            // on; until then the row has nothing to press.
+            // on; until then the heading has nothing to press.
             _ = waitUntil {
                 workspace.window?.contentView?.layoutSubtreeIfNeeded()
-                return rowOf(url)?.pullRectForTesting.isEmpty == false
+                return panel.headingForTesting?.pullRectForTesting.isEmpty == false
             }
-            guard let target = rowOf(url) else {
-                throw Failure(description: "no row for \(url.lastPathComponent)")
+            guard let target = panel.headingForTesting else {
+                throw Failure(description: "no heading for \(url.lastPathComponent)")
             }
             let box = target.pullRectForTesting
             guard !target.bounds.isEmpty, !box.isEmpty else {
-                throw Failure(description: "the row has no pull target to press: "
+                throw Failure(description: "the heading has no pull target to press: "
                                 + "\(target.bounds) \(box)")
             }
             target.pressForTesting(at: NSPoint(x: box.midX, y: box.midY))
@@ -16170,10 +16263,8 @@ enum RegressionTests {
         // Opening a project fetches it, and its Git mark shows the fetch for
         // at least the minimum, however quick the remote was.
         //
-        // Timed from the window's own record of the sync, not from the row:
-        // the row of a project just opened is rebuilt once its branch is
-        // known, and may be new partway through. The row on screen has to
-        // agree with the record the whole way.
+        // Timed from the window's own record of the sync, not from the strip:
+        // the chip on screen has to agree with the record the whole way.
         func recorded(_ url: URL) -> Bool { workspace.syncingForTesting.contains(url) }
         workspace.openProject(second.clone)
         try expect(waitUntil { recorded(second.clone) }, "the opening fetch was not shown")
@@ -16188,7 +16279,7 @@ enum RegressionTests {
                    "the fetch flickered on the mark: "
                      + "\(Date().timeIntervalSince(shownAt))s")
         try expect(!rowDisagreed && !syncing(second.clone),
-                   "the row's mark did not follow the sync it stands for")
+                   "the chip did not follow the sync it stands for")
         // Nothing to fetch, nothing shown.
         workspace.openProject(localURL)
         let quietUntil = Date().addingTimeInterval(0.8)
@@ -16244,13 +16335,13 @@ enum RegressionTests {
         try expect(!wentStill, "the mark went still between the fetch and the pull")
         try expect(waitUntil { !syncing(first.clone) }, "the queued pull never stopped showing")
 
-        // The mark on another project's row pulls that project, and leaves
-        // the one on screen where it is.
+        // Pull from another project's menu pulls that project, and leaves the
+        // one on screen where it is.
         try pushFromElsewhere(second.remote, subject: "pulled while away")
         try press(second.clone)
         try expect(waitUntil { git(["rev-parse", "HEAD"], in: second.clone)
                                 == git(["rev-parse", "main"], in: second.remote) },
-                   "the other project's mark did not pull it")
+                   "the other project's Pull did not pull it")
         try expect(workspace.projectURL == first.clone,
                    "pulling another project switched to it")
         try expect(waitUntil { !syncing(second.clone) }, "the other pull never stopped showing")
@@ -16396,34 +16487,40 @@ enum RegressionTests {
                    "the titlebar strip did not pick up the branch: "
                     + "\(title.titleForTesting.branch)")
 
-        // The row in the Projects panel carries the same branch, and after it,
+        // The heading under the strip carries the same branch, and after it,
         // a gap further along, how many files the project has changed but not
         // committed — the count the Git button shows, on the project it
         // belongs to. Nothing at all while the project is clean.
         let projectsPanel = workspace.sidebar.projectsPanel
         _ = projectsPanel.view
+        func headingTitle() -> String? { projectsPanel.headingForTesting?.titleForTesting }
         // Name, branch, and who commits here — the repository's own user.name,
-        // which is whose name the next commit from this row will carry.
-        try expect(projectsPanel.rowsForTesting.first?.titleForTesting
-                    == "\(root.lastPathComponent)  trunk  Puzzle Test",
-                   "a clean project's row does not read as name, branch and user: "
-                     + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
+        // which is whose name the next commit from this project will carry.
+        try expect(headingTitle() == "\(root.lastPathComponent)  trunk  Puzzle Test",
+                   "a clean project's heading does not read as name, branch and user: "
+                     + "\(String(describing: headingTitle()))")
         try expect(projectsPanel.changes.rowCountForTesting == 0,
                    "a clean project's changes column is not empty")
+        try expect(projectsPanel.chipsForTesting.first?.titleForTesting == root.lastPathComponent,
+                   "a clean project's chip carries a count")
         try Data("new\n".utf8).write(to: root.appendingPathComponent("changed.txt"))
         workspace.refreshGit(requireFollowUp: true)
         let wanted = "\(root.lastPathComponent)  trunk  Puzzle Test  1"
         let countDeadline = Date().addingTimeInterval(5)
-        while projectsPanel.rowsForTesting.first?.titleForTesting != wanted,
-              Date() < countDeadline {
+        while headingTitle() != wanted, Date() < countDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
-        try expect(projectsPanel.rowsForTesting.first?.titleForTesting == wanted,
-                   "the row does not carry the change count: "
-                     + "\(String(describing: projectsPanel.rowsForTesting.first?.titleForTesting))")
+        try expect(headingTitle() == wanted,
+                   "the heading does not carry the change count: "
+                     + "\(String(describing: headingTitle()))")
+        // The project's chip in the strip counts it too, after its name.
+        try expect(projectsPanel.chipsForTesting.first?.titleForTesting
+                    == "\(root.lastPathComponent)  1",
+                   "the chip does not carry the change count: "
+                     + "\(String(describing: projectsPanel.chipsForTesting.first?.titleForTesting))")
         // Drawn in the round badge a count takes everywhere else in the
         // sidebar, not as loose digits after the branch.
-        let badge = projectsPanel.rowsForTesting.first?.badgeImageForTesting
+        let badge = projectsPanel.headingForTesting?.badgeImageForTesting
         try expect(badge != nil,
                    "the count is plain text rather than the sidebar's badge")
         try expect(badge.map { $0.size.width == $0.size.height
@@ -16432,64 +16529,104 @@ enum RegressionTests {
                    "the badge is not the round mark the sidebar draws a count in: "
                      + "\(String(describing: badge?.size))")
 
-        // The row is halved: the name heads the project's file tree, the
+        // The heading is halved: the name heads the project's file tree, the
         // branch heads that project's changes, and the two columns carry on
         // down the panel under the headings that name them.
-        let row = projectsPanel.rowsForTesting[0]
+        guard let row = projectsPanel.headingForTesting else {
+            throw Failure(description: "the project on show has no heading")
+        }
         row.frame = NSRect(x: 0, y: 0, width: 300, height: ProjectRowView.height)
         try expect(row.columnDividerForTesting == 150,
-                   "the row does not halve: \(row.columnDividerForTesting)")
+                   "the heading does not halve: \(row.columnDividerForTesting)")
         try expect(row.branchRectForTesting.minX >= row.columnDividerForTesting,
                    "the branch does not head the right column: "
                      + "\(row.branchRectForTesting)")
 
-        // The project being shown carries a band; the row under the pointer
-        // does not — a wash that follows the mouse across the headings read as
-        // a third list laid over the two they head.
+        // The project on show is marked in the strip: the selection's ground,
+        // and an edge in the accent. The others rest on the hover ground and
+        // lift to the selection's under the pointer. The heading has no ground
+        // at all: the strip already says which project it heads, and a wash
+        // under the pointer read as a third list over the two it heads.
         //
-        // A row of its own: the panel's real ones belong to its stack, and
-        // taking one out to look at it would leave the panel a row short.
-        let sample = ProjectRowView()
-        sample.configure(name: "project", branch: "trunk", user: "Ada",
-                         changes: 2, path: "/tmp/project", isActive: true)
-        let backdrop = FlatView(frame: NSRect(x: 0, y: 0, width: 300,
-                                              height: ProjectRowView.height))
-        backdrop.fillColor = Theme.panelBackground
-        backdrop.addSubview(sample)
-        sample.frame = backdrop.bounds
-        func rowPixel() throws -> NSColor {
-            backdrop.displayIfNeeded()
-            guard let rep = backdrop.bitmapImageRepForCachingDisplay(in: backdrop.bounds)
-            else { throw Failure(description: "the row would not render") }
-            backdrop.cacheDisplay(in: backdrop.bounds, to: rep)
-            let scale = CGFloat(rep.pixelsWide) / max(1, backdrop.bounds.width)
-            // Clear of the glyphs and of both marks: the very top of the row,
-            // in the left column.
-            guard let colour = rep.colorAt(x: Int(100 * scale),
-                                           y: Int(1 * scale)) else {
+        // Views of their own: the panel's real ones belong to its stack, and
+        // taking one out to look at it would leave the panel short.
+        func pixel(_ view: NSView, x: CGFloat, y: CGFloat) throws -> NSColor {
+            view.displayIfNeeded()
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+            else { throw Failure(description: "the view would not render") }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / max(1, view.bounds.width)
+            guard let colour = rep.colorAt(x: Int(x * scale), y: Int(y * scale)) else {
                 throw Failure(description: "no pixel to read")
             }
             return colour.usingColorSpace(.sRGB) ?? colour
         }
         /// A rendered pixel comes back through a colour-space conversion, so it
-        /// lands a shade off the value that was asked for. The washes this is
-        /// looking for are half a channel apart, not a thousandth.
-        func matches(_ colour: NSColor, _ wanted: NSColor) -> Bool {
-            guard let wanted = wanted.usingColorSpace(.sRGB) else { return false }
-            return abs(colour.redComponent - wanted.redComponent) < 0.02
-                && abs(colour.greenComponent - wanted.greenComponent) < 0.02
-                && abs(colour.blueComponent - wanted.blueComponent) < 0.02
+        /// lands a shade off the value that was asked for — and some of the
+        /// grounds here are only a few levels apart. Whichever it is nearer.
+        func distance(_ colour: NSColor, _ wanted: NSColor) -> CGFloat {
+            guard let wanted = wanted.usingColorSpace(.sRGB) else { return .infinity }
+            return abs(colour.redComponent - wanted.redComponent)
+                + abs(colour.greenComponent - wanted.greenComponent)
+                + abs(colour.blueComponent - wanted.blueComponent)
         }
-        let selectedPixel = try rowPixel()
-        try expect(matches(selectedPixel, Theme.selectedControl),
-                   "the project being shown carries no band: \(selectedPixel)")
+        func matches(_ colour: NSColor, _ wanted: NSColor) -> Bool {
+            distance(colour, wanted) < 0.06
+        }
+        func nearer(_ colour: NSColor, to wanted: NSColor, than other: NSColor) -> Bool {
+            distance(colour, wanted) < distance(colour, other)
+        }
+        let sample = ProjectChipView()
+        sample.configure(name: "project", branch: "trunk", user: "Ada",
+                         changes: 2, path: "/tmp/project", isActive: true)
+        let chipHeight = ProjectChipView.height()
+        let backdrop = FlatView(frame: NSRect(x: 0, y: 0, width: 160, height: chipHeight))
+        backdrop.fillColor = Theme.panelBackground
+        backdrop.addSubview(sample)
+        sample.frame = backdrop.bounds
+        // Left of the name, clear of its glyphs; and the edge along the top.
+        let groundAt = (x: CGFloat(5), y: chipHeight / 2)
+        let shownGround = try pixel(backdrop, x: groundAt.x, y: groundAt.y)
+        try expect(nearer(shownGround, to: Theme.selectedControl, than: Theme.hover)
+                    && matches(shownGround, Theme.selectedControl),
+                   "the project on show is not on the selection's ground: \(shownGround)")
+        let edge = try pixel(backdrop, x: 80, y: 0.25)
+        try expect(matches(edge, Theme.cursor),
+                   "the project on show has no edge in the accent: \(edge)")
         sample.configure(name: "project", branch: "trunk", user: "Ada",
                          changes: 2, path: "/tmp/project", isActive: false)
-        sample.hoverForTesting(at: NSPoint(x: 100, y: ProjectRowView.height / 2))
-        let hoveredPixel = try rowPixel()
-        try expect(matches(hoveredPixel, Theme.panelBackground),
-                   "the row under the pointer is washed with a background: "
-                     + "\(hoveredPixel)")
+        let restingGround = try pixel(backdrop, x: groundAt.x, y: groundAt.y)
+        try expect(nearer(restingGround, to: Theme.hover, than: Theme.selectedControl),
+                   "a project not on show is not on the resting ground: \(restingGround)")
+        let restingEdge = try pixel(backdrop, x: 80, y: 0.25)
+        try expect(!matches(restingEdge, Theme.cursor),
+                   "a project not on show still has the accent's edge: \(restingEdge)")
+        sample.setHoveredForTesting(true)
+        let liftedGround = try pixel(backdrop, x: groundAt.x, y: groundAt.y)
+        try expect(nearer(liftedGround, to: Theme.selectedControl, than: Theme.hover),
+                   "a project under the pointer does not lift: \(liftedGround)")
+        // Its branch is a rest away, in the card the title band's buttons use;
+        // the name is on the chip already and only says whose branch it is.
+        try expect(sample.hintForTesting?.text == "project"
+                    && sample.hintForTesting?.detail == "trunk",
+                   "a project's card does not give its branch: "
+                     + "\(String(describing: sample.hintForTesting))")
+        sample.setHoveredForTesting(false)
+
+        let headingSample = ProjectRowView()
+        headingSample.configure(name: "project", branch: "trunk", user: "Ada",
+                                changes: 2, path: "/tmp/project")
+        let headingBackdrop = FlatView(frame: NSRect(x: 0, y: 0, width: 300,
+                                                     height: ProjectRowView.height))
+        headingBackdrop.fillColor = Theme.panelBackground
+        headingBackdrop.addSubview(headingSample)
+        headingSample.frame = headingBackdrop.bounds
+        headingSample.hoverForTesting(at: NSPoint(x: 100, y: ProjectRowView.height / 2))
+        // Clear of the glyphs and of both marks: the very top of the heading,
+        // in the left column.
+        let headingGround = try pixel(headingBackdrop, x: 100, y: 1)
+        try expect(matches(headingGround, Theme.panelBackground),
+                   "the heading is washed with a background: \(headingGround)")
 
         // Each column is headed by a mark saying what it holds: the folder
         // whose tree is below it, Git's own for the changes. The two headings
@@ -16506,8 +16643,8 @@ enum RegressionTests {
                    "the branch is drawn over its own mark")
 
         // The branch names its column the way the project names its own: same
-        // size, same ink, so the row reads as the two headings it is rather
-        // than a name with a note after it.
+        // size, same ink, so the heading reads as the two headings it is
+        // rather than a name with a note after it.
         let nameRun = row.nameLabelForTesting
         let branchRun = row.labelForTesting
         try expect(nameRun.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
@@ -17051,10 +17188,11 @@ enum RegressionTests {
         try expect(projectsPanel.history.loadCountForTesting == readsBefore + 1,
                    "switching projects read the history "
                      + "\(projectsPanel.history.loadCountForTesting - readsBefore) times")
+        /// The sibling's chip: its branch, then what it reads as.
         func siblingRow() -> String? {
-            projectsPanel.rowsForTesting
-                .first { $0.titleForTesting.hasPrefix(sibling.lastPathComponent) }?
-                .titleForTesting
+            projectsPanel.chipsForTesting
+                .first { $0.titleForTesting.hasPrefix(sibling.lastPathComponent) }
+                .map { "\($0.branchForTesting)  \($0.titleForTesting)" }
         }
         try settleHistory("the sibling project's row never read its branch: "
                             + "\(String(describing: siblingRow()))") {
@@ -17089,8 +17227,9 @@ enum RegressionTests {
 
         // A sweep that read the project now on screen does not replace what
         // that project's own refresh said — the snapshot is older.
-        let rootRow = { projectsPanel.rowsForTesting
-            .first { $0.titleForTesting.hasPrefix(root.lastPathComponent) }?.titleForTesting }
+        let rootRow = { projectsPanel.chipsForTesting
+            .first { $0.titleForTesting.hasPrefix(root.lastPathComponent) }
+            .map { "\($0.branchForTesting)  \($0.titleForTesting)" } }
         let rootBefore = rootRow()
         workspace.applySummaryForTesting(branch: "stale-branch", changes: 99, for: root)
         try expect(rootRow() == rootBefore,

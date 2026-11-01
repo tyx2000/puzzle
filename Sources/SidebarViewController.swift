@@ -9,16 +9,18 @@ final class SidebarViewController: NSViewController {
     /// Project name + branch beside the traffic lights (the panel owns that
     /// strip of the titlebar because it is the view underneath it).
     let projectTitle = ProjectTitleView()
-    /// The Projects panel: the window's projects, with the selected one's tree
-    /// expanded under its row.
+    /// The Projects panel: the window's projects across its top, with the one
+    /// on show's tree and changes under them.
     private(set) lazy var projectsPanel = ProjectsPanelViewController(fileTree: fileTree)
-    /// A project row was chosen, or its ✕ was clicked.
+    /// A project in the strip was chosen, or closed — from its menu, or the
+    /// ✕ in the heading of the one on show.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
-    /// The branch on a project row was clicked, which goes to its Git panel.
+    /// The branch in the heading was clicked, which goes to its Git panel.
     var onSelectProjectBranchRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
-    /// The Git mark on a project row was clicked: pull that project.
+    /// The Git mark in the heading, or a project's Pull in the strip: pull
+    /// that project.
     var onPullProjectRow: ((Int) -> Void)?
     // Search and Git each own an outline/table view, scroll view, controls and
     // (for Git) another NSTextView. Most windows never show both panels, so do
@@ -292,6 +294,7 @@ final class SidebarViewController: NSViewController {
         fileTree.refreshAppearance()
         searchController?.refreshFonts()
         gitController?.refreshFonts()
+        projectsPanel.refreshFonts()
         projectsPanel.changes.refreshFonts()
         projectsPanel.history.refreshFonts()
     }

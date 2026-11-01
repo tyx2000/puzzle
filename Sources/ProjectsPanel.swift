@@ -1,16 +1,15 @@
 import AppKit
 
-/// One project in the Projects panel: its name, the branch it is on, and the
-/// button that takes it out of the window. Selecting it expands its file tree
-/// underneath.
+/// The project on show, heading its two columns under the strip of projects:
+/// its name over the file tree, the branch over its changes, and the button
+/// that takes it out of the window.
 final class ProjectRowView: NSView {
     static let height: CGFloat = 32
     /// The ✕'s square at the trailing end, held clear of the panel's edge.
     private static let closeWidth: CGFloat = 18
     private static let closeInset: CGFloat = 8
-    /// The band down the leading edge of the project being shown. Every row
-    /// leaves room for it, so a name does not shift as the selection moves.
-    static let markerWidth: CGFloat = 5
+    /// Room before the name's mark.
+    static let leadingInset: CGFloat = 5
     /// A mark at the head of each column saying what it holds: the folder the
     /// tree below it lists, Git's own for the changes. The two headings are
     /// otherwise set alike, and these carry their own colours.
@@ -19,36 +18,25 @@ final class ProjectRowView: NSView {
     private static let nameIcon = "folder-base"
     private static let branchIcon = "git"
 
-    var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
-    /// The branch name is its own target: it selects the project and shows
-    /// that project's Git panel, which otherwise costs a second trip to the
-    /// Git button at the foot of the sidebar.
+    /// The branch name is its own target: it shows the project's Git panel,
+    /// which otherwise costs a second trip to the Git button at the foot of
+    /// the sidebar.
     var onSelectBranch: (() -> Void)?
     /// The Git mark is a button of its own: it pulls this project.
     var onPull: (() -> Void)? {
         didSet { refreshAccessibilityActions() }
     }
     /// A fetch or a pull is running for this project. The Git mark says so
-    /// with a band of light running down through it — the way the commits
-    /// come, from the remote down.
+    /// with the light its name in the strip carries, running across it.
     var isSyncing = false {
         didSet {
             guard isSyncing != oldValue else { return }
             syncingChanged()
         }
     }
-    /// One sweep of the band down the mark.
-    static let sweepPeriod: TimeInterval = 1.0
     private var sweepStarted: Date?
     private var sweepTimer: Timer?
-    /// Dragging this row: the panel decides whether the list may be reordered
-    /// at all, and tracks where the row is going.
-    var onDragBegan: (() -> Bool)?
-    /// How far the row has travelled *down* the list from where it was picked
-    /// up, in points.
-    var onDragMoved: ((CGFloat) -> Void)?
-    var onDragEnded: (() -> Void)?
 
     private var name = ""
     private var branch = ""
@@ -60,15 +48,7 @@ final class ProjectRowView: NSView {
     /// drawn for none: a row of zeroes down the panel says nothing.
     private var changes = 0
     private var path = ""
-    private var isActive = false
     private var isHovered = false
-    /// A line above the row, so the list reads as rows rather than one block.
-    /// The first row has none, and neither does the gap between a project and
-    /// the tree that belongs to it.
-    var showsDivider = false { didSet { needsDisplay = true } }
-    /// A line under the row: the last one, while every project is collapsed,
-    /// closes the list off from the empty panel below it.
-    var showsBottomLine = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
     private var branchIsHovered = false
     private var pullIsHovered = false
@@ -85,13 +65,12 @@ final class ProjectRowView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func configure(name: String, branch: String, user: String, changes: Int,
-                   path: String, isActive: Bool) {
+                   path: String) {
         self.name = name
         self.branch = branch
         self.user = user
         self.changes = changes
         self.path = path
-        self.isActive = isActive
         toolTip = path
         // The branch's hit box moved with the name; the pointing hand over it
         // has to be measured again.
@@ -123,7 +102,7 @@ final class ProjectRowView: NSView {
     }
     /// Where each column's mark sits: at the head of its own column.
     private var nameIconRect: NSRect {
-        Self.centred(x: Self.markerWidth + 6, in: bounds)
+        Self.centred(x: Self.leadingInset + 6, in: bounds)
     }
     private var branchIconRect: NSRect {
         Self.centred(x: columnDivider + 8, in: bounds)
@@ -204,12 +183,9 @@ final class ProjectRowView: NSView {
         sweepStarted = nil
     }
 
-    /// How far down the mark the band is, 0 at the top to 1 past the bottom.
+    /// How far across the mark the light is; nil between passes.
     private var sweepPhase: CGFloat? {
-        guard let sweepStarted else { return nil }
-        let elapsed = Date().timeIntervalSince(sweepStarted)
-        return CGFloat(elapsed.truncatingRemainder(dividingBy: Self.sweepPeriod)
-                        / Self.sweepPeriod)
+        sweepStarted.flatMap { SyncShimmer.phase(since: $0) }
     }
 
     override func viewDidMoveToWindow() {
@@ -222,9 +198,10 @@ final class ProjectRowView: NSView {
     deinit { sweepTimer?.invalidate() }
 
     /// The Git mark as it stands: itself, or — while its project syncs —
-    /// dimmed, with a band of light at `phase` of the way down. No band when
-    /// the system asks for less motion: the dimmed mark says it on its own.
-    /// `base` draws the mark; a test hands in a shape of its own.
+    /// dimmed, with the light at `phase` of the way across. No light when the
+    /// system asks for less motion, or between passes: the dimmed mark says
+    /// it on its own. `base` draws the mark; a test hands in a shape of its
+    /// own.
     static func gitMark(syncingAt phase: CGFloat?, syncing: Bool,
                         base: @escaping (NSRect) -> Void = {
                             SidebarCellDrawing.icon(.material(branchIcon), in: $0)
@@ -238,14 +215,7 @@ final class ProjectRowView: NSView {
             NSColor.black.withAlphaComponent(0.3).setFill()
             rect.fill(using: .sourceAtop)
             guard let phase else { return true }
-            let band = rect.height * 0.8
-            let light = Theme.cursor.blended(withFraction: 0.55, of: .white) ?? Theme.cursor
-            NSGradient(colors: [light.withAlphaComponent(0),
-                                light.withAlphaComponent(0.9),
-                                light.withAlphaComponent(0)])?
-                .draw(in: NSRect(x: 0, y: -band + (rect.height + band) * phase,
-                                 width: rect.width, height: band),
-                      angle: 90)
+            SyncShimmer.draw(in: rect, phase: phase, colour: SyncShimmer.light, peak: 0.85)
             return true
         }
     }
@@ -268,25 +238,9 @@ final class ProjectRowView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // The project being shown carries a band; the row under the pointer
-        // does not — a wash that follows the mouse across the headings read as
-        // a third list laid over the two they head.
-        if isActive {
-            Theme.selectedControl.setFill()
-            bounds.fill()
-        }
-        if showsDivider {
-            Theme.border.setFill()
-            NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
-        }
-        if showsBottomLine {
-            Theme.border.setFill()
-            NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
-        }
-        if isActive {
-            Theme.cursor.setFill()
-            NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height).fill()
-        }
+        // No ground of its own: the strip above already marks which project
+        // this is, and a wash under the pointer read as a third list laid
+        // over the two these head.
         SidebarCellDrawing.icon(.material(Self.nameIcon), in: nameIconRect)
         SidebarCellDrawing.attributedText(nameLabel(), in: nameRect)
         // The line between the two columns, carried on down the panel by the
@@ -318,11 +272,8 @@ final class ProjectRowView: NSView {
         ])
     }
 
-    /// The ink both headings are written in: the project being shown is read
-    /// against its own band.
-    private var ink: NSColor {
-        isActive ? Theme.selectedControlText : Theme.foreground
-    }
+    /// The ink both headings are written in.
+    private var ink: NSColor { Theme.foreground }
 
     /// The right column's heading: the branch, and after it the number of
     /// files changed but not committed, in the badge the sidebar uses for a
@@ -371,13 +322,10 @@ final class ProjectRowView: NSView {
 
     /// The count as the sidebar's round badge, sitting on the label's line.
     private func badgeRun() -> NSAttributedString? {
-        // On the row being shown the panel's own band is already this colour,
-        // which left the count as loose digits on it.
-        let background = isActive ? Theme.panelBackground : Theme.activeRow
         guard changes > 0,
               let image = SidebarCellDrawing.Badge.image(
                 "\(changes)", labelFont: Self.nameFont(),
-                background: background, foreground: Theme.foreground)
+                background: Theme.activeRow, foreground: Theme.foreground)
         else { return nil }
         let attachment = NSTextAttachment()
         attachment.image = image
@@ -438,73 +386,35 @@ final class ProjectRowView: NSView {
         needsDisplay = true
     }
 
-    /// Far enough that a shaky click is not a drag.
-    private static let dragThreshold: CGFloat = 4
-
-    /// Selection waits for the release: a press that turns into a drag is
-    /// carrying the row to another place in the list, and selecting on the
-    /// press made every reorder also expand the project it started from.
-    ///
-    /// The drag runs in its own event loop — the panel moves this row between
-    /// its neighbours as it travels, and touching the view hierarchy mid-
-    /// gesture ends AppKit's own tracking.
     override func mouseDown(with event: NSEvent) {
         let start = convert(event.locationInWindow, from: nil)
-        // The ✕ takes the click, so closing never also selects.
         if closeRect.insetBy(dx: -4, dy: -4).contains(start) {
             onClose?()
             return
         }
-        trackPress(from: start, inWindow: event.locationInWindow) { [weak self] in
+        trackPress(from: start) { [weak self] in
             self?.window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp])
         }
     }
 
-    /// The press, from the button going down to what it turns out to have
-    /// meant. `nextEvent` hands over the rest of the gesture — the window's
-    /// own queue in the app, a scripted sequence in a test.
-    ///
-    /// The travel is measured in the window's own space, not this row's: the
-    /// row changes places under the pointer as it goes, which would otherwise
-    /// move the mark the travel is measured from.
-    func trackPress(from start: NSPoint, inWindow startInWindow: NSPoint,
-                    nextEvent: () -> NSEvent?) {
-        var dragging = false
-        var tracking = true
+    /// The press, from the button going down to its release. `nextEvent`
+    /// hands over the rest of the gesture — the window's own queue in the
+    /// app, a scripted sequence in a test. Only the Git mark and the branch
+    /// answer, and only to a press let go where it went down: one released
+    /// somewhere else was abandoned.
+    func trackPress(from start: NSPoint, nextEvent: () -> NSEvent?) {
         var released: NSPoint?
-        while tracking, let next = nextEvent() {
-            switch next.type {
-            case .leftMouseDragged:
-                // A window's y grows upwards; the list runs down the screen.
-                let travelled = startInWindow.y - next.locationInWindow.y
-                if !dragging {
-                    guard abs(travelled) > Self.dragThreshold,
-                          onDragBegan?() == true else { continue }
-                    dragging = true
-                }
-                onDragMoved?(travelled)
-            default:
+        while let next = nextEvent() {
+            guard next.type == .leftMouseDragged else {
                 released = convert(next.locationInWindow, from: nil)
-                tracking = false
+                break
             }
         }
-        // A row that travelled was moved, not clicked; a row that stayed put
-        // was clicked, on the branch or beside it.
-        guard !dragging else {
-            onDragEnded?()
-            return
-        }
-        // A press that could not become a drag — the list cannot be reordered
-        // while a project is open — and was let go somewhere else was not a
-        // click either. Selecting then closed every tab of the project being
-        // left, for a press the reader had already abandoned.
         guard let released, bounds.contains(released) else { return }
         if pullRect.contains(start), onPull != nil {
             onPull?()
         } else if branchRect.contains(start), onSelectBranch != nil {
             onSelectBranch?()
-        } else {
-            onSelect?()
         }
     }
 
@@ -528,11 +438,6 @@ final class ProjectRowView: NSView {
         }
         return found
     }
-    /// The band's rect when the row is the one being shown, else nil.
-    var markerRectForTesting: NSRect? {
-        isActive ? NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height) : nil
-    }
-    var isActiveForTesting: Bool { isActive }
     var closeRectForTesting: NSRect { closeRect }
     var pullRectForTesting: NSRect { pullRect }
     var isSyncingForTesting: Bool { isSyncing }
@@ -557,22 +462,17 @@ final class ProjectRowView: NSView {
         mouseMoved(with: Self.mouseEventForTesting(.mouseMoved, at: convert(point, to: nil)))
     }
     func clickCloseForTesting() { onClose?() }
-    func clickForTesting() { onSelect?() }
     /// A whole press, scripted: the button goes down at `point`, travels
     /// through `path`, and is released. Points are the row's own, converted
     /// back the way a real event arrives.
-    func pressForTesting(at point: NSPoint, draggingThrough path: [NSPoint] = [],
-                         between: (() -> Void)? = nil) {
+    func pressForTesting(at point: NSPoint, draggingThrough path: [NSPoint] = []) {
         var queue = path.map {
             Self.mouseEventForTesting(.leftMouseDragged, at: convert($0, to: nil))
         }
         queue.append(Self.mouseEventForTesting(
             .leftMouseUp, at: convert(path.last ?? point, to: nil)))
         var index = 0
-        trackPress(from: point, inWindow: convert(point, to: nil)) {
-            // Before each event, so a test can watch the list rearrange while
-            // the row is still travelling.
-            between?()
+        trackPress(from: point) {
             defer { index += 1 }
             return index < queue.count ? queue[index] : nil
         }
@@ -1080,34 +980,41 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     }
 }
 
-/// The Projects panel: the window's projects listed down the side, with the
-/// selected one's file tree and changes expanded directly underneath its row.
+/// The Projects panel: the window's projects across its top, and under them
+/// the one on show — its heading, then its file tree beside its changes.
 ///
 /// The tree is the same controller the panel always used; only where it sits
 /// changes, so nothing about browsing a project moves.
 final class ProjectsPanelViewController: NSViewController {
+    typealias Project = (name: String, branch: String, user: String, changes: Int, path: String)
+
     let fileTree: FileTreeViewController
-    /// The right-hand column, itself split: what the expanded project has
+    /// The right-hand column, itself split: what the project on show has
     /// changed, over the commits behind it.
     let changes = ProjectChangesViewController()
     let history = ProjectHistoryViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    /// The branch name on a row was clicked: show that project's Git panel.
+    /// The branch in the heading was clicked: show the project's Git panel.
     var onSelectBranch: ((Int) -> Void)?
-    /// The Git mark on a row was clicked: pull that project.
+    /// A pull was asked for: from the heading's Git mark, or a project's own
+    /// menu in the strip.
     var onPull: ((Int) -> Void)?
+    /// A project was dragged to another place in the strip.
+    var onReorder: ((Int, Int) -> Void)?
     /// The projects, by path, with a fetch or a pull running.
     private var syncingPaths: Set<String> = []
 
     func setSyncing(_ paths: Set<String>) {
         syncingPaths = paths
-        for row in rows { row.isSyncing = paths.contains(row.projectPath) }
+        strip.setSyncing(paths)
+        heading.isSyncing = activePath.map(paths.contains) ?? false
     }
-    /// A row was dragged to another place in the list.
-    var onReorder: ((Int, Int) -> Void)?
 
     private let stack = NSStackView()
+    private let strip = ProjectStripView()
+    /// The project on show, heading its two columns.
+    private let heading = ProjectRowView()
     private let columns = ProjectColumnsView()
     /// The right column's own split, between the changes and the history.
     private let gitColumn = ProjectColumnsView()
@@ -1131,17 +1038,11 @@ final class ProjectsPanelViewController: NSViewController {
         guard let stored, stored > 0.05, stored < 0.95 else { return ProjectColumnsView.defaultFraction }
         return CGFloat(stored)
     }
-    /// The row being dragged and where it started, while a drag is running.
-    private var draggingRow: ProjectRowView?
-    private var dragStartIndex = 0
-    /// What a refresh asked the list to show while a row was being dragged.
-    private var pendingConfiguration: (projects: [(name: String, branch: String,
-                                                   user: String, changes: Int,
-                                                   path: String)],
-                                       active: Int?)?
-    private var rows: [ProjectRowView] = []
-    private var shown: [String] = []
+    /// What a refresh asked the strip to show while a project was being
+    /// dragged across it.
+    private var pendingConfiguration: (projects: [Project], active: Int?)?
     private var activeIndex: Int?
+    private var activePath: String?
 
     init(fileTree: FileTreeViewController) {
         self.fileTree = fileTree
@@ -1152,8 +1053,8 @@ final class ProjectsPanelViewController: NSViewController {
     override func loadView() {
         let root = FlatView()
         root.fillColor = Theme.panelBackground
-        // Layer-backed for one reason: the rows slide to their new places when
-        // a project is picked, which needs implicit animation.
+        // Layer-backed for one reason: the strip's chips slide to make room
+        // when a project comes or goes, which needs implicit animation.
         root.wantsLayer = true
         addChild(fileTree)
         addChild(changes)
@@ -1186,11 +1087,13 @@ final class ProjectsPanelViewController: NSViewController {
         }
         columns.addSubview(fileTree.view)
         columns.addSubview(gitColumn)
+        wire()
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 0
         stack.distribution = .fill
         stack.translatesAutoresizingMaskIntoConstraints = false
+        for item in [strip, heading, columns] as [NSView] { stack.addArrangedSubview(item) }
         root.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: root.topAnchor),
@@ -1198,19 +1101,55 @@ final class ProjectsPanelViewController: NSViewController {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        // The columns take whatever the rows leave.
+        // The columns take whatever the strip and the heading leave.
         columns.setContentHuggingPriority(.init(1), for: .vertical)
         columns.setContentCompressionResistancePriority(.init(1), for: .vertical)
         view = root
-        // Nothing open yet: the space below the rows is left as the panel's
-        // own ground.
+        // Nothing open yet: the space is left as the panel's own ground.
+        strip.isHidden = true
+        heading.isHidden = true
         showRegions(forRepository: nil)
-        layOut(active: nil)
+    }
+
+    override func viewWillLayout() {
+        super.viewWillLayout()
+        // The strip runs the panel's width, and how many lines its names take
+        // there decides its height.
+        strip.fit(width: view.bounds.width)
+    }
+
+    private func wire() {
+        strip.onSelect = { [weak self] in self?.onSelect?($0) }
+        strip.onClose = { [weak self] in self?.onClose?($0) }
+        strip.onPull = { [weak self] in self?.onPull?($0) }
+        strip.onReorder = { [weak self] from, to in
+            // The reorder redraws the strip from the model, which already
+            // holds anything a refresh held back during the drag would say.
+            self?.pendingConfiguration = nil
+            self?.onReorder?(from, to)
+        }
+        strip.onDragEnded = { [weak self] in
+            guard let self, let pending = self.pendingConfiguration else { return }
+            self.pendingConfiguration = nil
+            self.configure(projects: pending.projects, active: pending.active)
+        }
+        heading.onClose = { [weak self] in
+            guard let self, let index = self.activeIndex else { return }
+            self.onClose?(index)
+        }
+        heading.onSelectBranch = { [weak self] in
+            guard let self, let index = self.activeIndex else { return }
+            self.onSelectBranch?(index)
+        }
+        heading.onPull = { [weak self] in
+            guard let self, let index = self.activeIndex else { return }
+            self.onPull?(index)
+        }
     }
 
     /// The Git column belongs to an open project that is a repository. The
     /// columns stay in the stack with none open, since they are what takes
-    /// up the height the rows leave, but show no second column.
+    /// up the height the strip leaves, but show no second column.
     ///
     /// `forRepository` is nil for no open project, and otherwise whether the
     /// open one is a repository — which is what decides the Git column.
@@ -1218,112 +1157,41 @@ final class ProjectsPanelViewController: NSViewController {
         columns.showsSecond = isRepository == true
     }
 
-    /// Rebuild the list. The tree is moved rather than remade, so switching
-    /// projects does not cost a fresh scroll view.
-    func configure(projects: [(name: String, branch: String, user: String,
-                               changes: Int, path: String)],
-                   active: Int?) {
+    /// Bring the strip and the heading in line with the window's projects.
+    func configure(projects: [Project], active: Int?) {
         _ = view
-        // A refresh can land in the middle of a row drag — the drag's own
-        // event loop still runs the main queue. Rearranging then put the row
-        // back where it started, or rebuilt the rows out from under it; the
-        // newest state waits until the row is put down.
-        guard draggingRow == nil else {
+        // A refresh can land in the middle of a drag — the drag's own event
+        // loop still runs the main queue. Rearranging then put the chip back
+        // where it started, or rebuilt the strip out from under it; the newest
+        // state waits until the chip is put down.
+        guard !strip.isDragging else {
             pendingConfiguration = (projects, active)
             return
         }
-        let identity = projects.map { "\($0.path)|\($0.branch)" }
-        if identity != shown {
-            shown = identity
-            rows.forEach {
-                stack.removeArrangedSubview($0)
-                $0.removeFromSuperview()
-            }
-            rows = projects.enumerated().map { index, project in
-                let row = ProjectRowView()
-                row.onSelect = { [weak self] in self?.onSelect?(index) }
-                row.onClose = { [weak self] in self?.onClose?(index) }
-                row.onSelectBranch = { [weak self] in self?.onSelectBranch?(index) }
-                row.onPull = { [weak self] in self?.onPull?(index) }
-                row.onDragBegan = { [weak self, weak row] in
-                    guard let self, let row else { return false }
-                    return self.beginRowDrag(row)
-                }
-                row.onDragMoved = { [weak self, weak row] travel in
-                    guard let self, let row else { return }
-                    self.rowDragMoved(row, by: travel)
-                }
-                row.onDragEnded = { [weak self] in self?.endRowDrag() }
-                return row
-            }
+        let hadProjects = !strip.chips.isEmpty
+        let moved = strip.configure(projects: projects, active: active)
+        strip.isHidden = projects.isEmpty
+        activeIndex = active.flatMap { projects.indices.contains($0) ? $0 : nil }
+        if let index = activeIndex {
+            let project = projects[index]
+            heading.dividerFraction = dividerFraction
+            heading.configure(name: project.name, branch: project.branch, user: project.user,
+                              changes: project.changes, path: project.path)
+            activePath = project.path
+        } else {
+            activePath = nil
         }
-        for (index, project) in projects.enumerated() where rows.indices.contains(index) {
-            rows[index].dividerFraction = dividerFraction
-            rows[index].configure(name: project.name, branch: project.branch,
-                                  user: project.user, changes: project.changes,
-                                  path: project.path, isActive: index == active)
-            rows[index].isSyncing = syncingPaths.contains(project.path)
-        }
-        activeIndex = active
+        heading.isSyncing = activePath.map(syncingPaths.contains) ?? false
+        heading.isHidden = activeIndex == nil
         // A project with no branch is not a repository: nothing to head the
         // right column with, and nothing to put in it.
-        showRegions(forRepository: active.flatMap {
-            projects.indices.contains($0) ? !projects[$0].branch.isEmpty : nil
-        })
-        layOut(active: active)
-        refreshRowLines()
-    }
-
-    /// Lines between rows, in the order they are on screen — which a dragged
-    /// row changes as it goes. None over the first row, and none between a
-    /// project and the tree under it, where a line would cut the project off
-    /// from its own contents. With every project collapsed the list ends
-    /// above empty panel, so a line under the last row closes it; with one
-    /// open, its tree fills that space and the rows after it sit on the
-    /// panel's foot.
-    private func refreshRowLines() {
-        let order = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
-        for (position, row) in order.enumerated() {
-            row.showsDivider = position > 0
-            row.showsBottomLine = activeIndex == nil && position == order.count - 1
-        }
-    }
-
-    /// Rows in order, with the expanded project's two columns inserted
-    /// straight after its row.
-    ///
-    /// Views are *moved* into place rather than torn down and rebuilt: taking
-    /// a list out of the hierarchy and putting it back leaves an outline view
-    /// that has to be reloaded before it draws anything, which showed up as an
-    /// empty panel after every project switch.
-    private func layOut(active: Int?) {
-        var desired: [NSView] = []
-        for (index, row) in rows.enumerated() {
-            desired.append(row)
-            if index == active { desired.append(columns) }
-        }
-        // No project: the tree still fills the panel, empty.
-        if active == nil || rows.isEmpty { desired.append(columns) }
-        guard desired != stack.arrangedSubviews else { return }
-        // Nothing to slide from when the panel is being filled for the first
-        // time: a window opening should find its project already there.
-        let hadRows = stack.arrangedSubviews.contains { $0 is ProjectRowView }
-        for (position, item) in desired.enumerated() {
-            guard stack.arrangedSubviews.indices.contains(position),
-                  stack.arrangedSubviews[position] === item else {
-                stack.insertArrangedSubview(item, at: position)
-                continue
-            }
-        }
-        while stack.arrangedSubviews.count > desired.count {
-            let extra = stack.arrangedSubviews[desired.count]
-            stack.removeArrangedSubview(extra)
-            extra.removeFromSuperview()
-        }
-        // The rows below the chosen project have to travel the height of a
-        // whole file tree. Jumping there reads as the list being rebuilt;
-        // sliding reads as the one project opening.
-        guard hadRows else {
+        showRegions(forRepository: activeIndex.map { !projects[$0].branch.isEmpty })
+        // A project come, gone or moved: the chips that make room slide
+        // there, a new one fades in, and what is under the strip follows its
+        // height. Switching moves nothing, and a window opening finds its
+        // projects already in place.
+        guard moved, hadProjects, view.window != nil,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             lastLayoutDurationForTesting = 0
             return
         }
@@ -1331,9 +1199,10 @@ final class ProjectsPanelViewController: NSViewController {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Self.switchDuration
             context.allowsImplicitAnimation = true
-            // Only the project rows travel. The file tree and the two Git
-            // lists below them veto animation on their own geometry — see
-            // ProjectColumnsView — so they appear and disappear at once
+            strip.fadeInArrivals()
+            // Only the strip and the heading travel. The file tree and the two
+            // Git lists below veto animation on their own geometry — see
+            // ProjectColumnsView — so they take their new height at once
             // instead of being resized a frame at a time.
             stack.layoutSubtreeIfNeeded()
         }
@@ -1343,75 +1212,26 @@ final class ProjectsPanelViewController: NSViewController {
     static let switchDuration: TimeInterval = 0.3
     private(set) var lastLayoutDurationForTesting: TimeInterval?
 
-    /// The line moved: the headings follow it, and it is where the next
+    /// The UI font changed: the chips' widths, and so the strip's lines, with
+    /// it.
+    func refreshFonts() {
+        strip.refreshFonts()
+        heading.needsDisplay = true
+    }
+
+    /// The line moved: the heading follows it, and it is where the next
     /// window will find it.
     private func applyDividerFraction(_ fraction: CGFloat) {
         dividerFraction = fraction
-        rows.forEach { $0.dividerFraction = fraction }
+        heading.dividerFraction = fraction
         dividerDefaults.set(Double(fraction), forKey: Self.dividerKey)
     }
 
-    // MARK: - Reordering
-
-    /// Reordering is offered only when every project is collapsed. With one
-    /// expanded, the tree sits between the rows and "where will it land" has
-    /// no honest answer.
-    private var canReorder: Bool { activeIndex == nil && rows.count > 1 }
-
-    private func beginRowDrag(_ row: ProjectRowView) -> Bool {
-        guard canReorder, let index = stack.arrangedSubviews.firstIndex(of: row) else {
-            return false
-        }
-        draggingRow = row
-        dragStartIndex = index
-        return true
-    }
-
-    /// The row follows the pointer by *changing places*: the list it is being
-    /// dropped into is the preview, so what is on screen while dragging is
-    /// exactly what will be committed.
-    ///
-    /// Counted in whole rows travelled rather than measured against the other
-    /// rows' frames. Reordering is only offered with every project collapsed,
-    /// so the rows are a contiguous run of one height; and frames are the one
-    /// thing that cannot be trusted here, since a project switch that is still
-    /// sliding into place has not settled into its own yet.
-    private func rowDragMoved(_ row: ProjectRowView, by travel: CGFloat) {
-        guard draggingRow === row else { return }
-        let moved = Int((travel / ProjectRowView.height).rounded())
-        let slot = max(0, min(rows.count - 1, dragStartIndex + moved))
-        guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
-        stack.insertArrangedSubview(row, at: slot)
-        refreshRowLines()
-        stack.layoutSubtreeIfNeeded()
-    }
-
-    private func endRowDrag() {
-        let row = draggingRow
-        draggingRow = nil
-        let pending = pendingConfiguration
-        pendingConfiguration = nil
-        if let row, let landed = stack.arrangedSubviews.firstIndex(of: row),
-           landed != dragStartIndex {
-            // The reorder redraws the list from the model, which already holds
-            // anything the deferred refresh would have said.
-            onReorder?(dragStartIndex, landed)
-            return
-        }
-        if let pending {
-            configure(projects: pending.projects, active: pending.active)
-        }
-    }
-
-    var rowsForTesting: [ProjectRowView] { rows }
-    /// Start carrying a row, as a press that has travelled far enough does.
-    func beginDragForTesting(_ index: Int) -> Bool {
-        rows.indices.contains(index) && beginRowDrag(rows[index])
-    }
-    func moveDragForTesting(_ index: Int, by travel: CGFloat) {
-        rowDragMoved(rows[index], by: travel)
-    }
-    func endDragForTesting() { endRowDrag() }
+    var stripForTesting: ProjectStripView { strip }
+    /// One a project, in the window's order.
+    var chipsForTesting: [ProjectChipView] { strip.chips }
+    /// The heading over the project on show; nil while none is.
+    var headingForTesting: ProjectRowView? { heading.isHidden ? nil : heading }
     var columnsForTesting: ProjectColumnsView { columns }
     var gitColumnForTesting: ProjectColumnsView { gitColumn }
     /// Drag the line inside the Git column, the way a pointer moves it.
@@ -1419,12 +1239,6 @@ final class ProjectsPanelViewController: NSViewController {
     var dividerFractionForTesting: CGFloat { dividerFraction }
     /// Drag the line to `x`, the way a pointer moves it.
     func dragDividerForTesting(to x: CGFloat) { columns.moveDivider(to: x) }
-    var visualOrderForTesting: [String] {
-        stack.arrangedSubviews.compactMap { ($0 as? ProjectRowView)?.titleForTesting }
-    }
-    /// Where the expanded columns sit among the rows, which is what "expanded
-    /// underneath" means in layout terms.
-    var treePositionForTesting: Int? {
-        stack.arrangedSubviews.firstIndex(of: columns)
-    }
+    /// The projects' names in the order the strip shows them.
+    var visualOrderForTesting: [String] { strip.visualOrderForTesting }
 }
