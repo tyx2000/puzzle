@@ -1,7 +1,8 @@
 import AppKit
 
-/// Window content: sidebar | editor split. There is no status bar — the panel
-/// switches live in the sidebar's title band.
+/// Window content: sidebar | editor split. There is no status bar — the
+/// Search switch lives in the sidebar's title band, and the branch beside the
+/// project's name there opens Git.
 ///
 /// The sidebar can be put away with the toggle beside the traffic lights (or
 /// ⌘B). Away, the pointer resting on the toggle brings it out over the editor

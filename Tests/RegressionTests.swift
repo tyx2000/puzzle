@@ -2942,14 +2942,15 @@ enum RegressionTests {
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
 
         let buttons = workspace.sidebar.titleButtonsForTesting
-        try expect(buttons.map(\.letterForTesting) == ["O", "R", "T", "W", "S", "G"],
-                   "the title band does not carry O, R, T, W, S, G")
+        // Git has no button: the branch beside the project's name opens it.
+        try expect(buttons.map(\.letterForTesting) == ["O", "R", "T", "W", "S"],
+                   "the title band does not carry O, R, T, W, S")
         try expect(buttons.map(\.wordForTesting)
-                    == ["Open", "Recent", "Terminal", "Window", "Search", "Git"],
+                    == ["Open", "Recent", "Terminal", "Window", "Search"],
                    "a button carries the wrong name: \(buttons.map(\.wordForTesting))")
         // Drawn as the file tree's own coloured icons.
         try expect(buttons.map(\.iconForTesting)
-                    == ["folder-import", "changelog", "console", "virtual", "search", "git"],
+                    == ["folder-import", "changelog", "console", "virtual", "search"],
                    "the buttons are not drawn as their icons: \(buttons.map(\.iconForTesting))")
         for button in buttons {
             // Hovering spells the letter out, so a tooltip would land on top of
@@ -3001,19 +3002,19 @@ enum RegressionTests {
         try expect(!open.isHoveredForTesting, "the button stayed hovered")
 
         // Resting on one names it, with its shortcut, under it and inside the
-        // window — W at the band's end too. Passing over shows nothing.
+        // window — S at the band's end too. Passing over shows nothing.
         let card = TitleLetterButton.hintCardForTesting
         try expect(buttons.map(\.hint) == ["Open Project", "Recent Projects",
                                             "Open in Terminal", "New Window",
-                                            "Search Project", "Git"]
+                                            "Search Project"]
                     && buttons[0].shortcut == "⌘O" && buttons[3].shortcut == "⌘N"
-                    && buttons[4].shortcut == "⌘2" && buttons[5].shortcut == "⌘3",
+                    && buttons[4].shortcut == "⌘2",
                    "the buttons are not named for what they do: \(buttons.map(\.hint))")
         open.setHoveredForTesting(true)
         open.setHoveredForTesting(false)
         RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
         try expect(!card.isVisible, "passing over a button put its name up")
-        for button in [buttons[0], buttons[5]] {
+        for button in [buttons[0], buttons[4]] {
             button.setHoveredForTesting(true)
             try expect(!card.isVisible, "the name came up before the pointer had rested")
             RunLoop.main.run(until: Date().addingTimeInterval(TitleLetterButton.hintDelay + 0.2))
@@ -3034,14 +3035,14 @@ enum RegressionTests {
             try expect(!card.isVisible, "the name stayed after the pointer left")
         }
 
-        // The last two switch panels: each is marked while its panel is open,
+        // The last switches panels: it is marked while its panel is open,
         // says so when rested on, and a second click goes back to the
         // projects.
-        let search = buttons[4], git = buttons[5]
-        try expect(workspace.sidebar.visiblePanel == .project && !search.isOn && !git.isOn,
-                   "a switch is marked with the projects showing")
+        let search = buttons[4]
+        try expect(workspace.sidebar.visiblePanel == .project && !search.isOn,
+                   "the switch is marked with the projects showing")
         search.performClick(nil)
-        try expect(workspace.sidebar.visiblePanel == .search && search.isOn && !git.isOn,
+        try expect(workspace.sidebar.visiblePanel == .search && search.isOn,
                    "S did not open Search, or is not marked: \(workspace.sidebar.visiblePanel)")
         try expect((capPixels(search).inside?.alphaComponent ?? 0) > 0.5,
                    "the switch for the open panel has no ground")
@@ -3050,12 +3051,13 @@ enum RegressionTests {
         try expect(card.textForTesting == "Back to Projects  ⌘1",
                    "resting on the open panel's switch says '\(card.textForTesting)'")
         search.setHoveredForTesting(false)
-        git.performClick(nil)
-        try expect(workspace.sidebar.visiblePanel == .git && git.isOn && !search.isOn,
-                   "G did not open Git in Search's place: \(workspace.sidebar.visiblePanel)")
-        git.performClick(nil)
-        try expect(workspace.sidebar.visiblePanel == .project && !git.isOn,
-                   "a second click on G did not go back to the projects")
+        search.performClick(nil)
+        try expect(workspace.sidebar.visiblePanel == .project && !search.isOn,
+                   "a second click on S did not go back to the projects")
+        // Git, opened from the branch or ⌘3, leaves the switch unmarked.
+        workspace.sidebar.showGit()
+        try expect(!search.isOn, "S is marked with Git showing")
+        workspace.sidebar.showFiles()
 
         // The hit area is bigger than the icon, and the buttons do not run
         // together into one strip.
@@ -3070,16 +3072,16 @@ enum RegressionTests {
                        "two buttons are touching: \(left.maxX) then \(right.minX)")
         }
 
-        // They sit at the end of the band, in order, inside it, the switches
+        // They sit at the end of the band, in order, inside it, the switch
         // a little apart from the errands.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
         let frames = buttons.map { $0.convert($0.bounds, to: workspace.sidebar.view) }
         try expect(zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX + 1 },
                    "the buttons are out of order: \(frames.map(\.minX))")
-        try expect(frames[5].maxX <= workspace.sidebar.view.bounds.maxX,
-                   "G hangs off the end of the band: \(frames[5])")
+        try expect(frames[4].maxX <= workspace.sidebar.view.bounds.maxX,
+                   "S hangs off the end of the band: \(frames[4])")
         try expect(abs(frames[4].minX - frames[3].maxX - TitleLetterButton.groupGap) < 0.5,
-                   "the switches are not set apart from the errands: "
+                   "the switch is not set apart from the errands: "
                      + "\(frames[3].maxX) then \(frames[4].minX)")
 
         var opened = 0
@@ -10403,11 +10405,12 @@ enum RegressionTests {
                    "re-clicking the open project did not collapse it")
         try expect(!host.editor.hasProject && host.editor.openURLs.isEmpty,
                    "the collapsed window still claims a project")
-        // The Git switch never carries a count: it would have to answer for
+        // No title-band button carries a count: it would have to answer for
         // one of several projects, and each row answers for its own.
-        try expect(host.sidebar.titleButtonsForTesting.last?.wordForTesting == "Git",
-                   "the Git switch carries a count: "
-                     + "\(String(describing: host.sidebar.titleButtonsForTesting.last?.wordForTesting))")
+        try expect(host.sidebar.titleButtonsForTesting.allSatisfy {
+                       !$0.wordForTesting.contains { $0.isNumber } },
+                   "a title-band button carries a count: "
+                     + "\(host.sidebar.titleButtonsForTesting.map(\.wordForTesting))")
         try expect(panel.rowsForTesting.allSatisfy { !$0.isActiveForTesting },
                    "a project is still marked as showing after collapsing")
         // Under a list of collapsed projects the space is left blank.
@@ -10483,8 +10486,11 @@ enum RegressionTests {
         try expect(host.projectURL == nil, "the fixture did not collapse")
 
         // The branch name is a target of its own: it brings the project
-        // forward and opens its Git panel, rather than sending the reader to
-        // the Git button at the foot of the sidebar.
+        // forward and drops the menu of its branches to switch to. These are
+        // plain folders, with no branches to list; the menu itself is checked
+        // against a repository with the title band.
+        // Kept off screen: `popUp` would hold the test in its tracking loop.
+        host.presentBranchMenu = { _, _, _ in }
         host.sidebar.setProjects(host.projects.map {
             (name: $0.lastPathComponent, branch: "main", user: "", changes: 0,
              path: $0.path)
@@ -10522,11 +10528,11 @@ enum RegressionTests {
         branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.projectURL == host.projects[0],
                    "clicking the branch did not bring its project forward")
-        try expect(host.sidebar.visiblePanel == .git,
-                   "clicking the branch did not open the Git panel: "
+        try expect(host.sidebar.visiblePanel == .project,
+                   "clicking the branch switched the sidebar away: "
                      + "\(host.sidebar.visiblePanel)")
         // Clicking the branch of the project already showing must not fold it
-        // away — that would take back the panel it just asked for.
+        // away — that would take the menu's project away from under it.
         branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.projectURL == host.projects[0],
                    "clicking the branch again collapsed the project")
@@ -16633,25 +16639,26 @@ enum RegressionTests {
         try expect(projectsPanel.history.view.subviews.filter { !$0.isHidden }
                     .allSatisfy { $0 is NSScrollView },
                    "the history list took a heading row back")
-        // Both lists keep a little room above their first row and below their
-        // last, inside the scrolling.
-        for (name, list) in [("changes", projectsPanel.changes.view),
-                             ("history", projectsPanel.history.view)] {
+        // The changes keep a little room above their first row and below
+        // their last, inside the scrolling; the commits run edge to edge,
+        // from the line over them to the panel's foot.
+        for (name, list, room) in [("changes", projectsPanel.changes.view, padding),
+                                   ("history", projectsPanel.history.view, CGFloat(0))] {
             guard let scroll = list.subviews.compactMap({ $0 as? NSScrollView }).first else {
                 throw Failure(description: "the \(name) list has no scroll view")
             }
             let insets = scroll.contentInsets
-            try expect(insets.top == padding && insets.bottom == padding
+            try expect(insets.top == room && insets.bottom == room
                         && insets.left == 0 && insets.right == 0,
-                       "the \(name) list is padded \(insets), not \(padding)pt above and below")
+                       "the \(name) list is padded \(insets), not \(room)pt above and below")
             guard let rows = scroll.documentView as? NSTableView, rows.numberOfRows > 0 else {
                 continue
             }
             rows.layoutSubtreeIfNeeded()
             let firstRow = rows.convert(rows.rect(ofRow: 0), to: scroll)
             let top = scroll.isFlipped ? firstRow.minY : scroll.bounds.height - firstRow.maxY
-            try expect(abs(top - padding) <= 0.5,
-                       "the \(name) list's first row starts \(top)pt down, not \(padding)pt")
+            try expect(abs(top - room) <= 0.5,
+                       "the \(name) list's first row starts \(top)pt down, not \(room)pt")
         }
 
         // A commit moves HEAD and the list follows without being asked: the
@@ -16914,21 +16921,31 @@ enum RegressionTests {
                    "clicking the project name did not show the Projects panel: "
                      + "\(workspace.sidebar.visiblePanel)")
 
-        // The branch beside it drops the menu of branches to switch to,
-        // anchored under the name, and leaves the panel that is showing alone.
+        // The branch beside it opens the project's Git panel.
+        title.clickForTesting(at: inBranch)
+        try expect(workspace.sidebar.visiblePanel == .git,
+                   "clicking the branch did not open the Git panel: "
+                     + "\(workspace.sidebar.visiblePanel)")
+        workspace.sidebar.showFiles()
+
+        // The branch on the project's row drops the menu of branches to
+        // switch to, anchored under it, and leaves the panel showing alone.
         var shownMenu: (menu: NSMenu, origin: NSPoint, anchor: NSView)?
         workspace.presentBranchMenu = { shownMenu = ($0, $1, $2) }
-        title.clickForTesting(at: inBranch)
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let branchRow = projectsPanel.rowsForTesting[0]
+        let rowBranch = branchRow.branchRectForTesting
+        try expect(!rowBranch.isEmpty, "the project's row has no branch to click")
+        branchRow.pressForTesting(at: NSPoint(x: rowBranch.midX, y: rowBranch.midY))
         let menuDeadline = Date().addingTimeInterval(5)
         while shownMenu == nil, Date() < menuDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
-        try expect(shownMenu != nil, "clicking the branch dropped no menu")
-        try expect(shownMenu?.anchor === title
-                    && shownMenu?.origin == NSPoint(x: zones.branch.minX,
-                                                    y: zones.branch.maxY),
-                   "the menu is not anchored under the branch name: "
-                     + "\(String(describing: shownMenu?.origin))")
+        try expect(shownMenu != nil, "clicking the row's branch dropped no menu")
+        try expect(shownMenu?.anchor === branchRow
+                    && shownMenu?.origin == NSPoint(x: rowBranch.minX, y: rowBranch.maxY),
+                   "the menu is not anchored under the row's branch: "
+                     + "\(String(describing: shownMenu?.origin)) for \(rowBranch)")
         let menuItems = shownMenu?.menu.items.filter { !$0.isSeparatorItem } ?? []
         let listed = menuItems.compactMap { item -> (String, NSControl.StateValue)? in
             guard let branch = item.representedObject as? GitService.Branch else { return nil }
@@ -16938,7 +16955,7 @@ enum RegressionTests {
                    "the menu does not list the checked-out branch, ticked: "
                      + "\(listed.map(\.0))")
         try expect(workspace.sidebar.visiblePanel == .project,
-                   "clicking the branch switched the sidebar away: "
+                   "clicking the row's branch switched the sidebar away: "
                      + "\(workspace.sidebar.visiblePanel)")
 
         // Opening a terminal is a menu-bar errand now, and the window answers

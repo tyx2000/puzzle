@@ -119,14 +119,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 self.activateProject(wanted)
             }
         }
-        // The branch is a shortcut into that project's Git panel: it brings the
-        // project forward if it is not the one showing, and never collapses the
-        // one that is — collapsing would take the panel it just asked for away.
+        // The branch on a row drops the menu of that project's branches to
+        // switch to, under the name. A project not on show comes forward
+        // first — the switch acts on the project showing — and the one that
+        // is never collapses.
         sidebar.onSelectProjectBranchRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             let wanted = self.projects[index]
             if self.projectURL != wanted { self.activateProject(wanted) }
-            self.sidebar.showGit()
+            self.showBranchMenu { [weak self] in
+                self?.sidebar.projectsPanel.branchAnchor(forPath: wanted.path)
+            }
         }
         sidebar.onPullProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
@@ -191,12 +194,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // The name goes back to the list it was chosen from; the terminal has
         // its own button at the end of the band.
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
-        // The branch in the title band drops the list of branches to switch
-        // to, anchored under the name. (The branch on a project row is the
-        // one that goes to the Git panel.)
-        sidebar.projectTitle.onBranchClick = { [weak self] rect in
-            self?.showBranchMenu(from: rect)
-        }
+        // The branch in the title band opens the project's Git panel. (The
+        // branch on a project row is the one that switches branches.)
+        sidebar.projectTitle.onBranchClick = { [weak self] in self?.sidebar.showGit() }
         sidebar.onOpenProject = { [weak self] in self?.openFolder(nil) }
         sidebar.onNewWindow = { (NSApp.delegate as? AppDelegate)?.newWindow(nil) }
         sidebar.onOpenTerminal = { [weak self] in self?.openProjectInTerminal(nil) }
@@ -1212,8 +1212,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Branch menu
 
-    /// How many branches the title-strip menu lists. Beyond this the Git panel's
-    /// Branch tab is the place to look.
+    /// How many branches the menu under a project row's branch lists. Beyond
+    /// this the Git panel's Branch tab is the place to look.
     static let branchMenuLimit = 10
 
     /// Branches for the menu: the current one first so switching away from it is
@@ -1230,13 +1230,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         menu.popUp(positioning: nil, at: origin, in: anchor)
     }
 
-    private func showBranchMenu(from rect: NSRect) {
+    /// The menu of the project on show's branches, dropped under `anchor`:
+    /// a view, and the branch name's rect in it.
+    private func showBranchMenu(anchor: @escaping () -> (view: NSView, rect: NSRect)?) {
         guard let directory = projectURL else { return }
-        let anchor = sidebar.projectTitle
         gitSummaryQueue.async { [weak self] in
             let branches = GitService.branches(in: directory)
             DispatchQueue.main.async {
-                guard let self, self.projectURL == directory else { return }
+                guard let self, self.projectURL == directory,
+                      let (anchor, rect) = anchor() else { return }
                 let menu = NSMenu()
                 menu.font = Theme.uiFont(11)
                 let entries = Self.branchMenuEntries(branches)

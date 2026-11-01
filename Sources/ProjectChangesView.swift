@@ -26,11 +26,13 @@ final class ProjectChangesViewController: NSViewController {
         return note
     }
 
-    /// The note's place: across the middle of the first row's slot.
-    static func placeEmptyNote(_ note: NSTextField, over scroll: NSScrollView) -> [NSLayoutConstraint] {
+    /// The note's place: across the middle of the first row's slot, which
+    /// starts `padding` down the list.
+    static func placeEmptyNote(_ note: NSTextField, over scroll: NSScrollView,
+                               padding: CGFloat = listPadding) -> [NSLayoutConstraint] {
         [note.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
          note.centerYAnchor.constraint(equalTo: scroll.topAnchor,
-                                       constant: listPadding + Theme.treeRowHeight() / 2)]
+                                       constant: padding + Theme.treeRowHeight() / 2)]
     }
 
     /// Said once the project's changes have been read and there are none.

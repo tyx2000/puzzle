@@ -21,9 +21,8 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
-    /// The branch name is its own target: it selects the project and shows
-    /// that project's Git panel, which otherwise costs a second trip to the
-    /// Git switch in the title band.
+    /// The branch name is its own target: it drops the menu of the
+    /// project's branches to switch to, under the name.
     var onSelectBranch: (() -> Void)?
     /// The Git mark is a button of its own: it pulls this project.
     var onPull: (() -> Void)? {
@@ -59,7 +58,7 @@ final class ProjectRowView: NSView {
     /// How many files the project has changed but not committed. Nothing is
     /// drawn for none: a row of zeroes down the panel says nothing.
     private var changes = 0
-    private var path = ""
+    private(set) var path = ""
     private var isActive = false
     private var isHovered = false
     /// A line above the row, so the list reads as rows rather than one block.
@@ -157,7 +156,7 @@ final class ProjectRowView: NSView {
     /// Where the branch name lands, so a click on it can be told from a click
     /// on the rest of the row. Empty when there is no branch, or when its
     /// column has no room left.
-    private var branchRect: NSRect {
+    var branchRect: NSRect {
         guard !branch.isEmpty else { return .zero }
         let column = branchColumnRect
         let width = (branch as NSString)
@@ -1093,7 +1092,7 @@ final class ProjectsPanelViewController: NSViewController {
     let history = ProjectHistoryViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    /// The branch name on a row was clicked: show that project's Git panel.
+    /// The branch name on a row was clicked: drop that project's branch menu.
     var onSelectBranch: ((Int) -> Void)?
     /// The Git mark on a row was clicked: pull that project.
     var onPull: ((Int) -> Void)?
@@ -1401,6 +1400,16 @@ final class ProjectsPanelViewController: NSViewController {
         if let pending {
             configure(projects: pending.projects, active: pending.active)
         }
+    }
+
+    /// Where a project's branch name is on screen, for the menu that drops
+    /// from it: the project's row, and the name's rect in the row's own
+    /// coordinates. Asked for when the menu is ready rather than at the
+    /// click, since bringing the project forward may rebuild the rows.
+    func branchAnchor(forPath path: String) -> (view: NSView, rect: NSRect)? {
+        guard let row = rows.first(where: { $0.path == path }),
+              row.window != nil, !row.branchRect.isEmpty else { return nil }
+        return (row, row.branchRect)
     }
 
     var rowsForTesting: [ProjectRowView] { rows }

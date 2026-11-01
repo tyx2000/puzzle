@@ -8,9 +8,8 @@ final class ProjectTitleView: NSView {
     /// was chosen from. A terminal is opened from the button at the end of the
     /// band instead, where it does not sit on top of the more common errand.
     var onProjectClick: (() -> Void)?
-    /// Clicking the branch name asks for the branch menu, anchored under the
-    /// branch text (the rect is in this view's coordinates).
-    var onBranchClick: ((NSRect) -> Void)?
+    /// Clicking the branch name opens the project's Git panel.
+    var onBranchClick: (() -> Void)?
 
     private var project = ""
     private var branch = ""
@@ -41,7 +40,7 @@ final class ProjectTitleView: NSView {
         self.branch = branch
         if hadProject != !project.isEmpty { window?.invalidateCursorRects(for: self) }
         toolTip = project.isEmpty ? nil
-            : "Click the name for the projects, the branch to switch"
+            : "Click the name for the projects, the branch for Git"
         setAccessibilityLabel(
             branch.isEmpty ? project : "\(project), branch \(branch)")
         setAccessibilityHelp("Shows the Projects panel.")
@@ -126,7 +125,7 @@ final class ProjectTitleView: NSView {
     private func act(on zone: Zone) {
         switch zone {
         case .project: onProjectClick?()
-        case .branch: onBranchClick?(branchRect())
+        case .branch: onBranchClick?()
         }
     }
 

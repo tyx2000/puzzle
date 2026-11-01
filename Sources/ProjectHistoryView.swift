@@ -95,11 +95,9 @@ final class ProjectHistoryViewController: NSViewController {
         table.addTableColumn(column)
 
         let scroll = NSScrollView()
+        // No padding above the first commit or below the last: the list runs
+        // from the line over it to the panel's foot.
         PuzzleScroller.adopt(scroll)
-        // The changes' padding, set before the list goes in so it starts
-        // below it.
-        let padding = ProjectChangesViewController.listPadding
-        scroll.contentInsets = NSEdgeInsets(top: padding, left: 0, bottom: padding, right: 0)
         scroll.documentView = table
         // Reaching the end asks for the next page.
         scroll.contentView.postsBoundsChangedNotifications = true
@@ -113,8 +111,8 @@ final class ProjectHistoryViewController: NSViewController {
 
         root.addSubview(scroll)
         root.addSubview(emptyNote)
-        NSLayoutConstraint.activate(ProjectChangesViewController.placeEmptyNote(emptyNote,
-                                                                                 over: scroll))
+        NSLayoutConstraint.activate(ProjectChangesViewController.placeEmptyNote(
+            emptyNote, over: scroll, padding: 0))
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),

@@ -18,7 +18,7 @@ final class SidebarViewController: NSViewController {
     /// A project row was chosen, or its ✕ was clicked.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
-    /// The branch on a project row was clicked, which goes to its Git panel.
+    /// The branch on a project row was clicked, which drops its branch menu.
     var onSelectProjectBranchRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
     /// The Git mark on a project row was clicked: pull that project.
@@ -56,15 +56,14 @@ final class SidebarViewController: NSViewController {
                                                    hint: "Open in Terminal", icon: "console")
     private let windowButton = TitleLetterButton(letter: "W", word: "Window", hint: "New Window",
                                                  shortcut: "⌘N", icon: "virtual")
-    /// After them, a little apart, the two panels other than the projects:
-    /// switches rather than errands, each marked while its panel is open, and
-    /// a second click on one goes back to the projects.
+    /// After them, a little apart, Search: a switch rather than an errand,
+    /// marked while its panel is open, and a second click goes back to the
+    /// projects. Git has no switch of its own: the branch beside the
+    /// project's name opens it.
     private let searchButton = TitleLetterButton(letter: "S", word: "Search", hint: "Search Project",
                                                  shortcut: "⌘2", icon: "search")
-    private let gitButton = TitleLetterButton(letter: "G", word: "Git", hint: "Git",
-                                              shortcut: "⌘3", icon: "git")
     private var titleButtons: [TitleLetterButton] {
-        [openButton, recentButton, terminalButton, windowButton, searchButton, gitButton]
+        [openButton, recentButton, terminalButton, windowButton, searchButton]
     }
     var onOpenProject: (() -> Void)?
     var onNewWindow: (() -> Void)?
@@ -95,8 +94,7 @@ final class SidebarViewController: NSViewController {
                                  (recentButton, #selector(showRecentAction)),
                                  (terminalButton, #selector(openTerminalAction)),
                                  (windowButton, #selector(newWindowAction)),
-                                 (searchButton, #selector(searchAction)),
-                                 (gitButton, #selector(gitAction))] {
+                                 (searchButton, #selector(searchAction))] {
             button.target = self
             button.action = action
             root.addSubview(button)
@@ -135,9 +133,7 @@ final class SidebarViewController: NSViewController {
                                                      constant: -TitleLetterButton.gap),
             windowButton.trailingAnchor.constraint(equalTo: searchButton.leadingAnchor,
                                                    constant: -TitleLetterButton.groupGap),
-            searchButton.trailingAnchor.constraint(equalTo: gitButton.leadingAnchor,
-                                                   constant: -TitleLetterButton.gap),
-            gitButton.trailingAnchor.constraint(
+            searchButton.trailingAnchor.constraint(
                 equalTo: root.trailingAnchor, constant: -6),
             openButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             openButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
@@ -154,9 +150,6 @@ final class SidebarViewController: NSViewController {
             searchButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
             searchButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
             searchButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            gitButton.centerYAnchor.constraint(equalTo: projectTitle.centerYAnchor),
-            gitButton.heightAnchor.constraint(equalToConstant: TitleLetterButton.side),
-            gitButton.widthAnchor.constraint(equalToConstant: TitleLetterButton.side),
             titleSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             titleSeparator.bottomAnchor.constraint(equalTo: containerView.topAnchor),
@@ -167,10 +160,8 @@ final class SidebarViewController: NSViewController {
             // Down to the window's foot: the panels have nothing under them.
             containerView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
-        // Back to the projects, from either switch while it is on.
-        for button in [searchButton, gitButton] {
-            button.onHint = (text: "Back to Projects", shortcut: "⌘1")
-        }
+        // Back to the projects, from the switch while it is on.
+        searchButton.onHint = (text: "Back to Projects", shortcut: "⌘1")
         self.view = root
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
@@ -232,14 +223,10 @@ final class SidebarViewController: NSViewController {
     @objc private func searchAction() {
         if visiblePanel == .search { showFiles() } else { showSearch() }
     }
-    @objc private func gitAction() {
-        if visiblePanel == .git { showFiles() } else { showGit() }
-    }
 
-    /// The switch for the panel on show is marked; the projects have none.
+    /// The switch is marked while its panel is on show.
     private func markVisiblePanel() {
         searchButton.isOn = visiblePanel == .search
-        gitButton.isOn = visiblePanel == .git
     }
 
     var titleButtonsForTesting: [TitleLetterButton] { titleButtons }
@@ -416,7 +403,7 @@ final class SidebarViewController: NSViewController {
 
 /// A button for the title band, drawn as one of the coloured icons the file
 /// tree uses: open a project, the recents, a terminal, a new window, and the
-/// Search and Git switches. Each keeps a letter as its short name.
+/// Search switch. Each keeps a letter as its short name.
 ///
 /// No edge of its own: the icon's colour is enough to read as a target. Under
 /// the pointer a ground comes up behind it; a switch keeps that ground while
@@ -428,7 +415,7 @@ final class TitleLetterButton: NSButton {
     /// Gap between neighbours, so they read as separate targets instead of
     /// one strip of icons.
     static let gap: CGFloat = 3
-    /// Between the errands and the switches after them.
+    /// Between the errands and the switch after them.
     static let groupGap: CGFloat = 8
     /// The ground inside the hit area.
     static let capInset: CGFloat = 2
