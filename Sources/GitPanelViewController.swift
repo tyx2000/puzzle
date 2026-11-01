@@ -711,7 +711,7 @@ final class GitPanelViewController: NSViewController {
     @objc private func commit() { performCommit(push: false) }
 
     /// How much is waiting rides on the button as a badge, the same shape the
-    /// Changes tab and the project bar use for their counts.
+    /// Changes tab and the project strip use for their counts.
     private func refreshCommitButton() {
         // Never enable anything while an operation owns the panel.
         commitButton.isEnabled = activeOperationID == nil && commitIsPossible
