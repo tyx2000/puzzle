@@ -227,6 +227,7 @@ enum RegressionTests {
         try testCutHistoryRowsSayTheRest()
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
+        try testOpenRowFrameTravels()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
         try testTabKeyboardNavigation()
@@ -8563,16 +8564,18 @@ enum RegressionTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
         // Whatever AppKit puts behind a row it paints in the row's own colour:
-        // the list hands it the list's background, and the row keeps its own.
+        // the list hands it its background, and the row keeps its own. The
+        // active row's is the hovered one's.
         let probe = TreeRowView()
         probe.isActiveFile = true
+        probe.isHovered = true
         probe.backgroundColor = Theme.panelBackground
-        try expect(sameColor(probe.backgroundColor, Theme.activeRow),
+        try expect(sameColor(probe.backgroundColor, Theme.hover),
                    "the active row reports \(probe.backgroundColor) as its background")
 
-        // A save in the folder reloads its rows. Every frame of that, nothing
-        // over the active row may show any colour but the active one — AppKit
-        // lays one of its own over each row it has just put back.
+        // A save in the folder reloads its rows. Every frame of that, the
+        // active row keeps its frame and its own ground — AppKit lays a colour
+        // of its own over each row it has just put back.
         try Data("y\n".utf8).write(to: active)
         tree.refresh(changedURLs: [active])
         var frames = 0
@@ -8588,9 +8591,11 @@ enum RegressionTests {
             }
             for cover in covering {
                 let colour = cover.backgroundColor.flatMap { NSColor(cgColor: $0) }
-                try expect(sameColor(colour, Theme.activeRow),
+                try expect(sameColor(colour, Theme.panelBackground),
                            "a layer over the active row showed \(String(describing: colour)) during the reload")
             }
+            try expect((view as? FlatRowView)?.isFrameShownForTesting == true,
+                       "the active row lost its frame during the reload")
         }
         try expect(frames > 0, "the active row was never on screen")
     }
@@ -11979,14 +11984,33 @@ enum RegressionTests {
                    "a Git row in a list that shows no selection showed it")
         git.isHovered = true
         try expect(sameColor(shown(git), Theme.hover), "a hovered Git row")
+        // The open file's row is framed rather than filled: its ground is
+        // whatever it would be without, and the frame is a layer of its own
+        // in from the row's sides, in the accent.
         git.isActiveFile = true
-        try expect(sameColor(shown(git), Theme.activeRow), "the active file's Git row")
+        try expect(sameColor(shown(git), Theme.hover)
+                    && git.isFrameShownForTesting,
+                   "the active file's Git row is not framed over its own ground")
         try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
+        let frameLayer = git.layer?.sublayers?.first { $0.borderWidth > 0 }
+        try expect(frameLayer?.frame == FlatRowView.frameRect(in: git.bounds)
+                    && sameColor(frameLayer?.borderColor.flatMap { NSColor(cgColor: $0) },
+                                 Theme.cursor),
+                   "the frame is not in from the row's sides in the accent: "
+                     + "\(String(describing: frameLayer?.frame))")
+        git.holdsFrameBack = true
+        git.displayIfNeeded()
+        try expect(!git.isFrameShownForTesting, "a row held back still shows its frame")
+        git.holdsFrameBack = false
+        git.isActiveFile = false
+        git.displayIfNeeded()
+        try expect(!git.isFrameShownForTesting, "the frame stayed on a row no longer open")
         try expect(sameColor(shown(tree), Theme.panelBackground), "a plain tree row")
         tree.isHovered = true
         try expect(sameColor(shown(tree), Theme.hover), "a hovered tree row")
         tree.isActiveFile = true
-        try expect(sameColor(shown(tree), Theme.activeRow), "the active file's tree row")
+        try expect(sameColor(shown(tree), Theme.hover) && tree.isFrameShownForTesting,
+                   "the active file's tree row is not framed over its own ground")
         search.selectionHighlightStyle = .regular
         try expect(sameColor(shown(search), Theme.panelBackground), "a plain search row")
         search.isSelected = true
@@ -16258,6 +16282,142 @@ enum RegressionTests {
         try expect(git(["rev-parse", "HEAD"], in: first.clone) == mine,
                    "a pull that could not fast-forward moved the branch")
         try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
+    }
+
+    /// The open tab's row is framed in the list that holds it — the tree for a
+    /// file, the changes for a working-tree diff, a commit's files for that
+    /// commit's diff — and one frame flies from row to row as the tab changes.
+    private static func testOpenRowFrameTravels() throws {
+        let root = try temporaryDirectory("open-row-frame")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "fixture git failed: \(args): \(result.err)")
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Frame Test"])
+        try git(["config", "user.email", "frame@example.invalid"])
+        let nested = root.appendingPathComponent("deep/er/still", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let top = root.appendingPathComponent("a.txt")
+        let deep = nested.appendingPathComponent("b.txt")
+        try Data("one\n".utf8).write(to: top)
+        try Data("two\n".utf8).write(to: deep)
+        try git(["add", "-A"])
+        try expect(GitService.commit("start", in: root).code == 0, "fixture commit failed")
+        try Data("one more\n".utf8).write(to: top)
+        try Data("two more\n".utf8).write(to: deep)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1100, height: 700))
+        workspace.openProject(root)
+        let panel = workspace.sidebar.projectsPanel
+        let tree = workspace.sidebar.fileTree
+        try expect(waitUntil { panel.changes.rowCountForTesting == 2 },
+                   "the fixture's changes never showed")
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+
+        // A file: the tree frames its row, and nothing else is framed.
+        RowFrameFlight.land()
+        workspace.editor.open(url: top)
+        try expect(tree.openRowIndex != nil && panel.changes.openRowIndex == nil
+                    && panel.history.openRowIndex == nil,
+                   "opening a file did not frame its row in the tree alone")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "a flight never landed")
+        guard let topRow = tree.openRowIndex,
+              let topView = tree.openRowTable.rowView(atRow: topRow, makeIfNecessary: true)
+                as? TreeRowView else {
+            throw Failure(description: "the open file's tree row is not on screen")
+        }
+        topView.displayIfNeeded()
+        try expect(topView.isActiveFile && topView.isFrameShownForTesting,
+                   "the open file's tree row is not framed")
+
+        // Another file, three folders down: the frame flies there, for longer
+        // the further it goes, and lands on the row. Opening the folders does
+        // not widen the tree past its column, which took the frame's right
+        // side.
+        workspace.editor.open(url: deep)
+        try expect(RowFrameFlight.isFlyingForTesting,
+                   "switching files did not fly the frame to the new row")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
+        guard let deepRow = tree.openRowIndex,
+              let deepView = tree.openRowTable.rowView(atRow: deepRow, makeIfNecessary: true)
+                as? FlatRowView else {
+            throw Failure(description: "the deep file's tree row is not on screen")
+        }
+        deepView.displayIfNeeded()
+        try expect(deepView.isFrameShownForTesting && !deepView.holdsFrameBack,
+                   "the frame did not land on the deep file's row")
+        let clip = tree.openRowTable.enclosingScrollView?.contentView.bounds.width ?? 0
+        try expect(abs(tree.openRowTable.frame.width - clip) < 0.5,
+                   "opening folders widened the tree past its column: "
+                     + "\(tree.openRowTable.frame.width) in \(clip)")
+        try expect(RowFrameFlight.duration(forDistance: 0) == RowFrameFlight.shortest
+                    && RowFrameFlight.duration(forDistance: 2000) == RowFrameFlight.longest,
+                   "a flight's length does not follow its distance")
+
+        // A working-tree diff from the changes: the changes frame its row and
+        // the tree lets go, the frame flying across from the tree's row.
+        guard let entry = panel.changes.entriesForTesting.first(where: { $0.path == "a.txt" })
+        else { throw Failure(description: "a.txt is not among the changes") }
+        var flewAcross = false
+        workspace.showDiff(for: entry, in: root.standardizedFileURL.resolvingSymlinksInPath())
+        try expect(waitUntil {
+            if RowFrameFlight.isFlyingForTesting { flewAcross = true }
+            return workspace.editor.currentURL?.scheme == DocumentStore.diffScheme
+        }, "the working-tree diff never opened")
+        if let url = workspace.editor.currentURL {
+            try expect(WorkspaceWindowController.openTab(for: url) == .change(path: "a.txt"),
+                       "a working-tree diff's tab is not read as its change: \(url)")
+        }
+        try expect(panel.changes.openRowIndex != nil && tree.openRowIndex == nil
+                    && panel.history.openRowIndex == nil,
+                   "the diff's change is not the one framed row")
+        try expect(flewAcross, "the frame did not fly from the tree to the changes")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
+
+        // A commit's diff of one file: framed under its commit, which is open.
+        panel.history.settleForTesting()
+        guard let commitRow = panel.history.rowOutlineForTesting.firstIndex(of: "start") else {
+            throw Failure(description: "the history does not list the fixture's commit")
+        }
+        panel.history.clickRowForTesting(commitRow)
+        try expect(waitUntil { panel.history.fileRowsForTesting.contains("a.txt") },
+                   "opening the commit did not list its files")
+        guard let fileRow = panel.history.rowOutlineForTesting.firstIndex(of: "a.txt") else {
+            throw Failure(description: "the commit's a.txt row is missing")
+        }
+        panel.history.clickRowForTesting(fileRow)
+        try expect(waitUntil {
+            workspace.editor.currentURL.map(WorkspaceWindowController.openTab(for:))
+                .map { if case .commitFile = $0 { return true } else { return false } } == true
+        }, "the commit's diff never opened")
+        try expect(panel.history.openRowIndex == fileRow && panel.changes.openRowIndex == nil
+                    && tree.openRowIndex == nil,
+                   "the commit's file is not the one framed row")
+        try expect(panel.history.rowViewForTesting(fileRow)?.isActiveFile == true,
+                   "the commit's file row is not marked")
+
+        // Back to the file: the tree has it again, and the lists let go.
+        workspace.editor.open(url: top)
+        try expect(tree.openRowIndex != nil && panel.changes.openRowIndex == nil
+                    && panel.history.openRowIndex == nil,
+                   "coming back to the file did not hand the frame back to the tree")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
+        // A file's history is not a row anywhere.
+        let historyTab = URL(string: "\(DocumentStore.diffScheme):////tmp/x/.puzzle-diff-preview"
+                               + "?path=a.txt&commit=file-history-table")!
+        try expect(WorkspaceWindowController.openTab(for: historyTab) == .file,
+                   "a file's history tab was read as a commit's diff")
     }
 
     private static func testTerminalLaunchScripts() throws {

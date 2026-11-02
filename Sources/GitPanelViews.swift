@@ -1003,7 +1003,10 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
 }
 
 final class GitRowView: FlatRowView {
-    var isActiveFile = false
+    /// The row of the diff the open tab shows: framed, like the tree's.
+    var isActiveFile = false {
+        didSet { showsFrame = isActiveFile }
+    }
     var isHovered = false {
         didSet {
             guard isHovered != oldValue else { return }
@@ -1021,7 +1024,6 @@ final class GitRowView: FlatRowView {
     }
 
     override var ground: NSColor {
-        if isActiveFile { return Theme.activeRow }
         if isHovered || (isSelected && selectionHighlightStyle != .none) { return Theme.hover }
         return isStriped ? Theme.stripedRow : Theme.panelBackground
     }

@@ -51,6 +51,20 @@ final class ProjectChangesViewController: NSViewController {
     private let table = GitTableView()
     private var entries: [GitService.Status.Entry] = []
     private var directory: URL?
+    /// The path whose working-tree diff the open tab shows: its row is
+    /// framed, and brought into view when the tab comes forward.
+    var openPath: String? {
+        didSet {
+            guard openPath != oldValue else { return }
+            refreshOpenRow()
+            if let row = openRowIndex { table.scrollRowToVisible(row) }
+        }
+    }
+    /// Where the open diff's row is, while it is listed.
+    var openRowIndex: Int? {
+        openPath.flatMap { path in entries.firstIndex { $0.path == path } }
+    }
+    var openRowTable: NSTableView { table }
     /// Where the branch stands against its remote. `nil` until the refresh
     /// that follows a project switch says, and Push stays off until then.
     private var remote: (ahead: Int, hasUpstream: Bool)?
@@ -423,7 +437,18 @@ extension ProjectChangesViewController: NSTableViewDataSource, NSTableViewDelega
         let view = (tableView.makeView(withIdentifier: id, owner: self) as? GitRowView)
             ?? GitRowView()
         view.identifier = id
+        view.isActiveFile = isOpen(row)
         return view
+    }
+
+    /// The rows on screen keep the frame they were made with until told.
+    private func refreshOpenRow() {
+        table.enumerateAvailableRowViews { view, row in
+            (view as? GitRowView)?.isActiveFile = isOpen(row)
+        }
+    }
+    private func isOpen(_ row: Int) -> Bool {
+        openPath != nil && entries.indices.contains(row) && entries[row].path == openPath
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,

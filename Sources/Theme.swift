@@ -433,6 +433,26 @@ class FlatRowView: NSTableRowView {
     /// The colour the row shows now, selection and hover included.
     var ground: NSColor { Theme.panelBackground }
 
+    /// The row of what the open tab shows: framed in the accent, in from the
+    /// row's sides, over whatever ground the row has. A frame rather than a
+    /// fill, so it can travel from row to row.
+    var showsFrame = false {
+        didSet { if showsFrame != oldValue { needsDisplay = true } }
+    }
+    /// Held back while a frame flies in to this row, so the two never show
+    /// at once.
+    var holdsFrameBack = false {
+        didSet { if holdsFrameBack != oldValue { needsDisplay = true } }
+    }
+    static let frameInset = NSSize(width: 4, height: 1)
+    static let frameRadius: CGFloat = 5
+    /// Where the frame sits in a row of `bounds`.
+    static func frameRect(in bounds: NSRect) -> NSRect {
+        bounds.insetBy(dx: frameInset.width, dy: frameInset.height)
+    }
+    private var frameLayer: CALayer?
+    var isFrameShownForTesting: Bool { frameLayer.map { !$0.isHidden } ?? false }
+
     override var isSelected: Bool {
         didSet { if isSelected != oldValue { needsDisplay = true } }
     }
@@ -450,12 +470,45 @@ class FlatRowView: NSTableRowView {
 
     override func updateLayer() {
         layer?.backgroundColor = ground.cgColor
+        updateFrameLayer()
+    }
+
+    override func layout() {
+        super.layout()
+        frameLayer?.frame = Self.frameRect(in: bounds)
+    }
+
+    /// A sublayer over the cell, made the first time the row is framed.
+    private func updateFrameLayer() {
+        let shown = showsFrame && !holdsFrameBack
+        guard shown || frameLayer != nil, let layer else { return }
+        let frame = frameLayer ?? {
+            let made = CALayer()
+            made.borderWidth = 1
+            made.cornerRadius = Self.frameRadius
+            made.zPosition = 100
+            // Placed and coloured at once: it never animates on its own.
+            made.actions = ["frame": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                            "hidden": NSNull(), "borderColor": NSNull()]
+            layer.addSublayer(made)
+            frameLayer = made
+            return made
+        }()
+        frame.isHidden = !shown
+        frame.frame = Self.frameRect(in: bounds)
+        frame.borderColor = Theme.cursor.cgColor
     }
 
     /// The row as it renders off screen — a snapshot, a drag image.
     override func drawBackground(in dirtyRect: NSRect) {
         ground.setFill()
         bounds.fill()
+        guard showsFrame, !holdsFrameBack else { return }
+        Theme.cursor.setStroke()
+        let path = NSBezierPath(roundedRect: Self.frameRect(in: bounds).insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: Self.frameRadius, yRadius: Self.frameRadius)
+        path.lineWidth = 1
+        path.stroke()
     }
 
     /// Selection is part of `ground`.

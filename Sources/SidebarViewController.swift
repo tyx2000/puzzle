@@ -4,6 +4,18 @@ import AppKit
 /// the one on show, or its Git panel.
 enum SidebarPanel: CaseIterable { case project, search, git }
 
+/// What the open tab shows, in the terms of the list that frames its row.
+enum OpenTab: Equatable {
+    /// A file, framed in the tree when the tree lists it; anything else the
+    /// sidebar has no row for.
+    case file
+    /// A working-tree diff, framed in the project's changes.
+    case change(path: String)
+    /// A commit's diff of one file, framed under that commit, by the
+    /// commit's short hash.
+    case commitFile(commit: String, path: String)
+}
+
 /// Left panel: the projects, a search or Git, running the whole height under
 /// the title band, whose buttons switch between them. Swapping panels never
 /// changes the panel width.
@@ -197,6 +209,53 @@ final class SidebarViewController: NSViewController {
         mount(projectsPanel)
         showFiles()
     }
+
+    /// Frame the open tab's row in whichever list holds it — the tree, the
+    /// changes or a commit's files — and fly the frame there from the row it
+    /// was on.
+    func showOpenTab(_ url: URL, as tab: OpenTab) {
+        let from = openRowFrame()?.rect
+        fileTree.selectFile(url)
+        switch tab {
+        case .file:
+            projectsPanel.changes.openPath = nil
+            projectsPanel.history.openFile = nil
+        case .change(let path):
+            projectsPanel.history.openFile = nil
+            projectsPanel.changes.openPath = path
+        case .commitFile(let commit, let path):
+            projectsPanel.changes.openPath = nil
+            projectsPanel.history.openFile = .init(commit: commit, path: path)
+        }
+        view.layoutSubtreeIfNeeded()
+        let to = openRowFrame()
+        RowFrameFlight.fly(in: view, from: from, to: to?.rect, landingOn: to?.row)
+    }
+
+    /// Where the open tab's frame is now: the row that holds it, and the frame
+    /// in this view's coordinates, kept inside its list, so a row scrolled
+    /// away is flown from the list's edge. Nil while no list on screen has it.
+    private func openRowFrame() -> (row: FlatRowView?, rect: NSRect)? {
+        let lists: [(NSTableView, Int?)] = [
+            (fileTree.openRowTable, fileTree.openRowIndex),
+            (projectsPanel.changes.openRowTable, projectsPanel.changes.openRowIndex),
+            (projectsPanel.history.openRowTable, projectsPanel.history.openRowIndex),
+        ]
+        for (table, index) in lists {
+            guard let index, table.window != nil, !table.isHiddenOrHasHiddenAncestor
+            else { continue }
+            var rect = FlatRowView.frameRect(in: table.rect(ofRow: index))
+            if let clip = table.enclosingScrollView?.contentView {
+                let shown = clip.documentVisibleRect
+                guard shown.height >= rect.height else { continue }
+                rect.origin.y = min(max(rect.minY, shown.minY), shown.maxY - rect.height)
+            }
+            let row = table.rowView(atRow: index, makeIfNecessary: false) as? FlatRowView
+            return (row, table.convert(rect, to: view))
+        }
+        return nil
+    }
+    func openRowFrameForTesting() -> NSRect? { openRowFrame()?.rect }
 
     func setFileTabHeight(_ height: CGFloat) {
         containerTopConstraint.constant = height

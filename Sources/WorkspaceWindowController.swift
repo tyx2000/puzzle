@@ -204,10 +204,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self.editor.reloadTabs()
             urls.forEach(self.fileWasWritten)
         }
-        // Keep the file tree's active-file highlight in sync with the active tab.
+        // The open tab's row is framed in the sidebar: the file's in the
+        // tree, a diff's in the list it was opened from.
         editor.onActiveDocumentChanged = { [weak self] url in
             guard let self, let url else { return }
-            self.sidebar.fileTree.selectFile(url)
+            self.sidebar.showOpenTab(url, as: Self.openTab(for: url))
             self.refreshWindowTitle(activeFile: url)
         }
     }
@@ -676,6 +677,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     commits: commits))
             }
         }
+    }
+
+    /// What a tab shows, read from its URL: a diff tab names its path, and a
+    /// commit's diff the commit too. A file's history is not a row anywhere.
+    static func openTab(for url: URL) -> OpenTab {
+        guard url.scheme == DocumentStore.diffScheme,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let path = items.first(where: { $0.name == "path" })?.value, !path.isEmpty
+        else { return .file }
+        let commit = items.first(where: { $0.name == "commit" })?.value ?? ""
+        if commit.isEmpty { return .change(path: path) }
+        guard commit.allSatisfy(\.isHexDigit) else { return .file }
+        return .commitFile(commit: commit, path: path)
     }
 
     /// Synthetic URL for a Git preview tab. The path identifies a Changes diff;

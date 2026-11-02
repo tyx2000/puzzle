@@ -27,6 +27,35 @@ final class ProjectHistoryViewController: NSViewController {
 
     private let table = GitTableView()
     private var directory: URL?
+    /// A commit's file whose diff the open tab shows, by the commit's short
+    /// hash: its row is framed while the commit is open, and brought into
+    /// view when the tab comes forward.
+    struct OpenFile: Equatable {
+        var commit: String
+        var path: String
+    }
+    var openFile: OpenFile? {
+        didSet {
+            guard openFile != oldValue else { return }
+            refreshOpenRow()
+            if let row = openRowIndex { table.scrollRowToVisible(row) }
+        }
+    }
+    /// Where the open file's row is, while its commit is open.
+    var openRowIndex: Int? { rows.indices.first(where: isOpen) }
+    private func isOpen(_ row: Int) -> Bool {
+        guard let openFile, rows.indices.contains(row),
+              case .file(let file, let commit) = rows[row] else { return false }
+        return commit.shortHash == openFile.commit && file.path == openFile.path
+    }
+    var openRowTable: NSTableView { table }
+
+    /// The rows on screen keep the frame they were made with until told.
+    private func refreshOpenRow() {
+        table.enumerateAvailableRowViews { view, row in
+            (view as? GitRowView)?.isActiveFile = isOpen(row)
+        }
+    }
     /// What the list was built for: the commit it ends at and where the
     /// upstream sits behind it. Those are what the rows show — the commits
     /// themselves, and the ↑ on the ones not pushed yet — so the log is read
@@ -455,6 +484,7 @@ extension ProjectHistoryViewController: NSTableViewDataSource, NSTableViewDelega
         // The rule is not read across as a row; it lights under the pointer
         // like one, since a click folds the base.
         view.isHovered = table.hoveredRow == row
+        view.isActiveFile = isOpen(row)
         if rows.indices.contains(row), case .base = rows[row] {
             view.isStriped = false
         } else {

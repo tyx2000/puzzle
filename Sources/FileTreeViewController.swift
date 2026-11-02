@@ -183,6 +183,10 @@ final class FileTreeViewController: NSViewController {
         column.resizingMask = .autoresizingMask
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
+        // The column stays as wide as the list. AppKit otherwise widens it as
+        // folders open, to fit their depth, and the rows ran on past the
+        // panel's edge, taking the right side of the open file's frame.
+        outlineView.autoresizesOutlineColumn = false
 
         let scrollView = NSScrollView()
         PuzzleScroller.adopt(scrollView)
@@ -275,6 +279,10 @@ final class FileTreeViewController: NSViewController {
         affected.forEach { reloadChildren(of: $0) }
         refreshActiveRowBackgrounds()
     }
+
+    /// Where the active file's row is, while the tree lists it.
+    var openRowIndex: Int? { activeURL.flatMap(row(for:)) }
+    var openRowTable: NSTableView { outlineView }
 
     /// Row index currently painted as the active file (nil if none on screen).
     var activeHighlightedRow: Int? {
@@ -1383,9 +1391,11 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     var textColorForTesting: NSColor? { editor.textColor }
 }
 
-/// Tree row with a persistent background for the file open in the active pane.
+/// Tree row, framed for the file open in the active pane.
 final class TreeRowView: FlatRowView {
-    var isActiveFile = false
+    var isActiveFile = false {
+        didSet { showsFrame = isActiveFile }
+    }
     var isHovered = false {
         didSet { if isHovered != oldValue { needsDisplay = true } }
     }
@@ -1420,10 +1430,9 @@ final class TreeRowView: FlatRowView {
         return guides.map(\.frame)
     }
 
-    // Selection is conveyed by active-file/hover state; keep rows flat.
+    // Selection is the active file's frame; the ground is hover's alone.
     override var ground: NSColor {
-        if isActiveFile { return Theme.activeRow }
-        return isHovered ? Theme.hover : Theme.panelBackground
+        isHovered ? Theme.hover : Theme.panelBackground
     }
 
     override func viewDidChangeEffectiveAppearance() {
