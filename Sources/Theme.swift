@@ -433,9 +433,9 @@ class FlatRowView: NSTableRowView {
     /// The colour the row shows now, selection and hover included.
     var ground: NSColor { Theme.panelBackground }
 
-    /// The row of what the open tab shows: framed in the accent, in from the
-    /// row's sides, over whatever ground the row has. A frame rather than a
-    /// fill, so it can travel from row to row.
+    /// The row of what the open tab shows: framed as a diff frames a change,
+    /// in the accent, in from the row's sides, over whatever ground the row
+    /// has. A frame rather than a fill, so it can travel from row to row.
     var showsFrame = false {
         didSet { if showsFrame != oldValue { needsDisplay = true } }
     }
@@ -444,14 +444,15 @@ class FlatRowView: NSTableRowView {
     var holdsFrameBack = false {
         didSet { if holdsFrameBack != oldValue { needsDisplay = true } }
     }
-    static let frameInset = NSSize(width: 4, height: 1)
-    static let frameRadius: CGFloat = 5
-    /// Where the frame sits in a row of `bounds`.
+    /// Room for the frame's band round its line, inside the row.
+    static let frameInset = NSSize(width: 6, height: 2)
+    /// Where the frame's line sits in a row of `bounds`.
     static func frameRect(in bounds: NSRect) -> NSRect {
         bounds.insetBy(dx: frameInset.width, dy: frameInset.height)
     }
-    private var frameLayer: CALayer?
-    var isFrameShownForTesting: Bool { frameLayer.map { !$0.isHidden } ?? false }
+    private var frameLayers: (glow: CALayer, line: CALayer)?
+    var isFrameShownForTesting: Bool { frameLayers.map { !$0.line.isHidden } ?? false }
+    var frameLineLayerForTesting: CALayer? { frameLayers?.line }
 
     override var isSelected: Bool {
         didSet { if isSelected != oldValue { needsDisplay = true } }
@@ -475,28 +476,25 @@ class FlatRowView: NSTableRowView {
 
     override func layout() {
         super.layout()
-        frameLayer?.frame = Self.frameRect(in: bounds)
+        if let frameLayers {
+            frameLayers.glow.frame = OpenFrame.glowRect(for: Self.frameRect(in: bounds))
+            frameLayers.line.frame = Self.frameRect(in: bounds)
+        }
     }
 
-    /// A sublayer over the cell, made the first time the row is framed.
+    /// Sublayers over the cell, made the first time the row is framed.
     private func updateFrameLayer() {
         let shown = showsFrame && !holdsFrameBack
-        guard shown || frameLayer != nil, let layer else { return }
-        let frame = frameLayer ?? {
-            let made = CALayer()
-            made.borderWidth = 1
-            made.cornerRadius = Self.frameRadius
-            made.zPosition = 100
-            // Placed and coloured at once: it never animates on its own.
-            made.actions = ["frame": NSNull(), "bounds": NSNull(), "position": NSNull(),
-                            "hidden": NSNull(), "borderColor": NSNull()]
-            layer.addSublayer(made)
-            frameLayer = made
+        guard shown || frameLayers != nil, let layer else { return }
+        let layers = frameLayers ?? {
+            let made = OpenFrame.makeLayers()
+            layer.addSublayer(made.glow)
+            layer.addSublayer(made.line)
+            frameLayers = made
             return made
         }()
-        frame.isHidden = !shown
-        frame.frame = Self.frameRect(in: bounds)
-        frame.borderColor = Theme.cursor.cgColor
+        OpenFrame.style(glow: layers.glow, line: layers.line,
+                        at: Self.frameRect(in: bounds), hidden: !shown)
     }
 
     /// The row as it renders off screen — a snapshot, a drag image.
@@ -504,11 +502,7 @@ class FlatRowView: NSTableRowView {
         ground.setFill()
         bounds.fill()
         guard showsFrame, !holdsFrameBack else { return }
-        Theme.cursor.setStroke()
-        let path = NSBezierPath(roundedRect: Self.frameRect(in: bounds).insetBy(dx: 0.5, dy: 0.5),
-                                xRadius: Self.frameRadius, yRadius: Self.frameRadius)
-        path.lineWidth = 1
-        path.stroke()
+        OpenFrame.draw(in: Self.frameRect(in: bounds))
     }
 
     /// Selection is part of `ground`.

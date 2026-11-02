@@ -2018,6 +2018,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     func setTabRowHeight(_ height: CGFloat) { tabBar.setRowHeight(height) }
     func setTabLeadingInset(_ inset: CGFloat) { tabBar.leadingInset = inset }
     /// Each tab's frame, in window coordinates.
+    var tabBarForTesting: EditorTabBar { tabBar }
     var tabFramesInWindowForTesting: [NSRect] {
         tabBar.tabFramesForTesting.map { tabBar.convert($0, to: nil) }
     }

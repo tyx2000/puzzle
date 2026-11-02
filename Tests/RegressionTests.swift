@@ -11985,19 +11985,28 @@ enum RegressionTests {
         git.isHovered = true
         try expect(sameColor(shown(git), Theme.hover), "a hovered Git row")
         // The open file's row is framed rather than filled: its ground is
-        // whatever it would be without, and the frame is a layer of its own
-        // in from the row's sides, in the accent.
+        // whatever it would be without, and the frame is drawn as a diff
+        // frames its change — a 1.5pt line in from the row's sides, with a
+        // faint band round it — in the accent.
         git.isActiveFile = true
         try expect(sameColor(shown(git), Theme.hover)
                     && git.isFrameShownForTesting,
                    "the active file's Git row is not framed over its own ground")
         try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
-        let frameLayer = git.layer?.sublayers?.first { $0.borderWidth > 0 }
+        let frameLayer = git.frameLineLayerForTesting
         try expect(frameLayer?.frame == FlatRowView.frameRect(in: git.bounds)
+                    && frameLayer?.borderWidth == ChangeFrameOverlay.strokeWidth
+                    && frameLayer?.cornerRadius == ChangeFrameOverlay.cornerRadius
                     && sameColor(frameLayer?.borderColor.flatMap { NSColor(cgColor: $0) },
                                  Theme.cursor),
-                   "the frame is not in from the row's sides in the accent: "
+                   "the frame is not the diff's line, in from the row's sides in the accent: "
                      + "\(String(describing: frameLayer?.frame))")
+        let band = git.layer?.sublayers?.first {
+            $0 !== frameLayer && $0.borderWidth == ChangeFrameOverlay.glowWidth
+        }
+        try expect(band?.frame == OpenFrame.glowRect(for: FlatRowView.frameRect(in: git.bounds))
+                    && band?.isHidden == false,
+                   "the frame has no band round its outside: \(String(describing: band?.frame))")
         git.holdsFrameBack = true
         git.displayIfNeeded()
         try expect(!git.isFrameShownForTesting, "a row held back still shows its frame")
@@ -13750,8 +13759,9 @@ enum RegressionTests {
         }
     }
 
-    /// The three strips that show a selection — the activity bar, the Git
-    /// panel's tabs, the file tabs — say it the same way, and loudly enough.
+    /// A strip that shows a selection with a surface — the Git panel's tabs —
+    /// says it the selection's way, and loudly enough. The file tabs are
+    /// framed instead, as the open file's row is.
     private static func testSelectedControlsAgree() throws {
         func luminance(_ colour: NSColor) -> CGFloat {
             guard let c = colour.usingColorSpace(.sRGB) else { return 0 }
@@ -13759,13 +13769,10 @@ enum RegressionTests {
         }
 
         do {
-            let strips = [EditorTabBar.selectedColoursForTesting,
-                          GitPanelViewController.selectedTabColoursForTesting]
-            for strip in strips.dropFirst() {
-                try expect(sameColor(strip.surface, strips[0].surface)
-                            && sameColor(strip.ink, strips[0].ink),
-                           "the strips disagree about selection")
-            }
+            let strip = GitPanelViewController.selectedTabColoursForTesting
+            try expect(sameColor(strip.surface, Theme.selectedControl)
+                        && sameColor(strip.ink, Theme.selectedControlText),
+                       "the Git panel's tabs do not show selection the selection's way")
             let surface = luminance(Theme.selectedControl)
             // Against the bar it sits on. `activeTab` was two percent away,
             // which read as nothing at all.
@@ -16341,13 +16348,37 @@ enum RegressionTests {
         try expect(topView.isActiveFile && topView.isFrameShownForTesting,
                    "the open file's tree row is not framed")
 
+        // The open tab is framed the same way, and has no fill of its own.
+        guard let pane = workspace.editor.activePaneForTesting else {
+            throw Failure(description: "the editor has no pane")
+        }
+        let bar = pane.tabBarForTesting
+        func framedTab() -> NSRect? {
+            guard let index = pane.activeTabIndex,
+                  bar.tabFramesForTesting.indices.contains(index) else { return nil }
+            return bar.tabFramesForTesting[index].insetBy(dx: EditorTabBar.frameInset.width,
+                                                          dy: EditorTabBar.frameInset.height)
+        }
+        try expect(bar.openFrameRectForTesting != nil
+                    && bar.openFrameRectForTesting == framedTab(),
+                   "the open tab is not framed: \(String(describing: bar.openFrameRectForTesting))"
+                     + " for \(String(describing: framedTab()))")
+
         // Another file, three folders down: the frame flies there, for longer
-        // the further it goes, and lands on the row. Opening the folders does
+        // the further it goes, and lands on the row. The tab's frame moves to
+        // the new tab at the same time. Opening the folders does
         // not widen the tree past its column, which took the frame's right
         // side.
+        let tabBefore = bar.openFrameRectForTesting
         workspace.editor.open(url: deep)
         try expect(RowFrameFlight.isFlyingForTesting,
                    "switching files did not fly the frame to the new row")
+        try expect(bar.openFrameRectForTesting == framedTab()
+                    && bar.openFrameRectForTesting != tabBefore,
+                   "the tab's frame did not go to the new tab")
+        try expect(!(bar.subviews.compactMap { ($0 as? OpenFrameEdgeView)?.layer?.animationKeys() }
+                        .flatMap { $0 }.isEmpty),
+                   "the tab's frame jumped to the new tab instead of moving there")
         try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
         guard let deepRow = tree.openRowIndex,
               let deepView = tree.openRowTable.rowView(atRow: deepRow, makeIfNecessary: true)

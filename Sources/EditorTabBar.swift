@@ -20,6 +20,16 @@ final class EditorTabBar: NSView {
     }
 
     private var pills: [TabPillView] = []
+    /// The open tab is framed rather than filled, and the frame moves to the
+    /// tab chosen next, as the sidebar's moves to its row.
+    private let openFrame = OpenFrameMarker()
+    /// Room for the frame's band round its line, inside the tab.
+    static let frameInset = NSSize(width: 4, height: 4)
+    private var activeIndex = -1
+    /// The open tab as the frame knows it: a tab that only moved, because
+    /// one before it closed, is not a new tab to move to.
+    private var activeTab: String?
+    private var framedTab: String?
     /// Fallback until the owning window reports its traffic-light geometry.
     static let defaultRowHeight: CGFloat = 32
     private(set) var rowHeight: CGFloat = EditorTabBar.defaultRowHeight
@@ -71,13 +81,14 @@ final class EditorTabBar: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+        openFrame.refreshColour()
     }
 
-    static var selectedColoursForTesting: (surface: NSColor, ink: NSColor) {
-        (Theme.selectedControl, Theme.selectedControlText)
-    }
     var titlesForTesting: [String] { pills.map(\.titleForTesting) }
     var tabFramesForTesting: [NSRect] { pills.map(\.frame) }
+    /// Where the open tab's frame is, its line, in this view's coordinates.
+    var openFrameRectForTesting: NSRect? { openFrame.isHidden ? nil : openFrame.rect }
+    var openFrameShownRectForTesting: NSRect { openFrame.line.frame }
 
     func reload(tabs: [TabInfo], active: Int) {
         while pills.count > tabs.count {
@@ -88,6 +99,8 @@ final class EditorTabBar: NSView {
             addSubview(pill)
             pills.append(pill)
         }
+        activeIndex = active
+        activeTab = tabs.indices.contains(active) ? tabs[active].title + "\n" + tabs[active].path : nil
         for (index, tab) in tabs.enumerated() {
             let pill = pills[index]
             pill.configure(title: tab.title, modified: tab.modified,
@@ -132,6 +145,26 @@ final class EditorTabBar: NSView {
             contentHeight = height
             invalidateIntrinsicContentSize()
         }
+        placeOpenFrame()
+    }
+
+    /// Over the open tab: moved there when another tab has been chosen, and
+    /// simply kept on it when the tabs only moved round it.
+    private func placeOpenFrame() {
+        guard pills.indices.contains(activeIndex) else {
+            openFrame.isHidden = true
+            framedTab = nil
+            return
+        }
+        openFrame.raise(in: self)
+        let target = pills[activeIndex].frame.insetBy(dx: Self.frameInset.width,
+                                                      dy: Self.frameInset.height)
+        let moving = framedTab != nil && framedTab != activeTab
+        openFrame.isHidden = false
+        if openFrame.rect != target || moving {
+            openFrame.place(target, moving: moving)
+        }
+        framedTab = activeTab
     }
 
     var currentHeight: CGFloat { max(rowHeight, contentHeight) }
@@ -142,7 +175,8 @@ final class EditorTabBar: NSView {
 
 }
 
-/// One flat tab. Active = full-height background, no border or outer gap.
+/// One flat tab, the same whether open or not: the open one is framed by the
+/// bar.
 final class TabPillView: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
@@ -156,7 +190,6 @@ final class TabPillView: NSView {
 
     private let label = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
-    private var active = false
 
     override var isFlipped: Bool { true }
 
@@ -178,14 +211,13 @@ final class TabPillView: NSView {
     var titleForTesting: String { label.stringValue }
 
     func configure(title: String, modified: Bool, active: Bool, path: String) {
-        self.active = active
         label.stringValue = modified ? "\(title) ●" : title
         label.font = Theme.uiFont(11.5)
-        // The open file reads like the selected item everywhere else does: its
-        // own surface and its own ink. The rest stay legible rather than
-        // greyed, so the strip does not look half-disabled.
-        label.textColor = active ? Theme.selectedControlText : Theme.foreground
-        closeButton.contentTintColor = active ? Theme.selectedControlText : Theme.foreground
+        // Every tab in the same ink: the frame says which is open, and the
+        // rest stay legible rather than greyed.
+        label.textColor = Theme.foreground
+        closeButton.contentTintColor = Theme.foreground
+        setAccessibilitySelected(active)
         toolTip = path
         needsDisplay = true
         needsLayout = true
@@ -202,12 +234,6 @@ final class TabPillView: NSView {
         closeButton.frame = NSRect(x: bounds.width - 22, y: mid, width: 14, height: 14)
         label.frame = NSRect(x: 12, y: (bounds.height - 16) / 2,
                              width: max(0, bounds.width - 12 - 26), height: 16)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard active else { return }
-        Theme.selectedControl.setFill()
-        bounds.fill()
     }
 
     override func viewDidChangeEffectiveAppearance() {
