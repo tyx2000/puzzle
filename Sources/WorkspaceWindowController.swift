@@ -25,8 +25,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// project moves `gitRefreshGeneration` on, which means that refresh's
     /// result will be thrown away when it lands.
     private var gitSummaryGeneration = 0
-    /// Branch currently checked out, as last reported by the Git refresh.
-    private var currentBranchName: String?
     /// ⌘P's panel and the file list behind it.
     private var palette: PalettePanel?
     private var quickOpenIndex: [String] = []
@@ -119,18 +117,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 self.activateProject(wanted)
             }
         }
-        // The branch on a row drops the menu of that project's branches to
-        // switch to, under the name. A project not on show comes forward
-        // first — the switch acts on the project showing — and the one that
-        // is never collapses.
-        sidebar.onSelectProjectBranchRow = { [weak self] index in
-            guard let self, self.projects.indices.contains(index) else { return }
-            let wanted = self.projects[index]
-            if self.projectURL != wanted { self.activateProject(wanted) }
-            self.showBranchMenu { [weak self] in
-                self?.sidebar.projectsPanel.branchAnchor(forPath: wanted.path)
-            }
-        }
         sidebar.onPullProjectRow = { [weak self] index in
             guard let self, self.projects.indices.contains(index) else { return }
             self.pullProject(self.projects[index])
@@ -195,7 +181,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // its own button at the end of the band.
         sidebar.projectTitle.onProjectClick = { [weak self] in self?.sidebar.showFiles() }
         // The branch in the title band opens the project's Git panel. (The
-        // branch on a project row is the one that switches branches.)
+        // branch on a project row only says which branch it is.)
         sidebar.projectTitle.onBranchClick = { [weak self] in self?.sidebar.showGit() }
         sidebar.onOpenProject = { [weak self] in self?.openFolder(nil) }
         sidebar.onNewWindow = { (NSApp.delegate as? AppDelegate)?.newWindow(nil) }
@@ -961,7 +947,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                     self.sidebar.fileTree.setStatus(modified: split.modified,
                                                     untracked: split.untracked,
                                                     ignored: ignored)
-                    self.currentBranchName = status.isRepo ? status.branch : nil
                     self.sidebar.setChanges(
                         status.isRepo ? status.entries : [], in: projectURL,
                         state: status.isRepo
@@ -990,24 +975,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// Terminals tried, in order, when the project/branch strip beside the
-    /// traffic lights is clicked.
-    static let terminalBundleIDs = ["com.googlecode.iterm2", "com.apple.Terminal"]
-
-    /// The first of those that is installed. Injectable so the preference order
-    /// stays testable on a machine with or without iTerm.
-    static func terminalApplication(
-        lookup: (String) -> URL? = {
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
-        }
-    ) -> URL? {
-        terminalBundleIDs.lazy.compactMap(lookup).first
-    }
-
-    /// Open the project folder in iTerm in a window of its own. Opening a folder
-    /// through `NSWorkspace` lets iTerm reuse whatever window it already has, so
-    /// ask it for a new one by script, and keep the plain open as the fallback
-    /// (no iTerm, or automation not permitted).
     /// The recents in a dialog over the window, listed and handled as the
     /// start page lists them. A click on R while it is up lands on the
     /// dimming over the window and only closes it.
@@ -1050,9 +1017,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         Self.openTerminal(at: projectURL)
     }
 
-    /// Open a terminal window at `directory` — the title strip and the file
-    /// tree's context menu both land here.
+    /// Open a terminal window at `directory`, in the terminal T's right-click
+    /// menu picked — T and the file tree's context menu both land here.
+    ///
+    /// iTerm is asked by script for a window of its own: a folder opened
+    /// through `NSWorkspace` lets it reuse whatever window it already has. The
+    /// plain open stays as the fallback, for automation not permitted.
     static func openTerminal(at directory: URL) {
+        guard let terminal = TerminalPreference.current() else { return }
+        func openFolder() {
+            NSWorkspace.shared.open([directory], withApplicationAt: terminal.url,
+                                    configuration: NSWorkspace.OpenConfiguration(),
+                                    completionHandler: nil)
+        }
+        // Every other terminal opens a shell in a folder handed to it.
+        guard terminal.bundleID == TerminalPreference.iTermID else {
+            openFolder()
+            return
+        }
         let command = "cd " + shellQuoted(directory.path)
         // Launching iTerm already opens a window; asking for another on top of
         // that is what produced two. Only create one when it was running.
@@ -1060,18 +1042,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             guard !runITermScript(command: command,
                                   reusingLaunchWindow: reuseLaunchWindow) else { return }
-            DispatchQueue.main.async {
-                guard let terminal = terminalApplication() else { return }
-                NSWorkspace.shared.open([directory], withApplicationAt: terminal,
-                                        configuration: NSWorkspace.OpenConfiguration(),
-                                        completionHandler: nil)
-            }
+            DispatchQueue.main.async { openFolder() }
         }
     }
 
     static var isITermRunning: Bool {
         !NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.googlecode.iterm2").isEmpty
+            withBundleIdentifier: TerminalPreference.iTermID).isEmpty
     }
 
     /// Runs off the main thread: the reuse path waits for the launch window, and
@@ -1210,197 +1187,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    // MARK: - Branch menu
-
-    /// How many branches the menu under a project row's branch lists. Beyond
-    /// this the Git panel's Branch tab is the place to look.
-    static let branchMenuLimit = 10
-
-    /// Branches for the menu: the current one first so switching away from it is
-    /// obvious, then the most recently updated, capped at `branchMenuLimit`.
-    static func branchMenuEntries(_ branches: [GitService.Branch]) -> [GitService.Branch] {
-        let current = branches.filter(\.isCurrent)
-        let rest = branches.filter { !$0.isCurrent }
-        return Array((current + rest).prefix(branchMenuLimit))
-    }
-
-    /// Puts the menu on screen. `popUp` runs its own tracking loop until the
-    /// menu closes, so a test hands in something that keeps the menu instead.
-    var presentBranchMenu: (NSMenu, NSPoint, NSView) -> Void = { menu, origin, anchor in
-        menu.popUp(positioning: nil, at: origin, in: anchor)
-    }
-
-    /// The menu of the project on show's branches, dropped under `anchor`:
-    /// a view, and the branch name's rect in it.
-    private func showBranchMenu(anchor: @escaping () -> (view: NSView, rect: NSRect)?) {
-        guard let directory = projectURL else { return }
-        gitSummaryQueue.async { [weak self] in
-            let branches = GitService.branches(in: directory)
-            DispatchQueue.main.async {
-                guard let self, self.projectURL == directory,
-                      let (anchor, rect) = anchor() else { return }
-                let menu = NSMenu()
-                menu.font = Theme.uiFont(11)
-                let entries = Self.branchMenuEntries(branches)
-                if entries.isEmpty {
-                    let item = NSMenuItem(title: "No branches", action: nil, keyEquivalent: "")
-                    item.isEnabled = false
-                    menu.addItem(item)
-                }
-                for branch in entries {
-                    let item = NSMenuItem(title: branch.name,
-                                          action: #selector(self.branchMenuItemSelected(_:)),
-                                          keyEquivalent: "")
-                    item.attributedTitle = Self.branchMenuTitle(branch)
-                    item.target = self
-                    item.representedObject = branch
-                    item.state = branch.isCurrent ? .on : .off
-                    menu.addItem(item)
-                }
-                if branches.count > entries.count {
-                    menu.addItem(.separator())
-                    let more = NSMenuItem(
-                        title: "\(branches.count - entries.count) more in the Git panel…",
-                        action: #selector(self.showBranchPanel), keyEquivalent: "")
-                    more.target = self
-                    menu.addItem(more)
-                }
-                // Just under the branch text, so the menu reads as its dropdown.
-                let origin = NSPoint(x: rect.minX, y: rect.maxY)
-                self.presentBranchMenu(menu, origin, anchor)
-            }
-        }
-    }
-
-    /// Two lines per item: the branch, then who last touched it and when.
-    static func branchMenuTitle(_ branch: GitService.Branch) -> NSAttributedString {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 1
-        let title = NSMutableAttributedString(
-            string: branch.name,
-            attributes: [.font: Theme.uiFont(11.5),
-                         .foregroundColor: Theme.foreground,
-                         .paragraphStyle: paragraph])
-        let detail = branch.author.isEmpty
-            ? branch.createdAt
-            : "\(branch.author) · \(branch.createdAt)"
-        title.append(NSAttributedString(
-            string: "\n" + detail,
-            attributes: [.font: Theme.uiFont(9.5),
-                         .foregroundColor: Theme.dimText,
-                         .paragraphStyle: paragraph]))
-        return title
-    }
-
-    @objc private func showBranchPanel() {
-        sidebar.showGit()
-        sidebar.showGitBranches()
-    }
-
-    @objc private func branchMenuItemSelected(_ sender: NSMenuItem) {
-        guard let branch = sender.representedObject as? GitService.Branch,
-              let directory = projectURL else { return }
-        switchBranch(branch, in: directory)
-    }
-
-    /// What clicking a branch in the menu should do. Kept separate from the
-    /// alerts so the rule — refuse with a reason, or confirm naming both ends —
-    /// is decided in one testable place.
-    enum BranchSwitch: Equatable {
-        case alreadyCurrent
-        case unavailable(reason: String)
-        case confirm(from: String, to: String)
-    }
-
-    static func branchSwitch(to branch: GitService.Branch,
-                             from current: String?) -> BranchSwitch {
-        if branch.isCurrent { return .alreadyCurrent }
-        if branch.isRemote, branch.upstreamBranch == nil {
-            return .unavailable(reason:
-                "This remote-tracking ref has no branch name to check out locally. "
-                    + "Create a local branch from it in the Git panel's Branch tab.")
-        }
-        if let current, current == branch.name { return .alreadyCurrent }
-        return .confirm(from: current ?? "the current branch", to: branch.name)
-    }
-
-    /// Switch to `branch`, explaining first. A switch that cannot happen says
-    /// why instead of asking; one that can names both ends before it runs.
-    private func switchBranch(_ branch: GitService.Branch, in directory: URL) {
-        let from: String
-        switch Self.branchSwitch(to: branch, from: currentBranchName) {
-        case .alreadyCurrent:
-            presentBranchAlert(
-                title: "Already on “\(branch.name)”",
-                message: "This is the branch the working tree is already checked out to.")
-            return
-        case .unavailable(let reason):
-            presentBranchAlert(title: "Cannot switch to “\(branch.name)”", message: reason)
-            return
-        case .confirm(let source, _):
-            from = source
-        }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Switch from “\(from)” to “\(branch.name)”?"
-        let effect = branch.isRemote
-            ? "A local tracking branch will be created, checked out, and the files in this "
-                + "working tree will be replaced with that branch's versions."
-            : "The files in this working tree will be replaced with the versions from "
-                + "“\(branch.name)”. Git will refuse the switch if local changes cannot be preserved."
-        alert.informativeText = "Project:\n\(directory.path)\n\n\(effect)"
-        alert.addButton(withTitle: "Switch")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        gitSummaryQueue.async { [weak self] in
-            let result = GitService.switchBranch(branch, in: directory)
-            DispatchQueue.main.async {
-                self?.branchSwitchFinished(result, branchName: branch.name, in: directory)
-            }
-        }
-    }
-
-    /// The user may have moved to another project while the switch ran. It
-    /// still lands: that project's row reads its new branch, and a refusal is
-    /// still reported — dropped, the user was never told the switch did not
-    /// happen.
-    private func branchSwitchFinished(_ result: GitService.RemoteResult, branchName: String,
-                                      in directory: URL) {
-        let here = projectURL == directory
-        if result.ok {
-            if here { refreshExternalGitState() } else { refreshProjectSummaries(all: true) }
-            return
-        }
-        // Git refused it — a dirty tree it cannot preserve, a missing ref — so
-        // hand its own words to the user, naming the project when it is not
-        // the one on screen.
-        presentBranchAlert(
-            title: here ? "Could not switch to “\(branchName)”"
-                : "Could not switch “\(directory.lastPathComponent)” to “\(branchName)”",
-            message: result.message)
-    }
-
-    func branchSwitchFinishedForTesting(ok: Bool, message: String, branchName: String,
-                                        in directory: URL) {
-        branchSwitchFinished(GitService.RemoteResult(ok: ok, message: message),
-                             branchName: branchName,
-                             in: directory.standardizedFileURL.resolvingSymlinksInPath())
-    }
     func summaryBranchForTesting(for url: URL) -> String? {
         projectSummaries[url.standardizedFileURL.resolvingSymlinksInPath()]?.branch
-    }
-
-    private func presentBranchAlert(title: String, message: String) {
-        if let presentSyncError {
-            presentSyncError(title, message)
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        alert.runModal()
     }
 
     /// Re-apply fonts/metrics after settings.json changes.
@@ -1525,7 +1313,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // which would otherwise arrive and speak for a project that is no
         // longer on screen.
         gitRefreshGeneration += 1
-        currentBranchName = nil
         window?.subtitle = ""
         refreshWindowTitle(activeFile: nil)
         return true

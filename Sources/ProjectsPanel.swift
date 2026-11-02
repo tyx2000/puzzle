@@ -21,9 +21,6 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
-    /// The branch name is its own target: it drops the menu of the
-    /// project's branches to switch to, under the name.
-    var onSelectBranch: (() -> Void)?
     /// The Git mark is a button of its own: it pulls this project.
     var onPull: (() -> Void)? {
         didSet { refreshAccessibilityActions() }
@@ -58,7 +55,7 @@ final class ProjectRowView: NSView {
     /// How many files the project has changed but not committed. Nothing is
     /// drawn for none: a row of zeroes down the panel says nothing.
     private var changes = 0
-    private(set) var path = ""
+    private var path = ""
     private var isActive = false
     private var isHovered = false
     /// A line above the row, so the list reads as rows rather than one block.
@@ -69,7 +66,6 @@ final class ProjectRowView: NSView {
     /// closes the list off from the empty panel below it.
     var showsBottomLine = false { didSet { needsDisplay = true } }
     private var closeIsHovered = false
-    private var branchIsHovered = false
     private var pullIsHovered = false
     private var tracking: NSTrackingArea?
 
@@ -128,8 +124,9 @@ final class ProjectRowView: NSView {
         Self.centred(x: columnDivider + 8, in: bounds)
     }
     /// What a click on the Git mark lands in: the mark, and a little round
-    /// it — short of the branch name, which is a target of its own. Nothing
-    /// for a folder that is not a repository, which draws no mark.
+    /// it — short of the branch name, a click on which is a click on the
+    /// row. Nothing for a folder that is not a repository, which draws no
+    /// mark.
     private var pullRect: NSRect {
         guard !branch.isEmpty, onPull != nil else { return .zero }
         return branchIconRect.insetBy(dx: -3, dy: -5)
@@ -153,10 +150,10 @@ final class ProjectRowView: NSView {
                       height: bounds.height)
     }
 
-    /// Where the branch name lands, so a click on it can be told from a click
-    /// on the rest of the row. Empty when there is no branch, or when its
-    /// column has no room left.
-    var branchRect: NSRect {
+    /// Where the branch name lands. Empty when there is no branch, or when
+    /// its column has no room left. Only shown: a click on it is a click on
+    /// the row.
+    private var branchRect: NSRect {
         guard !branch.isEmpty else { return .zero }
         let column = branchColumnRect
         let width = (branch as NSString)
@@ -169,9 +166,6 @@ final class ProjectRowView: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         if !pullRect.isEmpty { addCursorRect(pullRect, cursor: .pointingHand) }
-        let branch = branchRect
-        guard !branch.isEmpty else { return }
-        addCursorRect(branch, cursor: .pointingHand)
     }
 
     // MARK: - Syncing
@@ -327,17 +321,11 @@ final class ProjectRowView: NSView {
     /// files changed but not committed, in the badge the sidebar uses for a
     /// count everywhere else.
     private func branchLabel() -> NSAttributedString {
-        // Underlined under the pointer, the way a link is: it is the one part
-        // of the row that goes somewhere else.
-        var attributes: [NSAttributedString.Key: Any] = [
+        let label = NSMutableAttributedString(string: branch, attributes: [
             .font: Self.nameFont(),
             .foregroundColor: ink,
             .paragraphStyle: Self.truncating,
-        ]
-        if branchIsHovered {
-            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-        }
-        let label = NSMutableAttributedString(string: branch, attributes: attributes)
+        ])
         if !user.isEmpty {
             label.append(gap())
             label.append(NSAttributedString(string: user, attributes: [
@@ -412,26 +400,21 @@ final class ProjectRowView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let onClose = closeRect.insetBy(dx: -4, dy: -4).contains(point)
         let onPull = !onClose && pullRect.contains(point)
-        let onBranch = !onClose && !onPull && branchRect.contains(point)
         guard !isHovered || onClose != closeIsHovered
-                || onBranch != branchIsHovered || onPull != pullIsHovered else { return }
+                || onPull != pullIsHovered else { return }
         isHovered = true
         closeIsHovered = onClose
-        branchIsHovered = onBranch
         pullIsHovered = onPull
-        // Back to the project's path once the pointer leaves the ✕. The branch
-        // says what it does by underlining itself; a bubble over it as well is
-        // one explanation too many. The Git mark does not look like a button,
-        // so it says what it does.
+        // Back to the project's path once the pointer leaves the ✕. The Git
+        // mark does not look like a button, so it says what it does.
         toolTip = onClose ? "Close this project" : (onPull ? pullHint : path)
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
-        guard isHovered || closeIsHovered || branchIsHovered || pullIsHovered else { return }
+        guard isHovered || closeIsHovered || pullIsHovered else { return }
         isHovered = false
         closeIsHovered = false
-        branchIsHovered = false
         pullIsHovered = false
         toolTip = path
         needsDisplay = true
@@ -488,7 +471,7 @@ final class ProjectRowView: NSView {
             }
         }
         // A row that travelled was moved, not clicked; a row that stayed put
-        // was clicked, on the branch or beside it.
+        // was clicked.
         guard !dragging else {
             onDragEnded?()
             return
@@ -500,8 +483,6 @@ final class ProjectRowView: NSView {
         guard let released, bounds.contains(released) else { return }
         if pullRect.contains(start), onPull != nil {
             onPull?()
-        } else if branchRect.contains(start), onSelectBranch != nil {
-            onSelectBranch?()
         } else {
             onSelect?()
         }
@@ -549,7 +530,7 @@ final class ProjectRowView: NSView {
     var pathForTesting: String { path }
     /// The left column's label exactly as it is drawn.
     var nameLabelForTesting: NSAttributedString { nameLabel() }
-    /// The right column's label exactly as it is drawn, hover and all.
+    /// The right column's label exactly as it is drawn.
     var labelForTesting: NSAttributedString { branchLabel() }
     /// Move the pointer across the row, the way its tracking area reports it.
     func hoverForTesting(at point: NSPoint) {
@@ -1092,8 +1073,6 @@ final class ProjectsPanelViewController: NSViewController {
     let history = ProjectHistoryViewController()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    /// The branch name on a row was clicked: drop that project's branch menu.
-    var onSelectBranch: ((Int) -> Void)?
     /// The Git mark on a row was clicked: pull that project.
     var onPull: ((Int) -> Void)?
     /// The projects, by path, with a fetch or a pull running.
@@ -1242,7 +1221,6 @@ final class ProjectsPanelViewController: NSViewController {
                 let row = ProjectRowView()
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
-                row.onSelectBranch = { [weak self] in self?.onSelectBranch?(index) }
                 row.onPull = { [weak self] in self?.onPull?(index) }
                 row.onDragBegan = { [weak self, weak row] in
                     guard let self, let row else { return false }
@@ -1400,16 +1378,6 @@ final class ProjectsPanelViewController: NSViewController {
         if let pending {
             configure(projects: pending.projects, active: pending.active)
         }
-    }
-
-    /// Where a project's branch name is on screen, for the menu that drops
-    /// from it: the project's row, and the name's rect in the row's own
-    /// coordinates. Asked for when the menu is ready rather than at the
-    /// click, since bringing the project forward may rebuild the rows.
-    func branchAnchor(forPath path: String) -> (view: NSView, rect: NSRect)? {
-        guard let row = rows.first(where: { $0.path == path }),
-              row.window != nil, !row.branchRect.isEmpty else { return nil }
-        return (row, row.branchRect)
     }
 
     var rowsForTesting: [ProjectRowView] { rows }

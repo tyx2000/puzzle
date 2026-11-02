@@ -221,7 +221,6 @@ enum RegressionTests {
         try testHistoryRowOpenActions()
         try testStripedGitLists()
         try testGitPanelHistoryPages()
-        try testBranchMenu()
         try testSplitterAndRowGestures()
         try testDividersTakeHoldAtTheirMiddle()
         try testDividerKnobMarksResetsAndHolds()
@@ -3005,7 +3004,9 @@ enum RegressionTests {
         // window — S at the band's end too. Passing over shows nothing.
         let card = TitleLetterButton.hintCardForTesting
         try expect(buttons.map(\.hint) == ["Open Project", "Recent Projects",
-                                            "Open in Terminal", "New Window",
+                                            "Open in " + (TerminalPreference.current()?.name
+                                                          ?? "Terminal"),
+                                            "New Window",
                                             "Search Project"]
                     && buttons[0].shortcut == "⌘O" && buttons[3].shortcut == "⌘N"
                     && buttons[4].shortcut == "⌘2",
@@ -10485,12 +10486,9 @@ enum RegressionTests {
         panel.rowsForTesting[0].clickForTesting()
         try expect(host.projectURL == nil, "the fixture did not collapse")
 
-        // The branch name is a target of its own: it brings the project
-        // forward and drops the menu of its branches to switch to. These are
-        // plain folders, with no branches to list; the menu itself is checked
-        // against a repository with the title band.
-        // Kept off screen: `popUp` would hold the test in its tracking loop.
-        host.presentBranchMenu = { _, _, _ in }
+        // The branch name is only shown: under the pointer it does not
+        // underline itself as a link would, and a click on it is a click on
+        // the row, which brings the project forward like anywhere else on it.
         host.sidebar.setProjects(host.projects.map {
             (name: $0.lastPathComponent, branch: "main", user: "", changes: 0,
              path: $0.path)
@@ -10500,43 +10498,25 @@ enum RegressionTests {
         let branchBox = branchRow.branchRectForTesting
         try expect(branchBox.width > 0 && branchBox.minX > ProjectRowView.markerWidth
                     && branchBox.maxX < branchRow.closeRectForTesting.minX,
-                   "the branch name has no hit box between the name and the ✕: \(branchBox)")
-        // Under the pointer the branch underlines itself, the way a link does —
-        // and only itself: the underline once ran back across the gap between
-        // the project's name and its branch.
+                   "the branch name is not drawn between the name and the ✕: \(branchBox)")
         branchRow.hoverForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         let hovered = branchRow.labelForTesting
-        var underlined: [String] = []
+        var underlined = false
         hovered.enumerateAttribute(.underlineStyle,
                                    in: NSRange(location: 0, length: hovered.length)) {
-            value, range, _ in
-            guard value != nil else { return }
-            underlined.append((hovered.string as NSString).substring(with: range))
+            value, _, _ in
+            if value != nil { underlined = true }
         }
-        try expect(underlined == ["main"],
-                   "the hover underline covers \(underlined), not the branch name alone")
-        // The underline says where it goes; a bubble saying it again does not.
+        try expect(!underlined, "the branch underlines itself under the pointer")
         try expect(branchRow.toolTip == branchRow.pathForTesting,
                    "hovering the branch put a tip over it: "
                      + "\(String(describing: branchRow.toolTip))")
-        branchRow.hoverForTesting(at: NSPoint(x: 20, y: branchBox.midY))
-        let plain = branchRow.labelForTesting
-        try expect(plain.attribute(.underlineStyle, at: plain.length - 1,
-                                   effectiveRange: nil) == nil,
-                   "the branch stays underlined with the pointer elsewhere")
-
         branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         try expect(host.projectURL == host.projects[0],
-                   "clicking the branch did not bring its project forward")
+                   "a click on the branch did not bring its project forward")
         try expect(host.sidebar.visiblePanel == .project,
-                   "clicking the branch switched the sidebar away: "
+                   "a click on the branch switched the sidebar away: "
                      + "\(host.sidebar.visiblePanel)")
-        // Clicking the branch of the project already showing must not fold it
-        // away — that would take the menu's project away from under it.
-        branchRow.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
-        try expect(host.projectURL == host.projects[0],
-                   "clicking the branch again collapsed the project")
-        host.sidebar.showFiles()
         panel.rowsForTesting[0].clickForTesting()
         try expect(host.projectURL == nil,
                    "the fixture did not collapse after the branch check")
@@ -12865,27 +12845,20 @@ enum RegressionTests {
         try expect(tree.statusColorForTesting(at: treeRow("same.txt") ?? -1) != nil,
                    "re-showing the same project dropped its colours")
 
-        // 5. A branch switch, or a Git panel operation, that lands in a
-        // project the user has left updates that project's row, and a refusal
-        // is still told.
+        // 5. A Git panel operation that lands in a project the user has left
+        // updates that project's row.
         let rowA = try repository("switch-row-a"), rowB = try repository("switch-row-b")
         let host = WorkspaceWindowController()
         defer { host.window?.close() }
-        var alerts: [String] = []
-        host.presentSyncError = { title, _ in alerts.append(title) }
         host.openProject(rowA)
         try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "main" },
                    "project A's row never read its branch")
         host.openProject(rowB)
         try git(["checkout", "-q", "-b", "other"], in: rowA)
-        host.branchSwitchFinishedForTesting(ok: true, message: "", branchName: "other", in: rowA)
+        host.sidebar.onGitChanged?(rowA)
         try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "other" },
-                   "a branch switch landing in a project left did not update its row: "
+                   "a Git panel operation landing in a project left did not update its row: "
                      + "\(String(describing: host.summaryBranchForTesting(for: rowA)))")
-        host.branchSwitchFinishedForTesting(ok: false, message: "refused",
-                                            branchName: "gone", in: rowA)
-        try expect(alerts == ["Could not switch “\(rowA.lastPathComponent)” to “gone”"],
-                   "a refused switch in a project left was not told: \(alerts)")
         try git(["checkout", "-q", "main"], in: rowA)
         host.sidebar.onGitChanged?(rowA)
         try expect(waitUntil { host.summaryBranchForTesting(for: rowA) == "main" },
@@ -16010,10 +15983,9 @@ enum RegressionTests {
     private static func testGitMarkPulls() throws {
         // The row: the Git mark is a target of its own, beside the branch.
         let row = ProjectRowView(frame: NSRect(x: 0, y: 0, width: 420, height: ProjectRowView.height))
-        var pulled = 0, selected = 0, branchSelected = 0
+        var pulled = 0, selected = 0
         row.onPull = { pulled += 1 }
         row.onSelect = { selected += 1 }
-        row.onSelectBranch = { branchSelected += 1 }
         row.configure(name: "project", branch: "main", user: "", changes: 0,
                       path: "/tmp/project", isActive: false)
         let mark = row.columnIconsForTesting.branch.1
@@ -16022,14 +15994,15 @@ enum RegressionTests {
                    "the pull target does not cover the mark, or reaches the branch: "
                      + "\(pullBox) / \(mark) / \(row.branchRectForTesting)")
         row.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
-        try expect(pulled == 1 && selected == 0 && branchSelected == 0,
+        try expect(pulled == 1 && selected == 0,
                    "a click on the Git mark did not pull, or did more: "
-                     + "\(pulled) \(selected) \(branchSelected)")
+                     + "\(pulled) \(selected)")
+        // The branch beside it is only shown: a click there is the row's.
         let branchBox = row.branchRectForTesting
         row.pressForTesting(at: NSPoint(x: branchBox.midX, y: branchBox.midY))
         row.pressForTesting(at: NSPoint(x: 60, y: branchBox.midY))
-        try expect(pulled == 1 && branchSelected == 1 && selected == 1,
-                   "the branch and the rest of the row lost their own clicks")
+        try expect(pulled == 1 && selected == 2,
+                   "a click on the branch, or on the rest of the row, did not choose it")
         // It says what it does, and what it is doing.
         row.hoverForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
         try expect(row.toolTipForTesting?.hasPrefix("Pull") == true,
@@ -16042,7 +16015,7 @@ enum RegressionTests {
                         path: "/tmp/folder", isActive: false)
         try expect(plain.pullRectForTesting == .zero, "a folder has a pull target")
         plain.pressForTesting(at: NSPoint(x: mark.midX, y: mark.midY))
-        try expect(pulled == 1 && selected == 2, "a click where no mark is drawn pulled")
+        try expect(pulled == 1 && selected == 3, "a click where no mark is drawn pulled")
 
         // Syncing: the mark dims and a band runs down it, only while the row
         // is on screen to be seen.
@@ -16285,73 +16258,6 @@ enum RegressionTests {
         try expect(git(["rev-parse", "HEAD"], in: first.clone) == mine,
                    "a pull that could not fast-forward moved the branch")
         try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
-    }
-
-    private static func testBranchMenu() throws {
-        func branch(_ name: String, _ author: String, _ date: String,
-                    _ stamp: Int64, current: Bool = false,
-                    remote: Bool = false) -> GitService.Branch {
-            GitService.Branch(name: name, author: author, createdAt: date,
-                              createdTimestamp: stamp, isCurrent: current,
-                              isRemote: remote,
-                              upstreamRemote: remote ? "origin" : nil,
-                              upstreamBranch: remote ? name : nil)
-        }
-        // Most recent first is how GitService hands them over; the menu puts the
-        // checked-out branch at the top regardless, then caps the list.
-        var branches = (0..<15).map {
-            branch("topic-\($0)", "Author \($0)", "2026-08-\(10 + $0) 09:00", Int64(1000 - $0))
-        }
-        branches.insert(branch("main", "tyxu", "2026-07-01 12:00", 1, current: true), at: 7)
-        let entries = WorkspaceWindowController.branchMenuEntries(branches)
-        try expect(entries.count == WorkspaceWindowController.branchMenuLimit,
-                   "the menu listed \(entries.count) branches, not "
-                    + "\(WorkspaceWindowController.branchMenuLimit)")
-        try expect(entries.first?.name == "main",
-                   "the current branch is not first: \(entries.map(\.name))")
-        try expect(entries.dropFirst().map(\.name) == (0..<9).map { "topic-\($0)" },
-                   "the rest lost their recency order: \(entries.map(\.name))")
-        // A short list is not padded or truncated.
-        try expect(WorkspaceWindowController.branchMenuEntries(Array(branches.prefix(3))).count == 3,
-                   "a three-branch repo did not list all three")
-
-        // Each row carries the branch, its author and its date.
-        let title = WorkspaceWindowController.branchMenuTitle(
-            branch("release", "Ada", "2026-08-20 18:30", 900)).string
-        try expect(title.contains("release") && title.contains("Ada")
-                    && title.contains("2026-08-20 18:30"),
-                   "a menu row is missing branch, author or date: \(title.debugDescription)")
-        try expect(title.contains("\n"),
-                   "the row is not two lines: \(title.debugDescription)")
-
-        // What a click decides, before any alert is on screen: refuse with a
-        // reason, or confirm naming both ends.
-        let main = branch("main", "tyxu", "2026-07-01 12:00", 1, current: true)
-        let topic = branch("topic", "Ada", "2026-08-20 18:30", 900)
-        let danglingRemote = GitService.Branch(
-            name: "origin/HEAD", author: "Ada", createdAt: "2026-08-20 18:30",
-            createdTimestamp: 900, isCurrent: false, isRemote: true,
-            upstreamRemote: "origin", upstreamBranch: nil)
-
-        try expect(WorkspaceWindowController.branchSwitch(to: main, from: "main")
-                    == .alreadyCurrent,
-                   "switching to the checked-out branch was not refused")
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "topic")
-                    == .alreadyCurrent,
-                   "a branch matching HEAD by name was not treated as current")
-        if case .unavailable(let reason) = WorkspaceWindowController.branchSwitch(
-            to: danglingRemote, from: "main") {
-            try expect(!reason.isEmpty, "the refusal did not say why")
-        } else {
-            throw Failure(description: "a remote ref with no local name was offered as switchable")
-        }
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: "main")
-                    == .confirm(from: "main", to: "topic"),
-                   "the confirmation did not name both ends")
-        // With no branch known yet the prompt still reads sensibly.
-        try expect(WorkspaceWindowController.branchSwitch(to: topic, from: nil)
-                    == .confirm(from: "the current branch", to: "topic"),
-                   "an unknown current branch produced an empty prompt")
     }
 
     private static func testTerminalLaunchScripts() throws {
@@ -16928,36 +16834,6 @@ enum RegressionTests {
                      + "\(workspace.sidebar.visiblePanel)")
         workspace.sidebar.showFiles()
 
-        // The branch on the project's row drops the menu of branches to
-        // switch to, anchored under it, and leaves the panel showing alone.
-        var shownMenu: (menu: NSMenu, origin: NSPoint, anchor: NSView)?
-        workspace.presentBranchMenu = { shownMenu = ($0, $1, $2) }
-        workspace.window?.contentView?.layoutSubtreeIfNeeded()
-        let branchRow = projectsPanel.rowsForTesting[0]
-        let rowBranch = branchRow.branchRectForTesting
-        try expect(!rowBranch.isEmpty, "the project's row has no branch to click")
-        branchRow.pressForTesting(at: NSPoint(x: rowBranch.midX, y: rowBranch.midY))
-        let menuDeadline = Date().addingTimeInterval(5)
-        while shownMenu == nil, Date() < menuDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        try expect(shownMenu != nil, "clicking the row's branch dropped no menu")
-        try expect(shownMenu?.anchor === branchRow
-                    && shownMenu?.origin == NSPoint(x: rowBranch.minX, y: rowBranch.maxY),
-                   "the menu is not anchored under the row's branch: "
-                     + "\(String(describing: shownMenu?.origin)) for \(rowBranch)")
-        let menuItems = shownMenu?.menu.items.filter { !$0.isSeparatorItem } ?? []
-        let listed = menuItems.compactMap { item -> (String, NSControl.StateValue)? in
-            guard let branch = item.representedObject as? GitService.Branch else { return nil }
-            return (branch.name, item.state)
-        }
-        try expect(listed.contains { $0.0 == "trunk" && $0.1 == .on },
-                   "the menu does not list the checked-out branch, ticked: "
-                     + "\(listed.map(\.0))")
-        try expect(workspace.sidebar.visiblePanel == .project,
-                   "clicking the row's branch switched the sidebar away: "
-                     + "\(workspace.sidebar.visiblePanel)")
-
         // Opening a terminal is a menu-bar errand now, and the window answers
         // the menu's selector through the responder chain.
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
@@ -16965,20 +16841,77 @@ enum RegressionTests {
                     WorkspaceWindowController.openProjectInTerminal(_:))),
                    "nothing answers the Terminal menu's selector")
 
-        // It opens the folder in iTerm, with Terminal as the fallback where
-        // iTerm is not installed.
+        // With none picked it opens the folder in iTerm, with Terminal as the
+        // fallback where iTerm is not installed; another terminal only ever
+        // by choice.
+        let realTerminalDefaults = TerminalPreference.defaults
+        let terminalDefaults = UserDefaults(suiteName: "puzzle-terminal-\(UUID())")!
+        TerminalPreference.defaults = terminalDefaults
+        defer { TerminalPreference.defaults = realTerminalDefaults }
         let iTerm = URL(fileURLWithPath: "/Applications/iTerm.app")
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let installed: [String: URL] = ["com.googlecode.iterm2": iTerm,
-                                        "com.apple.Terminal": terminal]
-        try expect(WorkspaceWindowController.terminalApplication { installed[$0] } == iTerm,
+        let ghostty = URL(fileURLWithPath: "/Applications/Ghostty.app")
+        let everything: [String: URL] = ["com.googlecode.iterm2": iTerm,
+                                         "com.apple.Terminal": terminal,
+                                         "com.mitchellh.ghostty": ghostty]
+        try expect(TerminalPreference.installed { everything[$0] }.map(\.name)
+                    == ["iTerm2", "Terminal", "Ghostty"],
+                   "the terminals are not offered in order: "
+                     + "\(TerminalPreference.installed { everything[$0] }.map(\.name))")
+        try expect(TerminalPreference.current { everything[$0] }?.url == iTerm,
                    "iTerm is installed but was not preferred")
-        try expect(WorkspaceWindowController.terminalApplication {
-                       $0 == "com.apple.Terminal" ? terminal : nil
-                   } == terminal,
+        try expect(TerminalPreference.current {
+                       $0 == "com.googlecode.iterm2" ? nil : everything[$0]
+                   }?.url == terminal,
                    "without iTerm the click did not fall back to Terminal")
-        try expect(WorkspaceWindowController.terminalApplication { _ in nil } == nil,
-                   "a machine with neither terminal still resolved one")
+        try expect(TerminalPreference.current { _ in nil } == nil,
+                   "a machine with no terminal still resolved one")
+        // Picked, it is what a click opens from then on — until it is
+        // removed, when the click falls back again rather than doing nothing.
+        TerminalPreference.choose("com.mitchellh.ghostty")
+        try expect(TerminalPreference.current { everything[$0] }?.url == ghostty,
+                   "the terminal picked is not the one a click opens")
+        try expect(TerminalPreference.current {
+                       $0 == "com.mitchellh.ghostty" ? nil : everything[$0]
+                   }?.url == iTerm,
+                   "a picked terminal since removed left the click with nothing")
+
+        // T's right-click menu lists what is installed here, the one a click
+        // opens ticked, and its card names that one. Picking another moves
+        // the tick and the name, and nothing else happens.
+        terminalDefaults.removeObject(forKey: TerminalPreference.defaultsKey)
+        NotificationCenter.default.post(name: TerminalPreference.changed, object: nil)
+        guard let terminalButton = workspace.sidebar.titleButtonsForTesting
+                .first(where: { $0.letterForTesting == "T" }),
+              let terminalMenu = terminalButton.contextMenuForTesting else {
+            throw Failure(description: "T has no right-click menu")
+        }
+        let installedHere = TerminalPreference.installed()
+        let offered = terminalMenu.items.filter { $0.representedObject is String }
+        try expect(offered.map(\.title) == installedHere.map(\.name)
+                    && offered.allSatisfy { $0.image != nil },
+                   "T's menu does not list the terminals installed here: "
+                     + "\(offered.map(\.title)) for \(installedHere.map(\.name))")
+        let currentHere = TerminalPreference.current()
+        try expect(offered.filter { $0.state == .on }.map(\.title)
+                    == [currentHere?.name].compactMap { $0 },
+                   "T's menu does not tick the one a click opens: "
+                     + "\(offered.filter { $0.state == .on }.map(\.title))")
+        try expect(terminalButton.hint == "Open in " + (currentHere?.name ?? "Terminal"),
+                   "T's card does not name the terminal it opens: \(terminalButton.hint)")
+        if let other = offered.first(where: { $0.state != .on }),
+           let action = other.action {
+            NSApp.sendAction(action, to: other.target, from: other)
+            try expect(terminalDefaults.string(forKey: TerminalPreference.defaultsKey)
+                        == other.representedObject as? String,
+                       "picking \(other.title) from T's menu was not kept")
+            try expect(terminalButton.hint == "Open in " + other.title,
+                       "T's card still names the old terminal: \(terminalButton.hint)")
+            let ticked = terminalButton.contextMenuForTesting?.items
+                .filter { $0.state == .on }.map(\.title)
+            try expect(ticked == [other.title],
+                       "the tick did not move to \(other.title): \(String(describing: ticked))")
+        }
 
         // The window controller must have claimed the click handler, and the
         // transparent titlebar sitting over this band must not swallow it.

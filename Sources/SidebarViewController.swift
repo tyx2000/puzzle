@@ -18,8 +18,6 @@ final class SidebarViewController: NSViewController {
     /// A project row was chosen, or its ✕ was clicked.
     var onSelectProjectRow: ((Int) -> Void)?
     var onCloseProjectRow: ((Int) -> Void)?
-    /// The branch on a project row was clicked, which drops its branch menu.
-    var onSelectProjectBranchRow: ((Int) -> Void)?
     var onReorderProjectRows: ((Int, Int) -> Void)?
     /// The Git mark on a project row was clicked: pull that project.
     var onPullProjectRow: ((Int) -> Void)?
@@ -104,6 +102,13 @@ final class SidebarViewController: NSViewController {
         // accessibility label carries the name for VoiceOver instead.
         // Nothing to open a shell in until a project is showing.
         terminalButton.isEnabled = false
+        // A right-click on T picks the terminal it opens, and its card names
+        // the one it will use.
+        terminalButton.contextMenu = { [weak self] in self?.terminalMenu() }
+        refreshTerminalHint()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(terminalPreferenceChanged),
+            name: TerminalPreference.changed, object: nil)
         root.addSubview(titleSeparator)
 
         containerTopConstraint = containerView.topAnchor.constraint(
@@ -166,7 +171,6 @@ final class SidebarViewController: NSViewController {
 
         projectsPanel.onSelect = { [weak self] in self?.onSelectProjectRow?($0) }
         projectsPanel.onClose = { [weak self] in self?.onCloseProjectRow?($0) }
-        projectsPanel.onSelectBranch = { [weak self] in self?.onSelectProjectBranchRow?($0) }
         projectsPanel.onPull = { [weak self] in self?.onPullProjectRow?($0) }
         // The changes column opens a diff the same way the Git panel's list
         // does — it is the same list, beside the tree instead of instead of it.
@@ -216,6 +220,39 @@ final class SidebarViewController: NSViewController {
     @objc private func openProjectAction() { onOpenProject?() }
     @objc private func newWindowAction() { onNewWindow?() }
     @objc private func openTerminalAction() { onOpenTerminal?() }
+
+    /// The terminals installed here, the one T opens ticked. Picking one only
+    /// changes what the next click opens.
+    private func terminalMenu() -> NSMenu {
+        let menu = NSMenu()
+        let heading = NSMenuItem(title: "Open Projects In", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(heading)
+        let current = TerminalPreference.current()?.bundleID
+        for app in TerminalPreference.installed() {
+            let item = NSMenuItem(title: app.name, action: #selector(terminalChosen(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = app.bundleID
+            item.state = app.bundleID == current ? .on : .off
+            let icon = NSWorkspace.shared.icon(forFile: app.url.path)
+            icon.size = NSSize(width: 16, height: 16)
+            item.image = icon
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func terminalChosen(_ sender: NSMenuItem) {
+        guard let bundleID = sender.representedObject as? String else { return }
+        TerminalPreference.choose(bundleID)
+    }
+
+    @objc private func terminalPreferenceChanged() { refreshTerminalHint() }
+
+    private func refreshTerminalHint() {
+        terminalButton.hint = "Open in " + (TerminalPreference.current()?.name ?? "Terminal")
+    }
     @objc private func showRecentAction() {
         onShowRecent?(recentButton.convert(recentButton.bounds, to: view))
     }
@@ -290,12 +327,6 @@ final class SidebarViewController: NSViewController {
         markVisiblePanel()
         search.focusSearchField()
     }
-    /// Reveal the Git panel already switched to its Branch tab.
-    func showGitBranches() {
-        showGit()
-        gitController?.showBranchTab()
-    }
-
     func showGit() {
         let gitPanel = ensureGit()
         visiblePanel = .git
@@ -428,8 +459,12 @@ final class TitleLetterButton: NSButton {
     /// The Material icon it is drawn as.
     private let icon: String
     /// What it does, said in full, and its shortcut.
-    let hint: String
+    var hint: String {
+        didSet { setAccessibilityHelp(hint) }
+    }
     let shortcut: String?
+    /// What a right-click on it offers, built as it opens.
+    var contextMenu: (() -> NSMenu?)?
     /// A switch whose panel is open: marked with the ground, and its card says
     /// what a click on it now does.
     var isOn = false {
@@ -510,6 +545,12 @@ final class TitleLetterButton: NSButton {
         super.mouseDown(with: event)
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let menu = contextMenu?() else { return super.menu(for: event) }
+        hideHint()
+        return menu
+    }
+
     override func resetCursorRects() {
         if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
@@ -571,6 +612,7 @@ final class TitleLetterButton: NSButton {
     /// The pointer arriving or leaving, as the tracking area reports it.
     func setHoveredForTesting(_ hovered: Bool) { setHovered(hovered) }
     var letterForTesting: String { letter }
+    var contextMenuForTesting: NSMenu? { contextMenu?() }
     var iconForTesting: String { icon }
     var wordForTesting: String { accessibilityLabel() ?? "" }
     static var hintCardForTesting: TitleButtonHintCard { hintCard }
