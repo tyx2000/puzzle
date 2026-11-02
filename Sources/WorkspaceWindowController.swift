@@ -381,6 +381,65 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// The projects this window holds, in the order their tabs appear. A window
     /// shows one at a time; `projectURL` is whichever that is.
     private(set) var projects: [URL] = []
+
+    // MARK: - Session
+
+    /// What this window holds, to be put back at the next launch: its
+    /// projects in order, the one showing (none if all are folded away),
+    /// where the window was, and its sidebar.
+    struct Session: Codable, Equatable {
+        var projects: [String]
+        var showing: String?
+        var frame: String?
+        var sidebarWidth: Double?
+        var sidebarCollapsed: Bool?
+    }
+
+    var session: Session {
+        Session(projects: projects.map(\.path),
+                showing: projectURL?.path,
+                frame: window.map { NSStringFromRect($0.frame) },
+                sidebarWidth: Double(root.sidebarWidth),
+                sidebarCollapsed: root.sidebarCollapsed)
+    }
+
+    /// Where a window saved by `session` stood, if any of it is still on a
+    /// screen: a display unplugged since must not leave it out of reach.
+    static func restorableFrame(_ session: Session, screens: [NSRect]) -> NSRect? {
+        guard let saved = session.frame.map(NSRectFromString),
+              saved.width >= 200, saved.height >= 150,
+              screens.contains(where: { $0.intersection(saved).width >= 100
+                                        && $0.intersection(saved).height >= 60 })
+        else { return nil }
+        return saved
+    }
+
+    /// Put back a window saved by `session`: the projects still on disk, in
+    /// their order, and the one that was showing opened. Only that one loads;
+    /// the others are read for their rows, as when a window holds several.
+    func restore(_ session: Session) {
+        if let width = session.sidebarWidth {
+            window?.contentView?.layoutSubtreeIfNeeded()
+            root.setSidebarWidth(CGFloat(width))
+        }
+        for path in session.projects {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            if !projects.contains(url) { projects.append(url) }
+        }
+        updateSidebarVisibility()
+        let showing = session.showing.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath()
+        }
+        if let showing, projects.contains(showing) {
+            activateProject(showing)
+        } else {
+            refreshProjectTabs()
+        }
+        if session.sidebarCollapsed == true, projectURL != nil { root.setSidebarCollapsed(true) }
+    }
     /// Told when the list or the active project changes, so the strip redraws.
     var onProjectsChanged: (() -> Void)?
 

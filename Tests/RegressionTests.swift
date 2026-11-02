@@ -16,6 +16,9 @@ enum RegressionTests {
         // As the app does, so every test that parses runs on it.
         TreeSitterAllocator.install()
         _ = NSApplication.shared
+        // A test that closes an app's last window saves a session, as the app
+        // does; into a suite of its own.
+        WindowSession.defaults = UserDefaults(suiteName: "puzzle-regression-session")!
         // AppKit reports the real pointer even to windows that are not on
         // screen, and it is wherever the person running the suite has left
         // it: a history list laid out under it lit that row, and ↓↓ counted
@@ -228,6 +231,7 @@ enum RegressionTests {
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
         try testOpenRowFrameTravels()
+        try testWindowSessionComesBack()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
         try testTabKeyboardNavigation()
@@ -16449,6 +16453,97 @@ enum RegressionTests {
                                + "?path=a.txt&commit=file-history-table")!
         try expect(WorkspaceWindowController.openTab(for: historyTab) == .file,
                    "a file's history tab was read as a commit's diff")
+    }
+
+    /// The windows open at a quit, and their projects, come back at the next
+    /// launch: each window's projects in order, the one showing, where the
+    /// window stood and how wide its sidebar was.
+    private static func testWindowSessionComesBack() throws {
+        let root = try temporaryDirectory("window-session")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func folder(_ name: String) throws -> URL {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            try Data("\(name)\n".utf8).write(to: url.appendingPathComponent("readme.txt"))
+            return url.standardizedFileURL.resolvingSymlinksInPath()
+        }
+        let alpha = try folder("alpha"), beta = try folder("beta"), gamma = try folder("gamma")
+        let realDefaults = WindowSession.defaults
+        let defaults = UserDefaults(suiteName: "puzzle-session-\(UUID())")!
+        WindowSession.defaults = defaults
+        defer { WindowSession.defaults = realDefaults }
+
+        // Two windows: alpha and beta in one, beta showing and its sidebar
+        // widened; gamma alone in the other, folded away.
+        let app = AppDelegate()
+        try expect(app.openURLs([alpha]), "could not open the first project")
+        guard let first = app.window(showingProject: alpha) else {
+            throw Failure(description: "the first window was not registered")
+        }
+        first.openProject(beta)
+        first.window?.contentView?.layoutSubtreeIfNeeded()
+        first.rootForTesting.setSidebarWidth(420)
+        let firstFrame = first.window?.frame
+        app.openURLs([gamma])
+        guard let second = app.window(showingProject: gamma) else {
+            throw Failure(description: "the second window was not registered")
+        }
+        second.deactivateProject()
+        second.window?.makeKeyAndOrderFront(nil)
+
+        // ⌘Q keeps them all, front to back; a window with no project is the
+        // start page, which a launch gives anyway.
+        try expect(app.applicationShouldTerminate(NSApplication.shared) == .terminateNow,
+                   "quitting with nothing unsaved was refused")
+        let saved = WindowSession.load()
+        try expect(saved.count == 2, "the quit kept \(saved.count) windows, not 2")
+        try expect(saved.first?.projects == [gamma.path] && saved.first?.showing == nil,
+                   "the window in front is not kept first, folded: \(saved)")
+        try expect(saved.last?.projects == [alpha.path, beta.path]
+                    && saved.last?.showing == beta.path
+                    && saved.last?.sidebarWidth.map { abs($0 - 420) < 1 } == true,
+                   "a window's projects, the one showing or its sidebar were not kept: \(saved)")
+
+        // Closing the last window quits too, and keeps that window.
+        let quitData = defaults.data(forKey: WindowSession.defaultsKey)
+        second.window?.close()
+        try expect(WindowSession.load().count == 2,
+                   "closing a window that was not the last wrote over the session")
+        first.window?.close()
+        try expect(WindowSession.load().map(\.projects) == [[alpha.path, beta.path]],
+                   "closing the last window did not keep it: \(WindowSession.load())")
+
+        // The next launch, from the quit: both windows come back, the front
+        // one in front, each with its projects and the one that was showing.
+        // A folder removed since is left out, and a window with nothing left
+        // is not made at all.
+        defaults.set(quitData, forKey: WindowSession.defaultsKey)
+        try FileManager.default.removeItem(at: gamma)
+        let relaunched = AppDelegate()
+        defer { relaunched.windowsForTesting.forEach { $0.window?.close() } }
+        relaunched.restoreSessionForTesting()
+        let windows = relaunched.windowsForTesting
+        try expect(windows.count == 1,
+                   "a window whose projects are all gone came back: \(windows.count) windows")
+        guard let back = windows.first else { throw Failure(description: "nothing came back") }
+        try expect(back.projects == [alpha, beta] && back.projectURL == beta,
+                   "the window came back with \(back.projects), showing "
+                     + "\(String(describing: back.projectURL))")
+        try expect(back.window?.frame == firstFrame,
+                   "the window did not come back where it stood: "
+                     + "\(String(describing: back.window?.frame)) for \(String(describing: firstFrame))")
+        try expect(abs(back.rootForTesting.sidebarWidth - 420) < 1,
+                   "the sidebar came back at \(back.rootForTesting.sidebarWidth), not 420")
+
+        // A window saved on a display unplugged since is put where a new one
+        // would be, rather than out of reach.
+        let gone = WorkspaceWindowController.Session(
+            projects: [alpha.path], showing: nil,
+            frame: NSStringFromRect(NSRect(x: 9000, y: 9000, width: 800, height: 600)),
+            sidebarWidth: nil, sidebarCollapsed: nil)
+        try expect(WorkspaceWindowController.restorableFrame(
+                    gone, screens: [NSRect(x: 0, y: 0, width: 1440, height: 900)]) == nil,
+                   "a frame on no screen was put back")
     }
 
     private static func testTerminalLaunchScripts() throws {

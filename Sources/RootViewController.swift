@@ -273,6 +273,11 @@ final class RootViewController: NSViewController {
     }
 
     func resizeSidebarForTesting(to width: CGFloat) { resizeSidebar(to: width) }
+    /// The width the panel is kept at, shown or away.
+    var sidebarWidth: CGFloat { lastSidebarWidth }
+    /// Put the panel back at a width it had, as a drag to it would — held
+    /// to the same floor and ceiling.
+    func setSidebarWidth(_ width: CGFloat) { resizeSidebar(to: width) }
     var sidebarWidthForTesting: CGFloat { sidebarWidthConstraint.constant }
     /// The width the panel is laid out at, which a narrow window can hold
     /// under the one it was given.

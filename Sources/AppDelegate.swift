@@ -69,10 +69,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // `application(_:openFiles:)` fires BEFORE this method and has already
         // made a window for it. Creating one unconditionally here left an extra
         // empty welcome window alongside the project.
-        let controller = windows.first ?? makeWindow()
+        //
+        // Launched with nothing to open, the windows open at the last quit
+        // come back, with their projects. Asked for one project, that is all
+        // the launch opens.
+        if windows.isEmpty, !launchArgumentsOpenSomething {
+            restoreSession()
+        }
+        let controller = frontmostWindow ?? makeWindow()
         NSApp.activate(ignoringOtherApps: true)
         applyLaunchArguments(to: controller)
     }
+
+    // MARK: - Session
+
+    /// The windows, front to back.
+    private var orderedWindows: [WorkspaceWindowController] {
+        let ordered = NSApp.orderedWindows.compactMap { window in
+            windows.first { $0.window === window }
+        }
+        return ordered + windows.filter { listed in !ordered.contains { $0 === listed } }
+    }
+    private var frontmostWindow: WorkspaceWindowController? { orderedWindows.first }
+
+    /// Kept for the next launch.
+    private func saveSession(_ controllers: [WorkspaceWindowController]) {
+        WindowSession.save(controllers.map(\.session))
+    }
+
+    /// The windows of the last quit, put back where they stood: made back to
+    /// front, so the one that was in front is again. A window whose projects
+    /// have all gone from disk is not made.
+    private func restoreSession() {
+        let screens = NSScreen.screens.map(\.visibleFrame)
+        for session in WindowSession.load().reversed() {
+            let present = session.projects.contains { path in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+                    && isDirectory.boolValue
+            }
+            guard present else { continue }
+            let controller = makeWindow(
+                frame: WorkspaceWindowController.restorableFrame(session, screens: screens))
+            controller.restore(session)
+        }
+    }
+
+    func restoreSessionForTesting() { restoreSession() }
+    func saveSessionForTesting() { saveSession(orderedWindows) }
 
     private var settingsPrepared = false
     var settingsPreparedForTesting: Bool { settingsPrepared }
@@ -91,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for controller in windows {
             guard controller.editor.confirmClose() else { return .terminateCancel }
         }
+        // With no window left this is the quit that closing the last one
+        // brings, which kept that window as it closed.
+        if !windows.isEmpty { saveSession(orderedWindows) }
         return .terminateNow
     }
 
@@ -287,10 +334,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Windows
 
     @discardableResult
-    private func makeWindow() -> WorkspaceWindowController {
+    private func makeWindow(frame: NSRect? = nil) -> WorkspaceWindowController {
         let controller = WorkspaceWindowController()
+        if let frame { controller.window?.setFrame(frame, display: false) }
         controller.onClose = { [weak self] closed in
-            self?.windows.removeAll { $0 === closed }
+            guard let self else { return }
+            // The last window closing quits Puzzle: it is what the next
+            // launch puts back, as ⌘Q's windows would be.
+            if self.windows.count == 1, self.windows.first === closed {
+                self.saveSession([closed])
+            }
+            self.windows.removeAll { $0 === closed }
         }
         controller.onOpenRequested = { [weak self, weak controller] urls in
             self?.openURLs(urls, from: controller)
@@ -308,6 +362,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Launch arguments
+
+    /// A folder or a file named on the command line, or a folder in
+    /// PUZZLE_OPEN: a launch for that, not for the last session.
+    private var launchArgumentsOpenSomething: Bool {
+        let named = CommandLine.arguments.dropFirst().contains {
+            FileManager.default.fileExists(atPath: $0)
+        }
+        let preset = ProcessInfo.processInfo.environment["PUZZLE_OPEN"].map { !$0.isEmpty } ?? false
+        return named || preset
+    }
 
     private func applyLaunchArguments(to controller: WorkspaceWindowController) {
         let args = CommandLine.arguments
