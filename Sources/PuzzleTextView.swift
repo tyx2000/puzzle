@@ -836,13 +836,17 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     }
 
     override func drawBackground(in rect: NSRect) {
+        // TextKit can redraw several separate background rectangles in one
+        // pass. Never tint outside the rectangle whose ground was cleared.
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(rect: rect).addClip()
         super.drawBackground(in: rect)
         drawZebraStripes(in: rect)
         drawDiffBands()
         drawMarkdownCodeBlocks(in: rect)
         drawMarkdownInlineCode(in: rect)
-        drawHoverLineBand()
-        drawCurrentLineBand()
+        drawLineBands()
         drawGitChangeHighlight()
         drawScopeEndTint()
     }
@@ -1495,10 +1499,18 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         Theme.cursor.withAlphaComponent(Theme.palette.isDark ? 0.22 : 0.16)
     }
 
-    private func drawCurrentLineBand() {
-        guard let rect = displayedCurrentLineBandRect() else { return }
+    private func drawLineBands() {
+        // Fill the union once: hovering the active row, or a row the band is
+        // crossing, must not stack two translucent coats of the same colour.
+        let bands = NSBezierPath()
+        bands.windingRule = .nonZero
+        if let hoverLineBand { bands.appendRect(hoverLineBand) }
+        if let active = displayedCurrentLineBandRect() { bands.appendRect(active) }
+        // Highlighted rows have the same ground even over a zebra stripe.
+        Theme.editorBackground.setFill()
+        bands.fill()
         Self.currentLineTint.setFill()
-        rect.fill(using: .sourceOver)
+        bands.fill()
     }
 
     // MARK: - The caret's line, flying
@@ -1520,8 +1532,13 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// Where the band was last put down, and the text's length then: a move
     /// that comes with an edit is not flown.
     private var restingBand: (rect: NSRect, length: Int, storage: ObjectIdentifier)?
-    /// Where the band was drawn on the last tick, to be drawn again without it.
-    private var lastFlownBand: NSRect?
+    /// One position per animation tick, shared by drawing, the gutter, and
+    /// invalidation. Sampling time again while drawing can paint beyond the
+    /// rectangle the next tick knows it has to clear.
+    private var displayedFlightBand: NSRect?
+    /// Keep the whole painted path across redirects for one final cleanup
+    /// when the band lands or its animation is interrupted.
+    private var lineFlightDamage: NSRect?
 
     /// A step to the next line is quick enough to keep up with a held arrow
     /// key; a long move takes as long as a diff's frame scrolling to a change.
@@ -1534,12 +1551,9 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// The band as drawn this moment: on its way to the caret's line, or on it.
     func displayedCurrentLineBandRect() -> NSRect? {
         guard let target = currentLineBandRect() else { return nil }
-        guard let flight = lineFlight else { return target }
-        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
-        let t = ChangeFrameOverlay.eased(CGFloat(progress))
-        return NSRect(x: target.minX, y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
-                      width: target.width,
-                      height: flight.from.height + (flight.to.height - flight.from.height) * t)
+        guard lineFlight != nil, let displayedFlightBand else { return target }
+        return NSRect(x: target.minX, y: displayedFlightBand.minY,
+                      width: target.width, height: displayedFlightBand.height)
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity,
@@ -1582,10 +1596,11 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
             endLineFlight()
             return
         }
-        if let lastFlownBand { setNeedsDisplay(lastFlownBand.insetBy(dx: 0, dy: -1)) }
+        if let displayedFlightBand { setNeedsDisplay(displayedFlightBand.insetBy(dx: 0, dy: -1)) }
         lineFlight = LineFlight(from: shown, to: target, started: CACurrentMediaTime(),
                                 duration: Self.lineFlightDuration(forDistance: abs(target.minY - shown.minY)))
-        lastFlownBand = shown
+        displayedFlightBand = shown
+        lineFlightDamage = lineFlightDamage.map { $0.union(shown) } ?? shown
         if lineFlightTimer == nil {
             let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
                 self?.advanceLineFlight()
@@ -1599,13 +1614,21 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// One tick: the band drawn again where it was and where it is now, and
     /// the gutter, whose badge rides with it.
     private func advanceLineFlight() {
-        guard let flight = lineFlight else {
+        guard let flight = lineFlight, let target = currentLineBandRect() else {
             endLineFlight()
             return
         }
-        let now = displayedCurrentLineBandRect()
-        for rect in [lastFlownBand, now].compactMap({ $0 }) { setNeedsDisplay(rect.insetBy(dx: 0, dy: -1)) }
-        lastFlownBand = now
+        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
+        let t = ChangeFrameOverlay.eased(CGFloat(progress))
+        let now = NSRect(x: target.minX,
+                         y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
+                         width: target.width,
+                         height: flight.from.height + (flight.to.height - flight.from.height) * t)
+        for rect in [displayedFlightBand, now].compactMap({ $0 }) {
+            setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
+        }
+        displayedFlightBand = now
+        lineFlightDamage = lineFlightDamage.map { $0.union(now) } ?? now
         enclosingScrollView?.verticalRulerView?.needsDisplay = true
         if CACurrentMediaTime() - flight.started >= flight.duration { endLineFlight() }
     }
@@ -1615,10 +1638,11 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         lineFlightTimer = nil
         guard lineFlight != nil else { return }
         lineFlight = nil
-        for rect in [lastFlownBand, currentLineBandRect()].compactMap({ $0 }) {
+        for rect in [lineFlightDamage, displayedFlightBand, currentLineBandRect()].compactMap({ $0 }) {
             setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
         }
-        lastFlownBand = nil
+        displayedFlightBand = nil
+        lineFlightDamage = nil
         enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
 
@@ -1683,12 +1707,6 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
                       y: fragment.minY + origin.y,
                       width: max(bounds.width, visibleRect.maxX - bounds.minX),
                       height: fragment.height)
-    }
-
-    private func drawHoverLineBand() {
-        guard let rect = hoverLineBand else { return }
-        Theme.lineHighlight.setFill()
-        rect.fill()
     }
 
     /// The open change's rows, as wide as the current-line band, or nil.

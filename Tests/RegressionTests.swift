@@ -28,13 +28,14 @@ enum RegressionTests {
             try testActiveLineStaysInFiniteDocument()
             try testActiveLineBadge()
             try testCaretLineFlies()
+            try testLineBandLeavesNoRepaintResidue()
             try testCodeLightsTheLineUnderThePointer()
             try testGutterMarksUncommittedChanges()
             try testGitChangePopoverKeepsHardLines()
             try testGutterLinksMarkToItsDiff()
             try testGitChangePanelFlows()
             try testGitChangeLightsItsLines()
-            print("Active-line and Git panel regression tests passed (9)")
+            print("Active-line and Git panel regression tests passed (10)")
             return
         }
         if CommandLine.arguments.contains("--project-replace-regressions") {
@@ -288,6 +289,7 @@ enum RegressionTests {
         try testSideBySideDiff()
         try testActiveLineBadge()
         try testCaretLineFlies()
+        try testLineBandLeavesNoRepaintResidue()
         try testActiveLineStaysInFiniteDocument()
         try testFileOpensRouteToTheirProjectWindow()
         print("Regression tests passed")
@@ -9813,8 +9815,8 @@ enum RegressionTests {
                    "the line under the pointer stayed dark after the drag")
     }
 
-    /// The line under the pointer uses the same row geometry as the active
-    /// line, with a quieter colour so the caret's line remains prominent.
+    /// The line under the pointer uses the same row geometry and colour as
+    /// the active line, including where the two bands overlap.
     /// Rendered Markdown, which is laid out as prose, has no hover band.
     private static func testCodeLightsTheLineUnderThePointer() throws {
         defer { pinPointer(at: pointerNowhere) }
@@ -9869,8 +9871,8 @@ enum RegressionTests {
         pane.jumpToLine(1)
         text.refreshHoverState()
 
-        // Past the text's end, each row is painted with its own colour: the
-        // hover token and the accent composited over the code's ground. Make
+        // Past the text's end, both rows get the same accent over the code's
+        // ground. Make
         // reference swatches in the same bitmap format as the view so display
         // colour conversion cannot make the expected colours drift.
         guard let active = pane.currentLineBandRectForTesting, active.maxY <= band.minY - band.height
@@ -9909,7 +9911,7 @@ enum RegressionTests {
         let working = sample(at: active.midY)
         let above = sample(at: band.minY - band.height / 2)
         let ground = referenceColor()
-        let expectedHover = referenceColor(overlay: Theme.lineHighlight)
+        let expectedHover = referenceColor(overlay: PuzzleTextView.currentLineTint)
         let expectedActive = referenceColor(overlay: PuzzleTextView.currentLineTint)
         try expect(distance(hovered, expectedHover) < 0.02,
                    "the hover row is \(String(describing: hovered)), expected \(String(describing: expectedHover))")
@@ -9917,10 +9919,33 @@ enum RegressionTests {
                    "the active row is \(String(describing: working)), expected \(String(describing: expectedActive))")
         try expect(distance(above, ground) < 0.02,
                    "the row above the pointer is \(String(describing: above)), expected \(String(describing: ground))")
-        try expect(distance(working, ground) > distance(hovered, ground) + 0.02,
-                   "the active row is no more prominent than the hover row")
+        try expect(distance(working, hovered) < 0.02,
+                   "the hover row and the active row have different colours")
         try expect(distance(hovered, above) > 0.05,
                    "the line above the pointer is lit too: \(String(describing: above))")
+
+        // A pointer resting on the caret's row gets one coat of the tint,
+        // rather than the hover and active coats accumulating there.
+        pane.jumpToLine(line)
+        text.refreshHoverState()
+        try expect(distance(sample(at: band.midY), expectedActive) < 0.02,
+                   "overlapping hover and active bands became darker")
+
+        // A striped row and an unstriped one still show the same highlight.
+        // The pointer is on line 3; line 2 has the alternating background.
+        Settings.shared.zebraStripes = true
+        pane.jumpToLine(2)
+        text.refreshHoverState()
+        guard let stripedActive = pane.currentLineBandRectForTesting else {
+            throw Failure(description: "the striped active row has no band")
+        }
+        try expect(distance(sample(at: stripedActive.midY), expectedActive) < 0.02
+                    && distance(sample(at: band.midY), expectedHover) < 0.02,
+                   "alternating row backgrounds changed the hover or active highlight colour")
+        pane.jumpToLine(line)
+        text.refreshHoverState()
+        try expect(distance(sample(at: band.midY), expectedActive) < 0.02,
+                   "overlapping hover and active bands darkened with stripes enabled")
 
         // Rendered Markdown is prose: no line is lit under the pointer.
         let notes = directory.appendingPathComponent("notes.md")
@@ -10845,6 +10870,53 @@ enum RegressionTests {
                     && text.displayedCurrentLineBandRect() == pane.currentLineBandRectForTesting,
                    "the caret's flight continued over the search highlight")
         text.searchResultLineLocation = nil
+    }
+
+    /// TextKit can paint several dirty rectangles into the same backing
+    /// surface. Repainting an unrelated rectangle must not add another coat
+    /// to the translucent band elsewhere on that surface.
+    private static func testLineBandLeavesNoRepaintResidue() throws {
+        let zebraStripes = Settings.shared.zebraStripes
+        defer { Settings.shared.zebraStripes = zebraStripes }
+        Settings.shared.zebraStripes = false
+        let directory = try temporaryDirectory("line-repaint")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data((1...20).map { "let v\($0) = \($0)\n" }.joined().utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 400))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(4)
+        pane.view.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let active = pane.currentLineBandRectForTesting,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 700,
+                  pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                  isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap),
+              let pixels = bitmap.bitmapData else {
+            throw Failure(description: "the partial-repaint fixture could not be drawn")
+        }
+        let canvas = NSRect(x: 0, y: 0, width: 700, height: 400)
+        let unrelated = NSRect(x: 0, y: canvas.maxY - 8, width: canvas.width, height: 4)
+        try expect(!active.intersects(unrelated), "the repaint fixture intersects the active band")
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = context
+        Theme.editorBackground.setFill()
+        canvas.fill(using: .copy)
+        text.drawBackground(in: canvas)
+        let byteCount = bitmap.bytesPerRow * bitmap.pixelsHigh
+        let before = Data(bytes: pixels, count: byteCount)
+        // Keep the same outer clip, as with multiple TextKit background
+        // callbacks in one view draw. Each callback owns only its argument.
+        for _ in 0..<3 { text.drawBackground(in: unrelated) }
+        try expect(Data(bytes: pixels, count: byteCount) == before,
+                   "a partial background repaint left extra tint outside its dirty rectangle")
     }
 
     private static func testActiveLineBadge() throws {
