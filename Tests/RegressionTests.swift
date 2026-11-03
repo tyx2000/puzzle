@@ -32,7 +32,9 @@ enum RegressionTests {
             try testFlatSurfacesHoldNoBitmap()
             try testActiveTreeRowStaysLitThroughReload()
             try testOpenRowBackgroundTravels()
-            print("Animated background regression tests passed (7)")
+            try testSidebarBackgroundLandsWhenItsListScrolls()
+            try testGitPanelRestoresSidebarSelection()
+            print("Animated background regression tests passed (9)")
             return
         }
         if CommandLine.arguments.contains("--line-popup-regressions") {
@@ -246,6 +248,8 @@ enum RegressionTests {
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
         try testOpenRowBackgroundTravels()
+        try testSidebarBackgroundLandsWhenItsListScrolls()
+        try testGitPanelRestoresSidebarSelection()
         try testWindowSessionComesBack()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -16742,6 +16746,240 @@ enum RegressionTests {
         try expect(git(["rev-parse", "HEAD"], in: first.clone) == mine,
                    "a pull that could not fast-forward moved the branch")
         try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
+    }
+
+    /// A sidebar flight is in viewport coordinates. Moving either participating
+    /// list ends it immediately, while unrelated lists keep their own scroll.
+    private static func testSidebarBackgroundLandsWhenItsListScrolls() throws {
+        final class Page: NSView { override var isFlipped: Bool { true } }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 240),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = Page(frame: NSRect(x: 0, y: 0, width: 960, height: 240))
+        window.contentView = host
+        var lists: [NSScrollView] = []
+        var rows: [[FlatRowView]] = []
+        for column in 0..<3 {
+            let scroll = NSScrollView(frame: NSRect(x: CGFloat(column) * 320, y: 0,
+                                                    width: 300, height: 240))
+            let document = Page(frame: NSRect(x: 0, y: 0, width: 300, height: 1200))
+            scroll.documentView = document
+            scroll.contentView.postsBoundsChangedNotifications = true
+            host.addSubview(scroll)
+            var columnRows: [FlatRowView] = []
+            for index in 0..<40 {
+                let row = FlatRowView(frame: NSRect(x: 0, y: CGFloat(index) * 30,
+                                                    width: 300, height: 30))
+                row.wantsLayer = true
+                document.addSubview(row)
+                columnRows.append(row)
+            }
+            lists.append(scroll)
+            rows.append(columnRows)
+        }
+        window.orderFrontRegardless()
+        defer {
+            RowFrameFlight.land()
+            window.close()
+        }
+        host.layoutSubtreeIfNeeded()
+        func begin(from: FlatRowView, to: FlatRowView) {
+            for listRows in rows { for row in listRows { row.showsFrame = false } }
+            to.showsFrame = true
+            RowFrameFlight.fly(in: host, from: host.convert(from.bounds, from: from),
+                               to: host.convert(to.bounds, from: to), landingOn: to)
+        }
+        func scroll(_ column: Int, to y: CGFloat) {
+            lists[column].contentView.scroll(to: NSPoint(x: 0, y: y))
+            lists[column].reflectScrolledClipView(lists[column].contentView)
+        }
+        func checkLanded(on row: FlatRowView) throws {
+            try expect(!RowFrameFlight.isFlyingForTesting && !row.holdsFrameBack,
+                       "scrolling a participating list left its background flying")
+            row.displayIfNeeded()
+            try expect(row.selectionBackgroundRectForTesting == row.bounds,
+                       "scrolling did not put the background on the actual selected row")
+        }
+
+        begin(from: rows[0][0], to: rows[0][5])
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try checkLanded(on: rows[0][5])
+            return
+        }
+        try expect(RowFrameFlight.isFlyingForTesting, "the scroll fixture has no flight")
+        scroll(0, to: 60)
+        try expect(lists[0].contentView.bounds.minY == 60, "the fixture did not scroll")
+        try checkLanded(on: rows[0][5])
+        scroll(0, to: 0)
+
+        // A destination scroll cancels a cross-list flight; a third list does
+        // not, even though all three send the same bounds notification.
+        begin(from: rows[0][0], to: rows[1][5])
+        scroll(2, to: 30)
+        try expect(RowFrameFlight.isFlyingForTesting,
+                   "an unrelated list's scroll cancelled the selection flight")
+        scroll(1, to: 30)
+        try checkLanded(on: rows[1][5])
+        scroll(1, to: 0)
+        scroll(2, to: 0)
+
+        // A horizontally wide history row may geometrically reach another
+        // column. Explicit participant clips keep that column unrelated.
+        rows[1][5].showsFrame = true
+        RowFrameFlight.fly(in: host, from: NSRect(x: 0, y: 0, width: 960, height: 30),
+                           to: host.convert(rows[1][5].bounds, from: rows[1][5]),
+                           landingOn: rows[1][5],
+                           scrolling: [lists[0].contentView, lists[1].contentView])
+        scroll(2, to: 60)
+        try expect(RowFrameFlight.isFlyingForTesting,
+                   "a wide row made an unrelated list cancel an explicitly scoped flight")
+        scroll(1, to: 30)
+        try checkLanded(on: rows[1][5])
+        scroll(1, to: 0)
+        scroll(2, to: 0)
+
+        begin(from: rows[0][0], to: rows[1][5])
+        scroll(0, to: 30)
+        try checkLanded(on: rows[1][5])
+        scroll(0, to: 0)
+
+        // Redirecting a flight must retain its old participant observers and
+        // register its new destination, not just follow the latest row.
+        begin(from: rows[0][0], to: rows[1][5])
+        begin(from: rows[1][5], to: rows[2][5])
+        scroll(1, to: 30)
+        try checkLanded(on: rows[2][5])
+        scroll(1, to: 0)
+        begin(from: rows[0][0], to: rows[1][5])
+        begin(from: rows[1][5], to: rows[2][5])
+        scroll(2, to: 30)
+        try checkLanded(on: rows[2][5])
+        scroll(2, to: 0)
+
+        // Once a flight is over, its old observers must not cancel another
+        // selection in a different list.
+        begin(from: rows[2][0], to: rows[2][5])
+        scroll(0, to: 30)
+        try expect(RowFrameFlight.isFlyingForTesting,
+                   "an observer from an old flight cancelled a new unrelated flight")
+    }
+
+    /// A lazily built Git panel receives the sidebar's logical selection,
+    /// including after memory-pressure release and switching repositories.
+    private static func testGitPanelRestoresSidebarSelection() throws {
+        let directory = try temporaryDirectory("sidebar-git-selection")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func repository(_ name: String) throws -> URL {
+            let root = directory.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            for args in [["init", "-q", "-b", "main"],
+                         ["config", "user.name", "Selection Test"],
+                         ["config", "user.email", "selection@example.invalid"]] {
+                let result = GitService.run(args, in: root)
+                try expect(result.code == 0, "selection fixture git failed: \(result.err)")
+            }
+            let file = root.appendingPathComponent("a.txt")
+            try Data("\(name) original\n".utf8).write(to: file)
+            try expect(GitService.run(["add", "--", "a.txt"], in: root).code == 0,
+                       "selection fixture could not add its file")
+            try expect(GitService.commit("\(name) start", in: root).code == 0,
+                       "selection fixture could not commit")
+            try Data("\(name) changed\n".utf8).write(to: file)
+            return root
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        let firstProject = try repository("first"), secondProject = try repository("second")
+        let sidebar = SidebarViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = sidebar
+        defer {
+            RowFrameFlight.land()
+            window.close()
+        }
+        _ = sidebar.view
+        sidebar.setDirectory(firstProject)
+        sidebar.showOpenTab(firstProject.appendingPathComponent(".puzzle-diff-preview"),
+                            as: .change(path: "a.txt"))
+        try expect(sidebar.gitPanelForTesting == nil,
+                   "synchronizing the open tab eagerly created a hidden Git panel")
+        sidebar.showGit()
+        guard let firstPanel = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the Git panel was not created")
+        }
+        try expect(waitUntil { firstPanel.rowCountForTesting == 1 },
+                   "the first Git panel did not load its change")
+        try expect(firstPanel.activeChangesPathForTesting == "a.txt" && firstPanel.openRowIndex == 0
+                    && firstPanel.rowViewForTesting(0)?.isActiveFile == true,
+                   "the lazily created Git panel lost the sidebar's selected change")
+
+        sidebar.showFiles()
+        sidebar.releaseHiddenPanels()
+        try expect(sidebar.gitPanelForTesting == nil, "the hidden Git panel was not released")
+        sidebar.showGit()
+        guard let restored = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the Git panel was not recreated")
+        }
+        try expect(restored !== firstPanel && waitUntil { restored.rowCountForTesting == 1 },
+                   "the hidden Git panel did not rebuild its change list")
+        try expect(restored.activeChangesPathForTesting == "a.txt" && restored.openRowIndex == 0,
+                   "recreating a hidden Git panel lost the current selection")
+
+        // Reapplying the same directory is a refresh, not another project.
+        sidebar.setDirectory(firstProject)
+        try expect(waitUntil { restored.rowCountForTesting == 1 },
+                   "reapplying the same project left its list empty: \(restored.rowCountForTesting) rows, "
+                     + "selected \(String(describing: restored.activeChangesPathForTesting))")
+        try expect(restored.activeChangesPathForTesting == "a.txt",
+                   "refreshing the same project cleared its logical selection")
+
+        sidebar.showHistory()
+        try expect(waitUntil { restored.historyRowIsCommitForTesting.first == true },
+                   "the Git panel did not load the selection fixture's commit")
+        restored.activateRowForTesting(0)
+        guard let commit = restored.selectedCommit else {
+            throw Failure(description: "activating a commit did not select it")
+        }
+        try expect(restored.activeChangesPathForTesting == nil
+                    && sidebar.projectsPanel.changes.openPath == nil
+                    && sidebar.projectsPanel.history.selectedCommit == commit,
+                   "selecting a commit left an old file selection in another list")
+        sidebar.showFiles()
+        sidebar.releaseHiddenPanels()
+        sidebar.showGit()
+        guard let commitPanel = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the commit-selected Git panel was not recreated")
+        }
+        try expect(commitPanel.selectedCommit == commit && commitPanel.activeChangesPathForTesting == nil,
+                   "recreating Git resurrected the change selected before its commit")
+        sidebar.showHistory()
+        try expect(waitUntil { commitPanel.openRowIndex == 0
+                    && commitPanel.rowViewForTesting(0)?.isActiveFile == true },
+                   "the recreated History panel did not restore its selected commit")
+
+        sidebar.showOpenTab(firstProject.appendingPathComponent(".puzzle-diff-preview"),
+                            as: .change(path: "a.txt"))
+        try expect(commitPanel.selectedCommit == nil && commitPanel.activeChangesPathForTesting == "a.txt"
+                    && sidebar.projectsPanel.history.selectedCommit == nil,
+                   "opening a diff did not hand selection back from the commit to the file")
+
+        // Both repositories deliberately use a.txt: a matching path must not
+        // make the old project's selection appear in the new one.
+        sidebar.setDirectory(secondProject)
+        commitPanel.showChangesForTesting()
+        try expect(waitUntil { commitPanel.rowCountForTesting == 1 },
+                   "the next project did not load its change")
+        try expect(commitPanel.activeChangesPathForTesting == nil && commitPanel.selectedCommit == nil
+                    && commitPanel.openRowIndex == nil && sidebar.projectsPanel.changes.openPath == nil
+                    && sidebar.projectsPanel.history.selectedCommit == nil,
+                   "the previous project's selection leaked into another repository")
     }
 
     /// The sidebar's selected row has the code's background: the tree for a

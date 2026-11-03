@@ -174,6 +174,8 @@ enum RowFrameFlight {
     private static var displayed: NSRect?
     private static var timer: Timer?
     private static let rows = NSHashTable<FlatRowView>.weakObjects()
+    private static let scrollingClips = NSHashTable<NSClipView>.weakObjects()
+    private static var scrollObservers: [NSObjectProtocol] = []
 
     static func register(_ row: FlatRowView) { rows.add(row) }
 
@@ -196,8 +198,12 @@ enum RowFrameFlight {
 
     /// Rects are in the host's coordinates. An interrupted flight starts
     /// where it is displayed, even if it was heading in the other direction.
-    static func fly(in newHost: NSView, from: NSRect?, to: NSRect?, landingOn row: FlatRowView?) {
+    static func fly(in newHost: NSView, from: NSRect?, to: NSRect?, landingOn row: FlatRowView?,
+                    scrolling participating: [NSClipView]? = nil) {
         let current = host === newHost ? displayed : nil
+        // A redirected background can be between lists. Keep observing the
+        // lists it left as well as the one it is now heading into.
+        let previousClips = host === newHost ? scrollingClips.allObjects : []
         land()
         guard let from = current ?? from, let to, from != to,
               newHost.window != nil,
@@ -209,10 +215,46 @@ enum RowFrameFlight {
         flight = Flight(from: from, to: to, started: CACurrentMediaTime(),
                         duration: duration(forDistance: hypot(to.midX - from.midX,
                                                               to.midY - from.midY)))
+        // The sidebar knows the exact lists even when a horizontally wide
+        // history row extends beyond its own viewport into another column.
+        var clips = previousClips + (participating ?? participatingClips(in: newHost, from: from, to: to))
+        if let clip = row?.enclosingScrollView?.contentView { clips.append(clip) }
+        observeScrolling(in: clips)
         let ticker = Timer(timeInterval: 1.0 / 60, repeats: true) { _ in advance() }
         timer = ticker
         RunLoop.main.add(ticker, forMode: .common)
         advance()
+    }
+
+    /// Only lists holding one of the two ends participate. Scrolling another
+    /// list in the sidebar must not stop this background's movement.
+    private static func participatingClips(in host: NSView, from: NSRect, to: NSRect) -> [NSClipView] {
+        var clips: [NSClipView] = []
+        func visit(_ view: NSView) {
+            guard !view.isHidden else { return }
+            if let clip = view as? NSClipView {
+                let viewport = host.convert(clip.bounds, from: clip)
+                if viewport.intersects(from) || viewport.intersects(to) { clips.append(clip) }
+            }
+            view.subviews.forEach(visit)
+        }
+        visit(host)
+        return clips
+    }
+
+    private static func observeScrolling(in clips: [NSClipView]) {
+        for clip in clips where !scrollingClips.contains(clip) {
+            scrollingClips.add(clip)
+            clip.postsBoundsChangedNotifications = true
+            scrollObservers.append(NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+            ) { _ in
+                // The ends are in host coordinates, so scrolling would leave
+                // them pointing at the old screen rows. Let the selected row
+                // immediately take over its own, correctly scrolled ground.
+                land()
+            })
+        }
     }
 
     private static func refreshRows() {
@@ -232,6 +274,9 @@ enum RowFrameFlight {
     }
 
     static func land() {
+        scrollObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        scrollObservers.removeAll()
+        scrollingClips.removeAllObjects()
         timer?.invalidate()
         timer = nil
         flight = nil
