@@ -159,7 +159,13 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// *above* the current-line band instead of being hidden by it.
     var searchMatches: [NSRange] = [] { didSet { needsDisplay = true } }
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
-    var searchResultLineLocation: Int? { didSet { needsDisplay = true } }
+    var searchResultLineLocation: Int? {
+        didSet {
+            needsDisplay = true
+            // The gutter carries the band on into its row.
+            enclosingScrollView?.verticalRulerView?.needsDisplay = true
+        }
+    }
 
     /// The lines of the Git change whose diff panel is open, lit in the
     /// change's colour so the code the panel speaks of stands out beside it.
@@ -1449,13 +1455,14 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         didSet {
             guard showsCurrentLineBand != oldValue else { return }
             needsDisplay = true
+            enclosingScrollView?.verticalRulerView?.needsDisplay = true
         }
     }
 
     func currentLineBandRect() -> NSRect? {
         // Nothing is being worked on in a buffer that cannot be typed into, so
         // no line is the active one: a diff is read, not edited. The gutter
-        // still underlines the caret's line — that is where the pointer left
+        // still marks the caret's number — that is where the pointer left
         // off, which is worth knowing while reading.
         guard isEditable else { return nil }
         if searchResultLineLocation == nil {
@@ -2966,11 +2973,10 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         }
     }
 
-    /// How strongly the guides are drawn over the code area: faint, so the
-    /// active pair's line — which stands in for one of them — is plainly not
-    /// another guide; and taken back like the lines between regions, keeping
-    /// a divider's share of the quarter of the gutter colour they had.
-    static let indentGuideAlpha = 0.25 * CGFloat(ThemePalette.dividerStrength)
+    /// How strongly the guides are drawn over the code area: as the tree's
+    /// are, faint enough that the active pair's line — which stands in for
+    /// one of them — is plainly not another guide.
+    static let indentGuideAlpha = CGFloat(ThemePalette.indentGuideStrength)
 
     /// Where the 1pt indent guide for that much indentation stands.
     ///

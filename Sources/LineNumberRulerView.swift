@@ -321,7 +321,7 @@ final class LineNumberRulerView: NSRulerView {
         let normal: [NSAttributedString.Key: Any] =
             [.font: font, .foregroundColor: Theme.gutter, .paragraphStyle: para]
         let active: [NSAttributedString.Key: Any] =
-            [.font: font, .foregroundColor: Theme.gutterActive, .paragraphStyle: para]
+            [.font: font, .foregroundColor: Theme.cursor, .paragraphStyle: para]
 
         // Line numbers come from the document's index. Counting newlines here
         // was O(file) per visible row — every gutter draw walked the whole
@@ -335,6 +335,19 @@ final class LineNumberRulerView: NSRulerView {
         let rulerRect = NSRect(x: 0, y: visibleRect.minY,
                                width: textView.bounds.width, height: visibleRect.height)
         let glyphRange = layoutManager.glyphRange(forBoundingRect: rulerRect, in: container)
+
+        // The caret's line carries the band the code draws behind it on into
+        // the gutter: the same colour on the same row, taken from the code's
+        // own band, so the line reads as one from its number to its code.
+        // Where the code draws none — a diff, a selection — neither does this.
+        drawnActiveBandForTesting = nil
+        if let band = textView.currentLineBandRect() {
+            let row = NSRect(x: 0, y: band.minY - visibleRect.minY,
+                             width: ruleThickness, height: band.height)
+            Theme.lineHighlight.setFill()
+            row.fill()
+            drawnActiveBandForTesting = row
+        }
 
 
         let diffNumbers = textView.diffLineNumbers
@@ -403,15 +416,16 @@ final class LineNumberRulerView: NSRulerView {
                                  y: y + (fragRect.height - size.height) / 2,
                                  width: numbers.end - numbers.start,
                                  height: size.height)
-                // The caret's line is ringed rather than banded: a filled row
-                // behind the number repeated the band already drawn behind the
-                // code, and the two together read as one wide stripe.
+                // The caret's number is in the accent colour on a pale pill of
+                // it, found at a glance the way the open file's frame and its
+                // tab are — on the band, and where there is none to say which
+                // line the caret is on.
                 if isActive {
-                    let rule = Self.activeUnderline(around: box, textWidth: size.width,
-                                                    rowHeight: fragRect.height)
-                    Theme.red.setFill()
-                    rule.fill()
-                    self.drawnActiveMarkForTesting = rule
+                    let pill = Self.activePill(around: box, textWidth: size.width)
+                    Theme.cursor.withAlphaComponent(Self.activePillAlpha).setFill()
+                    NSBezierPath(roundedRect: pill, xRadius: pill.height / 2,
+                                 yRadius: pill.height / 2).fill()
+                    self.drawnActiveMarkForTesting = pill
                 }
                 value.draw(in: box, withAttributes: attributes)
             }
@@ -525,21 +539,23 @@ final class LineNumberRulerView: NSRulerView {
         changeLinkForTesting = (path.bounds, colour)
     }
 
-    /// What the last draw put under the caret's line number, so the mark can be
-    /// checked without reading pixels out of a bitmap.
+    /// What the last draw put under the caret's line number, and the band
+    /// across its row, so they can be checked without reading pixels out of a
+    /// bitmap.
     private(set) var drawnActiveMarkForTesting: NSRect?
+    private(set) var drawnActiveBandForTesting: NSRect?
     private(set) var drawnLineNumbersForTesting: [Int] = []
 
-    /// The rule under the caret's line number: as wide as the digits, right
+    /// The pill behind the caret's line number: round the digits, right
     /// aligned with them so it does not shift as the caret moves between lines
-    /// of different widths, and always inside the row.
-    static func activeUnderline(around box: NSRect, textWidth: CGFloat,
-                                rowHeight: CGFloat) -> NSRect {
-        let thickness: CGFloat = 1.5
+    /// of different widths.
+    static func activePill(around box: NSRect, textWidth: CGFloat) -> NSRect {
         let width = max(ceil(textWidth), 6)
-        let top = min(box.maxY + 1, box.midY + rowHeight / 2 - thickness)
-        return NSRect(x: box.maxX - width, y: top, width: width, height: thickness)
+        return NSRect(x: box.maxX - width, y: box.minY, width: width, height: box.height)
+            .insetBy(dx: -5, dy: -3)
     }
+    /// How much of the accent colour the pill is.
+    static let activePillAlpha: CGFloat = 0.18
 
     private func drawFoldArrow(in rect: NSRect, folded: Bool) {
         let path = NSBezierPath()

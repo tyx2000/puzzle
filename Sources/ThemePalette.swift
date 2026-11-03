@@ -101,6 +101,9 @@ struct ThemePalette {
     var dividerMark: UInt32 { mixed(raisedEdge, into: panelBackground, keeping: Self.dividerStrength) }
     /// How much of its contrast with the panel a divider keeps.
     static let dividerStrength = 0.35
+    /// How much of the gutter colour an indent guide is drawn with, in the
+    /// tree and in the code alike: half, taken back as a divider is.
+    static let indentGuideStrength = 0.5 * dividerStrength
 
     /// `colour` taken toward `ground`, keeping `share` of the difference.
     private func mixed(_ colour: UInt32, into ground: UInt32, keeping share: Double) -> UInt32 {

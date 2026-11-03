@@ -9973,12 +9973,12 @@ enum RegressionTests {
                    "the sidebar/editor divider is not the shared divider line")
         try expect(ThemePalette.dividerStrength == 0.35,
                    "dividers keep \(ThemePalette.dividerStrength) of their contrast, not 0.35")
-        // The indent guides — the tree's and the code's — are taken back as far.
+        // The indent guides — the tree's and the code's — are one strength:
+        // half the gutter colour, taken back as far as a divider.
         try expect(abs(TreeRowView.guideColour.alphaComponent - 0.5 * 0.35) < 0.001
-                    && abs(PuzzleTextView.indentGuideAlpha - 0.25 * 0.35) < 0.001,
+                    && abs(PuzzleTextView.indentGuideAlpha - 0.5 * 0.35) < 0.001,
                    "the indent guides are at \(TreeRowView.guideColour.alphaComponent) in the tree "
-                     + "and \(PuzzleTextView.indentGuideAlpha) in the code, not a divider's 35% "
-                     + "of 0.5 and 0.25")
+                     + "and \(PuzzleTextView.indentGuideAlpha) in the code, not both 0.175")
         for palette in ThemePalette.all {
             func channels(_ v: UInt32) -> [Double] { [16, 8, 0].map { Double((v >> UInt32($0)) & 0xff) } }
             for (name, mixed, full) in [("divider", palette.divider, palette.border),
@@ -10700,37 +10700,55 @@ enum RegressionTests {
         }
         try expect(text.height > 0, "the code's active row has no height")
 
-        // The caret's line number is underlined, not banded. A filled row behind
-        // the number repeated the band already drawn behind the code, and the
-        // two together read as one wide stripe across the window.
+        // The caret's line is banded in the gutter as in the code — the
+        // code's own band, on the same row — and its number is in the accent
+        // colour on a pale pill of it, so the line is found at a glance.
         let box = NSRect(x: 20, y: 100, width: 24, height: 14)
-        let rule = LineNumberRulerView.activeUnderline(around: box, textWidth: 10, rowHeight: 27)
-        try expect(rule.height == 1.5, "the rule is \(rule.height)pt, not 1.5pt")
-        try expect(rule.minY >= box.maxY, "the rule is not under the number")
-        try expect(rule.maxY <= box.midY + 27 / 2,
-                   "the rule hangs below the row: \(rule) in a 27pt row")
-        try expect(rule.maxX <= box.maxX + 0.5,
-                   "the rule is not right-aligned with the number it marks")
-        // A wider number widens the rule.
-        let wide = LineNumberRulerView.activeUnderline(around: box, textWidth: 30, rowHeight: 27)
-        try expect(wide.width > rule.width && wide.width >= 30,
-                   "a three-digit number does not get a wider rule: \(wide)")
+        let pill = LineNumberRulerView.activePill(around: box, textWidth: 10)
+        try expect(pill.minY < box.minY && pill.maxY > box.maxY,
+                   "the pill does not stand round the number: \(pill)")
+        try expect(pill.maxX > box.maxX && pill.maxX - box.maxX <= 6 && pill.minX < box.maxX - 10,
+                   "the pill is not right-aligned round the digits: \(pill)")
+        // A wider number widens the pill.
+        let wide = LineNumberRulerView.activePill(around: box, textWidth: 30)
+        try expect(wide.width > pill.width && wide.width >= 30,
+                   "a three-digit number does not get a wider pill: \(wide)")
 
-        // And nothing paints the gutter behind it: sample the column left of
-        // the numbers, on the caret's row, in a real render of the ruler.
-        ruler.needsDisplay = true
-        if let bitmap = ruler.bitmapImageRepForCachingDisplay(in: ruler.bounds) {
+        // In a real render of the ruler: the band runs across the gutter on the
+        // code band's own row, and the pill stays inside the gutter. Drawn at a
+        // size it can draw at — made the window's content, the pane shrank it
+        // to its fitting size, and a gutter with no height draws nothing.
+        window.setContentSize(NSSize(width: 700, height: 400))
+        pane.view.layoutSubtreeIfNeeded()
+        func renderRuler() throws {
+            ruler.needsDisplay = true
+            guard let bitmap = ruler.bitmapImageRepForCachingDisplay(in: ruler.bounds) else {
+                throw Failure(description: "the gutter could not be drawn: \(ruler.bounds)")
+            }
             ruler.cacheDisplay(in: ruler.bounds, to: bitmap)
-            if let drawn = ruler.drawnActiveMarkForTesting {
-                try expect(drawn.maxX <= ruler.ruleThickness && drawn.minX >= 0,
-                           "the rule was drawn outside the gutter: \(drawn)")
-            }
-            let row = text.minY - ruler.clientViewVisibleRectForTesting.minY
-            let sample = NSPoint(x: 3, y: row + text.height / 2)
-            if let colour = bitmap.colorAt(x: Int(sample.x * 2), y: Int(sample.y * 2)) {
-                try expect(!sameColor(colour, Theme.lineHighlight),
-                           "the gutter still fills the active row with the band colour")
-            }
+        }
+        try renderRuler()
+        guard let drawn = ruler.drawnActiveMarkForTesting,
+              let shown = pane.currentLineBandRectForTesting else {
+            throw Failure(description: "the gutter drew no mark on the caret's number, or the code no band")
+        }
+        try expect(drawn.maxX <= ruler.ruleThickness && drawn.minX >= 0,
+                   "the pill was drawn outside the gutter: \(drawn)")
+        let row = shown.minY - ruler.clientViewVisibleRectForTesting.minY
+        let band = ruler.drawnActiveBandForTesting
+        try expect(band.map { abs($0.minY - row) < 0.5 && abs($0.height - shown.height) < 0.5
+                                && $0.minX == 0 && $0.width == ruler.ruleThickness } == true,
+                   "the gutter's band is not the code's row: \(String(describing: band)) for \(shown)")
+        // A selection is not a line being worked on: no band in the code, and
+        // none here.
+        let typed = pane.textViewForTesting
+        let caret = typed.selectedRange()
+        if caret.location < (typed.string as NSString).length {
+            typed.setSelectedRange(NSRange(location: caret.location, length: 1))
+            try renderRuler()
+            try expect(ruler.drawnActiveBandForTesting == nil,
+                       "the gutter banded a row while text was selected")
+            typed.setSelectedRange(caret)
         }
 
         // Folding still hides a block's body when the document lays out on
