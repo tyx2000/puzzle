@@ -161,8 +161,13 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     var currentMatchIndex: Int? { didSet { needsDisplay = true } }
     var searchResultLineLocation: Int? {
         didSet {
+            guard searchResultLineLocation != oldValue else { return }
+            // A find result has its own row while the caret stays in place.
+            // It must not inherit a flight toward the caret's previous row.
+            endLineFlight()
+            restingBand = nil
             needsDisplay = true
-            // The gutter carries the band on into its row.
+            // The badge still belongs to the caret's row.
             enclosingScrollView?.verticalRulerView?.needsDisplay = true
         }
     }
@@ -1454,6 +1459,10 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     var showsCurrentLineBand = true {
         didSet {
             guard showsCurrentLineBand != oldValue else { return }
+            if !showsCurrentLineBand {
+                endLineFlight()
+                restingBand = nil
+            }
             needsDisplay = true
             enclosingScrollView?.verticalRulerView?.needsDisplay = true
         }
@@ -1480,10 +1489,142 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
                       height: fragment.height)
     }
 
+    /// The band behind the caret's line: the accent, faint — the colour the
+    /// gutter's badge for that line is, so the two read as one mark.
+    static var currentLineTint: NSColor {
+        Theme.cursor.withAlphaComponent(Theme.palette.isDark ? 0.22 : 0.16)
+    }
+
     private func drawCurrentLineBand() {
-        guard let rect = currentLineBandRect() else { return }
-        Theme.lineHighlight.setFill()
-        rect.fill()
+        guard let rect = displayedCurrentLineBandRect() else { return }
+        Self.currentLineTint.setFill()
+        rect.fill(using: .sourceOver)
+    }
+
+    // MARK: - The caret's line, flying
+
+    /// When the caret moves to another line, the band — and the gutter's
+    /// badge with it — flies there from where it was drawn, the way a diff's
+    /// frame moves from change to change: on the frame's curve, longer for a
+    /// longer move. A move made while it is on its way starts from where it
+    /// is. Typing that moves the caret puts it there at once: the line under
+    /// the keys never trails them.
+    private struct LineFlight {
+        let from: NSRect
+        let to: NSRect
+        let started: CFTimeInterval
+        let duration: TimeInterval
+    }
+    private var lineFlight: LineFlight?
+    private var lineFlightTimer: Timer?
+    /// Where the band was last put down, and the text's length then: a move
+    /// that comes with an edit is not flown.
+    private var restingBand: (rect: NSRect, length: Int, storage: ObjectIdentifier)?
+    /// Where the band was drawn on the last tick, to be drawn again without it.
+    private var lastFlownBand: NSRect?
+
+    /// A step to the next line is quick enough to keep up with a held arrow
+    /// key; a long move takes as long as a diff's frame scrolling to a change.
+    static let lineFlightShortest: TimeInterval = 0.12
+    static let lineFlightLongest: TimeInterval = ChangeFrameOverlay.scrollingMoveDuration
+    static func lineFlightDuration(forDistance distance: CGFloat) -> TimeInterval {
+        min(lineFlightLongest, lineFlightShortest + TimeInterval(abs(distance)) / 2000)
+    }
+
+    /// The band as drawn this moment: on its way to the caret's line, or on it.
+    func displayedCurrentLineBandRect() -> NSRect? {
+        guard let target = currentLineBandRect() else { return nil }
+        guard let flight = lineFlight else { return target }
+        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
+        let t = ChangeFrameOverlay.eased(CGFloat(progress))
+        return NSRect(x: target.minX, y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
+                      width: target.width,
+                      height: flight.from.height + (flight.to.height - flight.from.height) * t)
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity,
+                                    stillSelecting: Bool) {
+        let shown = displayedCurrentLineBandRect()
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        flyBand(from: shown)
+    }
+
+    /// An edit puts the band on its line at once.
+    override func didChangeText() {
+        super.didChangeText()
+        endLineFlight()
+    }
+
+    /// The caret has moved — its line's band flies there from `shown`, if it
+    /// was a move to another line rather than an edit, in a window on screen,
+    /// with motion not turned down.
+    private func flyBand(from shown: NSRect?) {
+        let length = (string as NSString).length
+        guard let storage = textStorage else {
+            restingBand = nil
+            endLineFlight()
+            return
+        }
+        let identity = ObjectIdentifier(storage)
+        let target = currentLineBandRect()
+        defer { restingBand = target.map { ($0, length, identity) } }
+        guard let target, let shown, restingBand?.length == length,
+              restingBand?.storage == identity, window?.isVisible == true,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            endLineFlight()
+            return
+        }
+        // Moving within the same row leaves a flight already on its way
+        // alone, rather than restarting it on every horizontal keypress.
+        if let restingBand, abs(restingBand.rect.minY - target.minY) < 0.5,
+           abs(restingBand.rect.height - target.height) < 0.5 { return }
+        guard abs(shown.minY - target.minY) > 0.5 else {
+            endLineFlight()
+            return
+        }
+        if let lastFlownBand { setNeedsDisplay(lastFlownBand.insetBy(dx: 0, dy: -1)) }
+        lineFlight = LineFlight(from: shown, to: target, started: CACurrentMediaTime(),
+                                duration: Self.lineFlightDuration(forDistance: abs(target.minY - shown.minY)))
+        lastFlownBand = shown
+        if lineFlightTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+                self?.advanceLineFlight()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            lineFlightTimer = timer
+        }
+        advanceLineFlight()
+    }
+
+    /// One tick: the band drawn again where it was and where it is now, and
+    /// the gutter, whose badge rides with it.
+    private func advanceLineFlight() {
+        guard let flight = lineFlight else {
+            endLineFlight()
+            return
+        }
+        let now = displayedCurrentLineBandRect()
+        for rect in [lastFlownBand, now].compactMap({ $0 }) { setNeedsDisplay(rect.insetBy(dx: 0, dy: -1)) }
+        lastFlownBand = now
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+        if CACurrentMediaTime() - flight.started >= flight.duration { endLineFlight() }
+    }
+
+    private func endLineFlight() {
+        lineFlightTimer?.invalidate()
+        lineFlightTimer = nil
+        guard lineFlight != nil else { return }
+        lineFlight = nil
+        for rect in [lastFlownBand, currentLineBandRect()].compactMap({ $0 }) {
+            setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
+        }
+        lastFlownBand = nil
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
+    /// The flight under way: where from, where to, and how long it takes.
+    var lineFlightForTesting: (from: NSRect, to: NSRect, duration: TimeInterval)? {
+        lineFlight.map { ($0.from, $0.to, $0.duration) }
     }
 
     /// The line under the pointer is lit the way the line being worked on is,
@@ -1763,6 +1904,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     }
 
     deinit {
+        lineFlightTimer?.invalidate()
         if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
         if let scopeLineScrollObserver { NotificationCenter.default.removeObserver(scopeLineScrollObserver) }
         if let caretLinkScrollObserver {

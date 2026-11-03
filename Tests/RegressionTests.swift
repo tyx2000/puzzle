@@ -26,13 +26,15 @@ enum RegressionTests {
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
         if CommandLine.arguments.contains("--line-popup-regressions") {
             try testActiveLineStaysInFiniteDocument()
-            try testActiveLineSpansTheGutter()
+            try testActiveLineBadge()
+            try testCaretLineFlies()
+            try testCodeLightsTheLineUnderThePointer()
             try testGutterMarksUncommittedChanges()
             try testGitChangePopoverKeepsHardLines()
             try testGutterLinksMarkToItsDiff()
             try testGitChangePanelFlows()
             try testGitChangeLightsItsLines()
-            print("Active-line and Git panel regression tests passed (7)")
+            print("Active-line and Git panel regression tests passed (9)")
             return
         }
         if CommandLine.arguments.contains("--project-replace-regressions") {
@@ -284,7 +286,8 @@ enum RegressionTests {
         try testGitMarksFollowUnsavedEdits()
         try testGutterWidthFollowsLineCount()
         try testSideBySideDiff()
-        try testActiveLineSpansTheGutter()
+        try testActiveLineBadge()
+        try testCaretLineFlies()
         try testActiveLineStaysInFiniteDocument()
         try testFileOpensRouteToTheirProjectWindow()
         print("Regression tests passed")
@@ -9810,11 +9813,16 @@ enum RegressionTests {
                    "the line under the pointer stayed dark after the drag")
     }
 
-    /// The line under the pointer is lit with the line being worked on's own
-    /// band — the same rect, the same colour — in code that can be typed into,
-    /// and not in rendered Markdown, which is laid out as prose.
+    /// The line under the pointer uses the same row geometry as the active
+    /// line, with a quieter colour so the caret's line remains prominent.
+    /// Rendered Markdown, which is laid out as prose, has no hover band.
     private static func testCodeLightsTheLineUnderThePointer() throws {
         defer { pinPointer(at: pointerNowhere) }
+        // Keep these colour comparisons independent of alternating row bases;
+        // the reading-aids regression covers the stripes themselves.
+        let zebraStripes = Settings.shared.zebraStripes
+        defer { Settings.shared.zebraStripes = zebraStripes }
+        Settings.shared.zebraStripes = false
         let directory = try temporaryDirectory("hover-line")
         defer { try? FileManager.default.removeItem(at: directory) }
         let code = directory.appendingPathComponent("lines.swift")
@@ -9861,10 +9869,10 @@ enum RegressionTests {
         pane.jumpToLine(1)
         text.refreshHoverState()
 
-        // And it is painted as the active line is, where the code is empty
-        // past the line's end; the line above it is not. Read back from one
-        // render and compared within it: the bitmap is in the display's
-        // colour space, which moves every colour away from its token.
+        // Past the text's end, each row is painted with its own colour: the
+        // hover token and the accent composited over the code's ground. Make
+        // reference swatches in the same bitmap format as the view so display
+        // colour conversion cannot make the expected colours drift.
         guard let active = pane.currentLineBandRectForTesting, active.maxY <= band.minY - band.height
         else {
             throw Failure(description: "the fixture's active line is not above the hovered one")
@@ -9875,6 +9883,23 @@ enum RegressionTests {
             text.cacheDisplay(in: spot, to: bitmap)
             return bitmap.colorAt(x: 1, y: 0)?.usingColorSpace(.sRGB)
         }
+        func referenceColor(overlay: NSColor? = nil) -> NSColor? {
+            let spot = NSRect(x: visible.maxX - 40, y: active.midY, width: 4, height: 1)
+            guard let bitmap = text.bitmapImageRepForCachingDisplay(in: spot),
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = context
+            let swatch = NSRect(x: 0, y: 0, width: CGFloat(bitmap.pixelsWide),
+                                height: CGFloat(bitmap.pixelsHigh))
+            Theme.editorBackground.setFill()
+            swatch.fill(using: .copy)
+            if let overlay {
+                overlay.setFill()
+                swatch.fill(using: .sourceOver)
+            }
+            return bitmap.colorAt(x: 1, y: 0)?.usingColorSpace(.sRGB)
+        }
         func distance(_ a: NSColor?, _ b: NSColor?) -> CGFloat {
             guard let a, let b else { return .infinity }
             return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
@@ -9883,9 +9908,17 @@ enum RegressionTests {
         let hovered = sample(at: band.midY)
         let working = sample(at: active.midY)
         let above = sample(at: band.minY - band.height / 2)
-        try expect(distance(hovered, working) < 0.02,
-                   "the line under the pointer is painted \(String(describing: hovered)), "
-                     + "the active line \(String(describing: working))")
+        let ground = referenceColor()
+        let expectedHover = referenceColor(overlay: Theme.lineHighlight)
+        let expectedActive = referenceColor(overlay: PuzzleTextView.currentLineTint)
+        try expect(distance(hovered, expectedHover) < 0.02,
+                   "the hover row is \(String(describing: hovered)), expected \(String(describing: expectedHover))")
+        try expect(distance(working, expectedActive) < 0.02,
+                   "the active row is \(String(describing: working)), expected \(String(describing: expectedActive))")
+        try expect(distance(above, ground) < 0.02,
+                   "the row above the pointer is \(String(describing: above)), expected \(String(describing: ground))")
+        try expect(distance(working, ground) > distance(hovered, ground) + 0.02,
+                   "the active row is no more prominent than the hover row")
         try expect(distance(hovered, above) > 0.05,
                    "the line above the pointer is lit too: \(String(describing: above))")
 
@@ -10674,7 +10707,147 @@ enum RegressionTests {
         try checkBand()
     }
 
-    private static func testActiveLineSpansTheGutter() throws {
+    /// The caret's line flies from line to line the way a diff's frame does:
+    /// the band in the code and the badge in the gutter together, on the
+    /// frame's curve, longer for a longer move, from wherever it is drawn
+    /// when another move comes. An edit puts it on its line at once, and
+    /// nothing flies in a window that is not on screen. The band is the
+    /// accent, faint — the badge's colour, so the two read as one mark.
+    private static func testCaretLineFlies() throws {
+        let step = PuzzleTextView.lineFlightDuration(forDistance: 27)
+        let farther = PuzzleTextView.lineFlightDuration(forDistance: 270)
+        let farthest = PuzzleTextView.lineFlightDuration(forDistance: 27_000)
+        try expect(step >= 0.12 && step < 0.15 && farther > step
+                    && farthest == ChangeFrameOverlay.scrollingMoveDuration,
+                   "a step takes \(step)s, ten lines \(farther)s, a long move \(farthest)s")
+        try expect(PuzzleTextView.lineFlightDuration(forDistance: -270) == farther,
+                   "moving up takes a different time from moving down the same distance")
+        let tint = PuzzleTextView.currentLineTint
+        try expect(sameColor(tint.withAlphaComponent(1), Theme.cursor)
+                    && abs(tint.alphaComponent - (Theme.palette.isDark ? 0.22 : 0.16)) < 0.001,
+                   "the caret's band is not the accent at the theme's stronger opacity: \(tint)")
+
+        let directory = try temporaryDirectory("caret-flight")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data((1...40).map { "let v\($0) = \($0)" }.joined(separator: "\n").utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 700))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(2)
+        pane.view.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        func caret(onLine line: Int) {
+            let lines = text.string as NSString
+            var start = 0
+            for _ in 1..<line { start = NSMaxRange(lines.lineRange(for: NSRange(location: start, length: 0))) }
+            text.setSelectedRange(NSRange(location: start + 2, length: 0))
+        }
+
+        // Off screen, the band is simply put on its line.
+        caret(onLine: 6)
+        try expect(text.lineFlightForTesting == nil, "the band flew in a window off screen")
+
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        guard let before = pane.currentLineBandRectForTesting else {
+            throw Failure(description: "no band on the caret's line")
+        }
+        caret(onLine: 14)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(text.lineFlightForTesting == nil
+                        && text.displayedCurrentLineBandRect() == pane.currentLineBandRectForTesting,
+                       "the band did not land immediately with Reduce Motion enabled")
+            let selection = text.selectedRange()
+            text.setSelectedRange(NSRange(location: selection.location, length: 1))
+            try expect(text.lineFlightForTesting == nil && text.displayedCurrentLineBandRect() == nil,
+                       "a selection retained the band with Reduce Motion enabled")
+            pane.insertTextForTesting("\n")
+            try expect(text.lineFlightForTesting == nil,
+                       "the band flew with an edit and Reduce Motion enabled")
+            return
+        }
+        guard let flight = text.lineFlightForTesting,
+              let target = pane.currentLineBandRectForTesting else {
+            throw Failure(description: "the band did not fly to the caret's new line")
+        }
+        try expect(abs(flight.from.minY - before.minY) < 0.5 && abs(flight.to.minY - target.minY) < 0.5,
+                   "the band flew from \(flight.from) to \(flight.to), not \(before) to \(target)")
+        try expect(abs(flight.duration
+                       - PuzzleTextView.lineFlightDuration(forDistance: target.minY - before.minY)) < 0.001,
+                   "the flight takes \(flight.duration)s")
+        // Moving across the destination row must not restart a flight that
+        // is already heading there.
+        let destination = text.selectedRange()
+        text.setSelectedRange(NSRange(location: destination.location + 1, length: 0))
+        try expect(text.lineFlightForTesting.map {
+            $0.from == flight.from && $0.to == flight.to && $0.duration == flight.duration
+        } == true, "moving within the caret's row restarted its flight")
+        text.searchResultLineLocation = nil
+        try expect(text.lineFlightForTesting.map {
+            $0.from == flight.from && $0.to == flight.to && $0.duration == flight.duration
+        } == true, "clearing an already absent search highlight interrupted the flight")
+        // On its way it is drawn between the two lines.
+        RunLoop.main.run(until: Date().addingTimeInterval(flight.duration * 0.5))
+        if let middle = text.displayedCurrentLineBandRect(), text.lineFlightForTesting != nil {
+            try expect(middle.minY > before.minY + 1 && middle.minY < target.minY - 1,
+                       "half way, the band is drawn at \(middle.minY), not between \(before.minY) "
+                         + "and \(target.minY)")
+        }
+        // And it lands.
+        RunLoop.main.run(until: Date().addingTimeInterval(flight.duration + 0.2))
+        try expect(text.lineFlightForTesting == nil && text.displayedCurrentLineBandRect() == target,
+                   "the band did not come to rest on the caret's line")
+
+        // A move made on the way starts from where the band is drawn.
+        caret(onLine: 30)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        caret(onLine: 4)
+        guard let turned = text.lineFlightForTesting,
+              let thirty = text.lineFlightForTesting.map({ _ in target.minY + 16 * target.height }) else {
+            throw Failure(description: "a move made on the way did not fly")
+        }
+        try expect(turned.from.minY > target.minY + 0.5 && turned.from.minY < thirty,
+                   "a move made on the way started from \(turned.from.minY), not from between "
+                     + "line 14 and line 30")
+        RunLoop.main.run(until: Date().addingTimeInterval(PuzzleTextView.lineFlightLongest + 0.2))
+
+        // Selecting text during a flight removes the band immediately.
+        caret(onLine: 20)
+        try expect(text.lineFlightForTesting != nil, "the selection fixture has no flight to cancel")
+        let selection = text.selectedRange()
+        text.setSelectedRange(NSRange(location: selection.location, length: 1))
+        try expect(text.lineFlightForTesting == nil && text.displayedCurrentLineBandRect() == nil,
+                   "selecting text left a flying band visible")
+
+        // Typing while the band is in flight puts it on the edited line at
+        // once, rather than letting the old animation continue afterwards.
+        caret(onLine: 4)
+        caret(onLine: 20)
+        try expect(text.lineFlightForTesting != nil, "the edit fixture has no flight to cancel")
+        pane.insertTextForTesting("\n")
+        try expect(text.lineFlightForTesting == nil
+                    && text.displayedCurrentLineBandRect() == pane.currentLineBandRectForTesting,
+                   "the band did not land on its edited line")
+
+        // A search highlight can change without changing the selection.
+        // Switching to it must end the old flight and display its own row.
+        caret(onLine: 4)
+        caret(onLine: 20)
+        try expect(text.lineFlightForTesting != nil, "the search fixture has no flight to cancel")
+        let lines = text.string as NSString
+        text.searchResultLineLocation = NSMaxRange(lines.lineRange(for: NSRange(location: 0, length: 0)))
+        try expect(text.lineFlightForTesting == nil
+                    && text.displayedCurrentLineBandRect() == pane.currentLineBandRectForTesting,
+                   "the caret's flight continued over the search highlight")
+        text.searchResultLineLocation = nil
+    }
+
+    private static func testActiveLineBadge() throws {
         let directory = try temporaryDirectory("active-line")
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("lines.swift")
@@ -10700,54 +10873,62 @@ enum RegressionTests {
         }
         try expect(text.height > 0, "the code's active row has no height")
 
-        // The caret's line is banded in the gutter as in the code — the
-        // code's own band, on the same row — and its number is in the accent
-        // colour on a pale pill of it, so the line is found at a glance.
+        // The caret's number is a badge — a solid pill of the accent, the
+        // number on it in the code's ground — on the row of the code's band,
+        // so the line is found at a glance. The gutter itself is not banded.
         let box = NSRect(x: 20, y: 100, width: 24, height: 14)
         let pill = LineNumberRulerView.activePill(around: box, textWidth: 10)
         try expect(pill.minY < box.minY && pill.maxY > box.maxY,
-                   "the pill does not stand round the number: \(pill)")
+                   "the badge does not stand round the number: \(pill)")
         try expect(pill.maxX > box.maxX && pill.maxX - box.maxX <= 6 && pill.minX < box.maxX - 10,
-                   "the pill is not right-aligned round the digits: \(pill)")
-        // A wider number widens the pill.
+                   "the badge is not right-aligned round the digits: \(pill)")
+        // A wider number widens the badge.
         let wide = LineNumberRulerView.activePill(around: box, textWidth: 30)
         try expect(wide.width > pill.width && wide.width >= 30,
-                   "a three-digit number does not get a wider pill: \(wide)")
+                   "a three-digit number does not get a wider badge: \(wide)")
 
-        // In a real render of the ruler: the band runs across the gutter on the
-        // code band's own row, and the pill stays inside the gutter. Drawn at a
-        // size it can draw at — made the window's content, the pane shrank it
-        // to its fitting size, and a gutter with no height draws nothing.
+        // In a real render of the ruler, drawn at a size it can draw at — made
+        // the window's content, the pane shrank it to its fitting size, and a
+        // gutter with no height draws nothing.
         window.setContentSize(NSSize(width: 700, height: 400))
         pane.view.layoutSubtreeIfNeeded()
-        func renderRuler() throws {
+        func renderRuler() throws -> NSBitmapImageRep {
             ruler.needsDisplay = true
             guard let bitmap = ruler.bitmapImageRepForCachingDisplay(in: ruler.bounds) else {
                 throw Failure(description: "the gutter could not be drawn: \(ruler.bounds)")
             }
             ruler.cacheDisplay(in: ruler.bounds, to: bitmap)
+            return bitmap
         }
-        try renderRuler()
+        let bitmap = try renderRuler()
         guard let drawn = ruler.drawnActiveMarkForTesting,
               let shown = pane.currentLineBandRectForTesting else {
-            throw Failure(description: "the gutter drew no mark on the caret's number, or the code no band")
+            throw Failure(description: "the gutter drew no badge on the caret's number, or the code no band")
         }
         try expect(drawn.maxX <= ruler.ruleThickness && drawn.minX >= 0,
-                   "the pill was drawn outside the gutter: \(drawn)")
+                   "the badge was drawn outside the gutter: \(drawn)")
         let row = shown.minY - ruler.clientViewVisibleRectForTesting.minY
-        let band = ruler.drawnActiveBandForTesting
-        try expect(band.map { abs($0.minY - row) < 0.5 && abs($0.height - shown.height) < 0.5
-                                && $0.minX == 0 && $0.width == ruler.ruleThickness } == true,
-                   "the gutter's band is not the code's row: \(String(describing: band)) for \(shown)")
-        // A selection is not a line being worked on: no band in the code, and
-        // none here.
+        try expect(abs(drawn.midY - (row + shown.height / 2)) < 1,
+                   "the badge is not on the code band's row: \(drawn) for \(shown)")
+        // Left of the numbers, the caret's row is the gutter's own ground, as
+        // the row above it is.
+        let scale = CGFloat(bitmap.pixelsWide) / ruler.bounds.width
+        func ground(_ y: CGFloat) -> NSColor? {
+            bitmap.colorAt(x: Int(3 * scale), y: Int(y * scale))
+        }
+        try expect(sameColor(ground(row + shown.height / 2), ground(row - shown.height / 2)),
+                   "the gutter is banded on the caret's row")
+        // A selection is not a line being worked on: no band in the code — but
+        // the badge still says which line the caret is on.
         let typed = pane.textViewForTesting
         let caret = typed.selectedRange()
         if caret.location < (typed.string as NSString).length {
             typed.setSelectedRange(NSRange(location: caret.location, length: 1))
-            try renderRuler()
-            try expect(ruler.drawnActiveBandForTesting == nil,
-                       "the gutter banded a row while text was selected")
+            _ = try renderRuler()
+            try expect(pane.currentLineBandRectForTesting == nil,
+                       "the code banded a line while text was selected")
+            try expect(ruler.drawnActiveMarkForTesting.map { abs($0.midY - drawn.midY) < 1 } == true,
+                       "the badge left the caret's row under a selection")
             typed.setSelectedRange(caret)
         }
 
@@ -10786,9 +10967,7 @@ enum RegressionTests {
         try expect(pane.undoLevelsForTesting == EditorPaneViewController.undoLevels,
                    "undo levels are \(String(describing: pane.undoLevelsForTesting))")
 
-        // With a selection rather than a caret there is no active row at all,
-        // so neither the band behind the code nor the ring in the gutter is
-        // drawn — both are keyed off the same caret line.
+        // Selecting text removes the band behind the code.
         pane.selectAllForTesting()
         try expect(pane.currentLineBandRectForTesting == nil,
                    "a selection still painted an active-line band")

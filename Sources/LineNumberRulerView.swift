@@ -320,8 +320,11 @@ final class LineNumberRulerView: NSRulerView {
         para.alignment = .right
         let normal: [NSAttributedString.Key: Any] =
             [.font: font, .foregroundColor: Theme.gutter, .paragraphStyle: para]
-        let active: [NSAttributedString.Key: Any] =
-            [.font: font, .foregroundColor: Theme.cursor, .paragraphStyle: para]
+        // The caret's number is drawn plain like the rest, then covered by its
+        // badge after them: a solid pill of the accent, the number on it in
+        // the code's ground.
+        let badge: [NSAttributedString.Key: Any] =
+            [.font: font, .foregroundColor: Theme.editorBackground, .paragraphStyle: para]
 
         // Line numbers come from the document's index. Counting newlines here
         // was O(file) per visible row — every gutter draw walked the whole
@@ -336,18 +339,8 @@ final class LineNumberRulerView: NSRulerView {
                                width: textView.bounds.width, height: visibleRect.height)
         let glyphRange = layoutManager.glyphRange(forBoundingRect: rulerRect, in: container)
 
-        // The caret's line carries the band the code draws behind it on into
-        // the gutter: the same colour on the same row, taken from the code's
-        // own band, so the line reads as one from its number to its code.
-        // Where the code draws none — a diff, a selection — neither does this.
-        drawnActiveBandForTesting = nil
-        if let band = textView.currentLineBandRect() {
-            let row = NSRect(x: 0, y: band.minY - visibleRect.minY,
-                             width: ruleThickness, height: band.height)
-            Theme.lineHighlight.setFill()
-            row.fill()
-            drawnActiveBandForTesting = row
-        }
+        // Where the caret's line is drawn in this pass, for its badge.
+        var caretRow: (y: CGFloat, height: CGFloat)?
 
 
         let diffNumbers = textView.diffLineNumbers
@@ -409,24 +402,13 @@ final class LineNumberRulerView: NSRulerView {
             if let shown {
                 self.drawnLineNumbersForTesting.append(shown)
                 let value = "\(shown)" as NSString
-                let isActive = lineNo == caretLine
-                let attributes = isActive ? active : normal
+                if lineNo == caretLine { caretRow = (y, fragRect.height) }
+                let attributes = normal
                 let size = value.size(withAttributes: attributes)
                 let box = NSRect(x: numbers.start,
                                  y: y + (fragRect.height - size.height) / 2,
                                  width: numbers.end - numbers.start,
                                  height: size.height)
-                // The caret's number is in the accent colour on a pale pill of
-                // it, found at a glance the way the open file's frame and its
-                // tab are — on the band, and where there is none to say which
-                // line the caret is on.
-                if isActive {
-                    let pill = Self.activePill(around: box, textWidth: size.width)
-                    Theme.cursor.withAlphaComponent(Self.activePillAlpha).setFill()
-                    NSBezierPath(roundedRect: pill, xRadius: pill.height / 2,
-                                 yRadius: pill.height / 2).fill()
-                    self.drawnActiveMarkForTesting = pill
-                }
                 value.draw(in: box, withAttributes: attributes)
             }
             // The change ribbon runs along the outer edge of the gutter. It used
@@ -487,6 +469,31 @@ final class LineNumberRulerView: NSRulerView {
         }
         flushRibbon()
         drawChangeLink()
+
+        // The badge, found at a glance the way the open file's frame and its
+        // tab are. It rides with the band the code draws behind the caret's
+        // line, flying when that does; where the code draws none — a diff, a
+        // selection — it sits on the caret's row.
+        drawnActiveMarkForTesting = nil
+        // Search can light a result other than the caret's row; its band
+        // must not carry the caret's number onto that result.
+        let movingRow = textView.searchResultLineLocation == nil
+            ? textView.displayedCurrentLineBandRect() : nil
+        let row = movingRow
+            .map { (y: $0.minY - visibleRect.minY, height: $0.height) } ?? caretRow
+        let caretNumber: Int? = diffNumbers.isEmpty
+            ? caretLine : (caretLine <= diffNumbers.count ? diffNumbers[caretLine - 1] : nil)
+        if let row, let caretNumber {
+            let value = "\(caretNumber)" as NSString
+            let size = value.size(withAttributes: badge)
+            let box = NSRect(x: numbers.start, y: row.y + (row.height - size.height) / 2,
+                             width: numbers.end - numbers.start, height: size.height)
+            let pill = Self.activePill(around: box, textWidth: size.width)
+            Theme.cursor.setFill()
+            NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
+            value.draw(in: box, withAttributes: badge)
+            drawnActiveMarkForTesting = pill
+        }
     }
 
     /// From the right of the change's mark, top and bottom, curving to the
@@ -543,10 +550,9 @@ final class LineNumberRulerView: NSRulerView {
     /// across its row, so they can be checked without reading pixels out of a
     /// bitmap.
     private(set) var drawnActiveMarkForTesting: NSRect?
-    private(set) var drawnActiveBandForTesting: NSRect?
     private(set) var drawnLineNumbersForTesting: [Int] = []
 
-    /// The pill behind the caret's line number: round the digits, right
+    /// The badge behind the caret's line number: round the digits, right
     /// aligned with them so it does not shift as the caret moves between lines
     /// of different widths.
     static func activePill(around box: NSRect, textWidth: CGFloat) -> NSRect {
@@ -554,8 +560,6 @@ final class LineNumberRulerView: NSRulerView {
         return NSRect(x: box.maxX - width, y: box.minY, width: width, height: box.height)
             .insetBy(dx: -5, dy: -3)
     }
-    /// How much of the accent colour the pill is.
-    static let activePillAlpha: CGFloat = 0.18
 
     private func drawFoldArrow(in rect: NSRect, folded: Bool) {
         let path = NSBezierPath()
