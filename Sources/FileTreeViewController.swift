@@ -1409,7 +1409,11 @@ final class TreeRowView: FlatRowView {
     /// One thin flat view per guide: a layer colour like the row's own, so a
     /// guide costs no bitmap, and it repaints with the theme like the row.
     private var guides: [FlatView] = []
-    static var guideColour: NSColor { Theme.gutter.withAlphaComponent(0.5) }
+    /// Taken back like the lines between regions: half the gutter colour,
+    /// keeping a divider's share of that.
+    static var guideColour: NSColor {
+        Theme.gutter.withAlphaComponent(0.5 * ThemePalette.dividerStrength)
+    }
 
     override func layout() {
         super.layout()

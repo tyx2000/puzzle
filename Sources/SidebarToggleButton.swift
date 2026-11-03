@@ -155,7 +155,7 @@ final class SidebarFloatView: NSView {
         shadow.shadowBlurRadius = 18
         shadow.shadowOffset = NSSize(width: 6, height: 0)
         self.shadow = shadow
-        edge.fillColor = Theme.border
+        edge.fillColor = Theme.divider
         edge.translatesAutoresizingMaskIntoConstraints = false
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -204,7 +204,7 @@ final class SidebarFloatView: NSView {
     }
 
     func refreshAppearance() {
-        edge.fillColor = Theme.border
+        edge.fillColor = Theme.divider
     }
 
     override func updateTrackingAreas() {

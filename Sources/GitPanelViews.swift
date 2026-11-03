@@ -837,7 +837,7 @@ final class GitProgressShimmerView: NSView {
 final class HorizontalBorderScrollView: NSScrollView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        Theme.border.setFill()
+        Theme.divider.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
     }

@@ -87,10 +87,27 @@ struct ThemePalette {
     static let matchLineSoftness = 0.3
 
     private func softened(_ hue: UInt32) -> UInt32 {
+        mixed(hue, into: editorBackground, keeping: 1 - Self.matchLineSoftness)
+    }
+
+    // Dividers
+    /// The line between two regions — under the title band, between project
+    /// rows, down the panel, between the changes and the history, beside the
+    /// code — taken most of the way back into the panel it crosses: regions
+    /// still read as apart, but the line is not looked at. `border` keeps its
+    /// strength for outlines, where it is the edge of a thing to press.
+    var divider: UInt32 { mixed(border, into: panelBackground, keeping: Self.dividerStrength) }
+    /// The mark a divider's knob leaves on its line, taken back as far.
+    var dividerMark: UInt32 { mixed(raisedEdge, into: panelBackground, keeping: Self.dividerStrength) }
+    /// How much of its contrast with the panel a divider keeps.
+    static let dividerStrength = 0.35
+
+    /// `colour` taken toward `ground`, keeping `share` of the difference.
+    private func mixed(_ colour: UInt32, into ground: UInt32, keeping share: Double) -> UInt32 {
         func channel(_ value: UInt32, _ shift: UInt32) -> Double { Double((value >> shift) & 0xff) }
         return [16, 8, 0].reduce(UInt32(0)) { mixed, shift in
-            let blend = channel(hue, UInt32(shift)) * (1 - Self.matchLineSoftness)
-                + channel(editorBackground, UInt32(shift)) * Self.matchLineSoftness
+            let blend = channel(colour, UInt32(shift)) * share
+                + channel(ground, UInt32(shift)) * (1 - share)
             return mixed | (UInt32(blend.rounded()) << UInt32(shift))
         }
     }

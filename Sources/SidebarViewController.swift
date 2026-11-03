@@ -97,7 +97,7 @@ final class SidebarViewController: NSViewController {
         containerView.translatesAutoresizingMaskIntoConstraints = false
         projectTitle.translatesAutoresizingMaskIntoConstraints = false
         titleSeparator.translatesAutoresizingMaskIntoConstraints = false
-        titleSeparator.fillColor = Theme.border
+        titleSeparator.fillColor = Theme.divider
         root.addSubview(containerView)
         root.addSubview(projectTitle)
         for (button, action) in [(openButton, #selector(openProjectAction)),
@@ -396,7 +396,7 @@ final class SidebarViewController: NSViewController {
     /// Re-apply the UI font (`ui_font_*`) across every panel in the sidebar.
     func refreshFonts() {
         (view as? FlatView)?.fillColor = Theme.panelBackground
-        titleSeparator.fillColor = Theme.border
+        titleSeparator.fillColor = Theme.divider
         projectTitle.refreshAppearance()
         titleButtons.forEach { $0.refreshFonts() }
         fileTree.refreshAppearance()

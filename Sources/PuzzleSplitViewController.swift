@@ -9,7 +9,7 @@ import AppKit
 /// raises inside AppKit's constraint pass, so the window's sidebar divider is
 /// painted by `SplitDividerHandleView` instead.
 final class PuzzleSplitView: NSSplitView {
-    override var dividerColor: NSColor { Theme.border }
+    override var dividerColor: NSColor { Theme.divider }
 }
 
 /// NSSplitViewController is its own split view's delegate, so we subclass it to

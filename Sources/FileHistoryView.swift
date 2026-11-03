@@ -423,7 +423,7 @@ private final class FileHistoryResizeHandle: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        Theme.border.setFill()
+        Theme.divider.setFill()
         NSRect(x: bounds.minX, y: floor(bounds.midY),
                width: bounds.width, height: 1).fill()
     }

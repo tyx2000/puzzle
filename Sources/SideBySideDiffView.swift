@@ -305,7 +305,7 @@ private final class SideBySideRowCell: DrawnSidebarCell {
                  background: row.kind == .change && row.rightText != nil
                      ? Theme.diffAddedBackground : nil)
 
-        Theme.border.setFill()
+        Theme.divider.setFill()
         NSRect(x: half, y: 0, width: 1, height: bounds.height).fill()
     }
 

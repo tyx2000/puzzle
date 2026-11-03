@@ -3518,10 +3518,10 @@ enum RegressionTests {
             let scale = CGFloat(rep.pixelsWide) / text.bounds.width
             return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))
         }
-        func apart(_ a: NSColor?, _ b: NSColor?) -> Bool {
+        func apart(_ a: NSColor?, _ b: NSColor?, by least: CGFloat = 0.04) -> Bool {
             guard let a = a?.usingColorSpace(.sRGB), let b = b?.usingColorSpace(.sRGB) else { return false }
             return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
-                + abs(a.blueComponent - b.blueComponent) > 0.04
+                + abs(a.blueComponent - b.blueComponent) > least
         }
         settings.zebraStripes = false
         text.showsCurrentLineBand = true
@@ -3531,13 +3531,21 @@ enum RegressionTests {
         let onDot = NSPoint(x: left + column / 2, y: row(5).midY)
         let clear = NSPoint(x: text.bounds.width - 20, y: row(5).midY)
         let plain = NSPoint(x: text.bounds.width - 20, y: row(1).midY)
+        // The guides are taken back as far as the lines between regions, and
+        // over the band they differ from it by less than a dot does: what
+        // shows they are drawn over it, not under, is that the band changes
+        // where one runs — against the same line drawn with none.
+        settings.indentMarkers = .none
+        guard let bare = rendered() else { throw Failure(description: "no rendering") }
         for marker in [Settings.IndentMarkers.guides, .dots] {
             settings.indentMarkers = marker
             guard let rep = rendered() else { throw Failure(description: "no rendering") }
             try expect(apart(pixel(rep, clear), pixel(rep, plain)),
                        "the active line's band is not drawn, so it proves nothing")
-            try expect(apart(pixel(rep, marker == .guides ? onGuide : onDot), pixel(rep, clear)),
-                       "the active line's band covered its \(marker.rawValue)")
+            let covered = marker == .guides
+                ? !apart(pixel(rep, onGuide), pixel(bare, onGuide), by: 0.01)
+                : !apart(pixel(rep, onDot), pixel(rep, clear))
+            try expect(!covered, "the active line's band covered its \(marker.rawValue)")
         }
         // A selection over the leading spaces leaves its dots showing.
         text.setSelectedRange(NSRange(location: fifth, length: 6))
@@ -9958,9 +9966,32 @@ enum RegressionTests {
         // strip already uses the panel colour.
         try expect(!sameColor(Theme.activeTab, Theme.barBackground),
                    "the active tab vanished into the tab strip")
-        // Every panel boundary is the same 1pt line.
-        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
-                   "the sidebar/editor divider is not the shared border line")
+        // Every panel boundary is the same 1pt line: the border colour taken
+        // most of the way back into the panel, so regions read as apart
+        // without the line being looked at. Outlines keep the border itself.
+        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.divider),
+                   "the sidebar/editor divider is not the shared divider line")
+        try expect(ThemePalette.dividerStrength == 0.35,
+                   "dividers keep \(ThemePalette.dividerStrength) of their contrast, not 0.35")
+        // The indent guides — the tree's and the code's — are taken back as far.
+        try expect(abs(TreeRowView.guideColour.alphaComponent - 0.5 * 0.35) < 0.001
+                    && abs(PuzzleTextView.indentGuideAlpha - 0.25 * 0.35) < 0.001,
+                   "the indent guides are at \(TreeRowView.guideColour.alphaComponent) in the tree "
+                     + "and \(PuzzleTextView.indentGuideAlpha) in the code, not a divider's 35% "
+                     + "of 0.5 and 0.25")
+        for palette in ThemePalette.all {
+            func channels(_ v: UInt32) -> [Double] { [16, 8, 0].map { Double((v >> UInt32($0)) & 0xff) } }
+            for (name, mixed, full) in [("divider", palette.divider, palette.border),
+                                        ("knob mark", palette.dividerMark, palette.raisedEdge)] {
+                let ground = channels(palette.panelBackground)
+                let expected = zip(channels(full), ground).map { ($0 - $1) * 0.35 + $1 }
+                try expect(zip(channels(mixed), expected).allSatisfy { abs($0 - $1) <= 0.5 },
+                           "\(palette.id)'s \(name) is not 35% of the way from the panel to "
+                             + "its full colour: \(String(mixed, radix: 16))")
+            }
+            try expect(palette.divider != palette.border,
+                       "\(palette.id)'s divider is as strong as its outlines")
+        }
         try expect(sameColor(Theme.foreground, hexColor(0xbfbdb6)),
                    "the editor foreground is not Ayu's")
         // Types are blue and calls yellow here, the reverse of most palettes —
@@ -9974,7 +10005,7 @@ enum RegressionTests {
                     && sameColor(Theme.syntaxProperty, Theme.red),
                    "Ayu Dark's strings or properties changed colour")
         // The sidebar/editor split takes the colour directly…
-        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.border),
+        try expect(sameColor(PuzzleSplitView().dividerColor, Theme.divider),
                    "the split did not take its divider colour from the theme")
         // …and the window's sidebar divider is painted over AppKit's hairline by
         // the drag handle, whose line must cover exactly that hairline.
@@ -12052,7 +12083,7 @@ enum RegressionTests {
             return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))
         }
         let swatch = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
-        swatch.fillColor = Theme.border
+        swatch.fillColor = Theme.divider
         host.addSubview(swatch)
         let border = try rendered(swatch, at: NSPoint(x: 2, y: 2))
         swatch.removeFromSuperview()
@@ -17240,8 +17271,8 @@ enum RegressionTests {
         // The traffic-light band is closed off by the same 1pt line the activity
         // bar draws, sitting exactly on the boundary with the file tree.
         let separator = workspace.sidebar.titleSeparatorForTesting
-        try expect(sameColor(separator.fillColor, Theme.border),
-                   "the title band's line is not the shared border colour")
+        try expect(sameColor(separator.fillColor, Theme.divider),
+                   "the title band's line is not the shared divider colour")
         try expect(abs(separator.frame.height - 1) < 0.5,
                    "the title band's line is \(separator.frame.height)pt tall")
         // The panel view is not flipped, so the band's lower edge is that far

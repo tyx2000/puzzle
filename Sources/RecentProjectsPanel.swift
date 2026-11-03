@@ -77,9 +77,9 @@ final class RecentProjectsPanel: NSPanel {
         openChecked.isEnabled = false
         openChecked.translatesAutoresizingMaskIntoConstraints = false
 
-        separator.fillColor = Theme.border
+        separator.fillColor = Theme.divider
         separator.translatesAutoresizingMaskIntoConstraints = false
-        footerRule.fillColor = Theme.border
+        footerRule.fillColor = Theme.divider
         footerRule.translatesAutoresizingMaskIntoConstraints = false
 
         list.translatesAutoresizingMaskIntoConstraints = false

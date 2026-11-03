@@ -101,6 +101,10 @@ enum Theme {
     static let scrollerKnob = token(\.scrollerKnob)
     static let scrollerSlot = token(\.scrollerSlot)
     static let border = token(\.border)
+    /// The line between regions: `border`, most of the way back into the panel.
+    static let divider = token(\.divider)
+    /// The mark on a divider where its knob is.
+    static let dividerMark = token(\.dividerMark)
     static let selection = token(\.selection)
     static let lineHighlight = token(\.lineHighlight)
     // The code area matches the panel, so the active tab cannot also match the
@@ -413,7 +417,7 @@ class FlatView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         fillColor.setFill()
         bounds.fill()
-        Theme.border.setFill()
+        Theme.divider.setFill()
         if bottomBorder { NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill() }
         if topBorder { NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill() }
         if rightBorder { NSRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height).fill() }

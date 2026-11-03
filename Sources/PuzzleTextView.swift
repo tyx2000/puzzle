@@ -2968,8 +2968,9 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
 
     /// How strongly the guides are drawn over the code area: faint, so the
     /// active pair's line — which stands in for one of them — is plainly not
-    /// another guide.
-    static let indentGuideAlpha: CGFloat = 0.25
+    /// another guide; and taken back like the lines between regions, keeping
+    /// a divider's share of the quarter of the gutter colour they had.
+    static let indentGuideAlpha = 0.25 * CGFloat(ThemePalette.dividerStrength)
 
     /// Where the 1pt indent guide for that much indentation stands.
     ///

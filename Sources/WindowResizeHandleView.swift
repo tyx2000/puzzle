@@ -71,7 +71,7 @@ enum DividerGrip {
             super.init(frame: frameRect)
             wantsLayer = true
             layer?.cornerRadius = DividerGrip.markerThickness / 2
-            fillColor = Theme.raisedEdge
+            fillColor = Theme.dividerMark
             setAccessibilityElement(false)
         }
 
@@ -241,10 +241,10 @@ final class SplitDividerHandleView: NSView, ScrollerCursorRebuilding {
     }
 
     /// The handle straddles the divider, so painting its middle column replaces
-    /// AppKit's fixed grey hairline with the same 1pt `Theme.border` line the
+    /// AppKit's fixed grey hairline with the same 1pt `Theme.divider` line the
     /// title band and the project strip draw.
     override func draw(_ dirtyRect: NSRect) {
-        Theme.border.setFill()
+        Theme.divider.setFill()
         paintedDividerRect.fill()
     }
 

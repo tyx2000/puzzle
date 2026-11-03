@@ -269,11 +269,11 @@ final class ProjectRowView: NSView {
             bounds.fill()
         }
         if showsDivider {
-            Theme.border.setFill()
+            Theme.divider.setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         }
         if showsBottomLine {
-            Theme.border.setFill()
+            Theme.divider.setFill()
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
         if isActive {
@@ -285,7 +285,7 @@ final class ProjectRowView: NSView {
         // The line between the two columns, carried on down the panel by the
         // pair of lists below.
         if !branch.isEmpty {
-            Theme.border.setFill()
+            Theme.divider.setFill()
             NSRect(x: columnDivider, y: 0, width: 1, height: bounds.height).fill()
             Self.gitMark(syncingAt: sweepPhase, syncing: isSyncing).draw(in: branchIconRect)
             SidebarCellDrawing.attributedText(branchLabel(), in: branchColumnRect)
@@ -979,7 +979,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        line.fillColor = Theme.border
+        line.fillColor = Theme.divider
         addSubview(line)
         addSubview(marker)
         addSubview(grip)
