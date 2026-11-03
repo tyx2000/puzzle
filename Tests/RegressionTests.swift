@@ -24,10 +24,22 @@ enum RegressionTests {
         // it: a history list laid out under it lit that row, and ↓↓ counted
         // on from there. Every test starts with it nowhere.
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
+        if CommandLine.arguments.contains("--animated-background-regressions") {
+            try testCaretLineFlies()
+            try testHoverLineFlies()
+            try testLineBandLeavesNoRepaintResidue()
+            try testCodeLightsTheLineUnderThePointer()
+            try testFlatSurfacesHoldNoBitmap()
+            try testActiveTreeRowStaysLitThroughReload()
+            try testOpenRowBackgroundTravels()
+            print("Animated background regression tests passed (7)")
+            return
+        }
         if CommandLine.arguments.contains("--line-popup-regressions") {
             try testActiveLineStaysInFiniteDocument()
             try testActiveLineBadge()
             try testCaretLineFlies()
+            try testHoverLineFlies()
             try testLineBandLeavesNoRepaintResidue()
             try testCodeLightsTheLineUnderThePointer()
             try testGutterMarksUncommittedChanges()
@@ -35,7 +47,7 @@ enum RegressionTests {
             try testGutterLinksMarkToItsDiff()
             try testGitChangePanelFlows()
             try testGitChangeLightsItsLines()
-            print("Active-line and Git panel regression tests passed (10)")
+            print("Active-line and Git panel regression tests passed (11)")
             return
         }
         if CommandLine.arguments.contains("--project-replace-regressions") {
@@ -233,7 +245,7 @@ enum RegressionTests {
         try testCutHistoryRowsSayTheRest()
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
-        try testOpenRowFrameTravels()
+        try testOpenRowBackgroundTravels()
         try testWindowSessionComesBack()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -289,6 +301,7 @@ enum RegressionTests {
         try testSideBySideDiff()
         try testActiveLineBadge()
         try testCaretLineFlies()
+        try testHoverLineFlies()
         try testLineBandLeavesNoRepaintResidue()
         try testActiveLineStaysInFiniteDocument()
         try testFileOpensRouteToTheirProjectWindow()
@@ -8591,7 +8604,7 @@ enum RegressionTests {
                    "the active row reports \(probe.backgroundColor) as its background")
 
         // A save in the folder reloads its rows. Every frame of that, the
-        // active row keeps its frame and its own ground — AppKit lays a colour
+        // active row keeps its background and its own ground — AppKit lays a colour
         // of its own over each row it has just put back.
         try Data("y\n".utf8).write(to: active)
         tree.refresh(changedURLs: [active])
@@ -8611,8 +8624,8 @@ enum RegressionTests {
                 try expect(sameColor(colour, Theme.panelBackground),
                            "a layer over the active row showed \(String(describing: colour)) during the reload")
             }
-            try expect((view as? FlatRowView)?.isFrameShownForTesting == true,
-                       "the active row lost its frame during the reload")
+            try expect((view as? FlatRowView)?.selectionBackgroundRectForTesting == view.bounds,
+                       "the active row lost its background during the reload")
         }
         try expect(frames > 0, "the active row was never on screen")
     }
@@ -10872,10 +10885,115 @@ enum RegressionTests {
         text.searchResultLineLocation = nil
     }
 
+    /// The code's hover band follows pointer rows with the same interrupted
+    /// motion as the caret band. Leaving or scrolling is not a flight across
+    /// empty space: it clears or aligns the mark immediately.
+    private static func testHoverLineFlies() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let directory = try temporaryDirectory("hover-flight")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data((1...80).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 700))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(1)
+        pane.view.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let lm = text.layoutManager else { throw Failure(description: "no hover-flight layout") }
+        let source = text.string as NSString
+        func hover(_ line: Int) throws -> NSRect {
+            var location = 0
+            for _ in 1..<line {
+                location = NSMaxRange(source.lineRange(for: NSRange(location: location, length: 0)))
+            }
+            lm.ensureLayout(forCharacterRange: NSRange(location: location, length: 1))
+            let glyph = lm.glyphIndexForCharacter(at: location)
+            let fragment = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let point = NSPoint(x: text.visibleRect.maxX - 30,
+                                y: fragment.midY + text.textContainerOrigin.y)
+            pinPointer(at: window.convertPoint(toScreen: text.convert(point, to: nil)))
+            text.refreshHoverState()
+            guard let target = text.hoverLineBandForTesting else {
+                throw Failure(description: "line \(line) is not hovered at \(point)")
+            }
+            return target
+        }
+        let first = try hover(3)
+        try expect(text.hoverLineFlightForTesting == nil && text.displayedHoverLineBandRect() == first,
+                   "the first hover flew from nowhere")
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        let target = try hover(15)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(text.hoverLineFlightForTesting == nil && text.displayedHoverLineBandRect() == target,
+                       "hover did not land immediately with Reduce Motion enabled")
+        } else {
+            guard let flight = text.hoverLineFlightForTesting else {
+                throw Failure(description: "the pointer's row changed without a hover flight")
+            }
+            try expect(flight.from == first && flight.to == target,
+                       "hover flew from \(flight.from) to \(flight.to), not \(first) to \(target)")
+            RunLoop.main.run(until: Date().addingTimeInterval(flight.duration * 0.25))
+            guard let shown = text.displayedHoverLineBandRect() else {
+                throw Failure(description: "a hover band disappeared during its flight")
+            }
+            if text.hoverLineFlightForTesting != nil {
+                try expect(shown.minY > first.minY && shown.minY < target.minY,
+                           "hover jumped instead of travelling between the rows: \(shown)")
+                _ = try hover(15)
+                try expect(text.hoverLineFlightForTesting.map {
+                    $0.from == flight.from && $0.to == flight.to && $0.duration == flight.duration
+                } == true, "pointer movement within the same row restarted the hover animation")
+                let redirected = try hover(6)
+                try expect(text.hoverLineFlightForTesting.map {
+                    abs($0.from.minY - shown.minY) < 0.5 && $0.to == redirected
+                } == true, "a redirected hover jumped back to its previous row")
+                RunLoop.main.run(until: Date().addingTimeInterval(PuzzleTextView.lineFlightLongest + 0.1))
+                try expect(text.hoverLineFlightForTesting == nil
+                            && text.displayedHoverLineBandRect() == redirected,
+                           "hover did not settle on the pointer's latest row")
+            }
+        }
+
+        // Moving off the code clears both the destination and any presentation.
+        _ = try hover(15)
+        pinPointer(at: pointerNowhere)
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting == nil && text.displayedHoverLineBandRect() == nil
+                    && text.hoverLineFlightForTesting == nil,
+                   "leaving the code retained a moving hover band")
+
+        // A scroll changes the row under a stationary pointer, without making
+        // the highlight fly through unrelated document rows.
+        _ = try hover(3)
+        _ = try hover(15)
+        let clip = pane.scrollViewForTesting.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + 27))
+        pane.scrollViewForTesting.reflectScrolledClipView(clip)
+        try expect(text.hoverLineFlightForTesting == nil
+                    && text.displayedHoverLineBandRect() == text.hoverLineBandForTesting,
+                   "scrolling left hover flying toward a stale row")
+        guard let scroller = pane.verticalScrollerForTesting as? PuzzleScroller else {
+            throw Failure(description: "hover fixture has no Puzzle scroller")
+        }
+        scroller.beginDraggingForTesting()
+        text.refreshHoverState()
+        try expect(text.hoverLineBandForTesting == nil && text.displayedHoverLineBandRect() == nil
+                    && text.hoverLineFlightForTesting == nil,
+                   "a dragged scroller retained the moving hover background")
+        scroller.endDraggingForTesting()
+    }
+
     /// TextKit can paint several dirty rectangles into the same backing
     /// surface. Repainting an unrelated rectangle must not add another coat
     /// to the translucent band elsewhere on that surface.
     private static func testLineBandLeavesNoRepaintResidue() throws {
+        defer { pinPointer(at: pointerNowhere) }
         let zebraStripes = Settings.shared.zebraStripes
         defer { Settings.shared.zebraStripes = zebraStripes }
         Settings.shared.zebraStripes = false
@@ -10901,6 +11019,12 @@ enum RegressionTests {
               let pixels = bitmap.bitmapData else {
             throw Failure(description: "the partial-repaint fixture could not be drawn")
         }
+        let hoverPoint = NSPoint(x: text.visibleRect.maxX - 30,
+                                 y: active.midY + active.height * 3)
+        pinPointer(at: window.convertPoint(toScreen: text.convert(hoverPoint, to: nil)))
+        text.refreshHoverState()
+        try expect(text.displayedHoverLineBandRect() != nil,
+                   "the repaint fixture has no hover band")
         let canvas = NSRect(x: 0, y: 0, width: 700, height: 400)
         let unrelated = NSRect(x: 0, y: canvas.maxY - 8, width: canvas.width, height: 4)
         try expect(!active.intersects(unrelated), "the repaint fixture intersects the active band")
@@ -12234,6 +12358,7 @@ enum RegressionTests {
     /// every panel ground and list row held a bitmap the size of itself, and
     /// together they were the largest part of the app's memory.
     private static func testFlatSurfacesHoldNoBitmap() throws {
+        RowFrameFlight.land()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
         defer { window.close() }
@@ -12288,42 +12413,63 @@ enum RegressionTests {
                    "a Git row in a list that shows no selection showed it")
         git.isHovered = true
         try expect(sameColor(shown(git), Theme.hover), "a hovered Git row")
-        // The open file's row is framed rather than filled: its ground is
-        // whatever it would be without, and the frame is drawn as a diff
-        // frames its change — a 1.5pt line in from the row's sides, with a
-        // faint band round it — in the accent.
-        git.isActiveFile = true
-        try expect(sameColor(shown(git), Theme.hover)
-                    && git.isFrameShownForTesting,
-                   "the active file's Git row is not framed over its own ground")
-        try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
-        let frameLayer = git.frameLineLayerForTesting
-        try expect(frameLayer?.frame == FlatRowView.frameRect(in: git.bounds)
-                    && frameLayer?.borderWidth == ChangeFrameOverlay.strokeWidth
-                    && frameLayer?.cornerRadius == ChangeFrameOverlay.cornerRadius
-                    && sameColor(frameLayer?.borderColor.flatMap { NSColor(cgColor: $0) },
-                                 Theme.cursor),
-                   "the frame is not the diff's line, in from the row's sides in the accent: "
-                     + "\(String(describing: frameLayer?.frame))")
-        let band = git.layer?.sublayers?.first {
-            $0 !== frameLayer && $0.borderWidth == ChangeFrameOverlay.glowWidth
+        // The open row fills behind its content with the code's active-line
+        // tint. The row still keeps its own ground and no bitmap, while the
+        // selection layer has no stroke or glow above the cell.
+        func checkSelectionBackground(_ row: FlatRowView) throws {
+            guard let background = row.selectionBackgroundLayerForTesting else {
+                throw Failure(description: "an active row has no selection background")
+            }
+            try expect(row.selectionBackgroundRectForTesting == row.bounds
+                        && background.zPosition < 0 && background.borderWidth == 0
+                        && background.cornerRadius == 0,
+                       "the selected row is not a full background behind its content: \(background.frame)")
+            try expect(sameColor(background.backgroundColor.flatMap { NSColor(cgColor: $0) },
+                                 Theme.editorBackground)
+                        && sameColor(background.sublayers?.first?.backgroundColor.flatMap {
+                            NSColor(cgColor: $0)
+                        }, PuzzleTextView.currentLineTint),
+                       "the sidebar selection does not share the code's ground and tint")
+            try expect((row.layer?.sublayers ?? []).allSatisfy { $0.borderWidth == 0 },
+                       "the selected row retained a stroke or glow")
+            guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 600,
+                pixelsHigh: 22, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+                throw Failure(description: "the selected row could not be rendered")
+            }
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = context
+            Theme.editorBackground.setFill()
+            row.bounds.fill(using: .copy)
+            PuzzleTextView.currentLineTint.setFill()
+            row.bounds.fill(using: .sourceOver)
+            let reference = bitmap.colorAt(x: 300, y: 11)
+            row.drawBackground(in: row.bounds)
+            try expect([NSPoint(x: 1, y: 1), NSPoint(x: 300, y: 11), NSPoint(x: 598, y: 20)]
+                .allSatisfy { sameColor(bitmap.colorAt(x: Int($0.x), y: Int($0.y)), reference) },
+                       "the selected row is outlined or has a different fill from the code")
         }
-        try expect(band?.frame == OpenFrame.glowRect(for: FlatRowView.frameRect(in: git.bounds))
-                    && band?.isHidden == false,
-                   "the frame has no band round its outside: \(String(describing: band?.frame))")
+        git.isActiveFile = true
+        try expect(sameColor(shown(git), Theme.hover) && git.isFrameShownForTesting,
+                   "the active file's Git row has no background over its own ground")
+        try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
+        try checkSelectionBackground(git)
         git.holdsFrameBack = true
         git.displayIfNeeded()
-        try expect(!git.isFrameShownForTesting, "a row held back still shows its frame")
+        try expect(!git.isFrameShownForTesting, "a row held back still shows its resting background")
         git.holdsFrameBack = false
         git.isActiveFile = false
         git.displayIfNeeded()
-        try expect(!git.isFrameShownForTesting, "the frame stayed on a row no longer open")
+        try expect(!git.isFrameShownForTesting, "the background stayed on a row no longer open")
         try expect(sameColor(shown(tree), Theme.panelBackground), "a plain tree row")
         tree.isHovered = true
         try expect(sameColor(shown(tree), Theme.hover), "a hovered tree row")
         tree.isActiveFile = true
         try expect(sameColor(shown(tree), Theme.hover) && tree.isFrameShownForTesting,
-                   "the active file's tree row is not framed over its own ground")
+                   "the active file's tree row has no background over its own ground")
+        try checkSelectionBackground(tree)
         search.selectionHighlightStyle = .regular
         try expect(sameColor(shown(search), Theme.panelBackground), "a plain search row")
         search.isSelected = true
@@ -14064,8 +14210,8 @@ enum RegressionTests {
     }
 
     /// A strip that shows a selection with a surface — the Git panel's tabs —
-    /// says it the selection's way, and loudly enough. The file tabs are
-    /// framed instead, as the open file's row is.
+    /// says it the selection's way, and loudly enough. File tabs keep their
+    /// frame while the sidebar's open row carries a moving background.
     private static func testSelectedControlsAgree() throws {
         func luminance(_ colour: NSColor) -> CGFloat {
             guard let c = colour.usingColorSpace(.sRGB) else { return 0 }
@@ -15667,8 +15813,11 @@ enum RegressionTests {
         history2.clickRowForTesting(0)
         try expect(waitUntil { history2.rowCountForTesting > 5 },
                    "the first commit did not open")
-        let opened = try pattern(4) { history2.rowViewForTesting($0) }
-        try expect(opened == ["plain", "stripe", "plain", "stripe"],
+        // The commit clicked is selected, so it wears the selection instead.
+        try expect(history2.rowViewForTesting(0)?.isFrameShownForTesting == true,
+                   "the opened commit is not selected")
+        let opened = try pattern(4) { history2.rowViewForTesting($0) }.dropFirst()
+        try expect(Array(opened) == ["stripe", "plain", "stripe"],
                    "rows kept the colours of their old places: \(opened)")
     }
 
@@ -16595,10 +16744,10 @@ enum RegressionTests {
         try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
     }
 
-    /// The open tab's row is framed in the list that holds it — the tree for a
-    /// file, the changes for a working-tree diff, a commit's files for that
-    /// commit's diff — and one frame flies from row to row as the tab changes.
-    private static func testOpenRowFrameTravels() throws {
+    /// The sidebar's selected row has the code's background: the tree for a
+    /// file, Changes for a working-tree diff, and the selected commit or its
+    /// open file. One background moves between them; tabs retain their frame.
+    private static func testOpenRowBackgroundTravels() throws {
         let root = try temporaryDirectory("open-row-frame")
         defer { try? FileManager.default.removeItem(at: root) }
         func git(_ args: [String]) throws {
@@ -16636,12 +16785,12 @@ enum RegressionTests {
                    "the fixture's changes never showed")
         workspace.window?.contentView?.layoutSubtreeIfNeeded()
 
-        // A file: the tree frames its row, and nothing else is framed.
+        // A file: the tree fills its row, and the other lists let go.
         RowFrameFlight.land()
         workspace.editor.open(url: top)
         try expect(tree.openRowIndex != nil && panel.changes.openRowIndex == nil
                     && panel.history.openRowIndex == nil,
-                   "opening a file did not frame its row in the tree alone")
+                   "opening a file did not highlight its row in the tree alone")
         try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "a flight never landed")
         guard let topRow = tree.openRowIndex,
               let topView = tree.openRowTable.rowView(atRow: topRow, makeIfNecessary: true)
@@ -16649,8 +16798,8 @@ enum RegressionTests {
             throw Failure(description: "the open file's tree row is not on screen")
         }
         topView.displayIfNeeded()
-        try expect(topView.isActiveFile && topView.isFrameShownForTesting,
-                   "the open file's tree row is not framed")
+        try expect(topView.isActiveFile && topView.selectionBackgroundRectForTesting == topView.bounds,
+                   "the open file's tree row has no full background")
 
         // The open tab is framed the same way, and has no fill of its own.
         guard let pane = workspace.editor.activePaneForTesting else {
@@ -16668,21 +16817,37 @@ enum RegressionTests {
                    "the open tab is not framed: \(String(describing: bar.openFrameRectForTesting))"
                      + " for \(String(describing: framedTab()))")
 
-        // Another file, three folders down: the frame flies there, for longer
-        // the further it goes, and lands on the row. The tab's frame moves to
-        // the new tab at the same time. Opening the folders does
-        // not widen the tree past its column, which took the frame's right
-        // side.
+        // Another file, three folders down: the background moves there and
+        // lands on its row, while the tab keeps its independent frame motion.
+        // Opening folders does not widen the tree past its column.
         let tabBefore = bar.openFrameRectForTesting
         workspace.editor.open(url: deep)
-        try expect(RowFrameFlight.isFlyingForTesting,
-                   "switching files did not fly the frame to the new row")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(RowFrameFlight.isFlyingForTesting,
+                       "switching files did not move the background to the new row")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.04))
+            if RowFrameFlight.isFlyingForTesting,
+               let shown = RowFrameFlight.displayedBackgroundForTesting {
+                // Quickly returning to the old file redirects the visible
+                // background rather than jumping to the previous target.
+                workspace.editor.open(url: top)
+                guard let redirected = RowFrameFlight.displayedBackgroundForTesting else {
+                    throw Failure(description: "a redirected sidebar background disappeared")
+                }
+                try expect(abs(redirected.minY - shown.minY) < 1
+                            && abs(redirected.minX - shown.minX) < 1,
+                           "the sidebar background jumped during quick reselection: \(shown) to \(redirected)")
+                workspace.editor.open(url: deep)
+            }
+        }
         try expect(bar.openFrameRectForTesting == framedTab()
                     && bar.openFrameRectForTesting != tabBefore,
                    "the tab's frame did not go to the new tab")
-        try expect(!(bar.subviews.compactMap { ($0 as? OpenFrameEdgeView)?.layer?.animationKeys() }
-                        .flatMap { $0 }.isEmpty),
-                   "the tab's frame jumped to the new tab instead of moving there")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(!(bar.subviews.compactMap { ($0 as? OpenFrameEdgeView)?.layer?.animationKeys() }
+                            .flatMap { $0 }.isEmpty),
+                       "the tab's frame jumped to the new tab instead of moving there")
+        }
         try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
         guard let deepRow = tree.openRowIndex,
               let deepView = tree.openRowTable.rowView(atRow: deepRow, makeIfNecessary: true)
@@ -16690,8 +16855,8 @@ enum RegressionTests {
             throw Failure(description: "the deep file's tree row is not on screen")
         }
         deepView.displayIfNeeded()
-        try expect(deepView.isFrameShownForTesting && !deepView.holdsFrameBack,
-                   "the frame did not land on the deep file's row")
+        try expect(deepView.selectionBackgroundRectForTesting == deepView.bounds && !deepView.holdsFrameBack,
+                   "the background did not land on the deep file's row")
         let clip = tree.openRowTable.enclosingScrollView?.contentView.bounds.width ?? 0
         try expect(abs(tree.openRowTable.frame.width - clip) < 0.5,
                    "opening folders widened the tree past its column: "
@@ -16700,8 +16865,8 @@ enum RegressionTests {
                     && RowFrameFlight.duration(forDistance: 2000) == RowFrameFlight.longest,
                    "a flight's length does not follow its distance")
 
-        // A working-tree diff from the changes: the changes frame its row and
-        // the tree lets go, the frame flying across from the tree's row.
+        // A working-tree diff: Changes gets its row's background, travelling
+        // across from the tree, which lets go of the source file.
         guard let entry = panel.changes.entriesForTesting.first(where: { $0.path == "a.txt" })
         else { throw Failure(description: "a.txt is not among the changes") }
         var flewAcross = false
@@ -16716,16 +16881,27 @@ enum RegressionTests {
         }
         try expect(panel.changes.openRowIndex != nil && tree.openRowIndex == nil
                     && panel.history.openRowIndex == nil,
-                   "the diff's change is not the one framed row")
-        try expect(flewAcross, "the frame did not fly from the tree to the changes")
+                   "the diff's change is not the highlighted row")
+        try expect(flewAcross || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                   "the background did not travel from the tree to Changes")
         try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
 
-        // A commit's diff of one file: framed under its commit, which is open.
+        // Selecting a commit highlights its header, not merely its eventual
+        // file. Opening that commit's diff then hands the mark to the file.
         panel.history.settleForTesting()
         guard let commitRow = panel.history.rowOutlineForTesting.firstIndex(of: "start") else {
             throw Failure(description: "the history does not list the fixture's commit")
         }
         panel.history.clickRowForTesting(commitRow)
+        try expect(waitUntil { panel.history.openRowIndex == commitRow
+                    && panel.history.rowViewForTesting(commitRow)?.isActiveFile == true },
+                   "the selected commit header has no active background")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the commit background never landed")
+        if let commitView = panel.history.rowViewForTesting(commitRow) {
+            commitView.displayIfNeeded()
+            try expect(commitView.selectionBackgroundRectForTesting == commitView.bounds,
+                       "the selected commit header is still outlined or only partly filled")
+        }
         try expect(waitUntil { panel.history.fileRowsForTesting.contains("a.txt") },
                    "opening the commit did not list its files")
         guard let fileRow = panel.history.rowOutlineForTesting.firstIndex(of: "a.txt") else {
@@ -16738,7 +16914,7 @@ enum RegressionTests {
         }, "the commit's diff never opened")
         try expect(panel.history.openRowIndex == fileRow && panel.changes.openRowIndex == nil
                     && tree.openRowIndex == nil,
-                   "the commit's file is not the one framed row")
+                   "the commit's file is not the highlighted row")
         try expect(panel.history.rowViewForTesting(fileRow)?.isActiveFile == true,
                    "the commit's file row is not marked")
 
@@ -16746,13 +16922,33 @@ enum RegressionTests {
         workspace.editor.open(url: top)
         try expect(tree.openRowIndex != nil && panel.changes.openRowIndex == nil
                     && panel.history.openRowIndex == nil,
-                   "coming back to the file did not hand the frame back to the tree")
+                   "coming back to the file did not hand the background back to the tree")
         try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "the flight never landed")
         // A file's history is not a row anywhere.
         let historyTab = URL(string: "\(DocumentStore.diffScheme):////tmp/x/.puzzle-diff-preview"
                                + "?path=a.txt&commit=file-history-table")!
         try expect(WorkspaceWindowController.openTab(for: historyTab) == .file,
                    "a file's history tab was read as a commit's diff")
+
+        // The full Git History panel also highlights a chosen commit header,
+        // even though activating the header expands it rather than a diff.
+        workspace.sidebar.showHistory()
+        guard let gitPanel = workspace.sidebar.gitPanelForTesting else {
+            throw Failure(description: "the sidebar did not create Git History")
+        }
+        try expect(waitUntil { gitPanel.historyRowIsCommitForTesting.first == true },
+                   "the full Git History panel did not load its commit")
+        gitPanel.activateRowForTesting(0)
+        try expect(waitUntil { gitPanel.selectedCommit != nil && gitPanel.openRowIndex == 0
+                    && gitPanel.rowViewForTesting(0)?.isActiveFile == true },
+                   "Git History did not mark the selected commit header")
+        try expect(waitUntil { !RowFrameFlight.isFlyingForTesting }, "Git History's background never landed")
+        guard let selectedCommitRow = gitPanel.rowViewForTesting(0) else {
+            throw Failure(description: "Git History's selected commit row is not visible")
+        }
+        selectedCommitRow.displayIfNeeded()
+        try expect(selectedCommitRow.selectionBackgroundRectForTesting == selectedCommitRow.bounds,
+                   "Git History's selected commit row has no full background")
     }
 
     /// The windows open at a quit, and their projects, come back at the next

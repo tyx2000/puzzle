@@ -156,51 +156,93 @@ final class OpenFrameMarker {
     }
 }
 
-/// The sidebar's frame on its way to another row: a frame of its own over
-/// the sidebar, from where the last row's was to where the new row's will
-/// be, which then hands over to that row. The tree, the changes and a
-/// commit's files share it, so one frame travels between the three.
-///
-/// Each list draws the frame in the row itself the rest of the time, so it
-/// scrolls with the row and needs nothing from here.
+/// One background travels between the sidebar's selected rows. Its cached
+/// geometry is read by the row backgrounds, behind their cells and icons.
 enum RowFrameFlight {
-    static var shortest: TimeInterval { OpenFrame.shortest }
-    static var longest: TimeInterval { OpenFrame.longest }
+    static var shortest: TimeInterval { PuzzleTextView.lineFlightShortest }
+    static var longest: TimeInterval { PuzzleTextView.lineFlightLongest }
 
-    private static var flying: OpenFrameMarker?
+    private struct Flight {
+        let from: NSRect
+        let to: NSRect
+        let started: CFTimeInterval
+        let duration: TimeInterval
+    }
+    private static var flight: Flight?
+    private static weak var host: NSView?
     private static weak var heldRow: FlatRowView?
+    private static var displayed: NSRect?
+    private static var timer: Timer?
+    private static let rows = NSHashTable<FlatRowView>.weakObjects()
+
+    static func register(_ row: FlatRowView) { rows.add(row) }
 
     static func duration(forDistance distance: CGFloat) -> TimeInterval {
-        OpenFrame.duration(forDistance: distance)
+        PuzzleTextView.lineFlightDuration(forDistance: distance)
     }
 
-    /// Fly from `from` to `to`, rects in `host`'s coordinates of the frame's
-    /// line. `row` is the row arriving, held back until the frame lands.
-    /// Nothing flies without both ends, or with less motion asked for.
-    static func fly(in host: NSView, from: NSRect?, to: NSRect?, landingOn row: FlatRowView?) {
+    static func controlsBackground(in row: FlatRowView) -> Bool {
+        guard flight != nil, let host else { return false }
+        return row.window === host.window && row.isDescendant(of: host)
+    }
+
+    /// The moving piece belonging to this row, in its own coordinates.
+    static func background(in row: FlatRowView) -> NSRect? {
+        guard flight != nil, let host, let displayed,
+              row.window === host.window, row.isDescendant(of: host) else { return nil }
+        let piece = row.convert(displayed, from: host).intersection(row.bounds)
+        return piece.isNull || piece.isEmpty ? nil : piece
+    }
+
+    /// Rects are in the host's coordinates. An interrupted flight starts
+    /// where it is displayed, even if it was heading in the other direction.
+    static func fly(in newHost: NSView, from: NSRect?, to: NSRect?, landingOn row: FlatRowView?) {
+        let current = host === newHost ? displayed : nil
         land()
-        guard let from, let to, from != to, host.window != nil,
+        guard let from = current ?? from, let to, from != to,
+              newHost.window != nil,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let marker = OpenFrameMarker()
-        marker.raise(in: host)
-        marker.place(from, moving: false)
-        flying = marker
+        host = newHost
         heldRow = row
         row?.holdsFrameBack = true
-        marker.place(to, moving: true) {
-            if flying === marker { land() }
-        }
+        displayed = from
+        flight = Flight(from: from, to: to, started: CACurrentMediaTime(),
+                        duration: duration(forDistance: hypot(to.midX - from.midX,
+                                                              to.midY - from.midY)))
+        let ticker = Timer(timeInterval: 1.0 / 60, repeats: true) { _ in advance() }
+        timer = ticker
+        RunLoop.main.add(ticker, forMode: .common)
+        advance()
     }
 
-    /// Put down whatever is in flight: the row it was flying to shows its own
-    /// frame. A new flight starts from where the last one was going.
+    private static func refreshRows() {
+        for row in rows.allObjects { row.needsDisplay = true }
+    }
+
+    private static func advance() {
+        guard let flight, let host, host.window != nil else { land(); return }
+        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
+        let t = ChangeFrameOverlay.eased(CGFloat(progress))
+        displayed = NSRect(x: flight.from.minX + (flight.to.minX - flight.from.minX) * t,
+                           y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
+                           width: flight.from.width + (flight.to.width - flight.from.width) * t,
+                           height: flight.from.height + (flight.to.height - flight.from.height) * t)
+        refreshRows()
+        if progress >= 1 { land() }
+    }
+
     static func land() {
-        flying?.remove()
-        flying = nil
+        timer?.invalidate()
+        timer = nil
+        flight = nil
+        displayed = nil
+        host = nil
         heldRow?.holdsFrameBack = false
         heldRow = nil
+        refreshRows()
     }
 
-    static var isFlyingForTesting: Bool { flying != nil }
-    static var flyingFrameForTesting: NSRect? { flying?.rect }
+    static var isFlyingForTesting: Bool { flight != nil }
+    static var flyingFrameForTesting: NSRect? { flight?.to }
+    static var displayedBackgroundForTesting: NSRect? { displayed }
 }

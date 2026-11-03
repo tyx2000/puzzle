@@ -198,6 +198,9 @@ final class SidebarViewController: NSViewController {
         // the errand the Git panel's own list runs with `onOpenFile`.
         projectsPanel.changes.onOpenFile = { [weak self] url in self?.onGitFile?(url) }
         projectsPanel.history.onOpenFile = { [weak self] url in self?.onGitFile?(url) }
+        projectsPanel.history.onSelectCommit = { [weak self] hash in
+            self?.selectHistoryCommit(hash, inGitPanel: false)
+        }
         // A file inside a commit opens that commit's diff, as it does in the
         // Git panel's own History tab.
         projectsPanel.history.onOpenCommitDiff = { [weak self] commit, file, directory in
@@ -215,6 +218,8 @@ final class SidebarViewController: NSViewController {
     /// was on.
     func showOpenTab(_ url: URL, as tab: OpenTab) {
         let from = openRowFrame()?.rect
+        projectsPanel.history.selectedCommit = nil
+        gitController?.showOpenTab(tab)
         fileTree.selectFile(url)
         switch tab {
         case .file:
@@ -232,15 +237,38 @@ final class SidebarViewController: NSViewController {
         RowFrameFlight.fly(in: view, from: from, to: to?.rect, landingOn: to?.row)
     }
 
+    /// Commit activation owns the same background as an open file, without
+    /// opening a different document or changing the commit's toggle action.
+    private func selectHistoryCommit(_ hash: String, inGitPanel: Bool) {
+        let from = openRowFrame()?.rect
+        fileTree.clearSelectedFile()
+        projectsPanel.changes.openPath = nil
+        projectsPanel.history.openFile = nil
+        projectsPanel.history.selectedCommit = inGitPanel ? nil : hash
+        if inGitPanel {
+            gitController?.selectedCommit = hash
+        } else {
+            gitController?.selectedCommit = nil
+        }
+        // Off screen there is no background to move.
+        guard view.window != nil else { return }
+        view.layoutSubtreeIfNeeded()
+        let to = openRowFrame()
+        RowFrameFlight.fly(in: view, from: from, to: to?.rect, landingOn: to?.row)
+    }
+
     /// Where the open tab's frame is now: the row that holds it, and the frame
     /// in this view's coordinates, kept inside its list, so a row scrolled
     /// away is flown from the list's edge. Nil while no list on screen has it.
     private func openRowFrame() -> (row: FlatRowView?, rect: NSRect)? {
-        let lists: [(NSTableView, Int?)] = [
+        var lists: [(NSTableView, Int?)] = [
             (fileTree.openRowTable, fileTree.openRowIndex),
             (projectsPanel.changes.openRowTable, projectsPanel.changes.openRowIndex),
             (projectsPanel.history.openRowTable, projectsPanel.history.openRowIndex),
         ]
+        if let gitController {
+            lists.append((gitController.openRowTable, gitController.openRowIndex))
+        }
         for (table, index) in lists {
             guard let index, table.window != nil, !table.isHiddenOrHasHiddenAncestor
             else { continue }
@@ -474,6 +502,9 @@ final class SidebarViewController: NSViewController {
         git.onOpenDiff = { [weak self] entry, directory in self?.onGitDiff?(entry, directory) }
         git.onOpenCommitDiff = { [weak self] commit, file, directory in
             self?.onGitCommitDiff?(commit, file, directory)
+        }
+        git.onSelectCommit = { [weak self] hash in
+            self?.selectHistoryCommit(hash, inGitPanel: true)
         }
         git.onChanged = { [weak self] directory in self?.onGitChanged?(directory) }
         if let directory { git.setDirectory(directory) }

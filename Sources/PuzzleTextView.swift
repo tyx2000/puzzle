@@ -1504,7 +1504,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         // crossing, must not stack two translucent coats of the same colour.
         let bands = NSBezierPath()
         bands.windingRule = .nonZero
-        if let hoverLineBand { bands.appendRect(hoverLineBand) }
+        if let hover = displayedHoverLineBandRect() { bands.appendRect(hover) }
         if let active = displayedCurrentLineBandRect() { bands.appendRect(active) }
         // Highlighted rows have the same ground even over a zebra stripe.
         Theme.editorBackground.setFill()
@@ -1567,6 +1567,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     override func didChangeText() {
         super.didChangeText()
         endLineFlight()
+        refreshHoverLine(animated: false)
     }
 
     /// The caret has moved — its line's band flies there from `shown`, if it
@@ -1654,32 +1655,114 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// The line under the pointer is lit the way the line being worked on is,
     /// wherever that one would be: code that can be typed into. Set by the
     /// pane with each document it shows.
-    var showsHoverLineBand = false { didSet { refreshHoverState() } }
+    var showsHoverLineBand = false { didSet { refreshHoverLine(animated: false) } }
 
     /// The band across the line under the pointer, in view coordinates. Kept
     /// where it is rather than tied to a character: the pointer is still over
     /// the same row when the text under it changes.
-    private var hoverLineBand: NSRect? {
-        didSet {
-            guard hoverLineBand != oldValue else { return }
-            for rect in [oldValue, hoverLineBand].compactMap({ $0 }) { setNeedsDisplay(rect) }
-        }
-    }
+    private var hoverLineBand: NSRect?
+    private var hoverLineFlight: LineFlight?
+    private var hoverLineFlightTimer: Timer?
+    private var displayedHoverFlightBand: NSRect?
+    private var hoverLineFlightDamage: NSRect?
     var hoverLineBandForTesting: NSRect? { hoverLineBand }
+
+    /// Drawing and invalidation use the same tick's position, just as the
+    /// active line does. The real hovered row remains the hit-test target.
+    func displayedHoverLineBandRect() -> NSRect? {
+        guard let target = hoverLineBand else { return nil }
+        guard hoverLineFlight != nil, let displayedHoverFlightBand else { return target }
+        return NSRect(x: target.minX, y: displayedHoverFlightBand.minY,
+                      width: target.width, height: displayedHoverFlightBand.height)
+    }
+
+    var hoverLineFlightForTesting: (from: NSRect, to: NSRect, duration: TimeInterval)? {
+        hoverLineFlight.map { ($0.from, $0.to, $0.duration) }
+    }
 
     /// Where the pointer is now — after the code scrolled under it, say. Not
     /// while a scroller is dragged, which scrolls every line past it.
     func refreshHoverState() {
-        guard let window else {
-            hoverLineBand = nil
-            return
-        }
-        updateHoverLine(at: convert(window.pointerLocation, from: nil))
+        refreshHoverLine(animated: true)
     }
 
-    private func updateHoverLine(at point: NSPoint) {
-        hoverLineBand = showsHoverLineBand && !PuzzleScroller.isDragging
+    private func refreshHoverLine(animated: Bool) {
+        guard let window else {
+            setHoverLineBand(nil, animated: false)
+            return
+        }
+        updateHoverLine(at: convert(window.pointerLocation, from: nil), animated: animated)
+    }
+
+    private func updateHoverLine(at point: NSPoint, animated: Bool = true) {
+        let target = showsHoverLineBand && !PuzzleScroller.isDragging
             ? lineBandRect(at: point) : nil
+        setHoverLineBand(target, animated: animated)
+    }
+
+    private func setHoverLineBand(_ target: NSRect?, animated: Bool) {
+        let canAnimate = animated && window?.isVisible == true
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard target != hoverLineBand else {
+            if !canAnimate { endHoverLineFlight() }
+            return
+        }
+        let shown = displayedHoverLineBandRect()
+        let previous = hoverLineBand
+        hoverLineBand = target
+        for rect in [previous, target, shown].compactMap({ $0 }) {
+            setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
+        }
+        guard canAnimate, let shown, let target,
+              abs(shown.minY - target.minY) > 0.5 else {
+            endHoverLineFlight()
+            return
+        }
+        hoverLineFlight = LineFlight(
+            from: shown, to: target, started: CACurrentMediaTime(),
+            duration: Self.lineFlightDuration(forDistance: target.minY - shown.minY))
+        displayedHoverFlightBand = shown
+        hoverLineFlightDamage = hoverLineFlightDamage.map { $0.union(shown) } ?? shown
+        if hoverLineFlightTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+                self?.advanceHoverLineFlight()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            hoverLineFlightTimer = timer
+        }
+        advanceHoverLineFlight()
+    }
+
+    private func advanceHoverLineFlight() {
+        guard let flight = hoverLineFlight, let target = hoverLineBand,
+              window?.isVisible == true,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            endHoverLineFlight()
+            return
+        }
+        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
+        let t = ChangeFrameOverlay.eased(CGFloat(progress))
+        let now = NSRect(x: target.minX,
+                         y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
+                         width: target.width,
+                         height: flight.from.height + (flight.to.height - flight.from.height) * t)
+        for rect in [displayedHoverFlightBand, now].compactMap({ $0 }) {
+            setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
+        }
+        displayedHoverFlightBand = now
+        hoverLineFlightDamage = hoverLineFlightDamage.map { $0.union(now) } ?? now
+        if progress >= 1 { endHoverLineFlight() }
+    }
+
+    private func endHoverLineFlight() {
+        hoverLineFlightTimer?.invalidate()
+        hoverLineFlightTimer = nil
+        guard hoverLineFlight != nil else { return }
+        hoverLineFlight = nil
+        for rect in [hoverLineFlightDamage, displayedHoverFlightBand, hoverLineBand]
+            .compactMap({ $0 }) { setNeedsDisplay(rect.insetBy(dx: 0, dy: -1)) }
+        displayedHoverFlightBand = nil
+        hoverLineFlightDamage = nil
     }
 
     /// The band across the line at `point`, as wide as the current-line band;
@@ -1897,7 +1980,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         }
         guard window != nil else {
             clearCommandHover()
-            hoverLineBand = nil
+            setHoverLineBand(nil, animated: false)
             scopeLine?.isHidden = true
             return
         }
@@ -1907,7 +1990,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
                 forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
             ) { [weak self] _ in
                 self?.syncScopeLine()
-                self?.refreshHoverState()
+                self?.refreshHoverLine(animated: false)
             }
         }
         scheduleScopeLineSync()
@@ -1923,6 +2006,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
 
     deinit {
         lineFlightTimer?.invalidate()
+        hoverLineFlightTimer?.invalidate()
         if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
         if let scopeLineScrollObserver { NotificationCenter.default.removeObserver(scopeLineScrollObserver) }
         if let caretLinkScrollObserver {
@@ -1944,7 +2028,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     override func mouseExited(with event: NSEvent) {
         clearCommandHover()
         updateLinkHover(with: nil)
-        hoverLineBand = nil
+        setHoverLineBand(nil, animated: false)
     }
 
     // MARK: - Markdown link hover
@@ -2272,8 +2356,13 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        let changed = frame.size != newSize
         super.setFrameSize(newSize)
         applyReadingInset()
+        if changed, hoverLineFlight != nil {
+            endHoverLineFlight()
+            DispatchQueue.main.async { [weak self] in self?.refreshHoverLine(animated: false) }
+        }
     }
 
     /// Room above the text, left by the pane when the text above the caret

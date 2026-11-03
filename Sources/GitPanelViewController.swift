@@ -8,6 +8,8 @@ final class GitPanelViewController: NSViewController {
     var onOpenDiff: ((GitService.Status.Entry, URL) -> Void)?
     /// Clicking a file inside an expanded commit shows that commit's diff for it.
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
+    /// The sidebar owns selection when this panel is mounted beside its tree.
+    var onSelectCommit: ((String) -> Void)?
     /// An operation finished in the given project — which may no longer be
     /// the one on screen; the window refreshes whatever shows that project.
     var onChanged: ((URL) -> Void)?
@@ -26,6 +28,73 @@ final class GitPanelViewController: NSViewController {
     /// active file in the tree.
     private var activeChangesPath: String?
     private var activeCommitFile: (commit: String, path: String)?
+    var selectedCommit: String? {
+        didSet {
+            guard selectedCommit != oldValue else { return }
+            if selectedCommit != nil {
+                activeChangesPath = nil
+                activeCommitFile = nil
+            }
+            refreshOpenRows()
+        }
+    }
+
+    var openRowTable: NSTableView { table }
+    var openRowIndex: Int? {
+        guard !showingBranches else { return nil }
+        let count = showingHistory ? historyRows.count : entries.count
+        return (0..<count).first(where: isOpenRow)
+    }
+
+    func showOpenTab(_ tab: OpenTab) {
+        selectedCommit = nil
+        switch tab {
+        case .file:
+            activeChangesPath = nil
+            activeCommitFile = nil
+        case .change(let path):
+            activeChangesPath = path
+            activeCommitFile = nil
+        case .commitFile(let commit, let path):
+            activeChangesPath = nil
+            activeCommitFile = (commit, path)
+        }
+        refreshOpenRows()
+    }
+
+    private func isOpenRow(_ row: Int) -> Bool {
+        guard row >= 0, !showingBranches else { return false }
+        if showingHistory {
+            guard row < historyRows.count else { return false }
+            switch historyRows[row] {
+            case .commit(let commit, _): return selectedCommit == commit.shortHash
+            case .file(let file, let commit):
+                return selectedCommit == nil && activeCommitFile?.commit == commit.shortHash
+                    && activeCommitFile?.path == file.path
+            }
+        }
+        return selectedCommit == nil && row < entries.count && activeChangesPath == entries[row].path
+    }
+
+    private func refreshOpenRows() {
+        guard isViewLoaded else { return }
+        table.enumerateAvailableRowViews { [self] rowView, row in
+            (rowView as? GitRowView)?.isActiveFile = isOpenRow(row)
+        }
+        renderedActiveChangesPath = activeChangesPath
+        renderedActiveCommitFile = activeCommitFile.map { "\($0.commit):\($0.path)" }
+    }
+
+    private func openRowRect() -> NSRect? {
+        guard let row = openRowIndex else { return nil }
+        return table.convert(FlatRowView.frameRect(in: table.rect(ofRow: row)), to: view)
+    }
+
+    private func flyOpenRow(from: NSRect?) {
+        view.layoutSubtreeIfNeeded()
+        let row = openRowIndex.flatMap { table.rowView(atRow: $0, makeIfNecessary: false) as? FlatRowView }
+        RowFrameFlight.fly(in: view, from: from, to: openRowRect(), landingOn: row)
+    }
     /// Files per commit, fetched on first expand.
     private var commitFiles: [String: [GitService.CommitFile]] = [:]
 
@@ -137,6 +206,7 @@ final class GitPanelViewController: NSViewController {
         // that was open there.
         activeChangesPath = nil
         activeCommitFile = nil
+        selectedCommit = nil
         expandedCommits.removeAll()
         commitFiles.removeAll()
         entries.removeAll()
@@ -928,23 +998,36 @@ final class GitPanelViewController: NSViewController {
             guard row < historyRows.count else { return }
             switch historyRows[row] {
             case .commit(let commit, _):
+                if let onSelectCommit {
+                    onSelectCommit(commit.shortHash)
+                } else {
+                    let from = openRowRect()
+                    selectedCommit = commit.shortHash
+                    flyOpenRow(from: from)
+                }
                 toggleCommit(commit, in: directory)
             case .file(let file, let commit):
-                activeCommitFile = (commit.shortHash, file.path)
-                activeChangesPath = nil
-                table.reloadData()
-                onOpenCommitDiff?(commit, file, directory)
+                if let onOpenCommitDiff {
+                    onOpenCommitDiff(commit, file, directory)
+                } else {
+                    let from = openRowRect()
+                    showOpenTab(.commitFile(commit: commit.shortHash, path: file.path))
+                    flyOpenRow(from: from)
+                }
             }
             return
         }
 
         guard row < entries.count else { return }
         let entry = entries[row]
-        activeChangesPath = entry.path
-        activeCommitFile = nil
-        table.reloadData()
         // Clicking a changed file shows its diff, not the plain file.
-        onOpenDiff?(entry, directory)
+        if let onOpenDiff {
+            onOpenDiff(entry, directory)
+        } else {
+            let from = openRowRect()
+            showOpenTab(.change(path: entry.path))
+            flyOpenRow(from: from)
+        }
     }
 
     /// Switch to the Branch tab programmatically.
@@ -1578,20 +1661,10 @@ extension GitPanelViewController: NSTableViewDataSource {
             ?? GitRowView()
         view.identifier = id
         view.isHovered = table.hoveredRow == row
-        view.isActiveFile = false
+        view.isActiveFile = isOpenRow(row)
         // Branches and commits are read across a wide row; alternate rows
         // keep the line. Changes is a short list of names and stays plain.
         view.isStriped = (showingBranches || showingHistory) && row % 2 == 1
-        if showingBranches {
-            return view
-        } else if showingHistory, row < historyRows.count {
-            if case .file(let file, let commit) = historyRows[row] {
-                view.isActiveFile = activeCommitFile?.commit == commit.shortHash
-                    && activeCommitFile?.path == file.path
-            }
-        } else if row < entries.count {
-            view.isActiveFile = activeChangesPath == entries[row].path
-        }
         return view
     }
 

@@ -16,6 +16,15 @@ final class ProjectHistoryViewController: NSViewController {
     var onOpenCommitDiff: ((GitService.Commit, GitService.CommitFile, URL) -> Void)?
     /// Open the current working-tree file from the row's trailing button.
     var onOpenFile: ((URL) -> Void)?
+    /// The sidebar can hand its shared selection to this commit without
+    /// changing what a click does to the commit's expanded files.
+    var onSelectCommit: ((String) -> Void)?
+    var selectedCommit: String? {
+        didSet {
+            guard selectedCommit != oldValue else { return }
+            refreshOpenRow()
+        }
+    }
 
     /// A commit, or one of its files while the commit is open.
     private enum Row {
@@ -37,6 +46,7 @@ final class ProjectHistoryViewController: NSViewController {
     var openFile: OpenFile? {
         didSet {
             guard openFile != oldValue else { return }
+            if openFile != nil { selectedCommit = nil }
             refreshOpenRow()
             if let row = openRowIndex { table.scrollRowToVisible(row) }
         }
@@ -44,9 +54,14 @@ final class ProjectHistoryViewController: NSViewController {
     /// Where the open file's row is, while its commit is open.
     var openRowIndex: Int? { rows.indices.first(where: isOpen) }
     private func isOpen(_ row: Int) -> Bool {
-        guard let openFile, rows.indices.contains(row),
-              case .file(let file, let commit) = rows[row] else { return false }
-        return commit.shortHash == openFile.commit && file.path == openFile.path
+        guard rows.indices.contains(row) else { return false }
+        switch rows[row] {
+        case .commit(let commit): return selectedCommit == commit.shortHash
+        case .file(let file, let commit):
+            guard selectedCommit == nil, let openFile else { return false }
+            return commit.shortHash == openFile.commit && file.path == openFile.path
+        case .base: return false
+        }
     }
     var openRowTable: NSTableView { table }
 
@@ -179,6 +194,8 @@ final class ProjectHistoryViewController: NSViewController {
         commits = []
         unpushed = []
         expanded = []
+        selectedCommit = nil
+        openFile = nil
         files = [:]
         baseName = nil
         inherited = []
@@ -312,12 +329,30 @@ final class ProjectHistoryViewController: NSViewController {
         guard let directory, rows.indices.contains(row) else { return }
         switch rows[row] {
         case .commit(let commit):
+            if let onSelectCommit {
+                onSelectCommit(commit.shortHash)
+            } else {
+                let from = selectionRect()
+                openFile = nil
+                selectedCommit = commit.shortHash
+                table.layoutSubtreeIfNeeded()
+                let target = openRowIndex
+                RowFrameFlight.fly(in: view, from: from, to: selectionRect(),
+                                   landingOn: target.flatMap {
+                    table.rowView(atRow: $0, makeIfNecessary: false) as? FlatRowView
+                })
+            }
             toggle(commit, in: directory)
         case .file(let file, let commit):
             onOpenCommitDiff?(commit, file, directory)
         case .base:
             toggleBaseFold()
         }
+    }
+
+    private func selectionRect() -> NSRect? {
+        guard let index = openRowIndex else { return nil }
+        return table.convert(FlatRowView.frameRect(in: table.rect(ofRow: index)), to: view)
     }
 
     /// The rule folds the base's commits away, and brings them back.

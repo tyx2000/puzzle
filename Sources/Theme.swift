@@ -437,26 +437,36 @@ class FlatRowView: NSTableRowView {
     /// The colour the row shows now, selection and hover included.
     var ground: NSColor { Theme.panelBackground }
 
-    /// The row of what the open tab shows: framed as a diff frames a change,
-    /// in the accent, in from the row's sides, over whatever ground the row
-    /// has. A frame rather than a fill, so it can travel from row to row.
+    /// The row selected by the open file or the last activated commit.
     var showsFrame = false {
         didSet { if showsFrame != oldValue { needsDisplay = true } }
     }
-    /// Held back while a frame flies in to this row, so the two never show
-    /// at once.
+    /// The moving background owns the destination until it lands.
     var holdsFrameBack = false {
         didSet { if holdsFrameBack != oldValue { needsDisplay = true } }
     }
-    /// Room for the frame's band round its line, inside the row.
-    static let frameInset = NSSize(width: 6, height: 2)
-    /// Where the frame's line sits in a row of `bounds`.
-    static func frameRect(in bounds: NSRect) -> NSRect {
-        bounds.insetBy(dx: frameInset.width, dy: frameInset.height)
+    static let frameInset = NSSize.zero
+    static func frameRect(in bounds: NSRect) -> NSRect { bounds }
+    private var selectionBackground: CALayer?
+    private var selectionTint: CALayer?
+    var isFrameShownForTesting: Bool { selectionBackground.map { !$0.isHidden } ?? false }
+    var frameLineLayerForTesting: CALayer? { selectionBackground }
+    var selectionBackgroundLayerForTesting: CALayer? { selectionBackground }
+    var selectionBackgroundRectForTesting: NSRect? {
+        selectionBackground.flatMap { $0.isHidden ? nil : $0.frame }
     }
-    private var frameLayers: (glow: CALayer, line: CALayer)?
-    var isFrameShownForTesting: Bool { frameLayers.map { !$0.line.isHidden } ?? false }
-    var frameLineLayerForTesting: CALayer? { frameLayers?.line }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        RowFrameFlight.register(self)
+    }
+
+    private var selectedBackgroundRect: NSRect? {
+        if RowFrameFlight.controlsBackground(in: self) {
+            return RowFrameFlight.background(in: self)
+        }
+        return showsFrame && !holdsFrameBack ? bounds : nil
+    }
 
     override var isSelected: Bool {
         didSet { if isSelected != oldValue { needsDisplay = true } }
@@ -474,39 +484,56 @@ class FlatRowView: NSTableRowView {
     }
 
     override func updateLayer() {
+        RowFrameFlight.register(self)
         layer?.backgroundColor = ground.cgColor
-        updateFrameLayer()
+        updateSelectionBackground()
     }
 
     override func layout() {
         super.layout()
-        if let frameLayers {
-            frameLayers.glow.frame = OpenFrame.glowRect(for: Self.frameRect(in: bounds))
-            frameLayers.line.frame = Self.frameRect(in: bounds)
+        updateSelectionBackground()
+    }
+
+    /// The colour sits behind the row's cell and icons. Each row renders the
+    /// piece of the shared moving band that crosses it, so no overlay has to
+    /// tint the text to travel between lists.
+    private func updateSelectionBackground() {
+        let rect = selectedBackgroundRect
+        guard rect != nil || selectionBackground != nil, let layer else { return }
+        if selectionBackground == nil {
+            let background = CALayer(), tint = CALayer()
+            for part in [background, tint] {
+                part.actions = ["frame": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                                "hidden": NSNull(), "backgroundColor": NSNull()]
+            }
+            background.zPosition = -1
+            background.masksToBounds = true
+            background.addSublayer(tint)
+            layer.insertSublayer(background, at: 0)
+            selectionBackground = background
+            selectionTint = tint
+        }
+        selectionBackground?.isHidden = rect == nil
+        if let rect {
+            selectionBackground?.frame = rect
+            selectionBackground?.backgroundColor = Theme.editorBackground.cgColor
+            selectionTint?.frame = NSRect(origin: .zero, size: rect.size)
+            selectionTint?.backgroundColor = PuzzleTextView.currentLineTint.cgColor
         }
     }
 
-    /// Sublayers over the cell, made the first time the row is framed.
-    private func updateFrameLayer() {
-        let shown = showsFrame && !holdsFrameBack
-        guard shown || frameLayers != nil, let layer else { return }
-        let layers = frameLayers ?? {
-            let made = OpenFrame.makeLayers()
-            layer.addSublayer(made.glow)
-            layer.addSublayer(made.line)
-            frameLayers = made
-            return made
-        }()
-        OpenFrame.style(glow: layers.glow, line: layers.line,
-                        at: Self.frameRect(in: bounds), hidden: !shown)
-    }
-
-    /// The row as it renders off screen — a snapshot, a drag image.
+    /// Off-screen snapshots use the same ground and tint as the layers.
     override func drawBackground(in dirtyRect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(rect: dirtyRect).addClip()
         ground.setFill()
         bounds.fill()
-        guard showsFrame, !holdsFrameBack else { return }
-        OpenFrame.draw(in: Self.frameRect(in: bounds))
+        guard let rect = selectedBackgroundRect else { return }
+        Theme.editorBackground.setFill()
+        rect.fill()
+        PuzzleTextView.currentLineTint.setFill()
+        rect.fill(using: .sourceOver)
     }
 
     /// Selection is part of `ground`.

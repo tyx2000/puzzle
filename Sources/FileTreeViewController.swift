@@ -506,6 +506,14 @@ final class FileTreeViewController: NSViewController {
         return titleColor(for: node)
     }
 
+    /// A commit row, rather than the open editor tab, owns the sidebar's
+    /// selected background until another file is brought forward.
+    func clearSelectedFile() {
+        let previousURL = activeURL
+        activeURL = nil
+        refreshActiveFilePresentation(previousURL: previousURL)
+    }
+
     /// Expand ancestors and select the row for `url` (keeps the tree in sync
     /// with the active editor tab). Does not trigger onOpenFile.
     func selectFile(_ url: URL) {
