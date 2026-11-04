@@ -1661,8 +1661,17 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// where it is rather than tied to a character: the pointer is still over
     /// the same row when the text under it changes.
     private var hoverLineBand: NSRect?
-    private var hoverLineFlight: LineFlight?
+    private struct HoverLineFlight {
+        let from: NSRect
+        let to: NSRect
+    }
+    /// Hover follows continuous pointer input rather than restarting the
+    /// caret's slow-start curve every time the pointer crosses another row.
+    private static let hoverLineResponseTime: TimeInterval = 0.03
+    private static let hoverLineLandingTolerance: CGFloat = 0.25
+    private var hoverLineFlight: HoverLineFlight?
     private var hoverLineFlightTimer: Timer?
+    private var hoverLineLastTick: CFTimeInterval?
     private var displayedHoverFlightBand: NSRect?
     private var hoverLineFlightDamage: NSRect?
     var hoverLineBandForTesting: NSRect? { hoverLineBand }
@@ -1677,7 +1686,12 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     }
 
     var hoverLineFlightForTesting: (from: NSRect, to: NSRect, duration: TimeInterval)? {
-        hoverLineFlight.map { ($0.from, $0.to, $0.duration) }
+        hoverLineFlight.map {
+            let distance = max(abs($0.to.minY - $0.from.minY), abs($0.to.height - $0.from.height))
+            let duration = Self.hoverLineResponseTime
+                * log(max(1, Double(distance / Self.hoverLineLandingTolerance)))
+            return ($0.from, $0.to, duration)
+        }
     }
 
     /// Where the pointer is now — after the code scrolled under it, say. Not
@@ -1710,53 +1724,60 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         let shown = displayedHoverLineBandRect()
         let previous = hoverLineBand
         hoverLineBand = target
-        for rect in [previous, target, shown].compactMap({ $0 }) {
-            setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
-        }
         guard canAnimate, let shown, let target,
               abs(shown.minY - target.minY) > 0.5 else {
+            for rect in [previous, target, shown].compactMap({ $0 }) {
+                setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
+            }
             endHoverLineFlight()
             return
         }
-        hoverLineFlight = LineFlight(
-            from: shown, to: target, started: CACurrentMediaTime(),
-            duration: Self.lineFlightDuration(forDistance: target.minY - shown.minY))
+        hoverLineFlight = HoverLineFlight(from: shown, to: target)
         displayedHoverFlightBand = shown
         hoverLineFlightDamage = hoverLineFlightDamage.map { $0.union(shown) } ?? shown
         if hoverLineFlightTimer == nil {
+            hoverLineLastTick = CACurrentMediaTime()
             let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
                 self?.advanceHoverLineFlight()
             }
             RunLoop.main.add(timer, forMode: .common)
             hoverLineFlightTimer = timer
         }
-        advanceHoverLineFlight()
+        // A burst of pointer events only replaces the destination. The next
+        // tick consumes the latest one and damages only what is really drawn.
     }
 
     private func advanceHoverLineFlight() {
-        guard let flight = hoverLineFlight, let target = hoverLineBand,
+        guard hoverLineFlight != nil, let target = hoverLineBand,
+              let previous = displayedHoverFlightBand,
               window?.isVisible == true,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             endHoverLineFlight()
             return
         }
-        let progress = min(1, max(0, (CACurrentMediaTime() - flight.started) / flight.duration))
-        let t = ChangeFrameOverlay.eased(CGFloat(progress))
+        let time = CACurrentMediaTime()
+        let elapsed = max(0, time - (hoverLineLastTick ?? time))
+        hoverLineLastTick = time
+        // Exact exponential integration keeps the same response when frames
+        // run late. Retargeting never resets the clock or introduces a pause.
+        let fraction = CGFloat(-expm1(-elapsed / Self.hoverLineResponseTime))
         let now = NSRect(x: target.minX,
-                         y: flight.from.minY + (flight.to.minY - flight.from.minY) * t,
+                         y: previous.minY + (target.minY - previous.minY) * fraction,
                          width: target.width,
-                         height: flight.from.height + (flight.to.height - flight.from.height) * t)
-        for rect in [displayedHoverFlightBand, now].compactMap({ $0 }) {
+                         height: previous.height + (target.height - previous.height) * fraction)
+        for rect in [previous, now] {
             setNeedsDisplay(rect.insetBy(dx: 0, dy: -1))
         }
         displayedHoverFlightBand = now
         hoverLineFlightDamage = hoverLineFlightDamage.map { $0.union(now) } ?? now
-        if progress >= 1 { endHoverLineFlight() }
+        if max(abs(now.minY - target.minY), abs(now.height - target.height))
+            <= Self.hoverLineLandingTolerance { endHoverLineFlight() }
     }
 
     private func endHoverLineFlight() {
         hoverLineFlightTimer?.invalidate()
         hoverLineFlightTimer = nil
+        hoverLineLastTick = nil
         guard hoverLineFlight != nil else { return }
         hoverLineFlight = nil
         for rect in [hoverLineFlightDamage, displayedHoverFlightBand, hoverLineBand]

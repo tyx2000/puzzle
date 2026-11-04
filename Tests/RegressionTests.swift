@@ -27,6 +27,7 @@ enum RegressionTests {
         if CommandLine.arguments.contains("--animated-background-regressions") {
             try testCaretLineFlies()
             try testHoverLineFlies()
+            try testHoverKeepsUpWithRapidPointerMovement()
             try testLineBandLeavesNoRepaintResidue()
             try testCodeLightsTheLineUnderThePointer()
             try testFlatSurfacesHoldNoBitmap()
@@ -34,7 +35,7 @@ enum RegressionTests {
             try testOpenRowBackgroundTravels()
             try testSidebarBackgroundLandsWhenItsListScrolls()
             try testGitPanelRestoresSidebarSelection()
-            print("Animated background regression tests passed (9)")
+            print("Animated background regression tests passed (10)")
             return
         }
         if CommandLine.arguments.contains("--line-popup-regressions") {
@@ -42,6 +43,7 @@ enum RegressionTests {
             try testActiveLineBadge()
             try testCaretLineFlies()
             try testHoverLineFlies()
+            try testHoverKeepsUpWithRapidPointerMovement()
             try testLineBandLeavesNoRepaintResidue()
             try testCodeLightsTheLineUnderThePointer()
             try testGutterMarksUncommittedChanges()
@@ -49,7 +51,7 @@ enum RegressionTests {
             try testGutterLinksMarkToItsDiff()
             try testGitChangePanelFlows()
             try testGitChangeLightsItsLines()
-            print("Active-line and Git panel regression tests passed (11)")
+            print("Active-line and Git panel regression tests passed (12)")
             return
         }
         if CommandLine.arguments.contains("--project-replace-regressions") {
@@ -306,6 +308,7 @@ enum RegressionTests {
         try testActiveLineBadge()
         try testCaretLineFlies()
         try testHoverLineFlies()
+        try testHoverKeepsUpWithRapidPointerMovement()
         try testLineBandLeavesNoRepaintResidue()
         try testActiveLineStaysInFiniteDocument()
         try testFileOpensRouteToTheirProjectWindow()
@@ -10991,6 +10994,99 @@ enum RegressionTests {
                     && text.hoverLineFlightForTesting == nil,
                    "a dragged scroller retained the moving hover background")
         scroller.endDraggingForTesting()
+    }
+
+    /// Pointer rows can change faster than display ticks. The mark must make
+    /// progress during that movement, rather than restarting a slow takeoff
+    /// for every mouse event and only moving after the pointer has stopped.
+    private static func testHoverKeepsUpWithRapidPointerMovement() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let oldLineHeight = Settings.shared.codeLineHeight
+        Settings.shared.codeLineHeight = 27
+        defer { Settings.shared.codeLineHeight = oldLineHeight }
+        let directory = try temporaryDirectory("hover-tracking")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data((1...80).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 900),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 900))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(1)
+        pane.view.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let layout = text.layoutManager else {
+            throw Failure(description: "the hover tracking fixture has no layout")
+        }
+        let source = text.string as NSString
+        var points: [Int: NSPoint] = [:]
+        var start = 0
+        for line in 1...25 {
+            layout.ensureLayout(forCharacterRange: NSRange(location: start, length: 1))
+            let fragment = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: start),
+                                                   effectiveRange: nil)
+            let point = NSPoint(x: text.visibleRect.maxX - 30,
+                                y: fragment.midY + text.textContainerOrigin.y)
+            points[line] = point
+            start = NSMaxRange(source.lineRange(for: NSRange(location: start, length: 0)))
+        }
+        func hover(_ line: Int) throws -> NSRect {
+            let point = NSPoint(x: text.visibleRect.maxX - 30, y: points[line]!.y)
+            pinPointer(at: window.convertPoint(toScreen: text.convert(point, to: nil)))
+            text.refreshHoverState()
+            guard let target = text.hoverLineBandForTesting else {
+                throw Failure(description: "the tracking pointer is not on line \(line)")
+            }
+            return target
+        }
+        let first = try hover(2)
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reducedMotion {
+            // Coalesce several destinations before the next frame. Pointer
+            // events must not advance the presentation independently of the
+            // frame tick. AppKit can mark unrelated text geometry dirty, so
+            // its whole-view needsDisplay flag is not evidence of band work.
+            for line in 3...8 { _ = try hover(line) }
+            try expect(text.displayedHoverLineBandRect().map {
+                abs($0.minY - first.minY) < 0.01 && abs($0.height - first.height) < 0.01
+            } == true,
+                       "pointer events advanced the hover presentation before its frame: \(String(describing: text.displayedHoverLineBandRect())) from \(first)")
+        }
+        var target = first
+        for line in 3...22 {
+            target = try hover(line)
+            RunLoop.main.run(until: Date().addingTimeInterval(1.0 / 120))
+        }
+        guard let shown = text.displayedHoverLineBandRect() else {
+            throw Failure(description: "the hover mark disappeared during continuous pointer movement")
+        }
+        if reducedMotion {
+            try expect(shown == target && text.hoverLineFlightForTesting == nil,
+                       "rapid hover did not land immediately with Reduce Motion enabled")
+        } else {
+            let distance = target.minY - first.minY
+            try expect(shown.minY - first.minY > distance * 0.35 && shown.minY <= target.minY + 0.5,
+                       "hover stalled during fast movement: shown \(shown.minY), start \(first.minY), target \(target.minY)")
+            let beforeReverse = shown
+            _ = try hover(3)
+            try expect(abs((text.displayedHoverLineBandRect()?.minY ?? -.infinity) - beforeReverse.minY) < 0.5,
+                       "reversing the pointer jumped the displayed mark")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.04))
+            try expect((text.displayedHoverLineBandRect()?.minY ?? .infinity) < beforeReverse.minY - 1,
+                       "hover did not start following a reversed pointer promptly")
+        }
+        // A distant destination must settle after the final pointer event,
+        // and remain at rest when subsequent display ticks arrive.
+        let distant = try hover(25)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        try expect(text.hoverLineFlightForTesting == nil && text.displayedHoverLineBandRect() == distant,
+                   "hover did not settle promptly after a large pointer move")
     }
 
     /// TextKit can paint several dirty rectangles into the same backing
