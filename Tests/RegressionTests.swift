@@ -63,6 +63,13 @@ enum RegressionTests {
             print("Animated background regression tests passed (10)")
             return
         }
+        if CommandLine.arguments.contains("--scope-drawing-regressions") {
+            try testActivePairTintedAndLined()
+            try testActivePairIsOneFlowingLine()
+            try testActivePairDrawsInOneStroke()
+            print("Scope drawing regression tests passed (3)")
+            return
+        }
         if CommandLine.arguments.contains("--commit-file-reveal-regressions") {
             try testCommitFileTabsRevealCollapsedHistory()
             print("Commit file reveal regression tests passed (1)")
@@ -184,6 +191,7 @@ enum RegressionTests {
         try testActivePairTintedAndLined()
         try testActivePairRunsDownTheGuide()
         try testActivePairIsOneFlowingLine()
+        try testActivePairDrawsInOneStroke()
         try testDiffPairIgnoresTheMarks()
         try testCommitImagePathsDoNotCollide()
         try testFullScreenStripTakesTheLightsPlace()
@@ -4004,6 +4012,160 @@ enum RegressionTests {
                    "a returned component's line does not set out along its tag's bottom: \(returned.walk)")
         try expect(close(returned.walk.end.x, returned.line.guideX) && returned.walk.arrives.dy > 0.99,
                    "a returned component's line does not end running down into the guide: \(returned.walk)")
+    }
+
+    /// A newly active pair is traced once. Moving within it, repainting and
+    /// scrolling keep that stroke's clock; a new pair replaces the old stroke.
+    private static func testActivePairDrawsInOneStroke() throws {
+        let size = NSSize(width: 600, height: 300)
+        let text = PuzzleTextView(frame: NSRect(origin: .zero,
+                                                size: NSSize(width: size.width, height: 1800)))
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
+        scroll.hasVerticalScroller = true
+        scroll.documentView = text
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        window.contentView = scroll
+        // Replacing a window's content view can reset its viewport to zero.
+        window.setContentSize(size)
+        window.orderFrontRegardless()
+        text.font = Theme.editorFont()
+        text.scopeLineReduceMotionForTesting = false
+        let source = "first(\n  one\n)\nsecond[\n  two\n]\n<Panel\n  title=\"x\">\n  <Row />\n</Panel>\n"
+            + String(repeating: "\n", count: 60)
+        text.string = source
+        let ns = source as NSString
+        let first = ns.range(of: "first(").location + "first(".count
+        let second = ns.range(of: "second[").location + "second[".count
+        let opening = ns.range(of: "<Panel")
+        let openingEnd = NSMaxRange(ns.range(of: "\">"))
+        let closing = ns.range(of: "</Panel>")
+        text.updateJSXTagMatches([JSXTagMatch(
+            kind: .paired,
+            openingTagRange: NSRange(location: opening.location,
+                                     length: openingEnd - opening.location),
+            closingTagRange: closing,
+            openingAngleRange: NSRange(location: opening.location, length: 1),
+            openingHeadRange: opening,
+            openingTerminatorRange: NSRange(location: openingEnd - 1, length: 1),
+            closingTerminatorRange: NSRange(location: NSMaxRange(closing) - 1, length: 1))])
+        CATransaction.flush()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        try expect(text.visibleRect.width > 0 && text.visibleRect.height > 0,
+                   "the scope animation fixture has no viewport")
+
+        func activate(_ location: Int) {
+            text.setSelectedRange(NSRange(location: location, length: 0))
+            text.refreshBracketMatches()
+            CATransaction.flush()
+        }
+        func stroke(_ name: String) throws -> CABasicAnimation {
+            guard let animation = text.scopeLineDrawingAnimationForTesting else {
+                throw Failure(description: "\(name) did not start drawing")
+            }
+            try expect(animation.keyPath == "strokeEnd"
+                        && (animation.fromValue as? NSNumber)?.doubleValue == 0
+                        && (animation.toValue as? NSNumber)?.doubleValue == 1
+                        && animation.duration > 0 && animation.duration <= 0.25
+                        && animation.repeatCount == 0 && !animation.autoreverses,
+                       "\(name) does not draw one short stroke from start to end")
+            return animation
+        }
+        func currentPath(_ name: String) throws {
+            guard let geometry = text.activeScopeGeometryForTesting else {
+                throw Failure(description: "\(name) has no scope geometry")
+            }
+            let line = text.scopeLineForTesting
+            let expected = geometry.path.boundingBoxOfPath
+            try expect(line.visible
+                        && abs(line.path.minX - expected.minX) < 0.01
+                        && abs(line.path.minY - expected.minY) < 0.01
+                        && abs(line.path.width - expected.width) < 0.01
+                        && abs(line.path.height - expected.height) < 0.01,
+                       "\(name) kept another scope's path: \(line.path) vs \(expected)")
+        }
+        func halfway(_ animation: CABasicAnimation, _ name: String) throws {
+            RunLoop.main.run(until: Date().addingTimeInterval(animation.duration * 0.3))
+            let progress = text.scopeLineDrawingProgressForTesting
+            try expect(progress > 0 && progress < 1,
+                       "\(name) has no partially drawn presentation: \(progress)")
+        }
+        func completed(_ animation: CABasicAnimation, _ name: String) throws {
+            RunLoop.main.run(until: Date().addingTimeInterval(animation.duration + 0.05))
+            try expect(text.scopeLineDrawingAnimationForTesting == nil
+                        && abs(text.scopeLineDrawingProgressForTesting - 1) < 0.001,
+                       "\(name) did not finish on its complete line")
+            try currentPath(name)
+        }
+
+        activate(first)
+        let bracket = try stroke("the bracket pair")
+        try currentPath("the bracket pair")
+        try halfway(bracket, "the bracket pair")
+        let progress = text.scopeLineDrawingProgressForTesting
+        // Both sides of the same opening bracket activate the same pair.
+        activate(first - 1)
+        for _ in 0..<3 {
+            text.needsDisplay = true
+            text.displayIfNeeded()
+            _ = text.scopeLineForTesting
+        }
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 8))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        _ = text.scopeLineForTesting
+        let continued = try stroke("the same bracket after moving, drawing and scrolling")
+        try expect(continued.beginTime == bracket.beginTime
+                    && text.scopeLineDrawingProgressForTesting >= progress,
+                   "moving, drawing or scrolling restarted the same scope")
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try completed(bracket, "the bracket pair")
+        activate(first)
+        text.displayIfNeeded()
+        _ = text.scopeLineForTesting
+        try expect(text.scopeLineDrawingAnimationForTesting == nil,
+                   "the completed scope replayed after another caret movement or draw")
+
+        // Switching while a stroke is running replaces its path and clock.
+        activate(second)
+        let otherBracket = try stroke("the next bracket pair")
+        try currentPath("the next bracket pair")
+        activate(opening.location + 2)
+        let component = try stroke("the component")
+        try expect(component.beginTime > otherBracket.beginTime,
+                   "a component reused the preceding bracket's animation clock")
+        try currentPath("the component")
+        try halfway(component, "the component")
+        activate(ns.range(of: "title").location + 2)
+        let sameComponent = try stroke("the same component's second opening row")
+        try expect(sameComponent.beginTime == component.beginTime,
+                   "moving within the component replayed its stroke")
+        try completed(component, "the component")
+
+        activate(second)
+        _ = try stroke("the bracket before leaving its scope")
+        activate(ns.range(of: "two").location + 1)
+        try expect(!text.scopeLineForTesting.visible
+                    && text.scopeLineDrawingAnimationForTesting == nil,
+                   "leaving a scope kept its line or drawing animation")
+
+        activate(opening.location + 2)
+        _ = try stroke("the component before Reduce Motion")
+        text.scopeLineReduceMotionForTesting = true
+        // Removing a CA animation updates the model immediately; its last
+        // presentation snapshot is replaced on the next rendered frame.
+        CATransaction.flush()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.04))
+        try expect(text.scopeLineDrawingAnimationForTesting == nil
+                    && abs(text.scopeLineDrawingProgressForTesting - 1) < 0.001,
+                   "enabling Reduce Motion did not finish the current stroke immediately")
+        activate(first)
+        try currentPath("the bracket with Reduce Motion")
+        try expect(text.scopeLineDrawingAnimationForTesting == nil
+                    && abs(text.scopeLineDrawingProgressForTesting - 1) < 0.001,
+                   "Reduce Motion animated a newly active scope")
     }
 
     /// In a diff, a pair's line keeps to the code, not the `+`/`-` marks in

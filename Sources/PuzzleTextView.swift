@@ -1992,12 +1992,21 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
             NotificationCenter.default.removeObserver(scopeLineScrollObserver)
             self.scopeLineScrollObserver = nil
         }
+        if let scopeLineMotionObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(scopeLineMotionObserver)
+            self.scopeLineMotionObserver = nil
+        }
         guard window != nil else {
             clearCommandHover()
             setHoverLineBand(nil, animated: false)
+            scopeLine?.finishDrawing()
             scopeLine?.isHidden = true
             return
         }
+        scopeLineMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.syncScopeLine() }
         if let clip = enclosingScrollView?.contentView {
             clip.postsBoundsChangedNotifications = true
             scopeLineScrollObserver = NotificationCenter.default.addObserver(
@@ -2023,6 +2032,9 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         hoverLineFlightTimer?.invalidate()
         if let commandModifierMonitor { NSEvent.removeMonitor(commandModifierMonitor) }
         if let scopeLineScrollObserver { NotificationCenter.default.removeObserver(scopeLineScrollObserver) }
+        if let scopeLineMotionObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(scopeLineMotionObserver)
+        }
         if let caretLinkScrollObserver {
             NotificationCenter.default.removeObserver(caretLinkScrollObserver)
         }
@@ -3427,7 +3439,21 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// gradient layer over the text, shown only through the line's shape.
     private var scopeLine: ScopeLineOverlay?
     private var scopeLineScrollObserver: NSObjectProtocol?
+    private var scopeLineMotionObserver: NSObjectProtocol?
     private var scopeLineSyncScheduled = false
+    /// Text positions identify the active scope; viewport and font geometry
+    /// do not. Relaying out the same scope must not restart its pen stroke.
+    private struct ScopeLineIdentity: Equatable {
+        let storage: ObjectIdentifier
+        let brackets: [NSRange]
+        let tag: JSXTagMatch?
+    }
+    private var scopeLineIdentity: ScopeLineIdentity?
+    private var scopeLineStorage: ObjectIdentifier?
+    private var scopeLineTextLength = 0
+    var scopeLineReduceMotionForTesting: Bool? {
+        didSet { syncScopeLine() }
+    }
 
     /// One sync for however many draws ask for it, after the draw: views are
     /// not to be added or moved while one is being drawn.
@@ -3442,7 +3468,20 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     }
 
     private func syncScopeLine() {
-        guard window != nil, let geometry = activeScopeGeometry() else {
+        let storage = textStorage.map(ObjectIdentifier.init)
+        let length = textStorage?.length ?? 0
+        let edited = storage == scopeLineStorage && length != scopeLineTextLength
+        let identity = storage.flatMap { storage -> ScopeLineIdentity? in
+            guard bracketMatchRanges.count == 2 || activeJSXTagMatch != nil else { return nil }
+            return ScopeLineIdentity(storage: storage, brackets: bracketMatchRanges,
+                                     tag: activeJSXTagMatch)
+        }
+        let changed = identity != scopeLineIdentity
+        scopeLineIdentity = identity
+        scopeLineStorage = storage
+        scopeLineTextLength = length
+        guard window != nil, identity != nil, let geometry = activeScopeGeometry() else {
+            scopeLine?.finishDrawing()
             scopeLine?.isHidden = true
             return
         }
@@ -3485,6 +3524,23 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
             gradient.endPoint = CGPoint(x: unit(axis.to, frame.minX, frame.width), y: 0.5)
         }
         CATransaction.commit()
+        let reduceMotion = scopeLineReduceMotionForTesting
+            ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if changed {
+            overlay.reveal(animated: window?.isVisible == true && !reduceMotion && !edited)
+        } else if reduceMotion || edited || window?.isVisible != true {
+            overlay.finishDrawing()
+        }
+    }
+
+    var scopeLineDrawingAnimationForTesting: CABasicAnimation? {
+        syncScopeLine()
+        return scopeLine?.shape.animation(forKey: ScopeLineOverlay.drawingAnimationKey) as? CABasicAnimation
+    }
+    var scopeLineDrawingProgressForTesting: CGFloat {
+        syncScopeLine()
+        guard let shape = scopeLine?.shape else { return 1 }
+        return (shape.presentation() ?? shape).strokeEnd
     }
 
     /// The line as it stands, for the tests: whether it shows, its path in the
@@ -3516,6 +3572,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
 /// Holds the active pair's line over the text. It takes no clicks: they go
 /// through to the text under it.
 private final class ScopeLineOverlay: NSView {
+    static let drawingAnimationKey = "scopeLineDrawing"
     let gradient = CAGradientLayer()
     /// The line's shape: the gradient shows only where it is stroked.
     let shape = CAShapeLayer()
@@ -3529,11 +3586,31 @@ private final class ScopeLineOverlay: NSView {
         shape.lineWidth = BracketScopeGeometry.lineWidth
         shape.lineCap = .round
         shape.lineJoin = .round
+        shape.actions = ["strokeEnd": NSNull()]
         gradient.mask = shape
         layer?.addSublayer(gradient)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// One continuous path, drawn by Core Animation without repainting text
+    /// or laying out glyphs on each frame. A new scope replaces the old stroke.
+    func reveal(animated: Bool) {
+        finishDrawing()
+        guard animated else { return }
+        let drawing = CABasicAnimation(keyPath: "strokeEnd")
+        drawing.fromValue = 0
+        drawing.toValue = 1
+        drawing.duration = 0.22
+        drawing.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.75, 0.25, 1)
+        drawing.beginTime = shape.convertTime(CACurrentMediaTime(), from: nil)
+        shape.add(drawing, forKey: Self.drawingAnimationKey)
+    }
+
+    func finishDrawing() {
+        shape.strokeEnd = 1
+        shape.removeAnimation(forKey: Self.drawingAnimationKey)
+    }
 
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
