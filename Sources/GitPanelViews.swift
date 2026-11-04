@@ -854,6 +854,7 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     var onActivateRow: ((Int) -> Void)?
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoveredRow = -1
+    private lazy var hoverFollower = RowHoverFollower(host: self)
     /// The lit row was put there by ↑↓, not by the pointer: it stays until
     /// the pointer moves, rather than following wherever the pointer rests
     /// each time the list lays out.
@@ -895,6 +896,11 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     override func mouseExited(with event: NSEvent) {
         guard !keysLitRow else { return }
         setHoveredRow(-1)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { setHoveredRow(-1) }
     }
 
     // MARK: Keys
@@ -969,13 +975,24 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     /// Nothing is lit by the pointer while a scroller is dragged: the rows it
     /// scrolls pass under the pointer, and each lit in turn as it went.
     private func hover(at point: NSPoint) {
-        setHoveredRow(!PuzzleScroller.isDragging && bounds.contains(point) ? row(at: point) : -1)
+        setHoveredRow(!PuzzleScroller.isDragging && visibleRect.contains(point) ? row(at: point) : -1)
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }
+    var hoverTargetRectForTesting: NSRect? { hoverFollower.targetRect }
+    var displayedHoverRectForTesting: NSRect? { hoverFollower.displayedRect }
+    var isHoverFlyingForTesting: Bool { hoverFollower.isFlyingForTesting }
+    var hoverReduceMotionForTesting: Bool? {
+        get { hoverFollower.reduceMotionForTesting }
+        set { hoverFollower.reduceMotionForTesting = newValue }
+    }
+    func advanceHoverForTesting(elapsed: TimeInterval) {
+        hoverFollower.advanceForTesting(elapsed: elapsed)
+    }
 
     private func setHoveredRow(_ row: Int) {
         let next = row >= 0 && row < numberOfRows ? row : -1
+        hoverFollower.setTarget(next >= 0 ? rect(ofRow: next) : nil)
         guard next != hoveredRow else { return }
         let previous = hoveredRow
         hoveredRow = next
@@ -1024,8 +1041,12 @@ final class GitRowView: FlatRowView {
     }
 
     override var ground: NSColor {
-        if isHovered || (isSelected && selectionHighlightStyle != .none) { return Theme.hover }
         return isStriped ? Theme.stripedRow : Theme.panelBackground
+    }
+
+    override var isHoverHighlighted: Bool { isHovered }
+    override var showsPersistentSelection: Bool {
+        isSelected && selectionHighlightStyle != .none
     }
 
     override var isEmphasized: Bool {

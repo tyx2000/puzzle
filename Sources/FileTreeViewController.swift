@@ -43,6 +43,7 @@ private final class FileTreeOutlineView: NSOutlineView, PointerHoverRefreshing {
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoverTrackingAreaInstallCountForTesting = 0
     private(set) var hoveredRow = -1
+    private lazy var hoverFollower = RowHoverFollower(host: self)
 
     /// The disclosure symbol is drawn with the file icon and title by the cell,
     /// giving all three elements one coordinate system and one spacing rule.
@@ -66,6 +67,11 @@ private final class FileTreeOutlineView: NSOutlineView, PointerHoverRefreshing {
     override func mouseMoved(with event: NSEvent) { updateHoveredRow(with: event) }
     override func mouseExited(with event: NSEvent) { setHoveredRow(-1) }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { setHoveredRow(-1) }
+    }
+
     override func layout() {
         super.layout()
         refreshHoverState()
@@ -86,13 +92,26 @@ private final class FileTreeOutlineView: NSOutlineView, PointerHoverRefreshing {
     /// Nothing is lit while a scroller is dragged: the rows it scrolls pass
     /// under the pointer, and each lit in turn as it went.
     private func hover(at point: NSPoint) {
-        setHoveredRow(!PuzzleScroller.isDragging && bounds.contains(point) ? row(at: point) : -1)
+        setHoveredRow(!PuzzleScroller.isDragging && visibleRect.contains(point) ? row(at: point) : -1)
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }
+    var hoverTargetRectForTesting: NSRect? { hoverFollower.targetRect }
+    var displayedHoverRectForTesting: NSRect? { hoverFollower.displayedRect }
+    var isHoverFlyingForTesting: Bool { hoverFollower.isFlyingForTesting }
+    var hoverReduceMotionForTesting: Bool? {
+        get { hoverFollower.reduceMotionForTesting }
+        set { hoverFollower.reduceMotionForTesting = newValue }
+    }
+    func advanceHoverForTesting(elapsed: TimeInterval) {
+        hoverFollower.advanceForTesting(elapsed: elapsed)
+    }
 
     private func setHoveredRow(_ row: Int) {
         let next = row >= 0 && row < numberOfRows ? row : -1
+        // Refresh the geometry even if a reload or scroll kept the same
+        // row index under the pointer. A scroll discarded the old band.
+        hoverFollower.setTarget(next >= 0 ? rect(ofRow: next) : nil)
         guard next != hoveredRow else { return }
         let previous = hoveredRow
         hoveredRow = next
@@ -400,6 +419,16 @@ final class FileTreeViewController: NSViewController {
     }
     var hoveredRowForTesting: Int { outlineView.hoveredRow }
     func setHoveredRowForTesting(_ row: Int) { outlineView.setHoveredRowForTesting(row) }
+    var hoverTargetRectForTesting: NSRect? { outlineView.hoverTargetRectForTesting }
+    var displayedHoverRectForTesting: NSRect? { outlineView.displayedHoverRectForTesting }
+    var isHoverFlyingForTesting: Bool { outlineView.isHoverFlyingForTesting }
+    var hoverReduceMotionForTesting: Bool? {
+        get { outlineView.hoverReduceMotionForTesting }
+        set { outlineView.hoverReduceMotionForTesting = newValue }
+    }
+    func advanceHoverForTesting(elapsed: TimeInterval) {
+        outlineView.advanceHoverForTesting(elapsed: elapsed)
+    }
     var firstRowTopInsetInWindowForTesting: CGFloat? {
         guard outlineView.numberOfRows > 0, let window = view.window else { return nil }
         outlineView.layoutSubtreeIfNeeded()
@@ -1440,10 +1469,7 @@ final class TreeRowView: FlatRowView {
         return guides.map(\.frame)
     }
 
-    // Selection is the active file's frame; the ground is hover's alone.
-    override var ground: NSColor {
-        isHovered ? Theme.hover : Theme.panelBackground
-    }
+    override var isHoverHighlighted: Bool { isHovered }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

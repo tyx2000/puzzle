@@ -21,6 +21,10 @@ final class ProjectRowView: NSView {
 
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    /// A panel lends all its project headings one moving background. A row
+    /// drawn on its own still lights directly under the pointer.
+    var hoverBackground: (() -> NSRect?)?
+    var onHoverChanged: ((Bool, NSPoint?) -> Void)?
     /// The Git mark is a button of its own: it pulls this project.
     var onPull: (() -> Void)? {
         didSet { refreshAccessibilityActions() }
@@ -210,6 +214,7 @@ final class ProjectRowView: NSView {
         // A row taken out of the list stops its clock; one put back in picks
         // up where its project stands.
         syncingChanged()
+        if window == nil { clearHover(notifying: true) }
     }
 
     deinit { sweepTimer?.invalidate() }
@@ -261,13 +266,20 @@ final class ProjectRowView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // The project being shown carries a band; the row under the pointer
-        // does not — a wash that follows the mouse across the headings read as
-        // a third list laid over the two they head.
-        if isActive {
-            Theme.selectedControl.setFill()
-            bounds.fill()
+        Theme.panelBackground.setFill()
+        bounds.fill()
+        let hoveredShape: NSRect?
+        if let hoverBackground {
+            hoveredShape = hoverBackground()
+        } else {
+            hoveredShape = isHovered ? bounds : nil
         }
+        // One fill for the complete shapes keeps hover over the active
+        // project at the same strength as either highlight on its own.
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        Theme.drawRowHighlights(in: [isActive ? bounds : nil, hoveredShape].compactMap { $0 })
+        NSGraphicsContext.restoreGraphicsState()
         if showsDivider {
             Theme.divider.setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
@@ -277,8 +289,11 @@ final class ProjectRowView: NSView {
             NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
         }
         if isActive {
+            NSGraphicsContext.saveGraphicsState()
+            Theme.rowHighlightPath(in: bounds).addClip()
             Theme.cursor.setFill()
             NSRect(x: 0, y: 0, width: Self.markerWidth, height: bounds.height).fill()
+            NSGraphicsContext.restoreGraphicsState()
         }
         SidebarCellDrawing.icon(.material(Self.nameIcon), in: nameIconRect)
         SidebarCellDrawing.attributedText(nameLabel(), in: nameRect)
@@ -311,11 +326,8 @@ final class ProjectRowView: NSView {
         ])
     }
 
-    /// The ink both headings are written in: the project being shown is read
-    /// against its own band.
-    private var ink: NSColor {
-        isActive ? Theme.selectedControlText : Theme.foreground
-    }
+    /// The same ink reads over the code highlight and the panel's ground.
+    private var ink: NSColor { Theme.foreground }
 
     /// The right column's heading: the branch, and after it the number of
     /// files changed but not committed, in the badge the sidebar uses for a
@@ -358,8 +370,7 @@ final class ProjectRowView: NSView {
 
     /// The count as the sidebar's round badge, sitting on the label's line.
     private func badgeRun() -> NSAttributedString? {
-        // On the row being shown the panel's own band is already this colour,
-        // which left the count as loose digits on it.
+        // The active project's count keeps its own quiet pill over the band.
         let background = isActive ? Theme.panelBackground : Theme.activeRow
         guard changes > 0,
               let image = SidebarCellDrawing.Badge.image(
@@ -393,6 +404,7 @@ final class ProjectRowView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
+        onHoverChanged?(true, event.locationInWindow)
         needsDisplay = true
     }
 
@@ -402,21 +414,31 @@ final class ProjectRowView: NSView {
         let onPull = !onClose && pullRect.contains(point)
         guard !isHovered || onClose != closeIsHovered
                 || onPull != pullIsHovered else { return }
+        let entered = !isHovered
         isHovered = true
         closeIsHovered = onClose
         pullIsHovered = onPull
         // Back to the project's path once the pointer leaves the ✕. The Git
         // mark does not look like a button, so it says what it does.
         toolTip = onClose ? "Close this project" : (onPull ? pullHint : path)
+        if entered { onHoverChanged?(true, event.locationInWindow) }
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
+        clearHover()
+        onHoverChanged?(false, event.locationInWindow)
+    }
+
+    /// A reorder or a project switch changes which heading is under the
+    /// pointer before AppKit has sent another tracking event.
+    func clearHover(notifying: Bool = false) {
         guard isHovered || closeIsHovered || pullIsHovered else { return }
         isHovered = false
         closeIsHovered = false
         pullIsHovered = false
         toolTip = path
+        if notifying { onHoverChanged?(false, nil) }
         needsDisplay = true
     }
 
@@ -1120,12 +1142,57 @@ final class ProjectsPanelViewController: NSViewController {
     private var rows: [ProjectRowView] = []
     private var shown: [String] = []
     private var activeIndex: Int?
+    private weak var hoveredProjectRow: ProjectRowView?
+    private lazy var projectHover = RowHoverFollower(host: stack) { [weak self] _ in
+        self?.rows.forEach { $0.needsDisplay = true }
+    }
 
     init(fileTree: FileTreeViewController) {
         self.fileTree = fileTree
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let row = hoveredProjectRow else { return }
+        let rect = row.convert(row.bounds, to: stack)
+        if projectHover.targetRect != rect {
+            // Resizing the panel changes both columns' widths; a stationary
+            // pointer stays on its heading without chasing the old geometry.
+            projectHover.setTarget(rect, animated: false)
+        }
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        clearProjectHover()
+    }
+
+    private func setProjectHovered(_ row: ProjectRowView, hovering: Bool,
+                                   at pointInWindow: NSPoint? = nil) {
+        if hovering {
+            guard draggingRow == nil else { return }
+            hoveredProjectRow = row
+            projectHover.setTarget(row.convert(row.bounds, to: stack))
+        } else if hoveredProjectRow === row {
+            // An exit already carries the pointer's new place. Crossing to
+            // another heading retargets directly, before its enter arrives.
+            if let pointInWindow, let next = rows.first(where: {
+                $0 !== row && $0.bounds.contains($0.convert(pointInWindow, from: nil))
+            }) {
+                setProjectHovered(next, hovering: true)
+            } else {
+                clearProjectHover()
+            }
+        }
+    }
+
+    private func clearProjectHover() {
+        hoveredProjectRow = nil
+        projectHover.cancel()
+        rows.forEach { $0.clearHover() }
+    }
 
     override func loadView() {
         let root = FlatView()
@@ -1211,6 +1278,7 @@ final class ProjectsPanelViewController: NSViewController {
             return
         }
         let identity = projects.map { "\($0.path)|\($0.branch)" }
+        if identity != shown || activeIndex != active { clearProjectHover() }
         if identity != shown {
             shown = identity
             rows.forEach {
@@ -1222,6 +1290,16 @@ final class ProjectsPanelViewController: NSViewController {
                 row.onSelect = { [weak self] in self?.onSelect?(index) }
                 row.onClose = { [weak self] in self?.onClose?(index) }
                 row.onPull = { [weak self] in self?.onPull?(index) }
+                row.onHoverChanged = { [weak self, weak row] hovering, point in
+                    guard let self, let row else { return }
+                    self.setProjectHovered(row, hovering: hovering, at: point)
+                }
+                row.hoverBackground = { [weak self, weak row] in
+                    guard let self, let row, let rect = self.projectHover.displayedRect else {
+                        return nil
+                    }
+                    return row.convert(rect, from: self.stack)
+                }
                 row.onDragBegan = { [weak self, weak row] in
                     guard let self, let row else { return false }
                     return self.beginRowDrag(row)
@@ -1282,6 +1360,7 @@ final class ProjectsPanelViewController: NSViewController {
         // No project: the tree still fills the panel, empty.
         if active == nil || rows.isEmpty { desired.append(columns) }
         guard desired != stack.arrangedSubviews else { return }
+        clearProjectHover()
         // Nothing to slide from when the panel is being filled for the first
         // time: a window opening should find its project already there.
         let hadRows = stack.arrangedSubviews.contains { $0 is ProjectRowView }
@@ -1339,6 +1418,7 @@ final class ProjectsPanelViewController: NSViewController {
         guard canReorder, let index = stack.arrangedSubviews.firstIndex(of: row) else {
             return false
         }
+        clearProjectHover()
         draggingRow = row
         dragStartIndex = index
         return true
@@ -1364,6 +1444,7 @@ final class ProjectsPanelViewController: NSViewController {
     }
 
     private func endRowDrag() {
+        clearProjectHover()
         let row = draggingRow
         draggingRow = nil
         let pending = pendingConfiguration
@@ -1381,6 +1462,20 @@ final class ProjectsPanelViewController: NSViewController {
     }
 
     var rowsForTesting: [ProjectRowView] { rows }
+    func hoverRowForTesting(_ index: Int) {
+        guard rows.indices.contains(index) else { clearProjectHover(); return }
+        setProjectHovered(rows[index], hovering: true)
+    }
+    var hoveredProjectFrameForTesting: NSRect? { projectHover.targetRect }
+    var displayedProjectHoverFrameForTesting: NSRect? { projectHover.displayedRect }
+    var isProjectHoverMovingForTesting: Bool { projectHover.isFlyingForTesting }
+    func advanceProjectHoverForTesting(elapsed: TimeInterval) {
+        projectHover.advanceForTesting(elapsed: elapsed)
+    }
+    var projectHoverReduceMotionForTesting: Bool? {
+        get { projectHover.reduceMotionForTesting }
+        set { projectHover.reduceMotionForTesting = newValue }
+    }
     /// Start carrying a row, as a press that has travelled far enough does.
     func beginDragForTesting(_ index: Int) -> Bool {
         rows.indices.contains(index) && beginRowDrag(rows[index])

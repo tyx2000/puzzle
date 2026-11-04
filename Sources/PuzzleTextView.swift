@@ -1496,21 +1496,14 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
     /// The band behind the caret's line: the accent, faint — the colour the
     /// gutter's badge for that line is, so the two read as one mark.
     static var currentLineTint: NSColor {
-        Theme.cursor.withAlphaComponent(Theme.palette.isDark ? 0.22 : 0.16)
+        Theme.rowHighlightTint
     }
 
     private func drawLineBands() {
         // Fill the union once: hovering the active row, or a row the band is
         // crossing, must not stack two translucent coats of the same colour.
-        let bands = NSBezierPath()
-        bands.windingRule = .nonZero
-        if let hover = displayedHoverLineBandRect() { bands.append(Theme.rowHighlightPath(in: hover)) }
-        if let active = displayedCurrentLineBandRect() { bands.append(Theme.rowHighlightPath(in: active)) }
-        // Highlighted rows have the same ground even over a zebra stripe.
-        Theme.editorBackground.setFill()
-        bands.fill()
-        Self.currentLineTint.setFill()
-        bands.fill()
+        Theme.drawRowHighlights(in: [displayedHoverLineBandRect(), displayedCurrentLineBandRect()]
+            .compactMap { $0 })
     }
 
     // MARK: - The caret's line, flying

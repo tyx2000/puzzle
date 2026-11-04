@@ -24,6 +24,18 @@ enum RegressionTests {
         // it: a history list laid out under it lit that row, and ↓↓ counted
         // on from there. Every test starts with it nowhere.
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
+        if CommandLine.arguments.contains("--sidebar-hover-regressions") {
+            try testSidebarHoverFollowerKeepsUp()
+            try testSidebarHoverAndSelectionShareOneCoat()
+            try testSidebarListsClearMovingHover()
+            try testProjectHoverFollowsRows()
+            try testChangesBeginAtMessageEdge()
+            try testRoundedRowBackgroundStaysWholeWhileMoving()
+            try testFlatSurfacesHoldNoBitmap()
+            try testHoverSurvivesTheRowsGoingAway()
+            print("Sidebar hover regression tests passed (8)")
+            return
+        }
         if CommandLine.arguments.contains("--gutter-interaction-regressions") {
             try testCodeBlockAnalysisAndFolding()
             try testClickableLineNumbersFoldAndHover()
@@ -215,6 +227,11 @@ enum RegressionTests {
         try testClickableLineNumbersFoldAndHover()
         try testRoundedLineBackgrounds()
         try testRoundedRowBackgroundStaysWholeWhileMoving()
+        try testSidebarHoverFollowerKeepsUp()
+        try testSidebarHoverAndSelectionShareOneCoat()
+        try testSidebarListsClearMovingHover()
+        try testProjectHoverFollowsRows()
+        try testChangesBeginAtMessageEdge()
         try testIndexLockContention()
         try testStartPageOpensProjects()
         try testMarkdownLinkHover()
@@ -350,6 +367,28 @@ enum RegressionTests {
             && abs(lhs.greenComponent - rhs.greenComponent) < 0.002
             && abs(lhs.blueComponent - rhs.blueComponent) < 0.002
             && abs(lhs.alphaComponent - rhs.alphaComponent) < 0.002
+    }
+
+    /// Render the code's ground and tint through the same AppKit snapshot
+    /// path as a sidebar row, so a colour-space conversion cannot disguise a
+    /// difference between their fills.
+    private static func codeRowHighlightAsDrawn(in host: NSView) throws -> NSColor? {
+        final class Swatch: NSView {
+            override func draw(_ dirtyRect: NSRect) {
+                Theme.editorBackground.setFill()
+                bounds.fill()
+                PuzzleTextView.currentLineTint.setFill()
+                bounds.fill()
+            }
+        }
+        let swatch = Swatch(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
+        host.addSubview(swatch)
+        defer { swatch.removeFromSuperview() }
+        guard let bitmap = swatch.bitmapImageRepForCachingDisplay(in: swatch.bounds) else {
+            throw Failure(description: "the code highlight swatch could not be drawn")
+        }
+        swatch.cacheDisplay(in: swatch.bounds, to: bitmap)
+        return bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)
     }
 
     /// Off every screen, so over no window.
@@ -8598,12 +8637,12 @@ enum RegressionTests {
 
         // Whatever AppKit puts behind a row it paints in the row's own colour:
         // the list hands it its background, and the row keeps its own. The
-        // active row's is the hovered one's.
+        // selected and hovered states both sit above the panel ground.
         let probe = TreeRowView()
         probe.isActiveFile = true
         probe.isHovered = true
         probe.backgroundColor = Theme.panelBackground
-        try expect(sameColor(probe.backgroundColor, Theme.hover),
+        try expect(sameColor(probe.backgroundColor, Theme.panelBackground),
                    "the active row reports \(probe.backgroundColor) as its background")
 
         // A save in the folder reloads its rows. Every frame of that, the
@@ -11296,6 +11335,399 @@ enum RegressionTests {
                    "a read-only view still folds through its line numbers")
     }
 
+    /// The native layer and the snapshot fallback paint the same 4pt shape.
+    /// A moving hover can cover all or part of a selected row without a second
+    /// coat, including across the boundary between alternating row grounds.
+    private static func testSidebarHoverAndSelectionShareOneCoat() throws {
+        RowFrameFlight.land()
+        defer { RowFrameFlight.land() }
+        final class Rows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+            func numberOfRows(in tableView: NSTableView) -> Int { 3 }
+            func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+                NSTableCellView()
+            }
+            func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+                let view = GitRowView()
+                view.isStriped = row % 2 == 1
+                return view
+            }
+        }
+        let rows = Rows()
+        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 240, height: 72))
+        let column = NSTableColumn(identifier: .init("colour"))
+        column.width = 240
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.style = .plain
+        table.rowHeight = 24
+        table.intercellSpacing = .zero
+        table.dataSource = rows
+        table.delegate = rows
+        let window = NSWindow(contentRect: table.bounds, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = table
+        defer { window.close() }
+        table.reloadData()
+        window.orderFrontRegardless()
+        table.layoutSubtreeIfNeeded()
+        guard let selected = table.rowView(atRow: 0, makeIfNecessary: true) as? GitRowView,
+              let striped = table.rowView(atRow: 1, makeIfNecessary: true) as? GitRowView else {
+            throw Failure(description: "the sidebar overlap fixture has no native rows")
+        }
+        let follower = RowHoverFollower(host: table)
+        selected.showsFrame = true
+        let rowRect = table.rect(ofRow: 0)
+        func bitmap(_ row: FlatRowView, layer: Bool) throws -> NSBitmapImageRep {
+            row.wantsLayer = true
+            row.needsDisplay = true
+            row.displayIfNeeded()
+            CATransaction.flush()
+            guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 240,
+                pixelsHigh: 24, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+                throw Failure(description: "the sidebar overlap could not be rendered")
+            }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            if layer {
+                // A flipped row's native layer flips its children for view
+                // coordinates; direct drawBackground below uses this raw
+                // bitmap context. Normalize the native path to that context.
+                if row.layer?.isGeometryFlipped == true {
+                    context.cgContext.translateBy(x: 0, y: row.bounds.height)
+                    context.cgContext.scaleBy(x: 1, y: -1)
+                }
+                row.layer?.render(in: context.cgContext)
+            }
+            else { row.drawBackground(in: row.bounds) }
+            NSGraphicsContext.restoreGraphicsState()
+            if let outputPath = ProcessInfo.processInfo.environment["PUZZLE_TEST_ARTIFACTS"],
+               let png = bitmap.representation(using: .png, properties: [:]) {
+                let directory = URL(fileURLWithPath: outputPath, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try png.write(to: directory.appendingPathComponent("overlap-row-\(table.row(for: row))-\(layer ? "layer" : "snapshot").png"))
+            }
+            return bitmap
+        }
+        func pixel(_ bitmap: NSBitmapImageRep, x: Int = 120, y: Int = 12) -> NSColor? {
+            bitmap.colorAt(x: x, y: bitmap.pixelsHigh - 1 - y)
+        }
+        let reference = try bitmap(selected, layer: false)
+        let tint = pixel(reference)
+        try expect(Theme.rowHighlightCornerRadius == 4,
+                   "sidebar highlights no longer share the code's 4pt radius")
+        follower.setTarget(rowRect, animated: false)
+        for renderLayer in [false, true] {
+            let sameRow = try bitmap(selected, layer: renderLayer)
+            try expect(sameColor(pixel(sameRow), tint),
+                       "full selected/hover overlap added a second coat in \(renderLayer ? "the native layer" : "the snapshot")")
+            try expect(sameColor(pixel(sameRow, x: 0, y: 0), pixel(reference, x: 0, y: 0)),
+                       "full selected/hover overlap squared the outer corner")
+        }
+        try expect(selected.selectionBackgroundLayerForTesting?.cornerRadius == 4
+                    && selected.selectionBackgroundLayerForTesting?.mask == nil,
+                   "a complete hovered/selected row did not keep one 4pt native shape")
+        follower.setTarget(rowRect.offsetBy(dx: 0, dy: 12), animated: false)
+        for renderLayer in [false, true] {
+            let overlapping = try bitmap(selected, layer: renderLayer)
+            let crossing = try bitmap(striped, layer: renderLayer)
+            try expect(sameColor(pixel(overlapping, y: 18), tint)
+                        && sameColor(pixel(crossing, y: 6), tint),
+                       "a partial selected/hover overlap changed tint across a row boundary")
+            try expect(sameColor(pixel(overlapping, x: 1, y: 23), tint)
+                        && sameColor(pixel(crossing, x: 1, y: 0), tint),
+                       "the hover union rounded the shared seam between rows (native=\(renderLayer), selected=\(String(describing: pixel(overlapping, x: 1, y: 23))), striped=\(String(describing: pixel(crossing, x: 1, y: 0))), tint=\(String(describing: tint)), row=\(selected.bounds), stripe=\(striped.bounds))")
+        }
+        guard let mask = selected.selectionBackgroundLayerForTesting?.mask as? CAShapeLayer else {
+            throw Failure(description: "a partial selected/hover union has no native mask")
+        }
+        try expect(mask.fillRule == .nonZero,
+                   "the native hover mask cuts a hole in selected/hover overlap")
+        let originalPalette = Theme.palette
+        defer { _ = Theme.apply(originalPalette) }
+        for palette in [ThemePalette.ayuDark, .ayuLight] {
+            _ = Theme.apply(palette)
+            let snapshot = try bitmap(selected, layer: false)
+            let native = try bitmap(selected, layer: true)
+            try expect(sameColor(pixel(snapshot), pixel(native))
+                        && sameColor(pixel(snapshot, x: 1, y: 23), pixel(native, x: 1, y: 23)),
+                       "native and snapshot hover unions disagree in \(palette.id)")
+            if CommandLine.arguments.contains("--sidebar-hover-regressions"),
+               let outputPath = ProcessInfo.processInfo.environment["PUZZLE_TEST_ARTIFACTS"] {
+                let directory = URL(fileURLWithPath: outputPath, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                for (name, image) in [("snapshot", snapshot), ("native-layer", native)] {
+                    if let png = image.representation(using: .png, properties: [:]) {
+                        try png.write(to: directory.appendingPathComponent("\(palette.id)-partial-overlap-\(name).png"))
+                    }
+                }
+            }
+        }
+        follower.cancel()
+    }
+
+    /// A stream of pointer rows must keep making progress between events.
+    /// Each list owns its follower, including its timer and accessibility state.
+    private static func testSidebarHoverFollowerKeepsUp() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
+        let window = NSWindow(contentRect: host.bounds, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        let follower = RowHoverFollower(host: host)
+        let independent = RowHoverFollower(host: host)
+        follower.reduceMotionForTesting = false
+        independent.reduceMotionForTesting = false
+        let start = NSRect(x: 0, y: 0, width: 300, height: 24)
+        let other = NSRect(x: 0, y: 480, width: 300, height: 24)
+        follower.setTarget(start)
+        independent.setTarget(other)
+        try expect(follower.displayedRect == start && !follower.isFlyingForTesting,
+                   "the first sidebar hover flew from nowhere")
+        for row in 1...6 {
+            follower.setTarget(start.offsetBy(dx: 0, dy: CGFloat(row) * 24))
+        }
+        try expect(follower.displayedRect == start,
+                   "pointer events moved the sidebar hover before a frame tick")
+        var target = start
+        for row in 1...20 {
+            target = start.offsetBy(dx: 0, dy: CGFloat(row) * 24)
+            follower.setTarget(target)
+            follower.advanceForTesting(elapsed: 1.0 / 120)
+        }
+        guard let moving = follower.displayedRect else {
+            throw Failure(description: "the sidebar hover disappeared during rapid pointer movement")
+        }
+        try expect(moving.minY > target.minY * 0.5 && moving.minY < target.minY,
+                   "the sidebar hover stalled or jumped during rapid movement: \(moving) toward \(target)")
+        try expect(independent.displayedRect == other && !independent.isFlyingForTesting,
+                   "one list's pointer movement disturbed another list's hover")
+        follower.setTarget(start)
+        try expect(follower.displayedRect == moving,
+                   "reversing the pointer jumped the displayed sidebar hover")
+        follower.advanceForTesting(elapsed: 0.02)
+        try expect((follower.displayedRect?.minY ?? .infinity) < moving.minY - 1,
+                   "the sidebar hover did not promptly follow a reversed pointer")
+        follower.advanceForTesting(elapsed: 0.5)
+        try expect(follower.displayedRect == start && !follower.isFlyingForTesting,
+                   "the sidebar hover did not settle after the pointer stopped")
+
+        follower.setTarget(target)
+        follower.reduceMotionForTesting = true
+        try expect(follower.displayedRect == target && !follower.isFlyingForTesting,
+                   "enabling Reduce Motion left the sidebar hover moving")
+        follower.setTarget(start)
+        try expect(follower.displayedRect == start && !follower.isFlyingForTesting,
+                   "Reduce Motion did not place the sidebar hover immediately")
+        follower.cancel()
+        try expect(follower.targetRect == nil && follower.displayedRect == nil
+                    && !follower.isFlyingForTesting,
+                   "clearing a follower retained a stale sidebar hover")
+        try expect(independent.displayedRect == other,
+                   "clearing one follower cleared an unrelated list")
+    }
+
+    /// Real tables and the outline must discard animation geometry when the
+    /// pointer leaves, their clip scrolls, or the scroller takes the pointer.
+    private static func testSidebarListsClearMovingHover() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        final class Page: NSView { override var isFlipped: Bool { true } }
+        final class Rows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+            func numberOfRows(in tableView: NSTableView) -> Int { 80 }
+            func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+                NSTableCellView()
+            }
+            func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+                GitRowView()
+            }
+        }
+        let rows = Rows()
+        let host = Page(frame: NSRect(x: 0, y: 0, width: 900, height: 320))
+        let window = NSWindow(contentRect: host.bounds, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        var tables: [GitTableView] = []
+        var scrolls: [NSScrollView] = []
+        for column in 0..<2 {
+            let table = GitTableView(frame: NSRect(x: 0, y: 0, width: 280, height: 1920))
+            table.addTableColumn(NSTableColumn(identifier: .init("hover")))
+            table.headerView = nil
+            table.style = .plain
+            table.rowHeight = 24
+            table.intercellSpacing = .zero
+            table.dataSource = rows
+            table.delegate = rows
+            let scroll = NSScrollView(frame: NSRect(x: CGFloat(column) * 300, y: 0,
+                                                    width: 280, height: 320))
+            PuzzleScroller.adopt(scroll)
+            scroll.hasVerticalScroller = true
+            scroll.contentView.postsBoundsChangedNotifications = true
+            scroll.documentView = table
+            host.addSubview(scroll)
+            table.reloadData()
+            table.hoverReduceMotionForTesting = false
+            tables.append(table)
+            scrolls.append(scroll)
+        }
+        let directory = try temporaryDirectory("sidebar-hover-tree")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for row in 0..<80 {
+            try Data("x\n".utf8).write(to: directory.appendingPathComponent(String(format: "f%02d.txt", row)))
+        }
+        let tree = FileTreeViewController()
+        tree.view.frame = NSRect(x: 600, y: 0, width: 280, height: 320)
+        host.addSubview(tree.view)
+        tree.setRoot(directory)
+        tree.hoverReduceMotionForTesting = false
+        window.orderFrontRegardless()
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        tables[0].setHoveredRowForTesting(0)
+        tables[1].setHoveredRowForTesting(1)
+        let otherTarget = tables[1].displayedHoverRectForTesting
+        tables[0].setHoveredRowForTesting(8)
+        tables[0].advanceHoverForTesting(elapsed: 0.015)
+        try expect(tables[0].isHoverFlyingForTesting
+                    && tables[0].displayedHoverRectForTesting != tables[0].hoverTargetRectForTesting,
+                   "changing a Git list's row did not animate its hover")
+        try expect(tables[1].displayedHoverRectForTesting == otherTarget
+                    && !tables[1].isHoverFlyingForTesting,
+                   "the changes list moved another list's hover")
+        guard let exit = NSEvent.enterExitEvent(
+            with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+            trackingNumber: 0, userData: nil) else {
+            throw Failure(description: "could not make a sidebar exit event")
+        }
+        tables[0].mouseExited(with: exit)
+        try expect(tables[0].hoveredRow == -1 && tables[0].hoverTargetRectForTesting == nil
+                    && tables[0].displayedHoverRectForTesting == nil && !tables[0].isHoverFlyingForTesting,
+                   "leaving a Git list retained a moving hover")
+        tables[0].setHoveredRowForTesting(0)
+        tables[0].setHoveredRowForTesting(8)
+        scrolls[0].contentView.scroll(to: NSPoint(x: 0, y: 48))
+        scrolls[0].reflectScrolledClipView(scrolls[0].contentView)
+        try expect(!tables[0].isHoverFlyingForTesting
+                    && tables[0].displayedHoverRectForTesting == tables[0].hoverTargetRectForTesting,
+                   "scrolling a Git list kept hover flying toward stale geometry")
+        tree.setHoveredRowForTesting(0)
+        tree.setHoveredRowForTesting(8)
+        tree.advanceHoverForTesting(elapsed: 0.015)
+        try expect(tree.isHoverFlyingForTesting && tree.displayedHoverRectForTesting != tree.hoverTargetRectForTesting,
+                   "changing a tree row did not animate its hover")
+        guard let treeScroll = tree.view as? NSScrollView,
+              let treeScroller = tree.verticalScrollerForTesting as? PuzzleScroller,
+              let tableScroller = scrolls[0].verticalScroller as? PuzzleScroller else {
+            throw Failure(description: "the sidebar fixture has no Puzzle scroller")
+        }
+        treeScroll.contentView.scroll(to: NSPoint(x: 0, y: 48))
+        treeScroll.reflectScrolledClipView(treeScroll.contentView)
+        try expect(!tree.isHoverFlyingForTesting
+                    && tree.displayedHoverRectForTesting == tree.hoverTargetRectForTesting,
+                   "scrolling the tree kept hover flying toward stale geometry")
+        tree.setHoveredRowForTesting(0)
+        tree.setHoveredRowForTesting(8)
+        treeScroll.documentView?.mouseExited(with: exit)
+        try expect(tree.hoverTargetRectForTesting == nil && tree.displayedHoverRectForTesting == nil
+                    && !tree.isHoverFlyingForTesting,
+                   "leaving the tree retained a moving hover")
+        pinPointer(over: scrolls[0].contentView)
+        tables[0].refreshHoverState()
+        tableScroller.beginDraggingForTesting()
+        try expect(tables[0].hoverTargetRectForTesting == nil
+                    && tables[0].displayedHoverRectForTesting == nil && !tables[0].isHoverFlyingForTesting,
+                   "dragging a Git scroller retained the hover background")
+        tableScroller.endDraggingForTesting()
+        pinPointer(over: treeScroll.contentView)
+        (treeScroll.documentView as? PointerHoverRefreshing)?.refreshHoverState()
+        treeScroller.beginDraggingForTesting()
+        try expect(tree.hoverTargetRectForTesting == nil && tree.displayedHoverRectForTesting == nil
+                    && !tree.isHoverFlyingForTesting,
+                   "dragging the tree scroller retained the hover background")
+        treeScroller.endDraggingForTesting()
+    }
+
+    private static func testProjectHoverFollowsRows() throws {
+        let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        let defaults = UserDefaults(suiteName: "puzzle-sidebar-hover-divider-test")!
+        defaults.removePersistentDomain(forName: "puzzle-sidebar-hover-divider-test")
+        panel.dividerDefaults = defaults
+        defer { defaults.removePersistentDomain(forName: "puzzle-sidebar-hover-divider-test") }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = panel
+        panel.configure(projects: (0..<6).map {
+            (name: "Project \($0)", branch: "", user: "", changes: 0, path: "/tmp/sidebar-hover-\($0)")
+        }, active: nil)
+        window.orderFrontRegardless()
+        defer { window.close() }
+        panel.view.layoutSubtreeIfNeeded()
+        panel.projectHoverReduceMotionForTesting = false
+        panel.hoverRowForTesting(0)
+        guard let first = panel.displayedProjectHoverFrameForTesting else {
+            throw Failure(description: "the first project row has no hover")
+        }
+        panel.hoverRowForTesting(4)
+        try expect(panel.displayedProjectHoverFrameForTesting == first && panel.isProjectHoverMovingForTesting,
+                   "project hover jumped directly to a different row")
+        panel.advanceProjectHoverForTesting(elapsed: 0.02)
+        guard let moving = panel.displayedProjectHoverFrameForTesting,
+              let target = panel.hoveredProjectFrameForTesting else {
+            throw Failure(description: "project hover disappeared in flight")
+        }
+        try expect(moving != first && moving != target,
+                   "project hover did not travel continuously between rows")
+        panel.hoverRowForTesting(1)
+        try expect(panel.displayedProjectHoverFrameForTesting == moving,
+                   "redirecting project hover jumped back to an old row")
+        panel.advanceProjectHoverForTesting(elapsed: 0.5)
+        try expect(panel.displayedProjectHoverFrameForTesting == panel.hoveredProjectFrameForTesting
+                    && !panel.isProjectHoverMovingForTesting,
+                   "project hover did not settle on its latest row")
+        panel.projectHoverReduceMotionForTesting = true
+        panel.hoverRowForTesting(5)
+        try expect(panel.displayedProjectHoverFrameForTesting == panel.hoveredProjectFrameForTesting
+                    && !panel.isProjectHoverMovingForTesting,
+                   "project hover ignored Reduce Motion")
+        panel.hoverRowForTesting(-1)
+        try expect(panel.displayedProjectHoverFrameForTesting == nil
+                    && panel.hoveredProjectFrameForTesting == nil && !panel.isProjectHoverMovingForTesting,
+                   "leaving project rows retained their hover")
+    }
+
+    /// The first changed row starts at the message box's lower edge, across
+    /// narrow and wide layouts and after replacing the list's contents.
+    private static func testChangesBeginAtMessageEdge() throws {
+        let directory = try temporaryDirectory("changes-message-edge")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let changes = ProjectChangesViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = changes
+        defer { window.close() }
+        for width in [CGFloat(240), CGFloat(520)] {
+            window.setContentSize(NSSize(width: width, height: 300))
+            changes.setEntries([], in: directory)
+            changes.setEntries([.init(code: " M", path: "changed.swift", originalPath: nil)], in: directory)
+            changes.view.layoutSubtreeIfNeeded()
+            guard let messageTop = changes.commitBarTopInsetInWindowForTesting,
+                  let listTop = changes.firstRowTopInsetInWindowForTesting else {
+                throw Failure(description: "the changes/message fixture has no geometry")
+            }
+            let bar = changes.commitBarForTesting
+            try expect(abs(listTop - messageTop - bar.bounds.height) <= 0.5
+                        && bar.messageBoxFrameForTesting.height == bar.bounds.height,
+                       "blank space separates the message box and changes list at width \(width): \(messageTop), \(listTop)")
+        }
+    }
+
     /// The code's hover and caret surfaces leave their outer corners clear,
     /// while the centre and an overlapping hover retain one coat of colour.
     private static func testRoundedLineBackgrounds() throws {
@@ -12805,12 +13237,14 @@ enum RegressionTests {
         try expect(sameColor(shown(git), Theme.stripedRow), "a striped Git row")
         git.selectionHighlightStyle = .regular
         git.isSelected = true
-        try expect(sameColor(shown(git), Theme.hover), "a selected Git row")
+        try expect(sameColor(shown(git), Theme.stripedRow) && git.isFrameShownForTesting,
+                   "a selected Git row lost its ground or rounded highlight")
         git.selectionHighlightStyle = .none
         try expect(sameColor(shown(git), Theme.stripedRow),
                    "a Git row in a list that shows no selection showed it")
         git.isHovered = true
-        try expect(sameColor(shown(git), Theme.hover), "a hovered Git row")
+        try expect(sameColor(shown(git), Theme.stripedRow) && git.isFrameShownForTesting,
+                   "a hovered Git row lost its ground or rounded highlight")
         // The open row fills behind its content with the code's active-line
         // tint. The row still keeps its own ground and no bitmap, while the
         // selection layer has no stroke or glow above the cell.
@@ -12857,10 +13291,11 @@ enum RegressionTests {
                        "the selected row's corners stayed square in its snapshot")
         }
         git.isActiveFile = true
-        try expect(sameColor(shown(git), Theme.hover) && git.isFrameShownForTesting,
+        try expect(sameColor(shown(git), Theme.stripedRow) && git.isFrameShownForTesting,
                    "the active file's Git row has no background over its own ground")
         try expect(git.layer?.contents == nil, "a Git row holds a bitmap")
         try checkSelectionBackground(git)
+        git.isHovered = false
         git.holdsFrameBack = true
         git.displayIfNeeded()
         try expect(!git.isFrameShownForTesting, "a row held back still shows its resting background")
@@ -12870,9 +13305,10 @@ enum RegressionTests {
         try expect(!git.isFrameShownForTesting, "the background stayed on a row no longer open")
         try expect(sameColor(shown(tree), Theme.panelBackground), "a plain tree row")
         tree.isHovered = true
-        try expect(sameColor(shown(tree), Theme.hover), "a hovered tree row")
+        try expect(sameColor(shown(tree), Theme.panelBackground) && tree.isFrameShownForTesting,
+                   "a hovered tree row lost its ground or rounded highlight")
         tree.isActiveFile = true
-        try expect(sameColor(shown(tree), Theme.hover) && tree.isFrameShownForTesting,
+        try expect(sameColor(shown(tree), Theme.panelBackground) && tree.isFrameShownForTesting,
                    "the active file's tree row has no background over its own ground")
         try checkSelectionBackground(tree)
         search.selectionHighlightStyle = .regular
@@ -16110,7 +16546,8 @@ enum RegressionTests {
         window.setContentSize(NSSize(width: 380, height: 420))
         defer { window.close() }
 
-        /// The colour a row is drawn in, from a corner no text reaches.
+        /// The middle of the rounded row's trailing edge, where no text or
+        /// action reaches. Its outer corner deliberately keeps the ground.
         func ground(_ row: GitRowView?) throws -> NSColor? {
             guard let row else { return nil }
             row.layoutSubtreeIfNeeded()
@@ -16119,7 +16556,8 @@ enum RegressionTests {
             }
             row.cacheDisplay(in: row.bounds, to: rep)
             let scale = CGFloat(rep.pixelsWide) / max(1, row.bounds.width)
-            return rep.colorAt(x: Int(scale), y: Int(scale))
+            return rep.colorAt(x: Int((row.bounds.width - 1) * scale),
+                               y: Int(row.bounds.midY * scale))
         }
         /// A colour as the same window draws it, to compare like with like.
         func asDrawn(_ colour: NSColor, in host: NSView) throws -> NSColor? {
@@ -16141,7 +16579,7 @@ enum RegressionTests {
         }
         let plain = try asDrawn(Theme.panelBackground, in: panel.view)
         let stripe = try asDrawn(Theme.stripedRow, in: panel.view)
-        let hover = try asDrawn(Theme.hover, in: panel.view)
+        let hover = try codeRowHighlightAsDrawn(in: panel.view)
         // Three colours, none of which passes for another: the two grounds a
         // list alternates between, and the row under the pointer.
         try expect(!same(plain, stripe) && !same(stripe, hover) && !same(plain, hover),
@@ -17791,10 +18229,7 @@ enum RegressionTests {
                    "the branch does not head the right column: "
                      + "\(row.branchRectForTesting)")
 
-        // The project being shown carries a band; the row under the pointer
-        // does not — a wash that follows the mouse across the headings read as
-        // a third list laid over the two they head.
-        //
+        // Active and hovered project headings share the code's rounded band.
         // A row of its own: the panel's real ones belong to its stack, and
         // taking one out to look at it would leave the panel a row short.
         let sample = ProjectRowView()
@@ -17829,14 +18264,17 @@ enum RegressionTests {
                 && abs(colour.blueComponent - wanted.blueComponent) < 0.02
         }
         let selectedPixel = try rowPixel()
-        try expect(matches(selectedPixel, Theme.selectedControl),
+        guard let highlight = try codeRowHighlightAsDrawn(in: backdrop) else {
+            throw Failure(description: "the code highlight could not be rendered")
+        }
+        try expect(matches(selectedPixel, highlight),
                    "the project being shown carries no band: \(selectedPixel)")
         sample.configure(name: "project", branch: "trunk", user: "Ada",
                          changes: 2, path: "/tmp/project", isActive: false)
         sample.hoverForTesting(at: NSPoint(x: 100, y: ProjectRowView.height / 2))
         let hoveredPixel = try rowPixel()
-        try expect(matches(hoveredPixel, Theme.panelBackground),
-                   "the row under the pointer is washed with a background: "
+        try expect(matches(hoveredPixel, highlight),
+                   "the project row under the pointer has a different background from the code: "
                      + "\(hoveredPixel)")
 
         // Each column is headed by a mark saying what it holds: the folder
@@ -17913,10 +18351,9 @@ enum RegressionTests {
         try expect(barTop != nil && treeTop != nil && abs(barTop! - treeTop!) <= 0.5,
                    "the commit line does not start level with the tree: "
                      + "\(String(describing: barTop)) vs \(String(describing: treeTop))")
-        let padding = ProjectChangesViewController.listPadding
         try expect(changesTop != nil && treeTop != nil
-                    && abs(changesTop! - (treeTop! + ProjectCommitBar.height + padding)) <= 0.5,
-                   "the changes list does not start a padding under the commit line: "
+                    && abs(changesTop! - (treeTop! + ProjectCommitBar.height)) <= 0.5,
+                   "the changes list leaves blank space under the commit line: "
                      + "\(String(describing: changesTop)) vs \(String(describing: treeTop))")
         var openedDiff: String?
         let realDiffHandler = workspace.sidebar.onGitDiff
@@ -17971,26 +18408,26 @@ enum RegressionTests {
         try expect(projectsPanel.history.view.subviews.filter { !$0.isHidden }
                     .allSatisfy { $0 is NSScrollView },
                    "the history list took a heading row back")
-        // The changes keep a little room above their first row and below
-        // their last, inside the scrolling; the commits run edge to edge,
+        // Changes keep a little room below their last row; both lists begin
+        // at the edge directly under their headings. Commits run edge to edge,
         // from the line over them to the panel's foot.
-        for (name, list, room) in [("changes", projectsPanel.changes.view, padding),
+        for (name, list, room) in [("changes", projectsPanel.changes.view, ProjectChangesViewController.listPadding),
                                    ("history", projectsPanel.history.view, CGFloat(0))] {
             guard let scroll = list.subviews.compactMap({ $0 as? NSScrollView }).first else {
                 throw Failure(description: "the \(name) list has no scroll view")
             }
             let insets = scroll.contentInsets
-            try expect(insets.top == room && insets.bottom == room
+            try expect(insets.top == 0 && insets.bottom == room
                         && insets.left == 0 && insets.right == 0,
-                       "the \(name) list is padded \(insets), not \(room)pt above and below")
+                       "the \(name) list has \(insets), expected no top inset and \(room)pt below")
             guard let rows = scroll.documentView as? NSTableView, rows.numberOfRows > 0 else {
                 continue
             }
             rows.layoutSubtreeIfNeeded()
             let firstRow = rows.convert(rows.rect(ofRow: 0), to: scroll)
             let top = scroll.isFlipped ? firstRow.minY : scroll.bounds.height - firstRow.maxY
-            try expect(abs(top - room) <= 0.5,
-                       "the \(name) list's first row starts \(top)pt down, not \(room)pt")
+            try expect(abs(top) <= 0.5,
+                       "the \(name) list's first row leaves \(top)pt blank space")
         }
 
         // A commit moves HEAD and the list follows without being asked: the

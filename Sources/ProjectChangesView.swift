@@ -9,9 +9,9 @@ import AppKit
 /// that file's diff, as it does there, and ⌘↩ / ⇧⌘↩ in the message do what they
 /// do in the panel's own box.
 final class ProjectChangesViewController: NSViewController {
-    /// Room above the first row and below the last, in this list and the
-    /// history under it, so neither runs hard against the line or the strip
-    /// over it. Inside the scrolling: the rows pass through it.
+    /// Room below the last row, and at both ends of the history list. Changes
+    /// start directly under the commit strip; the other edges keep their room
+    /// inside the scrolling, so the rows pass through it.
     static let listPadding: CGFloat = 6
 
     /// A pale line where the first row would be, in this list and the
@@ -115,8 +115,9 @@ final class ProjectChangesViewController: NSViewController {
 
         let scroll = NSScrollView()
         PuzzleScroller.adopt(scroll)
-        // Before the list goes in, so it starts below the padding.
-        scroll.contentInsets = NSEdgeInsets(top: Self.listPadding, left: 0,
+        // The first changed file touches the commit strip; only the foot of
+        // this list is padded.
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0,
                                             bottom: Self.listPadding, right: 0)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
@@ -137,7 +138,7 @@ final class ProjectChangesViewController: NSViewController {
         root.addSubview(commitBar)
         root.addSubview(scroll)
         root.addSubview(emptyNote)
-        NSLayoutConstraint.activate(Self.placeEmptyNote(emptyNote, over: scroll))
+        NSLayoutConstraint.activate(Self.placeEmptyNote(emptyNote, over: scroll, padding: 0))
         NSLayoutConstraint.activate([
             commitBar.topAnchor.constraint(equalTo: root.topAnchor),
             commitBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),

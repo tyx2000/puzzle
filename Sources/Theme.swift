@@ -19,6 +19,26 @@ enum Theme {
         let radius = rowHighlightRadius(in: rect)
         return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     }
+    static var rowHighlightTint: NSColor {
+        cursor.withAlphaComponent(palette.isDark ? 0.22 : 0.16)
+    }
+    static func rowHighlightPath(in rects: [NSRect]) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.windingRule = .nonZero
+        for rect in rects where !rect.isEmpty && !rect.isNull {
+            path.append(rowHighlightPath(in: rect))
+        }
+        return path
+    }
+    /// Paint the union once so an active row and a passing hover band never
+    /// darken each other, including over alternating list-row backgrounds.
+    static func drawRowHighlights(in rects: [NSRect]) {
+        let path = rowHighlightPath(in: rects)
+        editorBackground.setFill()
+        path.fill()
+        rowHighlightTint.setFill()
+        path.fill()
+    }
     /// The palette being painted: the one settings.json named at launch, or
     /// the one `apply(_:)` switched to since.
     private(set) static var palette = ThemePalette.named(Settings.shared.theme) ?? .default
@@ -438,13 +458,13 @@ class FlatView: NSView {
     }
 }
 
-/// A list row that is one flat colour in every state it has. The colour is the
-/// layer's background, like `FlatView`'s, so a row costs no bitmap of its own;
-/// only what its cell draws does. A list holds one row view per visible row,
-/// each as wide as the list, so drawn they added up to megabytes of one colour.
+/// A list row with a flat ground and one shared selection/hover surface behind
+/// its contents. Native layers avoid a bitmap for each visible row.
 class FlatRowView: NSTableRowView {
-    /// The colour the row shows now, selection and hover included.
+    /// The colour beneath the rounded selection and hover backgrounds.
     var ground: NSColor { Theme.panelBackground }
+    var isHoverHighlighted: Bool { false }
+    var showsPersistentSelection: Bool { false }
 
     /// The row selected by the open file or the last activated commit.
     var showsFrame = false {
@@ -475,7 +495,17 @@ class FlatRowView: NSTableRowView {
         if RowFrameFlight.controlsBackground(in: self) {
             return RowFrameFlight.backgroundShape(in: self)
         }
-        return showsFrame && !holdsFrameBack ? bounds : nil
+        return (showsFrame && !holdsFrameBack) || showsPersistentSelection ? bounds : nil
+    }
+
+    private var backgroundShapes: [NSRect] {
+        var shapes = [NSRect]()
+        if let selected = selectedBackgroundShape { shapes.append(selected) }
+        let hovered = RowHoverFollower.controlsBackground(in: self)
+            ? RowHoverFollower.backgroundShape(in: self)
+            : (isHoverHighlighted ? bounds : nil)
+        if let hovered, !shapes.contains(hovered) { shapes.append(hovered) }
+        return shapes
     }
 
     override var isSelected: Bool {
@@ -508,8 +538,12 @@ class FlatRowView: NSTableRowView {
     /// piece of the shared moving band that crosses it, so no overlay has to
     /// tint the text to travel between lists.
     private func updateSelectionBackground() {
-        let shape = selectedBackgroundShape
-        let rect = shape.map { $0.intersection(bounds) }
+        let shapes = backgroundShapes
+        let rect = shapes.map { $0.intersection(bounds) }
+            .filter { !$0.isEmpty && !$0.isNull }
+            .reduce(nil as NSRect?) { combined, piece in
+                combined.map { $0.union(piece) } ?? piece
+            }
         guard rect != nil || selectionBackground != nil, let layer else { return }
         if selectionBackground == nil {
             let background = CALayer(), tint = CALayer()
@@ -526,13 +560,13 @@ class FlatRowView: NSTableRowView {
             selectionTint = tint
         }
         selectionBackground?.isHidden = rect == nil
-        if let rect, let shape {
+        if let rect {
             selectionBackground?.frame = rect
             selectionBackground?.backgroundColor = Theme.editorBackground.cgColor
             selectionTint?.frame = NSRect(origin: .zero, size: rect.size)
-            selectionTint?.backgroundColor = PuzzleTextView.currentLineTint.cgColor
-            if rect == shape {
-                selectionBackground?.cornerRadius = Theme.rowHighlightRadius(in: shape)
+            selectionTint?.backgroundColor = Theme.rowHighlightTint.cgColor
+            if shapes.count == 1, rect == shapes[0] {
+                selectionBackground?.cornerRadius = Theme.rowHighlightRadius(in: shapes[0])
                 selectionBackground?.mask = nil
             } else {
                 // Round the complete moving band, then clip it at this row.
@@ -545,10 +579,15 @@ class FlatRowView: NSTableRowView {
                     selectionShapeMask = made
                     return made
                 }()
-                let radius = Theme.rowHighlightRadius(in: shape)
                 mask.frame = NSRect(origin: .zero, size: rect.size)
-                mask.path = CGPath(roundedRect: shape.offsetBy(dx: -rect.minX, dy: -rect.minY),
-                                   cornerWidth: radius, cornerHeight: radius, transform: nil)
+                let path = CGMutablePath()
+                for shape in shapes {
+                    let radius = Theme.rowHighlightRadius(in: shape)
+                    path.addRoundedRect(in: shape.offsetBy(dx: -rect.minX, dy: -rect.minY),
+                                        cornerWidth: radius, cornerHeight: radius)
+                }
+                mask.fillRule = .nonZero
+                mask.path = path
                 selectionBackground?.cornerRadius = 0
                 selectionBackground?.mask = mask
             }
@@ -562,16 +601,11 @@ class FlatRowView: NSTableRowView {
         NSBezierPath(rect: dirtyRect).addClip()
         ground.setFill()
         bounds.fill()
-        guard let rect = selectedBackgroundShape else { return }
         NSBezierPath(rect: bounds).addClip()
-        let path = Theme.rowHighlightPath(in: rect)
-        Theme.editorBackground.setFill()
-        path.fill()
-        PuzzleTextView.currentLineTint.setFill()
-        path.fill()
+        Theme.drawRowHighlights(in: backgroundShapes)
     }
 
-    /// Selection is part of `ground`.
+    /// Selection is already part of the shared background surface.
     override func drawSelection(in dirtyRect: NSRect) {}
 }
 
