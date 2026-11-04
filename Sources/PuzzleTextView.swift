@@ -3601,7 +3601,7 @@ private final class ScopeLineOverlay: NSView {
         let drawing = CABasicAnimation(keyPath: "strokeEnd")
         drawing.fromValue = 0
         drawing.toValue = 1
-        drawing.duration = 0.22
+        drawing.duration = 0.8
         drawing.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.75, 0.25, 1)
         drawing.beginTime = shape.convertTime(CACurrentMediaTime(), from: nil)
         shape.add(drawing, forKey: Self.drawingAnimationKey)

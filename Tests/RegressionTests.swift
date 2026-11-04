@@ -4068,9 +4068,9 @@ enum RegressionTests {
             try expect(animation.keyPath == "strokeEnd"
                         && (animation.fromValue as? NSNumber)?.doubleValue == 0
                         && (animation.toValue as? NSNumber)?.doubleValue == 1
-                        && animation.duration > 0 && animation.duration <= 0.25
+                        && abs(animation.duration - 0.8) < 0.001
                         && animation.repeatCount == 0 && !animation.autoreverses,
-                       "\(name) does not draw one short stroke from start to end")
+                       "\(name) does not draw one 800ms stroke from start to end")
             return animation
         }
         func currentPath(_ name: String) throws {
