@@ -24,6 +24,19 @@ enum RegressionTests {
         // it: a history list laid out under it lit that row, and ↓↓ counted
         // on from there. Every test starts with it nowhere.
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
+        if CommandLine.arguments.contains("--gutter-interaction-regressions") {
+            try testCodeBlockAnalysisAndFolding()
+            try testClickableLineNumbersFoldAndHover()
+            try testGutterWidthFollowsLineCount()
+            try testGutterMarksUncommittedChanges()
+            try testActiveLineBadge()
+            try testRoundedLineBackgrounds()
+            try testRoundedRowBackgroundStaysWholeWhileMoving()
+            try testLineBandLeavesNoRepaintResidue()
+            try testFlatSurfacesHoldNoBitmap()
+            print("Clickable gutter and rounded background regression tests passed (9)")
+            return
+        }
         if CommandLine.arguments.contains("--animated-background-regressions") {
             try testCaretLineFlies()
             try testHoverLineFlies()
@@ -199,6 +212,9 @@ enum RegressionTests {
         try testCommentToggleRules()
         try testToggleCommentInTheEditor()
         try testCodeBlockAnalysisAndFolding()
+        try testClickableLineNumbersFoldAndHover()
+        try testRoundedLineBackgrounds()
+        try testRoundedRowBackgroundStaysWholeWhileMoving()
         try testIndexLockContention()
         try testStartPageOpensProjects()
         try testMarkdownLinkHover()
@@ -1063,9 +1079,7 @@ enum RegressionTests {
                        "a button does not take the hand under the pointer: "
                          + "\(String(describing: claimed))")
         }
-        // And set it themselves: the code's I-beam covers them, and the gutter
-        // — which follows the pointer across the code for its fold arrows —
-        // set the I-beam on every move over them.
+        // And set it themselves: the code's I-beam covers them.
         for button in navigator.buttonsForTesting {
             button.updateTrackingAreas()
             try expect(button.trackingOptionsForTesting?
@@ -1083,24 +1097,6 @@ enum RegressionTests {
         window.orderFront(nil)
         window.contentView?.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        if let ruler = pane.lineNumberRulerForTesting,
-           let button = navigator.buttonsForTesting.first {
-            func moved(to point: NSPoint) -> NSEvent? {
-                NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [],
-                                   timestamp: 0, windowNumber: window.windowNumber,
-                                   context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
-            }
-            let overButton = button.convert(NSPoint(x: button.bounds.midX,
-                                                    y: button.bounds.midY), to: nil)
-            let code = pane.textViewForTesting
-            let overCode = code.convert(NSPoint(x: code.visibleRect.midX - 100,
-                                                y: code.visibleRect.minY + 20), to: nil)
-            if let overButton = moved(to: overButton), let overCode = moved(to: overCode) {
-                try expect(!ruler.pointerIsOverTextForTesting(overButton)
-                            && ruler.pointerIsOverTextForTesting(overCode),
-                           "the gutter would set the I-beam over the search buttons")
-            }
-        }
 
         // A search that finds nothing has nothing for them to do.
         pane.showFindBar(seed: "no-such-text-anywhere")
@@ -11143,6 +11139,312 @@ enum RegressionTests {
                    "a partial background repaint left extra tint outside its dirty rectangle")
     }
 
+    /// The number is the fold target itself, while the adjacent Git ribbon
+    /// retains its own action. Its hover badge follows the pointer's rows.
+    private static func testClickableLineNumbersFoldAndHover() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let directory = try temporaryDirectory("clickable-numbers")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("blocks.swift")
+        let body = "func first() {\n    let one = 1\n}\nlet outside = 0\nfunc second() {\n    let two = 2\n}\n"
+            + (8...80).map { "// filler \($0)\n" }.joined()
+        try Data(body.utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 760, height: 600))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(4)
+        let text = pane.textViewForTesting
+        text.updateCodeBlocks(CodeBlockAnalyzer.analyze(body, language: "swift", tabSize: 4), resetFolds: true)
+        guard let ruler = pane.lineNumberRulerForTesting,
+              let firstBlock = text.codeBlocks.first(where: { $0.openerLineStart == 0 }) else {
+            throw Failure(description: "the clickable-number fixture has no gutter or first block")
+        }
+        func render() throws {
+            pane.view.layoutSubtreeIfNeeded()
+            if let container = text.textContainer { text.layoutManager?.ensureLayout(for: container) }
+            guard let bitmap = ruler.bitmapImageRepForCachingDisplay(in: ruler.bounds) else {
+                throw Failure(description: "the clickable-number gutter cannot be rendered")
+            }
+            ruler.cacheDisplay(in: ruler.bounds, to: bitmap)
+        }
+        func event(_ type: NSEvent.EventType, at point: NSPoint) throws -> NSEvent {
+            let location = ruler.convert(point, to: nil)
+            pinPointer(at: window.convertPoint(toScreen: location))
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: type == .leftMouseDown ? 1 : 0, pressure: 1) else {
+                throw Failure(description: "could not create a gutter pointer event")
+            }
+            return event
+        }
+        func point(on line: Int) throws -> NSPoint {
+            guard let box = ruler.numberHitRectForTesting(at: line) else {
+                throw Failure(description: "source line \(line) has no clickable number")
+            }
+            return NSPoint(x: box.midX, y: box.midY)
+        }
+        func move(to line: Int) throws {
+            ruler.mouseMoved(with: try event(.mouseMoved, at: point(on: line)))
+        }
+        func click(_ line: Int) throws {
+            ruler.mouseDown(with: try event(.leftMouseDown, at: point(on: line)))
+        }
+        try render()
+        try expect(ruler.foldableNumberLinesForTesting.contains(1)
+                    && ruler.foldableNumberLinesForTesting.contains(5),
+                   "block openers do not have foldable line numbers")
+        try expect(!ruler.foldableNumberLinesForTesting.contains(4),
+                   "a plain statement's number advertises folding")
+        let change = GitLineChanges.Change(kind: .modified, lines: 1...1,
+                                          removed: ["func old() {"], added: ["func first() {"])
+        ruler.gitChanges = [change]
+        var clickedChanges = 0
+        ruler.onChangeClicked = { _, _ in clickedChanges += 1 }
+        try render()
+        try move(to: 1)
+        try expect(ruler.pointingHandForTesting && NSCursor.current == .pointingHand,
+                   "a foldable number does not show the hand")
+        try click(1)
+        try render()
+        let hidden = (body as NSString).range(of: "let one").location
+        try expect(text.isFolded(firstBlock) && pane.isCharacterHiddenForTesting(hidden),
+                   "clicking the number did not fold its block")
+        try expect(clickedChanges == 0, "clicking a changed block's number opened its Git diff")
+        try expect(ruler.drawnLineNumbersForTesting.contains(4)
+                    && !ruler.drawnLineNumbersForTesting.contains(2)
+                    && !ruler.drawnLineNumbersForTesting.contains(3),
+                   "folded source lines were renumbered or stayed visible: \(ruler.drawnLineNumbersForTesting)")
+        try click(1)
+        try render()
+        try expect(!text.isFolded(firstBlock) && !pane.isCharacterHiddenForTesting(hidden),
+                   "clicking the folded opener's number did not unfold it")
+        guard let ribbon = ruler.changeMarkTargetsForTesting.first else {
+            throw Failure(description: "the changed header has no Git ribbon target")
+        }
+        ruler.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: ribbon.midX, y: ribbon.midY)))
+        try expect(clickedChanges == 1 && !text.isFolded(firstBlock),
+                   "the ribbon did not retain its separate Git action")
+        NSCursor.pointingHand.set()
+        try move(to: 4)
+        try click(4)
+        try expect(!ruler.pointingHandForTesting && NSCursor.current != .pointingHand
+                    && !text.isFolded(firstBlock),
+                   "a non-foldable number claimed a fold action")
+
+        // Real row movement starts only after entry, and quick retargets
+        // continue from the displayed badge instead of an old destination.
+        window.orderFrontRegardless()
+        try render()
+        try move(to: 1)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        try render()
+        guard let first = ruler.displayedHoverMarkForTesting else {
+            throw Failure(description: "the hovered line number has no badge")
+        }
+        try move(to: 12)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(!ruler.isHoverMarkMovingForTesting,
+                       "the number badge moved with Reduce Motion enabled")
+        } else {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.04))
+            try render()
+            guard let middle = ruler.displayedHoverMarkForTesting else {
+                throw Failure(description: "the number badge disappeared during its flight")
+            }
+            try expect(middle.midY > first.midY + 1,
+                       "the number badge stalled during movement")
+            try move(to: 5)
+            try expect(ruler.displayedHoverMarkForTesting.map { abs($0.midY - middle.midY) < 1 } == true,
+                       "retargeting the number badge jumped back to an old row")
+        }
+        try move(to: 5)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        try render()
+        guard let resting = ruler.displayedHoverMarkForTesting,
+              let row = ruler.numberHitRectForTesting(at: 5) else {
+            throw Failure(description: "the number badge did not settle")
+        }
+        try expect(abs(resting.midY - row.midY) < 1 && !ruler.isHoverMarkMovingForTesting,
+                   "the number badge is not on the hovered row")
+        for line in 6...16 {
+            try move(to: line)
+            RunLoop.main.run(until: Date().addingTimeInterval(1.0 / 120))
+        }
+        guard let following = ruler.displayedHoverMarkForTesting,
+              let lastRow = ruler.numberHitRectForTesting(at: 16) else {
+            throw Failure(description: "the number badge disappeared during continuous movement")
+        }
+        try expect(following.midY - resting.midY > (lastRow.midY - resting.midY) * 0.35
+                    && following.midY <= lastRow.midY + 0.5,
+                   "the number badge stalled while the pointer kept crossing rows: \(following)")
+        pinPointer(at: pointerNowhere)
+        ruler.refreshHoverState()
+        try render()
+        try expect(ruler.displayedHoverMarkForTesting == nil && ruler.drawnHoverMarkForTesting == nil,
+                   "the hover badge remained after the pointer left the gutter")
+
+        text.isEditable = false
+        try render()
+        try move(to: 1)
+        try click(1)
+        try expect(!ruler.pointingHandForTesting && !text.isFolded(firstBlock),
+                   "a read-only view still folds through its line numbers")
+    }
+
+    /// The code's hover and caret surfaces leave their outer corners clear,
+    /// while the centre and an overlapping hover retain one coat of colour.
+    private static func testRoundedLineBackgrounds() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let oldStripes = Settings.shared.zebraStripes
+        defer { Settings.shared.zebraStripes = oldStripes }
+        Settings.shared.zebraStripes = false
+        let directory = try temporaryDirectory("rounded-code-band")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("lines.swift")
+        try Data((1...12).map { "let value\($0) = \($0)\n" }.joined().utf8).write(to: url)
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 700, height: 400))
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(4)
+        pane.view.layoutSubtreeIfNeeded()
+        let text = pane.textViewForTesting
+        guard let band = pane.currentLineBandRectForTesting,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 700, pixelsHigh: 400,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw Failure(description: "the rounded code background cannot be drawn")
+        }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = context
+        let canvas = NSRect(x: 0, y: 0, width: 700, height: 400)
+        Theme.editorBackground.setFill()
+        canvas.fill(using: .copy)
+        let ground = bitmap.colorAt(x: 0, y: 0)
+        PuzzleTextView.currentLineTint.setFill()
+        canvas.fill(using: .sourceOver)
+        let tint = bitmap.colorAt(x: 350, y: 200)
+        func pixel(_ x: CGFloat, _ y: CGFloat) -> NSColor? {
+            // This manually created CGContext is bottom-up; bitmap pixels
+            // are addressed from the top, unlike the view-space band.
+            bitmap.colorAt(x: Int(x), y: bitmap.pixelsHigh - 1 - Int(y))
+        }
+        text.drawBackground(in: canvas)
+        let corner = pixel(band.minX, band.minY)
+        let centre = pixel(350, band.midY)
+        try expect(sameColor(corner, ground) && sameColor(centre, tint),
+                   "the code highlight has square corners or lost its centre tint: \(band), \(String(describing: corner))/\(String(describing: ground)), \(String(describing: centre))/\(String(describing: tint))")
+        let point = NSPoint(x: text.visibleRect.maxX - 30, y: band.midY)
+        pinPointer(at: window.convertPoint(toScreen: text.convert(point, to: nil)))
+        text.refreshHoverState()
+        text.drawBackground(in: canvas)
+        try expect(sameColor(pixel(band.minX, band.minY), ground)
+                    && sameColor(pixel(350, band.midY), tint),
+                   "overlapping rounded hover and caret surfaces darkened or squared their corners")
+        text.showsCurrentLineBand = false
+        text.drawBackground(in: canvas)
+        try expect(sameColor(pixel(band.minX, band.minY), ground)
+                    && sameColor(pixel(350, band.midY), tint),
+                   "hover alone does not use the same rounded highlight")
+    }
+
+    /// A moving band has one pair of rounded ends. Clipping that band into
+    /// neighbouring row layers must not round their shared seam a second time.
+    private static func testRoundedRowBackgroundStaysWholeWhileMoving() throws {
+        RowFrameFlight.land()
+        defer { RowFrameFlight.land() }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        final class FlippedHost: NSView { override var isFlipped: Bool { true } }
+        let host = FlippedHost(frame: NSRect(x: 0, y: 0, width: 240, height: 120))
+        host.wantsLayer = true
+        let window = NSWindow(contentRect: host.bounds, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        var rows: [FlatRowView] = []
+        for index in 0..<4 {
+            let row = FlatRowView(frame: NSRect(x: 0, y: CGFloat(index) * 24, width: 240, height: 24))
+            row.wantsLayer = true
+            host.addSubview(row)
+            rows.append(row)
+        }
+        rows[2].showsFrame = true
+        host.layoutSubtreeIfNeeded()
+        let from = host.convert(rows[0].bounds, from: rows[0])
+        let to = host.convert(rows[2].bounds, from: rows[2])
+        RowFrameFlight.fly(in: host, from: from, to: to, landingOn: rows[2])
+        var sampled: (shape: NSRect, boundary: CGFloat)?
+        let deadline = Date().addingTimeInterval(RowFrameFlight.longest)
+        while RowFrameFlight.isFlyingForTesting && Date() < deadline {
+            if let shape = RowFrameFlight.displayedBackgroundForTesting {
+                let boundary = (floor(shape.minY / 24) + 1) * 24
+                let radius = Theme.rowHighlightCornerRadius
+                if boundary - shape.minY > radius + 1 && shape.maxY - boundary > radius + 1 {
+                    sampled = (shape, boundary)
+                    break
+                }
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.003))
+        }
+        guard let sampled else { throw Failure(description: "the rounded band never crossed a row seam") }
+        for row in rows {
+            row.needsDisplay = true
+            row.displayIfNeeded()
+        }
+        CATransaction.flush()
+        for y in [sampled.boundary - 0.5, sampled.boundary + 0.5] {
+            let index = Int(floor(y / 24))
+            let row = rows[index]
+            let local = row.convert(NSPoint(x: 1.5, y: y), from: host)
+            guard let background = row.selectionBackgroundLayerForTesting,
+                  let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 240, pixelsHigh: 24,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+                throw Failure(description: "the moving row's actual layer cannot be drawn")
+            }
+            // CALayer.render uses its own bounds. This catches a flipped or
+            // offset mask that a correct drawBackground fallback could hide.
+            context.cgContext.clear(NSRect(x: 0, y: 0, width: 240, height: 24))
+            background.render(in: context.cgContext)
+            let layerPoint = NSPoint(x: local.x - background.frame.minX,
+                                     y: local.y - background.frame.minY)
+            let alpha = bitmap.colorAt(x: Int(layerPoint.x), y: bitmap.pixelsHigh - 1 - Int(layerPoint.y))?.alphaComponent ?? 0
+            try expect(alpha > 0.95,
+                       "the real selection mask rounded a row seam: \(sampled.shape), row \(index), point \(layerPoint)")
+            let corner = row.convert(NSPoint(x: sampled.shape.minX + 0.5,
+                                              y: sampled.shape.minY + 0.5), from: host)
+            if row.bounds.contains(corner) {
+                let cornerPoint = NSPoint(x: corner.x - background.frame.minX,
+                                          y: corner.y - background.frame.minY)
+                let cornerAlpha = bitmap.colorAt(x: Int(cornerPoint.x), y: bitmap.pixelsHigh - 1 - Int(cornerPoint.y))?.alphaComponent ?? 1
+                try expect(cornerAlpha < 0.2,
+                           "the real moving mask kept a square outer corner: \(cornerPoint)")
+            }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            row.drawBackground(in: row.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            guard let seam = bitmap.colorAt(x: Int(local.x), y: bitmap.pixelsHigh - 1 - Int(local.y)),
+                  let middle = bitmap.colorAt(x: 120, y: bitmap.pixelsHigh - 1 - Int(local.y)) else {
+                throw Failure(description: "the moving row's snapshot has no seam pixels")
+            }
+            try expect(sameColor(seam, middle),
+                       "the snapshot rounded the clipped band's shared seam")
+        }
+    }
+
     private static func testActiveLineBadge() throws {
         let directory = try temporaryDirectory("active-line")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -11601,7 +11903,7 @@ enum RegressionTests {
         try expect(ruler.gitChanges.count == changes.count,
                    "the gutter did not receive the marks")
 
-        // The ribbon is on the outer edge, clear of the fold arrow's column,
+        // The ribbon is on the outer edge, clear of the clickable numbers,
         // so a changed line can still be folded.
         // The ruler only paints the fragments inside the text view's visible
         // rect, so give it a laid-out window before asking what it drew.
@@ -11613,23 +11915,19 @@ enum RegressionTests {
         ruler.displayIfNeeded()
         try expect(!ruler.changeMarkBarsForTesting.isEmpty,
                    "the gutter drew no ribbons, so the geometry below proves nothing")
-        // Three targets share the gutter and none may overlap: the split
-        // divider's drag handle reaches in from the left, the fold arrow owns
-        // the right, and the ribbon plus the numbers sit between them. The
-        // handle takes hold at its knob, centred on the panel's edge; the
-        // code starts past the 1pt line there.
-        let arrowColumn = ruler.ruleThickness - LineNumberRulerView.foldArrowColumn
+        // Divider, ribbon and clickable line numbers keep separate targets.
+        let numberColumn = LineNumberRulerView.numberColumn(digits: 2)
         let dividerReach = LineNumberRulerView.dividerReach
         try expect(dividerReach >= DividerGrip.diameter / 2
                     && dividerReach >= SplitDividerHandleView.hitWidth / 2 - 1,
                    "the ribbon column starts inside the divider's drag handle")
-        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.maxX <= arrowColumn },
-                   "a change target reaches into the fold arrow's column: "
+        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.maxX <= numberColumn.start },
+                   "a change target reaches into the clickable line numbers: "
                     + "\(ruler.changeMarkTargetsForTesting)")
         try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.minX >= dividerReach },
                    "a change target reaches into the divider's drag handle: "
                     + "\(ruler.changeMarkTargetsForTesting)")
-        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.width >= 20 },
+        try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.width >= LineNumberRulerView.changeMarkWidth },
                    "the change target is too small to hit: "
                     + "\(ruler.changeMarkTargetsForTesting.map(\.width))")
         try expect(ruler.changeMarkBarsForTesting.allSatisfy { $0.minX == dividerReach },
@@ -11647,7 +11945,7 @@ enum RegressionTests {
         try expect(dividerReach + LineNumberRulerView.changeMarkWidth
                     <= LineNumberRulerView.numberColumn(digits: 2).start,
                    "the ribbon reaches into the line numbers")
-        // Four-digit line numbers still fit between the ribbon and the arrow.
+        // Four-digit numbers still fit without the former arrow column.
         let numbers = LineNumberRulerView.numberColumn(digits: 4)
         let digits = ("8888" as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
         try expect(numbers.end - numbers.start >= digits,
@@ -12522,8 +12820,9 @@ enum RegressionTests {
             }
             try expect(row.selectionBackgroundRectForTesting == row.bounds
                         && background.zPosition < 0 && background.borderWidth == 0
-                        && background.cornerRadius == 0,
-                       "the selected row is not a full background behind its content: \(background.frame)")
+                        && background.cornerRadius > 0
+                        && background.cornerRadius <= row.bounds.height / 2,
+                       "the selected row is not a rounded background behind its content: \(background.frame)")
             try expect(sameColor(background.backgroundColor.flatMap { NSColor(cgColor: $0) },
                                  Theme.editorBackground)
                         && sameColor(background.sublayers?.first?.backgroundColor.flatMap {
@@ -12541,15 +12840,21 @@ enum RegressionTests {
             NSGraphicsContext.saveGraphicsState()
             defer { NSGraphicsContext.restoreGraphicsState() }
             NSGraphicsContext.current = context
+            row.ground.setFill()
+            row.bounds.fill(using: .copy)
+            let ground = bitmap.colorAt(x: 0, y: 0)
             Theme.editorBackground.setFill()
             row.bounds.fill(using: .copy)
             PuzzleTextView.currentLineTint.setFill()
             row.bounds.fill(using: .sourceOver)
             let reference = bitmap.colorAt(x: 300, y: 11)
             row.drawBackground(in: row.bounds)
-            try expect([NSPoint(x: 1, y: 1), NSPoint(x: 300, y: 11), NSPoint(x: 598, y: 20)]
+            try expect([NSPoint(x: 300, y: 11), NSPoint(x: 5, y: 11), NSPoint(x: 594, y: 11)]
                 .allSatisfy { sameColor(bitmap.colorAt(x: Int($0.x), y: Int($0.y)), reference) },
                        "the selected row is outlined or has a different fill from the code")
+            try expect(sameColor(bitmap.colorAt(x: 0, y: 0), ground)
+                        && sameColor(bitmap.colorAt(x: 599, y: 21), ground),
+                       "the selected row's corners stayed square in its snapshot")
         }
         git.isActiveFile = true
         try expect(sameColor(shown(git), Theme.hover) && git.isFrameShownForTesting,
@@ -14293,8 +14598,8 @@ enum RegressionTests {
         try expect(bulkyWidth == Ruler.gutterWidth(digits: 4),
                    "a 1500-line file does not get the four-digit gutter: \(bulkyWidth)pt")
 
-        // Whatever the width, the numbers keep a column of their own between
-        // the ribbon and the fold arrow.
+        // Whatever the width, the numbers and their badge stay clear of the
+        // ribbon and inside the gutter, without an arrow-only column.
         for line in [1, 9, 10, 99, 100, 1000, 99999] {
             let digits = Ruler.digits(forHighestLine: line)
             let column = Ruler.numberColumn(digits: digits)
@@ -14306,6 +14611,11 @@ enum RegressionTests {
             let drawn = value.size(withAttributes: [.font: Theme.editorFont()]).width
             try expect(column.end - column.start >= drawn - 0.5,
                        "line \(line) does not fit its own column")
+            let box = NSRect(x: column.start, y: 10, width: column.end - column.start, height: 14)
+            let badge = Ruler.activePill(around: box, textWidth: drawn)
+            try expect(badge.minX >= Ruler.dividerReach + Ruler.changeMarkWidth
+                        && badge.maxX <= Ruler.gutterWidth(digits: digits),
+                       "line \(line)'s badge overlaps the ribbon or leaves the gutter: \(badge)")
         }
     }
 

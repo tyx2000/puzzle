@@ -42,7 +42,7 @@ syntax highlighting. **~3.9 MB app bundle, ~60 MB RAM.**
   the whole tree/tab/panel type hierarchy), with `tree_line_height` controlling
   file-tree rows. Saving re-applies live; `//` comments are allowed.
 - **Editor details** — active-line band and caret use the configured code-row
-  height, with code, line numbers and inline blame vertically centered; no gutter separator, and hover-only gutter-arrow
+  height, with code, line numbers and inline blame vertically centered; no gutter separator, and clickable line-number
   code folding that preserves source line numbers. Matching `()`, `[]` and `{}`
   are marked with red wave underlines at the insertion point.
 - **File tree** — lazy `NSOutlineView`, folders-first, git-dirty markers, and

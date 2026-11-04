@@ -10,6 +10,15 @@ import AppKit
 /// told what it holds. Resolving a token returns a colour made when the
 /// palette was chosen, so a draw call never allocates one.
 enum Theme {
+    /// Shared by code-line bands and sidebar selection backgrounds.
+    static let rowHighlightCornerRadius: CGFloat = 4
+    static func rowHighlightRadius(in rect: NSRect) -> CGFloat {
+        min(rowHighlightCornerRadius, max(0, min(rect.width, rect.height) / 2))
+    }
+    static func rowHighlightPath(in rect: NSRect) -> NSBezierPath {
+        let radius = rowHighlightRadius(in: rect)
+        return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+    }
     /// The palette being painted: the one settings.json named at launch, or
     /// the one `apply(_:)` switched to since.
     private(set) static var palette = ThemePalette.named(Settings.shared.theme) ?? .default
@@ -449,6 +458,7 @@ class FlatRowView: NSTableRowView {
     static func frameRect(in bounds: NSRect) -> NSRect { bounds }
     private var selectionBackground: CALayer?
     private var selectionTint: CALayer?
+    private var selectionShapeMask: CAShapeLayer?
     var isFrameShownForTesting: Bool { selectionBackground.map { !$0.isHidden } ?? false }
     var frameLineLayerForTesting: CALayer? { selectionBackground }
     var selectionBackgroundLayerForTesting: CALayer? { selectionBackground }
@@ -461,9 +471,9 @@ class FlatRowView: NSTableRowView {
         RowFrameFlight.register(self)
     }
 
-    private var selectedBackgroundRect: NSRect? {
+    private var selectedBackgroundShape: NSRect? {
         if RowFrameFlight.controlsBackground(in: self) {
-            return RowFrameFlight.background(in: self)
+            return RowFrameFlight.backgroundShape(in: self)
         }
         return showsFrame && !holdsFrameBack ? bounds : nil
     }
@@ -498,13 +508,15 @@ class FlatRowView: NSTableRowView {
     /// piece of the shared moving band that crosses it, so no overlay has to
     /// tint the text to travel between lists.
     private func updateSelectionBackground() {
-        let rect = selectedBackgroundRect
+        let shape = selectedBackgroundShape
+        let rect = shape.map { $0.intersection(bounds) }
         guard rect != nil || selectionBackground != nil, let layer else { return }
         if selectionBackground == nil {
             let background = CALayer(), tint = CALayer()
             for part in [background, tint] {
                 part.actions = ["frame": NSNull(), "bounds": NSNull(), "position": NSNull(),
-                                "hidden": NSNull(), "backgroundColor": NSNull()]
+                                "hidden": NSNull(), "backgroundColor": NSNull(),
+                                "cornerRadius": NSNull(), "mask": NSNull()]
             }
             background.zPosition = -1
             background.masksToBounds = true
@@ -514,11 +526,32 @@ class FlatRowView: NSTableRowView {
             selectionTint = tint
         }
         selectionBackground?.isHidden = rect == nil
-        if let rect {
+        if let rect, let shape {
             selectionBackground?.frame = rect
             selectionBackground?.backgroundColor = Theme.editorBackground.cgColor
             selectionTint?.frame = NSRect(origin: .zero, size: rect.size)
             selectionTint?.backgroundColor = PuzzleTextView.currentLineTint.cgColor
+            if rect == shape {
+                selectionBackground?.cornerRadius = Theme.rowHighlightRadius(in: shape)
+                selectionBackground?.mask = nil
+            } else {
+                // Round the complete moving band, then clip it at this row.
+                // Rounding each intersected piece separately leaves seams
+                // when one band passes across two neighbouring rows.
+                let mask = selectionShapeMask ?? {
+                    let made = CAShapeLayer()
+                    made.actions = ["path": NSNull(), "frame": NSNull(), "bounds": NSNull(),
+                                    "position": NSNull()]
+                    selectionShapeMask = made
+                    return made
+                }()
+                let radius = Theme.rowHighlightRadius(in: shape)
+                mask.frame = NSRect(origin: .zero, size: rect.size)
+                mask.path = CGPath(roundedRect: shape.offsetBy(dx: -rect.minX, dy: -rect.minY),
+                                   cornerWidth: radius, cornerHeight: radius, transform: nil)
+                selectionBackground?.cornerRadius = 0
+                selectionBackground?.mask = mask
+            }
         }
     }
 
@@ -529,11 +562,13 @@ class FlatRowView: NSTableRowView {
         NSBezierPath(rect: dirtyRect).addClip()
         ground.setFill()
         bounds.fill()
-        guard let rect = selectedBackgroundRect else { return }
+        guard let rect = selectedBackgroundShape else { return }
+        NSBezierPath(rect: bounds).addClip()
+        let path = Theme.rowHighlightPath(in: rect)
         Theme.editorBackground.setFill()
-        rect.fill()
+        path.fill()
         PuzzleTextView.currentLineTint.setFill()
-        rect.fill(using: .sourceOver)
+        path.fill()
     }
 
     /// Selection is part of `ground`.

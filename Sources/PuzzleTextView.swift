@@ -1504,8 +1504,8 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         // crossing, must not stack two translucent coats of the same colour.
         let bands = NSBezierPath()
         bands.windingRule = .nonZero
-        if let hover = displayedHoverLineBandRect() { bands.appendRect(hover) }
-        if let active = displayedCurrentLineBandRect() { bands.appendRect(active) }
+        if let hover = displayedHoverLineBandRect() { bands.append(Theme.rowHighlightPath(in: hover)) }
+        if let active = displayedCurrentLineBandRect() { bands.append(Theme.rowHighlightPath(in: active)) }
         // Highlighted rows have the same ground even over a zebra stripe.
         Theme.editorBackground.setFill()
         bands.fill()

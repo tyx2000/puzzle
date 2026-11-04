@@ -190,10 +190,17 @@ enum RowFrameFlight {
 
     /// The moving piece belonging to this row, in its own coordinates.
     static func background(in row: FlatRowView) -> NSRect? {
+        backgroundShape(in: row).map { $0.intersection(row.bounds) }
+    }
+
+    /// Keep the complete shape so rounded corners belong to the band,
+    /// rather than to each row-sized slice of it.
+    static func backgroundShape(in row: FlatRowView) -> NSRect? {
         guard flight != nil, let host, let displayed,
               row.window === host.window, row.isDescendant(of: host) else { return nil }
-        let piece = row.convert(displayed, from: host).intersection(row.bounds)
-        return piece.isNull || piece.isEmpty ? nil : piece
+        let shape = row.convert(displayed, from: host)
+        let piece = shape.intersection(row.bounds)
+        return piece.isNull || piece.isEmpty ? nil : shape
     }
 
     /// Rects are in the host's coordinates. An interrupted flight starts

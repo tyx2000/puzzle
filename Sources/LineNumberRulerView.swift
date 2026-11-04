@@ -49,7 +49,6 @@ final class LineNumberRulerView: NSRulerView {
         guard event.window === window else { return false }
         let point = convert(event.locationInWindow, from: nil)
         return changeMarkRects.contains { $0.rect.contains(point) }
-            && !arrowHitRects.contains { $0.value.insetBy(dx: -3, dy: -3).contains(point) }
     }
 
     /// How many times the gutter has drawn, for a test to tell a join that
@@ -60,13 +59,12 @@ final class LineNumberRulerView: NSRulerView {
     private(set) var changeLinkForTesting: (bounds: NSRect, colour: NSColor)?
     /// Gutter columns, outer edge inward:
     ///
-    ///     [ divider reach ][ ribbon ][ line numbers ][ fold arrow ]
+    ///     [ divider reach ][ ribbon ][ gap ][ clickable line numbers ]
     ///
     /// The first band belongs to the split divider's drag handle, which is
     /// centred on the boundary and reaches into the editor; anything drawn or
-    /// clicked there is really the resize target. The last belongs to the fold
-    /// arrow. The ribbon and the numbers live between them, so all three
-    /// targets are reachable without fighting each other. The handle takes
+    /// clicked there is really the resize target. The number's badge keeps
+    /// clear of the ribbon, which alone opens the line's change. The handle takes
     /// hold only at its knob, which is centred on the line and reaches half
     /// its width past it.
     static let dividerReach: CGFloat = DividerGrip.radius
@@ -74,7 +72,9 @@ final class LineNumberRulerView: NSRulerView {
     /// it is this wide throughout now, so the target never has to be found
     /// first. Stops short of the numbers, which keep their column.
     static let changeMarkWidth: CGFloat = 8
-    static let foldArrowColumn: CGFloat = 14
+    private static let numberBadgePadding: CGFloat = 5
+    private static let numberColumnGap: CGFloat = 3
+    private static let trailingInset: CGFloat = 3
     /// Never narrower than this, however short the file: a one-digit column
     /// reads as a stray character rather than a gutter, and a file one line
     /// from `9` to `10` would shift the code sideways.
@@ -84,8 +84,8 @@ final class LineNumberRulerView: NSRulerView {
     static func numberColumn(digits: Int,
                              font: NSFont = Theme.editorFont()) -> (start: CGFloat, end: CGFloat) {
         // Room for the ribbon, so it never runs under the widest line number.
-        (dividerReach + changeMarkWidth + 2,
-         gutterWidth(for: font, digits: digits) - foldArrowColumn)
+        (dividerReach + changeMarkWidth + numberColumnGap + numberBadgePadding,
+         gutterWidth(for: font, digits: digits) - trailingInset - numberBadgePadding)
     }
 
     /// Wide enough for the widest number this file will actually show, plus the
@@ -96,7 +96,8 @@ final class LineNumberRulerView: NSRulerView {
                             digits: Int = 4) -> CGFloat {
         let sample = String(repeating: "8", count: max(digits, minimumDigits))
         let width = ceil((sample as NSString).size(withAttributes: [.font: font]).width)
-        return dividerReach + changeMarkWidth + 2 + width + 4 + foldArrowColumn
+        return dividerReach + changeMarkWidth + numberColumnGap
+            + numberBadgePadding * 2 + width + trailingInset
     }
 
     /// Digits needed to write the highest line number in the file.
@@ -108,14 +109,28 @@ final class LineNumberRulerView: NSRulerView {
     /// Where the ribbon itself was painted, as opposed to its click target.
     private var changeMarkBars: [NSRect] = []
     private weak var textView: PuzzleTextView?
-    private var arrowHitRects: [Int: NSRect] = [:]
-    private var foldableRowRects: [Int: NSRect] = [:]
-    private var hoveredBlock: Int?
+    private struct NumberRow: Equatable {
+        let line: Int
+        let number: Int
+        let hitRect: NSRect
+        let labelBox: NSRect
+        let pill: NSRect
+        let blockIdentity: Int?
+    }
+    private var numberRows: [NumberRow] = []
+    private var hoveredNumber: NumberRow?
+    private var displayedHoverMark: NSRect?
+    private var hoverTimer: Timer?
+    private var hoverLastTick: CFTimeInterval?
+    private var hoverNeedsRealignment = true
+    private static let hoverResponseTime: TimeInterval = 0.03
+    private(set) var pointingHandForTesting = false
+    private var cachedCodeBlocks: [CodeBlock] = []
+    private var foldableByLine: [Int: CodeBlock] = [:]
     /// Line count for rulers with no document index behind them (the history
     /// pane), rebuilt only when the text changes.
     private var cachedLineCount: (length: Int, lines: Int)?
     private var gutterTrackingArea: NSTrackingArea?
-    private var editorTrackingArea: NSTrackingArea?
 
     init(textView: PuzzleTextView) {
         self.textView = textView
@@ -126,7 +141,7 @@ final class LineNumberRulerView: NSRulerView {
         setAccessibilityRole(.group)
         setAccessibilityLabel("Code folding gutter")
         setAccessibilityHelp(
-            "Click an arrow to fold or unfold a block. Option-Command-[ toggles the block at the caret.")
+            "Click the line number at the start of a block to fold or unfold it. Option-Command-[ toggles the block at the caret.")
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(textChanged),
@@ -144,12 +159,13 @@ final class LineNumberRulerView: NSRulerView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        if let editorTrackingArea, let textView {
-            textView.removeTrackingArea(editorTrackingArea)
-        }
+        hoverTimer?.invalidate()
     }
 
     @objc private func redraw() {
+        hoverNeedsRealignment = true
+        stopHoverMovement()
+        hoveredNumber = nil
         updateThickness()
         needsDisplay = true
     }
@@ -194,10 +210,6 @@ final class LineNumberRulerView: NSRulerView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let gutterTrackingArea { removeTrackingArea(gutterTrackingArea) }
-        if let editorTrackingArea, let textView {
-            textView.removeTrackingArea(editorTrackingArea)
-        }
-
         let options: NSTrackingArea.Options = [
             .mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect,
         ]
@@ -206,88 +218,139 @@ final class LineNumberRulerView: NSRulerView {
             owner: self, userInfo: nil)
         addTrackingArea(gutterTracking)
         gutterTrackingArea = gutterTracking
-
-        // VS Code-style folding controls appear when the pointer is anywhere
-        // on a foldable source row, not only after finding the invisible icon.
-        if let textView {
-            let editorTracking = NSTrackingArea(
-                rect: .zero, options: options,
-                owner: self, userInfo: nil)
-            textView.addTrackingArea(editorTracking)
-            editorTrackingArea = editorTracking
-        }
     }
+
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
 
     override func mouseMoved(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let hovered = foldableRowRects.first {
-            point.y >= $0.value.minY && point.y < $0.value.maxY
-        }?.key
-        if hovered != hoveredBlock {
-            hoveredBlock = hovered
-            needsDisplay = true
-        }
-
-        let overArrow = bounds.contains(point) && arrowHitRects.contains {
-            $0.value.contains(point)
-        }
-        let change = overArrow ? nil : changeMarkRects.first { $0.rect.contains(point) }?.change
-        if overArrow || change != nil {
-            NSCursor.pointingHand.set()
-        } else if bounds.contains(point) {
-            NSCursor.arrow.set()
-        } else if pointerIsOverText(event) {
-            NSCursor.iBeam.set()
-        }
+        updateHover(at: convert(event.locationInWindow, from: nil), animated: true)
     }
 
-    /// This view also follows the pointer across the code, to show the fold
-    /// arrow of the row it is on — including where something floats over the
-    /// code, like the search navigator's buttons. Setting the I-beam there
-    /// took the buttons' hand away on every move.
-    private func pointerIsOverText(_ event: NSEvent) -> Bool {
-        // `hitTest` takes the point in the superview's coordinates.
-        guard let textView, let content = window?.contentView,
-              let hit = content.hitTest(
-                content.superview?.convert(event.locationInWindow, from: nil)
-                    ?? event.locationInWindow)
-        else { return false }
-        return hit === textView || hit.isDescendant(of: textView)
+    func refreshHoverState() {
+        guard let window else {
+            setHoveredNumber(nil, animated: false)
+            pointingHandForTesting = false
+            return
+        }
+        updateHover(at: convert(window.pointerLocation, from: nil), animated: !hoverNeedsRealignment)
     }
-    func pointerIsOverTextForTesting(_ event: NSEvent) -> Bool { pointerIsOverText(event) }
 
     override func mouseExited(with event: NSEvent) {
-        if let window {
-            let windowPoint = window.pointerLocation
-            let insideGutter = bounds.contains(convert(windowPoint, from: nil))
-            let insideEditor = textView.map {
-                $0.visibleRect.contains($0.convert(windowPoint, from: nil))
-            } ?? false
-            if insideGutter || insideEditor { return }
+        setHoveredNumber(nil, animated: false)
+        pointingHandForTesting = false
+        // The destination view owns its cursor; in particular, do not replace
+        // the editor's I-beam or a floating button's hand on the way out.
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hoverNeedsRealignment = true
+        if window == nil {
+            setHoveredNumber(nil, animated: false)
+            pointingHandForTesting = false
         }
-        hoveredBlock = nil
-        NSCursor.arrow.set()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for row in numberRows where row.blockIdentity != nil {
+            addCursorRect(row.hitRect, cursor: .pointingHand)
+        }
+        for mark in changeMarkRects { addCursorRect(mark.rect, cursor: .pointingHand) }
+    }
+
+    private func updateHover(at point: NSPoint, animated: Bool) {
+        let row = bounds.contains(point) ? numberRows.first { $0.hitRect.contains(point) } : nil
+        setHoveredNumber(row, animated: animated)
+        pointingHandForTesting = row?.blockIdentity != nil
+            || changeMarkRects.contains { $0.rect.contains(point) }
+        if bounds.contains(point) {
+            (pointingHandForTesting ? NSCursor.pointingHand : NSCursor.arrow).set()
+        }
+    }
+
+    private func setHoveredNumber(_ row: NumberRow?, animated: Bool) {
+        let canAnimate = animated && window?.isVisible == true
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard row != hoveredNumber else {
+            if !canAnimate { stopHoverMovement() }
+            return
+        }
+        let shown = displayedHoverPill
+        hoveredNumber = row
+        guard canAnimate, let shown, let row, abs(shown.minY - row.pill.minY) > 0.25 else {
+            stopHoverMovement()
+            needsDisplay = true
+            return
+        }
+        displayedHoverMark = shown
+        if hoverTimer == nil {
+            hoverLastTick = CACurrentMediaTime()
+            let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+                self?.advanceHoverMark()
+            }
+            hoverTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    private func advanceHoverMark() {
+        guard let row = hoveredNumber, let shown = displayedHoverMark,
+              window?.isVisible == true,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            stopHoverMovement()
+            needsDisplay = true
+            return
+        }
+        let time = CACurrentMediaTime()
+        let elapsed = max(0, time - (hoverLastTick ?? time))
+        hoverLastTick = time
+        let amount = CGFloat(-expm1(-elapsed / Self.hoverResponseTime))
+        displayedHoverMark = NSRect(
+            x: row.pill.minX, y: shown.minY + (row.pill.minY - shown.minY) * amount,
+            width: row.pill.width, height: shown.height + (row.pill.height - shown.height) * amount)
+        if let displayedHoverMark,
+           max(abs(displayedHoverMark.minY - row.pill.minY),
+               abs(displayedHoverMark.height - row.pill.height)) <= 0.25 { stopHoverMovement() }
         needsDisplay = true
+    }
+
+    private func stopHoverMovement() {
+        let wasMoving = hoverTimer != nil || displayedHoverMark != nil
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        hoverLastTick = nil
+        displayedHoverMark = nil
+        if wasMoving { needsDisplay = true }
+    }
+
+    private func foldNumber(at point: NSPoint) -> Bool {
+        guard let identity = numberRows.first(where: { $0.hitRect.contains(point) })?.blockIdentity,
+              let textView, textView.isEditable, textView.diffLineNumbers.isEmpty,
+              let block = textView.codeBlocks.first(where: { $0.identity == identity }) else { return false }
+        textView.toggleFold(block)
+        hoverNeedsRealignment = true
+        stopHoverMovement()
+        needsDisplay = true
+        return true
     }
 
     override func mouseDown(with event: NSEvent) {
+        if hoverNeedsRealignment {
+            layoutSubtreeIfNeeded()
+            displayIfNeeded()
+        }
         let point = convert(event.locationInWindow, from: nil)
-        // The fold arrow wins where they overlap; it is the smaller target.
-        if !arrowHitRects.contains(where: { $0.value.insetBy(dx: -3, dy: -3).contains(point) }),
-           let hit = changeMarkRects.first(where: { $0.rect.contains(point) }) {
+        if numberRows.contains(where: { $0.hitRect.contains(point) }) {
+            _ = foldNumber(at: point)
+            return
+        }
+        if let hit = changeMarkRects.first(where: { $0.rect.contains(point) }) {
             onChangeClicked?(hit.change, rows(of: hit.change) ?? hit.rect)
             return
         }
-        guard let identity = arrowHitRects.first(where: {
-            $0.value.insetBy(dx: -3, dy: -3).contains(point)
-        })?.key,
-              let block = textView?.codeBlocks.first(where: { $0.identity == identity }) else {
-            super.mouseDown(with: event)
-            return
-        }
-        hoveredBlock = identity
-        textView?.toggleFold(block)
-        needsDisplay = true
+        super.mouseDown(with: event)
     }
 
     /// Take over drawing completely: NSRulerView otherwise paints a hairline
@@ -304,8 +367,9 @@ final class LineNumberRulerView: NSRulerView {
         drawsForTesting += 1
         Theme.editorBackground.setFill()
         bounds.fill()
-        arrowHitRects.removeAll(keepingCapacity: true)
-        foldableRowRects.removeAll(keepingCapacity: true)
+        let previousNumberRows = numberRows
+        let previousChangeTargets = changeMarkRects.map(\.rect)
+        numberRows.removeAll(keepingCapacity: true)
         changeMarkRects.removeAll(keepingCapacity: true)
         changeMarkBars.removeAll(keepingCapacity: true)
         drawnLineNumbersForTesting.removeAll(keepingCapacity: true)
@@ -344,8 +408,15 @@ final class LineNumberRulerView: NSRulerView {
 
 
         let diffNumbers = textView.diffLineNumbers
-        let foldableByLine = Dictionary(grouping: textView.codeBlocks, by: \.openerLineStart)
-            .compactMapValues { $0.max { $0.endLocation < $1.endLocation } }
+        if cachedCodeBlocks != textView.codeBlocks {
+            cachedCodeBlocks = textView.codeBlocks
+            foldableByLine.removeAll(keepingCapacity: true)
+            for block in cachedCodeBlocks {
+                if let previous = foldableByLine[block.openerLineStart],
+                   previous.endLocation >= block.endLocation { continue }
+                foldableByLine[block.openerLineStart] = block
+            }
+        }
         let numbers = Self.numberColumn(digits: currentDigits, font: font)
         // Changed lines next to each other, of one kind, are one ribbon: drawn
         // a row at a time, each row's rounded ends made a dashed line of what
@@ -373,7 +444,7 @@ final class LineNumberRulerView: NSRulerView {
                     ribbon?.rect.size.height += fragRect.height
                     self.changeMarkRects.append(
                         (drawn.change, NSRect(x: Self.dividerReach, y: y,
-                                              width: numbers.end - Self.dividerReach,
+                                              width: Self.changeMarkWidth,
                                               height: fragRect.height)))
                 }
                 return
@@ -409,11 +480,19 @@ final class LineNumberRulerView: NSRulerView {
                                  y: y + (fragRect.height - size.height) / 2,
                                  width: numbers.end - numbers.start,
                                  height: size.height)
+                let hit = NSRect(x: numbers.start - Self.numberBadgePadding, y: y,
+                                 width: numbers.end - numbers.start + Self.numberBadgePadding * 2,
+                                 height: fragRect.height)
+                let identity = textView.isEditable && diffNumbers.isEmpty
+                    ? self.foldableByLine[fragChar.location]?.identity : nil
+                self.numberRows.append(NumberRow(line: lineNo, number: shown, hitRect: hit,
+                                                 labelBox: box,
+                                                 pill: Self.activePill(around: box, textWidth: size.width),
+                                                 blockIdentity: identity))
                 value.draw(in: box, withAttributes: attributes)
             }
-            // The change ribbon runs along the outer edge of the gutter. It used
-            // to sit against the code, where it shared a column with the fold
-            // arrow and stole its clicks on any line that had changed.
+            // The change ribbon alone opens its diff. The number column is
+            // reserved for folding and must never share that click target.
             let change = GitLineChanges.change(at: lineNo, in: self.gitChanges)
             if let change {
                 let markRect = NSRect(x: Self.dividerReach, y: y,
@@ -436,45 +515,33 @@ final class LineNumberRulerView: NSRulerView {
                     flushRibbon()
                     ribbon = (markRect, change, lineNo)
                 }
-                // The ribbon is 3pt wide; the target is the ribbon plus the
-                // number column, which clears the divider handle on one side
-                // and the fold arrow on the other.
                 self.changeMarkRects.append(
                     (change, NSRect(x: Self.dividerReach, y: y,
-                                    width: numbers.end - Self.dividerReach,
+                                    width: Self.changeMarkWidth,
                                     height: fragRect.height)))
             }
             if change == nil { flushRibbon() }
-            if let block = foldableByLine[fragChar.location] {
-                let rowRect = NSRect(
-                    x: 0, y: y,
-                    width: self.ruleThickness, height: fragRect.height)
-                let hitRect = NSRect(
-                    x: self.ruleThickness - Self.foldArrowColumn, y: y,
-                    width: Self.foldArrowColumn, height: fragRect.height)
-                self.foldableRowRects[block.identity] = rowRect
-                self.arrowHitRects[block.identity] = hitRect
-
-                if self.hoveredBlock == block.identity {
-                    let centerY = y + fragRect.height / 2
-                    let arrowRect = NSRect(
-                        x: self.ruleThickness - Self.foldArrowColumn + 2,
-                        y: centerY - 5,
-                        width: 10, height: 10)
-                    self.drawFoldArrow(
-                        in: arrowRect,
-                        folded: textView.isFolded(block))
-                }
-            }
         }
         flushRibbon()
         drawChangeLink()
+
+        if hoverNeedsRealignment || previousNumberRows != numberRows
+            || previousChangeTargets != changeMarkRects.map(\.rect) {
+            hoverNeedsRealignment = false
+            if let window {
+                window.invalidateCursorRects(for: self)
+                updateHover(at: convert(window.pointerLocation, from: nil), animated: false)
+            } else {
+                setHoveredNumber(nil, animated: false)
+            }
+        }
 
         // The badge, found at a glance the way the open file's frame and its
         // tab are. It rides with the band the code draws behind the caret's
         // line, flying when that does; where the code draws none — a diff, a
         // selection — it sits on the caret's row.
         drawnActiveMarkForTesting = nil
+        drawnHoverMarkForTesting = nil
         // Search can light a result other than the caret's row; its band
         // must not carry the caret's number onto that result.
         let movingRow = textView.searchResultLineLocation == nil
@@ -489,10 +556,22 @@ final class LineNumberRulerView: NSRulerView {
             let box = NSRect(x: numbers.start, y: row.y + (row.height - size.height) / 2,
                              width: numbers.end - numbers.start, height: size.height)
             let pill = Self.activePill(around: box, textWidth: size.width)
+            // Two opaque badges can cross, but their digits must not overlap.
+            if displayedHoverPill.map({ !$0.intersects(pill) }) ?? true {
+                Theme.cursor.setFill()
+                NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
+                value.draw(in: box, withAttributes: badge)
+                drawnActiveMarkForTesting = pill
+            }
+        }
+        if let hoveredNumber, let pill = displayedHoverPill {
+            let value = "\(hoveredNumber.number)" as NSString
+            var box = hoveredNumber.labelBox
+            box.origin.y = pill.midY - box.height / 2
             Theme.cursor.setFill()
             NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
             value.draw(in: box, withAttributes: badge)
-            drawnActiveMarkForTesting = pill
+            drawnHoverMarkForTesting = pill
         }
     }
 
@@ -550,7 +629,35 @@ final class LineNumberRulerView: NSRulerView {
     /// across its row, so they can be checked without reading pixels out of a
     /// bitmap.
     private(set) var drawnActiveMarkForTesting: NSRect?
+    private(set) var drawnHoverMarkForTesting: NSRect?
     private(set) var drawnLineNumbersForTesting: [Int] = []
+    var hoveredLineNumberForTesting: Int? { hoveredNumber?.line }
+    var foldableNumberLinesForTesting: [Int] {
+        numberRows.filter { $0.blockIdentity != nil }.map(\.line)
+    }
+    func numberHitRectForTesting(at line: Int) -> NSRect? {
+        numberRows.first { $0.line == line }?.hitRect
+    }
+    private var displayedHoverPill: NSRect? {
+        guard let row = hoveredNumber else { return nil }
+        guard hoverTimer != nil, let displayedHoverMark else { return row.pill }
+        return NSRect(x: row.pill.minX, y: displayedHoverMark.minY,
+                      width: row.pill.width, height: displayedHoverMark.height)
+    }
+    var displayedHoverMarkForTesting: NSRect? { displayedHoverPill }
+    var isHoverMarkMovingForTesting: Bool { hoverTimer != nil }
+
+    func clickNumberForTesting(at line: Int) -> Bool {
+        guard let row = numberRows.first(where: { $0.line == line }), row.blockIdentity != nil,
+              let window,
+              let event = NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: convert(NSPoint(x: row.hitRect.midX, y: row.hitRect.midY), to: nil),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { return false }
+        mouseDown(with: event)
+        return true
+    }
 
     /// The badge behind the caret's line number: round the digits, right
     /// aligned with them so it does not shift as the caret moves between lines
@@ -559,29 +666,6 @@ final class LineNumberRulerView: NSRulerView {
         let width = max(ceil(textWidth), 6)
         return NSRect(x: box.maxX - width, y: box.minY, width: width, height: box.height)
             .insetBy(dx: -5, dy: -3)
-    }
-
-    private func drawFoldArrow(in rect: NSRect, folded: Bool) {
-        let path = NSBezierPath()
-        path.lineWidth = 1.15
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        let center = NSPoint(x: rect.midX, y: rect.midY)
-        if folded {
-            path.move(to: NSPoint(x: center.x - 1.5, y: center.y - 2.5))
-            path.line(to: NSPoint(x: center.x + 1.5, y: center.y))
-            path.line(to: NSPoint(x: center.x - 1.5, y: center.y + 2.5))
-        } else if isFlipped {
-            path.move(to: NSPoint(x: center.x - 2.5, y: center.y - 1.5))
-            path.line(to: NSPoint(x: center.x, y: center.y + 1.5))
-            path.line(to: NSPoint(x: center.x + 2.5, y: center.y - 1.5))
-        } else {
-            path.move(to: NSPoint(x: center.x - 2.5, y: center.y + 1.5))
-            path.line(to: NSPoint(x: center.x, y: center.y - 1.5))
-            path.line(to: NSPoint(x: center.x + 2.5, y: center.y + 1.5))
-        }
-        Theme.gutterActive.setStroke()
-        path.stroke()
     }
 
     var clientViewVisibleRectForTesting: NSRect { textView?.visibleRect ?? .zero }
