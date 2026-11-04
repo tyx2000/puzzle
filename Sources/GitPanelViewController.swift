@@ -28,12 +28,15 @@ final class GitPanelViewController: NSViewController {
     /// active file in the tree.
     private var activeChangesPath: String?
     private var activeCommitFile: (commit: String, path: String)?
+    /// A tab may become active before its log or file list has arrived.
+    private var pendingCommitFileReveal: (commit: String, path: String)?
     var selectedCommit: String? {
         didSet {
             guard selectedCommit != oldValue else { return }
             if selectedCommit != nil {
                 activeChangesPath = nil
                 activeCommitFile = nil
+                pendingCommitFileReveal = nil
             }
             refreshOpenRows()
         }
@@ -47,17 +50,30 @@ final class GitPanelViewController: NSViewController {
     }
 
     func showOpenTab(_ tab: OpenTab) {
+        let previousCommitFile = activeCommitFile
         selectedCommit = nil
         switch tab {
         case .file:
             activeChangesPath = nil
             activeCommitFile = nil
+            pendingCommitFileReveal = nil
         case .change(let path):
             activeChangesPath = path
             activeCommitFile = nil
+            pendingCommitFileReveal = nil
         case .commitFile(let commit, let path):
             activeChangesPath = nil
             activeCommitFile = (commit, path)
+            if previousCommitFile?.commit != commit || previousCommitFile?.path != path {
+                pendingCommitFileReveal = (commit, path)
+                revealRequestedCommitFile()
+            }
+        }
+        // Re-selecting an already expanded tab brings it back into view,
+        // while a repeated selection sync leaves a manually collapsed one shut.
+        if isViewLoaded, showingHistory, let row = openRowIndex {
+            table.enclosingScrollView?.layoutSubtreeIfNeeded()
+            table.scrollRowToVisible(row)
         }
         refreshOpenRows()
     }
@@ -206,6 +222,7 @@ final class GitPanelViewController: NSViewController {
         // that was open there.
         activeChangesPath = nil
         activeCommitFile = nil
+        pendingCommitFileReveal = nil
         selectedCommit = nil
         expandedCommits.removeAll()
         commitFiles.removeAll()
@@ -231,6 +248,7 @@ final class GitPanelViewController: NSViewController {
     }
 
     func releaseTransientMemory() {
+        pendingCommitFileReveal = nil
         historyRows.removeAll()
         expandedCommits.removeAll()
         commitFiles.removeAll()
@@ -616,6 +634,7 @@ final class GitPanelViewController: NSViewController {
         updateHistoryColumnWidth()
         rebuildHistoryRows()
         if showingHistory { table.reloadData() }
+        revealRequestedCommitFile()
     }
 
     /// The end of History came into view: read one page deeper. Only the log
@@ -732,6 +751,7 @@ final class GitPanelViewController: NSViewController {
         showingHistory = segmented.selectedSegment == 2
         updateTabLayout()
         table.reloadData()
+        scrollToRequestedCommitFile()
         // Changes, Branch and History hold unrelated rows, so the tab switch
         // replaces the list outright. Only here: the refreshes that rebuild
         // this same table on their own are deliberately left instant.
@@ -1409,14 +1429,30 @@ final class GitPanelViewController: NSViewController {
     private func toggleCommit(_ commit: GitService.Commit, in directory: URL) {
         let hash = commit.shortHash
         if expandedCommits.contains(hash) {
+            if pendingCommitFileReveal?.commit == hash {
+                pendingCommitFileReveal = nil
+            }
             expandedCommits.remove(hash)
             rebuildHistoryRows()
             table.reloadData()
             return
         }
-        expandedCommits.insert(hash)
-        if commitFiles[hash] != nil {
-            rebuildHistoryRows(); table.reloadData(); return
+        expandCommit(commit, in: directory)
+    }
+
+    /// Expand without toggling: selection sync and late history reads can
+    /// safely retry the same request while its files are being fetched.
+    private func expandCommit(_ commit: GitService.Commit, in directory: URL) {
+        let hash = commit.shortHash
+        guard expandedCommits.insert(hash).inserted else {
+            scrollToRequestedCommitFile()
+            return
+        }
+        rebuildHistoryRows()
+        if showingHistory { table.reloadData() }
+        guard commitFiles[hash] == nil else {
+            scrollToRequestedCommitFile()
+            return
         }
         // Fetch off the main thread; `git show` on a big commit isn't instant.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1426,9 +1462,38 @@ final class GitPanelViewController: NSViewController {
                       self.expandedCommits.contains(hash) else { return }
                 self.commitFiles[hash] = files
                 self.rebuildHistoryRows()
-                self.table.reloadData()
+                if self.showingHistory { self.table.reloadData() }
+                self.scrollToRequestedCommitFile()
             }
         }
+    }
+
+    /// Only a new tab target requests expansion. Ordinary refreshes retry an
+    /// outstanding request without reopening commits the user has collapsed.
+    private func revealRequestedCommitFile() {
+        guard let target = pendingCommitFileReveal else { return }
+        guard activeCommitFile?.commit == target.commit,
+              activeCommitFile?.path == target.path else {
+            pendingCommitFileReveal = nil
+            return
+        }
+        guard let directory,
+              let commit = history.first(where: { $0.shortHash == target.commit }) else { return }
+        expandCommit(commit, in: directory)
+    }
+
+    private func scrollToRequestedCommitFile() {
+        guard let target = pendingCommitFileReveal else { return }
+        guard activeCommitFile?.commit == target.commit,
+              activeCommitFile?.path == target.path else {
+            pendingCommitFileReveal = nil
+            return
+        }
+        guard isViewLoaded, showingHistory, let row = openRowIndex else { return }
+        pendingCommitFileReveal = nil
+        table.enclosingScrollView?.layoutSubtreeIfNeeded()
+        table.scrollRowToVisible(row)
+        refreshOpenRows()
     }
 
     // MARK: - Regression-test surface

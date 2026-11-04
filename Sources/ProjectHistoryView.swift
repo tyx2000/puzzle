@@ -22,6 +22,7 @@ final class ProjectHistoryViewController: NSViewController {
     var selectedCommit: String? {
         didSet {
             guard selectedCommit != oldValue else { return }
+            if selectedCommit != nil { pendingOpenFileReveal = nil }
             refreshOpenRow()
         }
     }
@@ -37,20 +38,22 @@ final class ProjectHistoryViewController: NSViewController {
     private let table = GitTableView()
     private var directory: URL?
     /// A commit's file whose diff the open tab shows, by the commit's short
-    /// hash: its row is framed while the commit is open, and brought into
-    /// view when the tab comes forward.
+    /// hash: bringing its tab forward opens the commit and reveals its row.
     struct OpenFile: Equatable {
         var commit: String
         var path: String
     }
     var openFile: OpenFile? {
         didSet {
-            guard openFile != oldValue else { return }
+            pendingOpenFileReveal = openFile
             if openFile != nil { selectedCommit = nil }
+            revealOpenFile()
             refreshOpenRow()
-            if let row = openRowIndex { table.scrollRowToVisible(row) }
         }
     }
+    /// A tab can come forward before its commit or file list has loaded.
+    /// Consumed once revealed, so later refreshes preserve manual folding.
+    private var pendingOpenFileReveal: OpenFile?
     /// Where the open file's row is, while its commit is open.
     var openRowIndex: Int? { rows.indices.first(where: isOpen) }
     private func isOpen(_ row: Int) -> Bool {
@@ -164,6 +167,7 @@ final class ProjectHistoryViewController: NSViewController {
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         view = root
+        finishOpenFileReveal()
     }
 
     /// Point the list at a project and at where that project stands. Called
@@ -254,6 +258,7 @@ final class ProjectHistoryViewController: NSViewController {
                 self.expanded.formIntersection(listed)
                 self.files = self.files.filter { listed.contains($0.key) }
                 self.rebuildRows()
+                self.revealOpenFile()
             }
         }
     }
@@ -359,6 +364,10 @@ final class ProjectHistoryViewController: NSViewController {
     private func toggleBaseFold() {
         guard let foldKey else { return }
         if Self.foldedBranches.remove(foldKey) == nil { Self.foldedBranches.insert(foldKey) }
+        if isBaseFolded, let target = pendingOpenFileReveal,
+           commits.contains(where: { $0.shortHash == target.commit && inherited.contains($0.graphID) }) {
+            pendingOpenFileReveal = nil
+        }
         rebuildRows()
         // Unfolded at the end of what is read, the next page may be due.
         if !isBaseFolded { scrolled() }
@@ -368,14 +377,47 @@ final class ProjectHistoryViewController: NSViewController {
         let hash = commit.shortHash
         if expanded.contains(hash) {
             expanded.remove(hash)
+            if pendingOpenFileReveal?.commit == hash { pendingOpenFileReveal = nil }
             rebuildRows()
             return
         }
-        expanded.insert(hash)
+        expand(commit, in: directory)
+    }
+
+    /// Reveal only the tab's containing commit, leaving every other commit's
+    /// expansion state alone. A folded base is another ancestor to open.
+    private func revealOpenFile() {
+        guard let target = pendingOpenFileReveal, target == openFile,
+              let directory, let commit = commits.first(where: { $0.shortHash == target.commit })
+        else { return }
+        if inherited.contains(commit.graphID), isBaseFolded, let foldKey {
+            Self.foldedBranches.remove(foldKey)
+            rebuildRows()
+        }
+        expand(commit, in: directory)
+        finishOpenFileReveal()
+    }
+
+    private func finishOpenFileReveal() {
+        guard isViewLoaded, let target = pendingOpenFileReveal, target == openFile,
+              selectedCommit == nil, expanded.contains(target.commit), let row = openRowIndex
+        else { return }
+        pendingOpenFileReveal = nil
+        table.enclosingScrollView?.layoutSubtreeIfNeeded()
+        table.scrollRowToVisible(row)
+        refreshOpenRow()
+    }
+
+    private func expand(_ commit: GitService.Commit, in directory: URL) {
+        let hash = commit.shortHash
+        let inserted = expanded.insert(hash).inserted
+        if inserted { rebuildRows() }
         if files[hash] != nil {
-            rebuildRows()
+            finishOpenFileReveal()
             return
         }
+        // An already-open commit without cached files is still loading.
+        guard inserted else { return }
         // `git show` on a large commit is not instant.
         GitService.workQueue.async { [weak self] in
             let found = GitService.files(inCommit: hash, in: directory)
@@ -384,6 +426,7 @@ final class ProjectHistoryViewController: NSViewController {
                       self.expanded.contains(hash) else { return }
                 self.files[hash] = found
                 self.rebuildRows()
+                self.finishOpenFileReveal()
             }
         }
     }

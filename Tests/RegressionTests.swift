@@ -63,6 +63,11 @@ enum RegressionTests {
             print("Animated background regression tests passed (10)")
             return
         }
+        if CommandLine.arguments.contains("--commit-file-reveal-regressions") {
+            try testCommitFileTabsRevealCollapsedHistory()
+            print("Commit file reveal regression tests passed (1)")
+            return
+        }
         if CommandLine.arguments.contains("--line-popup-regressions") {
             try testActiveLineStaysInFiniteDocument()
             try testActiveLineBadge()
@@ -285,6 +290,7 @@ enum RegressionTests {
         try testOpenRowBackgroundTravels()
         try testSidebarBackgroundLandsWhenItsListScrolls()
         try testGitPanelRestoresSidebarSelection()
+        try testCommitFileTabsRevealCollapsedHistory()
         try testWindowSessionComesBack()
         try testMaterialFileIcons()
         try testClosingATabWritesIt()
@@ -17824,6 +17830,186 @@ enum RegressionTests {
                     && commitPanel.openRowIndex == nil && sidebar.projectsPanel.changes.openPath == nil
                     && sidebar.projectsPanel.history.selectedCommit == nil,
                    "the previous project's selection leaked into another repository")
+    }
+
+    /// Returning to a commit-file tab reveals its row in both histories,
+    /// including when the log or the commit's files have not arrived yet.
+    private static func testCommitFileTabsRevealCollapsedHistory() throws {
+        let root = try temporaryDirectory("commit-file-reveal")
+        defer { try? FileManager.default.removeItem(at: root) }
+        @discardableResult
+        func git(_ args: [String]) throws -> String {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "reveal fixture git failed: \(args): \(result.err)")
+            return result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Reveal Test"])
+        try git(["config", "user.email", "reveal@example.invalid"])
+        // Enough files to put the target below either history's viewport.
+        for index in 0..<20 {
+            try Data("\(index)\n".utf8).write(to: root.appendingPathComponent("file-\(index).txt"))
+        }
+        let targetPath = "zz-target.txt"
+        try Data("target\n".utf8).write(to: root.appendingPathComponent(targetPath))
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "target commit"])
+        let targetCommit = try git(["rev-parse", "--short", "HEAD"])
+        let otherPath = "unrelated.txt"
+        try Data("other\n".utf8).write(to: root.appendingPathComponent(otherPath))
+        try git(["add", "-A"])
+        try git(["commit", "-q", "-m", "unrelated commit"])
+        let head = try git(["rev-parse", "HEAD"])
+
+        let sidebar = SidebarViewController()
+        let defaultsName = "puzzle-commit-file-reveal-\(UUID())"
+        sidebar.projectsPanel.dividerDefaults = UserDefaults(suiteName: defaultsName)!
+        defer { sidebar.projectsPanel.dividerDefaults.removePersistentDomain(forName: defaultsName) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = sidebar
+        window.setContentSize(NSSize(width: 650, height: 420))
+        window.orderFrontRegardless()
+        defer {
+            RowFrameFlight.land()
+            window.close()
+        }
+        _ = sidebar.view
+        sidebar.setProjects([(name: "Reveal", branch: "main", user: "", changes: 0,
+                              path: root.path)], active: 0)
+        sidebar.setDirectory(root)
+        sidebar.clearChanges(for: root)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let history = sidebar.projectsPanel.history
+        let tab = OpenTab.commitFile(commit: targetCommit, path: targetPath)
+        let diffURL = root.appendingPathComponent(".puzzle-diff-preview")
+        func selectTab() { sidebar.showOpenTab(diffURL, as: tab) }
+        func plainFile() { sidebar.showOpenTab(root.appendingPathComponent(otherPath), as: .file) }
+        func checkRevealed(_ table: NSTableView, row: Int?, view: GitRowView?,
+                           in label: String) throws {
+            window.contentView?.layoutSubtreeIfNeeded()
+            guard let row else { throw Failure(description: "\(label) has no selected commit file") }
+            try expect(view?.isActiveFile == true,
+                       "\(label) did not highlight the selected commit file")
+            try expect(table.visibleRect.intersects(table.rect(ofRow: row)),
+                       "\(label) left the selected commit file outside its viewport: "
+                         + "visible \(table.visibleRect), row \(table.rect(ofRow: row)), "
+                         + "table \(table.frame), clip \(String(describing: table.enclosingScrollView?.contentView.bounds))")
+        }
+        func checkProject() throws {
+            try expect(waitUntil { history.openRowIndex != nil
+                        && history.fileRowsForTesting.contains(targetPath) },
+                       "the project history did not expand the selected file's commit")
+            let row = history.openRowIndex
+            try expect(row.map { history.rowOutlineForTesting[$0] } == targetPath,
+                       "the project history selected a different file")
+            try checkRevealed(history.openRowTable, row: row,
+                              view: row.flatMap(history.rowViewForTesting), in: "project history")
+        }
+
+        // The selected tab precedes the very first asynchronous history read.
+        selectTab()
+        try expect(sidebar.gitPanelForTesting == nil,
+                   "revealing a commit file eagerly created the hidden Git panel")
+        sidebar.setChanges([], in: root, state: .init(head: head, branch: "main"))
+        try checkProject()
+        try expect(!history.fileRowsForTesting.contains(otherPath),
+                   "revealing one commit opened an unrelated commit")
+
+        // Selecting the same tab again must still bring its row into view.
+        history.openRowTable.scrollRowToVisible(0)
+        try expect(!history.openRowTable.visibleRect.intersects(
+            history.openRowTable.rect(ofRow: history.openRowIndex!)),
+                   "the project fixture did not scroll the target out of view")
+        selectTab()
+        try checkProject()
+
+        guard let otherRow = history.rowOutlineForTesting.firstIndex(of: "unrelated commit") else {
+            throw Failure(description: "the project history lost the unrelated commit")
+        }
+        history.clickRowForTesting(otherRow)
+        try expect(waitUntil { history.fileRowsForTesting.contains(otherPath) },
+                   "the project history did not expand the unrelated commit")
+        selectTab()
+        try checkProject()
+        try expect(history.fileRowsForTesting.contains(otherPath),
+                   "revealing a tab collapsed an unrelated project-history commit")
+
+        // A header click can close the commit. Returning from a plain file
+        // opens it again, while keeping the other commit's expansion.
+        guard let targetRow = history.rowOutlineForTesting.firstIndex(of: "target commit") else {
+            throw Failure(description: "the project history lost the target commit")
+        }
+        history.clickRowForTesting(targetRow)
+        try expect(!history.fileRowsForTesting.contains(targetPath),
+                   "the project history did not let the user collapse the target")
+        plainFile()
+        selectTab()
+        try checkProject()
+        try expect(history.fileRowsForTesting.contains(otherPath),
+                   "restoring a tab collapsed an unrelated project-history commit")
+
+        // The Git panel is created with the same tab selected before its first
+        // log read, so it must restore the file once that read arrives.
+        sidebar.showGit()
+        sidebar.showHistory()
+        guard let panel = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the sidebar did not create Git History")
+        }
+        func gitRow(_ text: String) -> Int? {
+            let commits = panel.historyRowIsCommitForTesting
+            return commits.indices.first { row in
+                commits[row] ? panel.rowTextForTesting(row).leading == text
+                    : panel.historyFileCellForTesting(row)?.toolTip == text
+            }
+        }
+        func checkGit() throws {
+            try expect(waitUntil { panel.openRowIndex != nil && gitRow(targetPath) != nil },
+                       "Git History did not expand the selected file's commit")
+            let row = panel.openRowIndex
+            try expect(row == gitRow(targetPath), "Git History selected a different file")
+            try checkRevealed(panel.openRowTable, row: row,
+                              view: row.flatMap(panel.rowViewForTesting), in: "Git History")
+        }
+        try checkGit()
+        try expect(panel.expandedCommitCountForTesting == 1,
+                   "revealing one file expanded unrelated Git History commits")
+        panel.openRowTable.scrollRowToVisible(0)
+        try expect(!panel.openRowTable.visibleRect.intersects(
+            panel.openRowTable.rect(ofRow: panel.openRowIndex!)),
+                   "the Git fixture did not scroll the target out of view")
+        selectTab()
+        try checkGit()
+
+        guard let otherGitRow = gitRow("unrelated commit") else {
+            throw Failure(description: "Git History lost the unrelated commit")
+        }
+        panel.activateRowForTesting(otherGitRow)
+        try expect(waitUntil { gitRow(otherPath) != nil },
+                   "Git History did not expand the unrelated commit")
+        selectTab()
+        try checkGit()
+        try expect(panel.expandedCommitCountForTesting == 2 && gitRow(otherPath) != nil,
+                   "revealing a tab collapsed an unrelated Git History commit")
+        guard let targetGitRow = gitRow("target commit") else {
+            throw Failure(description: "Git History lost the target commit")
+        }
+        panel.activateRowForTesting(targetGitRow)
+        try expect(gitRow(targetPath) == nil,
+                   "Git History did not let the user collapse the target")
+        plainFile()
+        selectTab()
+        try checkGit()
+        try expect(panel.expandedCommitCountForTesting == 2 && gitRow(otherPath) != nil,
+                   "restoring a tab collapsed an unrelated Git History commit")
     }
 
     /// The sidebar's selected row has the code's background: the tree for a
