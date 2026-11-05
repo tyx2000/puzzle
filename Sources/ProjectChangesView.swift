@@ -49,7 +49,7 @@ final class ProjectChangesViewController: NSViewController {
     var onChanged: ((URL) -> Void)?
 
     private let table = GitTableView()
-    private var entries: [GitService.Status.Entry] = []
+    private(set) var entries: [GitService.Status.Entry] = []
     private var directory: URL?
     /// The path whose working-tree diff the open tab shows: its row is
     /// framed, and brought into view when the tab comes forward.

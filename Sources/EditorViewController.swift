@@ -6,6 +6,7 @@ final class EditorViewController: NSViewController {
     var onDocumentSaved: ((URL) -> Void)?
     var onOpenSettings: (() -> Void)?
     var onActiveDocumentChanged: ((URL?) -> Void)?
+    var onStepPastDiff: ((URL, _ forward: Bool) -> Void)?
     /// Welcome-screen actions, forwarded to the window controller.
     var onOpenFolder: (() -> Void)?
     /// True once this window has a project. The welcome screen invites you to
@@ -141,6 +142,9 @@ final class EditorViewController: NSViewController {
             guard let self else { return }
             self.onActiveDocumentChanged?(url)
             self.updatePlaceholder()
+        }
+        pane.onStepPastDiff = { [weak self] url, forward in
+            self?.onStepPastDiff?(url, forward)
         }
         pane.onEmptied = { [weak self] _ in self?.updatePlaceholder() }
         pane.onTabOpened = { [weak pane] url in
@@ -354,8 +358,8 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Forwarded to the pane
 
-    func open(url: URL, replacingContent: Bool = false) {
-        pane?.open(url: url, replacingContent: replacingContent)
+    func open(url: URL, replacingContent: Bool = false, atLastChange: Bool = false) {
+        pane?.open(url: url, replacingContent: replacingContent, atLastChange: atLastChange)
         updatePlaceholder()
     }
 

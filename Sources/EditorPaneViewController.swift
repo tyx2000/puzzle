@@ -4,6 +4,8 @@ import AppKit
 /// independent (own tabs) but share document buffers via DocumentStore.
 final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onActiveDocumentChanged: ((URL?) -> Void)?
+    /// A step went past the first or last change of the diff at this URL.
+    var onStepPastDiff: ((URL, _ forward: Bool) -> Void)?
     var onEmptied: ((EditorPaneViewController) -> Void)?
     var onDocumentEdited: (() -> Void)?
     var onDocumentSaved: ((URL) -> Void)?
@@ -99,6 +101,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Which change that is, from 0, for each diff open in a tab: a tab come
     /// back to keeps its place.
     private var diffChanges: [URL: Int] = [:]
+    /// The diff to come in at its last change rather than its first: one
+    /// stepped back into from the file after it.
+    private var opensAtLastChange: URL?
     /// Side-by-side diffs, built the first time the mode is used.
     private var sideBySideDiff: SideBySideDiffView?
     /// The mode is a preference, not a property of the file: it sticks for the
@@ -622,7 +627,10 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         refreshDiffNavigator()
         // A diff opened afresh shows its first change, framed; a tab come
         // back to is where it was left.
-        placeChangeFrame(revealing: diffChanges[url] == nil)
+        let revealing = diffChanges[url] == nil
+        if opensAtLastChange == url { diffChanges[url] = max(0, diffHeader.changeCount - 1) }
+        opensAtLastChange = nil
+        placeChangeFrame(revealing: revealing)
     }
 
     /// The frame on the change this diff is at — its first, until a step
@@ -757,21 +765,26 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         return blocks
     }
 
-    /// Move the frame to the next (or previous) block of changed lines,
-    /// wrapping around at the ends the way the find bar does. It steps from
-    /// the change it is on, the one the header counts, wherever the caret is.
+    /// Move the frame to the next (or previous) block of changed lines. It
+    /// steps from the change it is on, the one the header counts, wherever the
+    /// caret is. Past either end the step leaves this diff for `onStepPastDiff`.
     private func stepThroughDiff(forward: Bool) {
+        guard let url = currentURL else { return }
         if let sideBySideDiff, !sideBySideDiff.isHidden {
-            sideBySideDiff.step(forward: forward)
+            if !sideBySideDiff.step(forward: forward) { onStepPastDiff?(url, forward) }
             return
         }
         let blocks = changeBlocks()
-        guard !blocks.isEmpty, let url = currentURL else { return }
+        guard !blocks.isEmpty else { return }
         let count = blocks.count
         let current = diffChanges[url] ?? -1
         let index = current < 0
             ? (forward ? 0 : count - 1)
-            : (min(current, count - 1) + (forward ? 1 : -1) + count) % count
+            : min(current, count - 1) + (forward ? 1 : -1)
+        guard blocks.indices.contains(index) else {
+            onStepPastDiff?(url, forward)
+            return
+        }
         diffChanges[url] = index
         diffHeader.setCurrentChange(index)
         textView.setSelectedRange(NSRange(location: blocks[index].location, length: 0))
@@ -1120,7 +1133,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
     // MARK: - Tabs / documents
 
-    func open(url: URL, replacingContent: Bool = false) {
+    func open(url: URL, replacingContent: Bool = false, atLastChange: Bool = false) {
+        opensAtLastChange = atLastChange ? url : nil
         if let existing = openURLs.firstIndex(of: url) {
             // The document behind this URL may have been swapped (a refreshed
             // git diff), so rebind the layout manager rather than just selecting.

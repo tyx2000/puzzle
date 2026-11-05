@@ -143,10 +143,11 @@ enum RegressionTests {
             try testDiffInlineChanges()
             try testDiffGutterUsesFileLineNumbers()
             try testDiffHeaderStepsThroughChanges()
+            try testDiffStepsAcrossFiles()
             try testSideBySideDiff()
             try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (22)")
+            print("Editor regression tests passed (23)")
             return
         }
         try testProcessDrain()
@@ -317,6 +318,7 @@ enum RegressionTests {
         try testLightThemesReadClearly()
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
+        try testDiffStepsAcrossFiles()
         try testWholeFileDiffsFrameEachKind()
         try testGitLineChangeMarks()
         try testThemeIsReadyBeforeAnyView()
@@ -15444,8 +15446,8 @@ enum RegressionTests {
                     && framed.minY >= after && framed.maxY <= after + 400,
                    "the frame is round \(framed), not the change's row on screen at \(after)")
         pane.diffNavigatorForTesting.clickNextForTesting()
-        try expect(pane.sideBySideBlockForTesting == 0,
-                   "stepping past the last change did not wrap")
+        try expect(pane.sideBySideBlockForTesting == 1,
+                   "stepping past the last change moved the frame")
 
         pane.toggleDiffModeForTesting()
         pane.view.layoutSubtreeIfNeeded()
@@ -15557,6 +15559,205 @@ enum RegressionTests {
         try expect(counted.summaryForTesting == "1/1 change", "the only change reads \(counted.summaryForTesting)")
     }
 
+    /// The round buttons carry on past a file's first and last changes to the
+    /// file beside it in its list, in a commit's files as in Changes, and do
+    /// nothing when there is no such file. A file with no change to land on is
+    /// passed over.
+    private static func testDiffStepsAcrossFiles() throws {
+        let root = try temporaryDirectory("diff-across-files")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ args: [String]) throws {
+            let result = GitService.run(args, in: root)
+            try expect(result.code == 0, "fixture git failed: \(args): \(result.err)")
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        // Two changes far apart: the last one is off screen as a file opens.
+        func write(_ name: String, editing word: String?) throws {
+            let text = (1...300).map { line -> String in
+                if let word, line == 5 || line == 280 { return "\(word) \(line)" }
+                return "line \(line)"
+            }
+            try Data((text.joined(separator: "\n") + "\n").utf8)
+                .write(to: root.appendingPathComponent(name))
+        }
+        func writeBinary(_ name: String, _ byte: UInt8) throws {
+            try Data([0x89, 0x50, 0x4E, 0x47, 0, 0, byte]).write(to: root.appendingPathComponent(name))
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Step Test"])
+        try git(["config", "user.email", "step@example.invalid"])
+        for name in ["a.txt", "c.txt", "d.txt"] { try write(name, editing: nil) }
+        try writeBinary("b.png", 1)
+        try writeBinary("e.bin", 1)
+        try git(["add", "-A"])
+        try expect(GitService.commit("start", in: root).code == 0, "fixture commit failed")
+        for name in ["a.txt", "c.txt", "d.txt"] { try write(name, editing: "committed") }
+        try writeBinary("b.png", 2)
+        try git(["add", "-A"])
+        try expect(GitService.commit("three files", in: root).code == 0, "fixture commit failed")
+        // Changes lists a.txt, b.png, c.txt, e.bin; only the two texts differ
+        // in lines.
+        for name in ["a.txt", "c.txt"] { try write(name, editing: "uncommitted") }
+        try writeBinary("b.png", 3)
+        try writeBinary("e.bin", 3)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1100, height: 700))
+        workspace.openProject(root)
+        let panel = workspace.sidebar.projectsPanel
+        try expect(waitUntil { panel.changes.rowCountForTesting == 4 },
+                   "the fixture's changes never showed")
+        try expect(panel.changes.entries.map(\.path) == ["a.txt", "b.png", "c.txt", "e.bin"],
+                   "the fixture lists \(panel.changes.entries.map(\.path))")
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let directory = root.standardizedFileURL.resolvingSymlinksInPath()
+
+        func openTab() -> OpenTab? {
+            workspace.editor.currentURL.map(WorkspaceWindowController.openTab(for:))
+        }
+        func openChange(_ path: String) throws {
+            guard let entry = panel.changes.entries.first(where: { $0.path == path }) else {
+                throw Failure(description: "\(path) is not among the changes")
+            }
+            let before = workspace.editor.currentURL
+            workspace.showDiff(for: entry, in: directory)
+            // The same tab opened again shows no difference to wait for.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            try expect(waitUntil { openTab() == .change(path: path) },
+                       "\(path)'s diff never opened, from \(String(describing: before))")
+            workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        try openChange("a.txt")
+        guard let pane = workspace.editor.activePaneForTesting else {
+            throw Failure(description: "no pane")
+        }
+        let navigator = pane.diffNavigatorForTesting
+        func summary() -> String { pane.diffHeaderForTesting.summaryForTesting }
+        func step(forward: Bool) throws {
+            if forward {
+                navigator.clickNextForTesting()
+            } else {
+                navigator.clickPreviousForTesting()
+            }
+            try expect(waitUntil { !workspace.isSteppingPastDiffForTesting },
+                       "a step past a diff's end never finished")
+            workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        func expectAt(_ tab: OpenTab, _ count: String, _ what: String) throws {
+            try expect(openTab() == tab && summary() == count,
+                       "\(what): at \(String(describing: openTab())), \(summary())")
+        }
+        func expectChangeOnScreen(_ what: String) throws {
+            guard let rows = pane.changeFrameForTesting.rows else {
+                throw Failure(description: "\(what): no change is framed")
+            }
+            let visible = pane.textViewForTesting.visibleRect
+            try expect(visible.minY <= rows.minY && rows.maxY <= visible.maxY,
+                       "\(what): the change at \(rows) is not in \(visible)")
+        }
+
+        // Changes. A file opens on its first change, and at the top of the
+        // list there is nowhere to go back to.
+        try expectAt(.change(path: "a.txt"), "1/2 changes", "a clicked file")
+        try expectChangeOnScreen("a clicked file")
+        try step(forward: false)
+        try expectAt(.change(path: "a.txt"), "1/2 changes", "a step back from the list's top")
+
+        // Down, over the picture, to the next file's first change.
+        try step(forward: true)
+        try expectAt(.change(path: "a.txt"), "2/2 changes", "a step within the file")
+        try step(forward: true)
+        try expectAt(.change(path: "c.txt"), "1/2 changes", "a step past the last change")
+        try expectChangeOnScreen("the next file's first change")
+        try expect(panel.changes.openRowIndex == 2,
+                   "the list did not follow the step: \(String(describing: panel.changes.openRowIndex))")
+
+        // After c.txt there is only a binary, so the step goes nowhere.
+        try step(forward: true)
+        try expectAt(.change(path: "c.txt"), "2/2 changes", "a step within the second file")
+        try step(forward: true)
+        try expectAt(.change(path: "c.txt"), "2/2 changes", "a step with only a binary after it")
+
+        // Up, over the picture, to the previous file's last change.
+        try step(forward: false)
+        try expectAt(.change(path: "c.txt"), "1/2 changes", "a step back within the file")
+        try step(forward: false)
+        try expectAt(.change(path: "a.txt"), "2/2 changes", "a step before the first change")
+        try expectChangeOnScreen("the previous file's last change")
+        try expect(pane.textViewForTesting.visibleRect.minY > 0,
+                   "the previous file's last change opened at the top of the file")
+
+        // Clicking its row goes back to the file's first change.
+        try openChange("a.txt")
+        try expectAt(.change(path: "a.txt"), "1/2 changes", "a file clicked again")
+        try expectChangeOnScreen("a file clicked again")
+
+        // Side by side the buttons do the same.
+        pane.toggleDiffModeForTesting()
+        defer { if pane.sideBySideVisibleForTesting { pane.toggleDiffModeForTesting() } }
+        try expect(pane.sideBySideVisibleForTesting, "the diff did not go side by side")
+        try step(forward: true)
+        try step(forward: true)
+        try expectAt(.change(path: "c.txt"), "1/2 changes", "a side-by-side step down a file")
+        try expect(pane.sideBySideBlockForTesting == 0,
+                   "side by side came in at change \(pane.sideBySideBlockForTesting)")
+        try step(forward: false)
+        try expectAt(.change(path: "a.txt"), "2/2 changes", "a side-by-side step up a file")
+        try expect(pane.sideBySideBlockForTesting == 1,
+                   "side by side came in at change \(pane.sideBySideBlockForTesting)")
+        pane.toggleDiffModeForTesting()
+
+        // A commit's files: they are the list, whatever else the history holds.
+        guard let commit = GitService.log(in: directory).first(where: { $0.subject == "three files" })
+        else { throw Failure(description: "the fixture's commit is not in the log") }
+        let hash = commit.shortHash
+        workspace.showCommitDiff(commit: commit,
+                                 file: GitService.CommitFile(status: "M", path: "a.txt"),
+                                 in: directory)
+        try expect(waitUntil { openTab() == .commitFile(commit: hash, path: "a.txt") },
+                   "the commit's file never opened")
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        try expectAt(.commitFile(commit: hash, path: "a.txt"), "1/2 changes", "a commit's file")
+        try step(forward: false)
+        try expectAt(.commitFile(commit: hash, path: "a.txt"), "1/2 changes",
+                     "a step back from the commit's first file")
+        try step(forward: true)
+        try step(forward: true)
+        try expectAt(.commitFile(commit: hash, path: "c.txt"), "1/2 changes",
+                     "a step over the commit's picture")
+        try step(forward: false)
+        try expectAt(.commitFile(commit: hash, path: "a.txt"), "2/2 changes",
+                     "a step back through the commit")
+        try expectChangeOnScreen("a commit file's last change")
+        try step(forward: true)
+        try step(forward: true)
+        try step(forward: true)
+        try expectAt(.commitFile(commit: hash, path: "d.txt"), "1/2 changes",
+                     "a step to the commit's last file")
+        try step(forward: true)
+        try step(forward: true)
+        try expectAt(.commitFile(commit: hash, path: "d.txt"), "2/2 changes",
+                     "a step past the commit's last change")
+
+        // What has a change to land on, and what does not.
+        for (text, expected) in [
+            ("+added\n context\n", true), (" context\n-removed\n", true),
+            (" context\n", false), ("Binary files a/x and b/x differ\n", false),
+            ("diff --git a/x b/y\nsimilarity index 100%\nrename from x\nrename to y\n", false),
+            ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", true),
+        ] {
+            try expect(DiffHighlighter.hasChanges(in: text) == expected,
+                       "\(text.debugDescription) should be \(expected)")
+        }
+    }
+
     private static func testDiffHeaderStepsThroughChanges() throws {
         let diff = """
         diff --git a/Sources/App.swift b/Sources/App.swift
@@ -15618,8 +15819,8 @@ enum RegressionTests {
         try expect(frame.colour == GitLineChanges.Change.Kind.modified.colour,
                    "a change of both kinds is not framed in the gutter's colour for it")
 
-        // Stepping moves the frame from the change it is on, wrapping at the
-        // ends, and takes the caret to the change.
+        // Stepping moves the frame from the change it is on and takes the caret
+        // to the change. At either end it stays, and says the step went past.
         func caretLine() -> Int {
             let caret = pane.caretLocationForTesting
             var line = 1
@@ -15636,12 +15837,20 @@ enum RegressionTests {
             ChangeFrameOverlay.scrollingMoveDuration + 0.2))
         try expect(!frame.isMovingForTesting && frame.rows == secondRows,
                    "the frame did not settle on the second change: \(String(describing: frame.rows))")
+        var pastEnds: [Bool] = []
+        pane.onStepPastDiff = { _, forward in pastEnds.append(forward) }
         navigator.clickNextForTesting()
-        try expect(caretLine() == 6 && summary() == "1/2 changes",
-                   "stepping past the last change did not wrap: line \(caretLine()), \(summary())")
+        try expect(caretLine() == 11 && summary() == "2/2 changes" && pastEnds == [true],
+                   "a step past the last change: line \(caretLine()), \(summary()), \(pastEnds)")
         navigator.clickPreviousForTesting()
+        try expect(caretLine() == 6 && summary() == "1/2 changes" && pastEnds == [true],
+                   "a step back to the first change: line \(caretLine()), \(summary())")
+        navigator.clickPreviousForTesting()
+        try expect(caretLine() == 6 && summary() == "1/2 changes" && pastEnds == [true, false],
+                   "a step before the first change: line \(caretLine()), \(summary()), \(pastEnds)")
+        navigator.clickNextForTesting()
         try expect(caretLine() == 11 && summary() == "2/2 changes",
-                   "stepping back from the first change did not wrap: line \(caretLine())")
+                   "a step on from the first change: line \(caretLine()), \(summary())")
         RunLoop.main.run(until: Date().addingTimeInterval(
             ChangeFrameOverlay.scrollingMoveDuration + 0.2))
 

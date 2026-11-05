@@ -183,16 +183,19 @@ final class SideBySideDiffView: FlatView {
 
     var changeCount: Int { changeStarts.count }
 
-    /// Step to the next (or previous) block of changed rows, wrapping like the
-    /// unified view does.
-    func step(forward: Bool) {
+    /// Step to the next (or previous) block of changed rows. False past either
+    /// end, where the frame stays put and the step is the caller's to take on.
+    @discardableResult
+    func step(forward: Bool) -> Bool {
         let count = changeStarts.count
-        guard count > 0 else { return }
+        guard count > 0 else { return false }
         let index = currentBlock < 0
             ? (forward ? 0 : count - 1)
-            : (currentBlock + (forward ? 1 : -1) + count) % count
+            : currentBlock + (forward ? 1 : -1)
+        guard changeStarts.indices.contains(index) else { return false }
         frameChange(index, animated: true)
         onCurrentChange?(index)
+        return true
     }
 
     /// Put the frame round change `index`, bringing it on screen unless

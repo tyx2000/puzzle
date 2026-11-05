@@ -32,6 +32,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
+    private var isSteppingPastDiff = false
     private(set) var trafficLightTopInset = (EditorTabBar.defaultRowHeight - 14) / 2
     private(set) var trafficLightHeight: CGFloat = 14
 
@@ -153,6 +154,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onGitFile = { [weak self] url in self?.editor.open(url: url) }
         sidebar.onGitDiff = { [weak self] entry, directory in
             self?.showDiff(for: entry, in: directory)
+        }
+        editor.onStepPastDiff = { [weak self] url, forward in
+            self?.stepPastDiff(url, forward: forward)
         }
         sidebar.onGitCommitDiff = { [weak self] commit, file, directory in
             self?.showCommitDiff(commit: commit, file: file, in: directory)
@@ -618,22 +622,99 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     private func showTextDiff(for entry: GitService.Status.Entry, in directory: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let text = GitService.diff(for: entry, in: directory, wholeFile: true)
-            // A picture that is also source: the diff tab shows both versions
-            // above the diff itself.
-            let sides = GitService.svgDiffSides(for: entry.path, in: directory)
+            let content = Self.changeDiffContent(for: entry, in: directory)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.projectURL == directory else { return }
-                let url = self.diffPreviewURL(in: directory, path: entry.path)
-                // Replace any previous diff for this file so re-clicking refreshes.
-                let document = DocumentStore.shared.setVirtualDocument(
-                    url: url, text: text,
-                    displayName: "\((entry.path as NSString).lastPathComponent) (diff)")
-                document.svgDiffSides = sides
-                self.editor.open(url: url, replacingContent: true)
+                self.showDiffContent(content, at: self.diffPreviewURL(in: directory,
+                                                                      path: entry.path))
             }
         }
     }
+
+    /// What a Changes row opens: the file's diff as it stands now.
+    private static func changeDiffContent(for entry: GitService.Status.Entry,
+                                          in directory: URL) -> DocumentStore.VirtualContent {
+        DocumentStore.VirtualContent(
+            text: GitService.diff(for: entry, in: directory, wholeFile: true),
+            displayName: "\((entry.path as NSString).lastPathComponent) (diff)",
+            // A picture that is also source: the diff tab shows both versions
+            // above the diff itself.
+            svgSides: GitService.svgDiffSides(for: entry.path, in: directory))
+    }
+
+    /// Replace any previous diff at `url`, so re-clicking refreshes it.
+    private func showDiffContent(_ content: DocumentStore.VirtualContent, at url: URL,
+                                 atLastChange: Bool = false) {
+        let document = DocumentStore.shared.setVirtualDocument(
+            url: url, text: content.text, displayName: content.displayName)
+        document.svgDiffSides = content.svgSides
+        editor.open(url: url, replacingContent: true, atLastChange: atLastChange)
+    }
+
+    /// A step off the end of `url`'s diff goes on to the file beside it in the
+    /// list it belongs to, a commit's files staying within that commit. It
+    /// lands on the change nearest the one it left: the first going down, the
+    /// last going up. A file with no change to land on — a picture, a binary —
+    /// is passed over, and with no file left the step does nothing.
+    private func stepPastDiff(_ url: URL, forward: Bool) {
+        guard let directory = projectURL, !isSteppingPastDiff else { return }
+        typealias Neighbour = (path: String, content: () -> DocumentStore.VirtualContent)
+        let commit: String?
+        let neighbours: () -> [Neighbour]
+        switch Self.openTab(for: url) {
+        case .file:
+            return
+        case .change(let path):
+            commit = nil
+            let entries = Self.beside(path, in: sidebar.projectsPanel.changes.entries,
+                                      forward: forward, pathOf: \.path)
+            neighbours = {
+                entries.map { entry in
+                    (entry.path, { Self.changeDiffContent(for: entry, in: directory) })
+                }
+            }
+        case .commitFile(let hash, let path):
+            commit = hash
+            neighbours = {
+                Self.beside(path, in: GitService.files(inCommit: hash, in: directory),
+                            forward: forward, pathOf: \.path).map { file in
+                    (file.path, { Self.commitDiffContent(commit: hash, path: file.path,
+                                                         in: directory) })
+                }
+            }
+        }
+        // Clicks while the file is read would each go one file further.
+        isSteppingPastDiff = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var landing: (path: String, content: DocumentStore.VirtualContent)?
+            for file in neighbours() where !Self.isImage(file.path) && !Self.isPlayable(file.path) {
+                let content = file.content()
+                guard DiffHighlighter.hasChanges(in: content.text) else { continue }
+                landing = (file.path, content)
+                break
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isSteppingPastDiff = false
+                // The reader may have gone elsewhere while the file was read.
+                guard let landing, self.projectURL == directory,
+                      self.editor.currentURL == url else { return }
+                self.showDiffContent(landing.content,
+                                     at: self.diffPreviewURL(in: directory, path: landing.path,
+                                                             commit: commit),
+                                     atLastChange: !forward)
+            }
+        }
+    }
+
+    /// The items after (or before, nearest first) the one at `path`. Nothing
+    /// when it is no longer listed: there is no telling what is beside it.
+    private static func beside<Item>(_ path: String, in items: [Item], forward: Bool,
+                                     pathOf: (Item) -> String) -> [Item] {
+        guard let index = items.firstIndex(where: { pathOf($0) == path }) else { return [] }
+        return forward ? Array(items[(index + 1)...]) : items[..<index].reversed()
+    }
+    var isSteppingPastDiffForTesting: Bool { isSteppingPastDiff }
 
     /// Show how one file changed in a specific commit (History tab).
     func showCommitDiff(commit: GitService.Commit, file: GitService.CommitFile, in directory: URL) {
@@ -654,12 +735,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                                                  path: file.path, in: directory)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.projectURL == directory else { return }
-                let url = self.diffPreviewURL(in: directory,
-                                              path: file.path, commit: commit.shortHash)
-                let document = DocumentStore.shared.setVirtualDocument(
-                    url: url, text: content.text, displayName: content.displayName)
-                document.svgDiffSides = content.svgSides
-                self.editor.open(url: url, replacingContent: true)
+                self.showDiffContent(content, at: self.diffPreviewURL(
+                    in: directory, path: file.path, commit: commit.shortHash))
             }
         }
     }

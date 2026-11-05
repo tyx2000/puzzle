@@ -348,6 +348,19 @@ enum DiffHighlighter {
         return first == "+" || first == "-" || first == " " || first == "\\"
     }
 
+    /// Whether `text` has an added or removed line: a change to step to. A
+    /// binary, a mode change or a pure rename has none.
+    static func hasChanges(in text: String) -> Bool {
+        let wholeFile = isWholeFileBody(text)
+        var found = false
+        text.enumerateLines { line, stop in
+            let lineKind = wholeFile ? bodyKind(of: line) : kind(of: line)
+            found = lineKind == .added || lineKind == .removed
+            stop = found
+        }
+        return found
+    }
+
     /// A body line is what its first character says, and nothing else: with
     /// no headers left, an added line reading "++x" is an addition.
     private static func bodyKind(of line: String) -> LineKind {
