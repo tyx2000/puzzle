@@ -214,6 +214,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             self, selector: #selector(documentReloadedFromDisk(_:)),
             name: Document.didReloadFromDisk, object: nil)
         NotificationCenter.default.addObserver(
+            self, selector: #selector(diffRebuilt(_:)),
+            name: Document.didRebuildDiff, object: nil)
+        NotificationCenter.default.addObserver(
             self, selector: #selector(documentWillReplaceText(_:)),
             name: Document.willReplaceText, object: nil)
         NotificationCenter.default.addObserver(
@@ -1904,23 +1907,23 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// made off the main thread.
     func reloadTabs() {
         let infos = openURLs.map { url -> EditorTabBar.TabInfo in
-            guard let doc = url.isFileURL ? DocumentStore.shared.cachedDocument(for: url)
-                                          : DocumentStore.shared.document(for: url) else {
-                return EditorTabBar.TabInfo(title: url.lastPathComponent, modified: false,
-                                            path: url.path)
-            }
-            let title = doc.displayName
-                ?? (doc.isVirtual ? "\(url.lastPathComponent) (diff)" : url.lastPathComponent)
-            let path = tabPath(for: url, doc: doc, fallback: title)
-            return EditorTabBar.TabInfo(title: title, modified: doc.isModified, path: path)
+            // Only what is in memory: drawing a tab must not read its file back
+            // or run Git for its diff. The URL says what a diff tab is called.
+            let doc = DocumentStore.shared.cachedDocument(for: url)
+            let isVirtual = doc?.isVirtual ?? (url.scheme == DocumentStore.diffScheme)
+            let title = doc?.displayName
+                ?? (isVirtual ? DocumentStore.diffName(for: url) : url.lastPathComponent)
+            return EditorTabBar.TabInfo(title: title, modified: doc?.isModified ?? false,
+                                        path: tabPath(for: url, isVirtual: isVirtual,
+                                                      fallback: title))
         }
         tabBar.reload(tabs: infos, active: activeIndex ?? -1)
     }
 
     /// Full file path for the tab tooltip. Diff previews live behind synthetic
     /// URLs, so their real path is reconstructed from the URL query.
-    private func tabPath(for url: URL, doc: Document, fallback: String) -> String {
-        if !doc.isVirtual { return url.path }
+    private func tabPath(for url: URL, isVirtual: Bool, fallback: String) -> String {
+        if !isVirtual { return url.path }
         guard url.scheme == DocumentStore.diffScheme,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let relative = components.queryItems?.first(where: { $0.name == "path" })?.value,
@@ -2061,6 +2064,16 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let document = notification.object as? Document,
               document.url == currentURL else { return }
         textView.refreshBracketMatches()
+    }
+
+    /// The tab on screen was a placeholder until now. Everything read from
+    /// the buffer as it came forward — the bands, the line numbers, the count
+    /// of changes — is read again, and the change it was left on shown.
+    @objc private func diffRebuilt(_ notification: Notification) {
+        guard let document = notification.object as? Document,
+              document.url == currentURL, let activeIndex else { return }
+        activate(index: activeIndex)
+        placeChangeFrame(revealing: true)
     }
 
     @objc private func documentReloadedFromDisk(_ notification: Notification) {

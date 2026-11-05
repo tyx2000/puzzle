@@ -144,10 +144,12 @@ enum RegressionTests {
             try testDiffGutterUsesFileLineNumbers()
             try testDiffHeaderStepsThroughChanges()
             try testDiffStepsAcrossFiles()
+            try testChangeFrameStaysOverTheCode()
+            try testDiffTabsKeepTheirNames()
             try testSideBySideDiff()
             try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (23)")
+            print("Editor regression tests passed (25)")
             return
         }
         try testProcessDrain()
@@ -319,6 +321,8 @@ enum RegressionTests {
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
         try testDiffStepsAcrossFiles()
+        try testChangeFrameStaysOverTheCode()
+        try testDiffTabsKeepTheirNames()
         try testWholeFileDiffsFrameEachKind()
         try testGitLineChangeMarks()
         try testThemeIsReadyBeforeAnyView()
@@ -15756,6 +15760,176 @@ enum RegressionTests {
             try expect(DiffHighlighter.hasChanges(in: text) == expected,
                        "\(text.debugDescription) should be \(expected)")
         }
+    }
+
+    /// A change taller than the view runs past the top of the code once it is
+    /// scrolled, and the frame round it stops at the code's edge: it stays off
+    /// the file's path and the tabs above, in either layout.
+    private static func testChangeFrameStaysOverTheCode() throws {
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 600))
+        defer { window.close() }
+        let body = (1...200).map { "+added line \($0)" }.joined(separator: "\n") + "\n"
+        let url = URL(string:
+            "puzzle-diff:///repo/.puzzle-diff-preview?window=test&path=Sources/New.swift")!
+        DocumentStore.shared.setVirtualDocument(url: url, text: body,
+                                                displayName: "New.swift (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFrameOverlay.appearDuration + 0.1))
+
+        /// The header as it is drawn, frame and all.
+        func headerPixels() throws -> Data {
+            let header = pane.diffHeaderForTesting
+            let area = pane.view.convert(header.bounds, from: header)
+            guard let rep = pane.view.bitmapImageRepForCachingDisplay(in: area) else {
+                throw Failure(description: "the header could not be drawn")
+            }
+            pane.view.cacheDisplay(in: area, to: rep)
+            return rep.tiffRepresentation ?? Data()
+        }
+        func expectHeaderClear(of frame: ChangeFrameOverlay, in layout: String) throws {
+            guard let box = frame.boxRect else {
+                throw Failure(description: "\(layout): nothing is framed")
+            }
+            try expect(box.minY < 0,
+                       "\(layout): the change does not reach past the code's top: \(box)")
+            let framed = try headerPixels()
+            frame.isHidden = true
+            defer { frame.isHidden = false }
+            let clear = try headerPixels()
+            try expect(framed == clear, "\(layout): the frame is drawn over the header")
+        }
+
+        guard let code = pane.textViewForTesting.enclosingScrollView else {
+            throw Failure(description: "the code has no scroll view")
+        }
+        code.contentView.scroll(to: NSPoint(x: 0, y: 100))
+        code.reflectScrolledClipView(code.contentView)
+        pane.view.layoutSubtreeIfNeeded()
+        try expectHeaderClear(of: pane.changeFrameForTesting, in: "one file")
+
+        pane.toggleDiffModeForTesting()
+        defer { if pane.sideBySideVisibleForTesting { pane.toggleDiffModeForTesting() } }
+        pane.view.layoutSubtreeIfNeeded()
+        guard let sideFrame = pane.sideBySideChangeFrameForTesting,
+              let sideScroll = sideFrame.scrollView else {
+            throw Failure(description: "side by side has no frame")
+        }
+        sideScroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+        sideScroll.reflectScrolledClipView(sideScroll.contentView)
+        pane.view.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(ChangeFrameOverlay.appearDuration + 0.1))
+        try expectHeaderClear(of: sideFrame, in: "side by side")
+    }
+
+    /// A diff tab is named from its URL, not its buffer: more tabs than the
+    /// store keeps buffers for must not rename any, or run Git for all of them
+    /// each time the tab bar is drawn. A change that has gone keeps its name.
+    private static func testDiffTabsKeepTheirNames() throws {
+        let store = DocumentStore.shared
+        let provider = store.virtualContentProvider
+        let limit = store.maxCachedDocuments
+        defer {
+            store.virtualContentProvider = provider
+            store.maxCachedDocuments = limit
+        }
+        func diff(_ query: String) throws -> URL {
+            guard let url = URL(string: "puzzle-diff:///repo/.puzzle-diff-preview?window=names&"
+                                + query) else {
+                throw Failure(description: "no URL from \(query)")
+            }
+            return url
+        }
+        let change = try diff("path=Sources/App.swift")
+        let commit = try diff("path=Sources/Old.swift&commit=abc1234")
+        let gone = try diff("path=Sources/Gone.swift")
+        let filler = try diff("path=Sources/Last.swift")
+        // Two changes, the second off screen as the file opens.
+        let twoChanges = "+first\n" + (1...100).map { " line \($0)\n" }.joined() + "+last\n"
+        store.virtualContentProvider = { url in
+            url == gone ? nil : DocumentStore.VirtualContent(
+                text: twoChanges, displayName: DocumentStore.diffName(for: url), svgSides: nil)
+        }
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 600))
+        defer {
+            window.close()
+            for url in [change, commit, gone, filler] { store.unregisterOpen(url, owner: pane) }
+        }
+        let names = ["App.swift (diff)", "Old.swift @ abc1234", "Gone.swift (diff)", "Last.swift (diff)"]
+        for (url, name) in zip([change, commit, gone, filler], names) {
+            store.setVirtualDocument(url: url, text: twoChanges, displayName: name)
+            pane.open(url: url, replacingContent: true)
+            pane.view.layoutSubtreeIfNeeded()
+            // Each left on its last change.
+            pane.diffNavigatorForTesting.clickNextForTesting()
+        }
+        try expect(pane.tabTitlesForTesting == names, "the tabs opened as \(pane.tabTitlesForTesting)")
+
+        // Their buffers go, the one on screen aside.
+        store.maxCachedDocuments = 1
+        let extra = try diff("path=Sources/Extra.swift")
+        store.setVirtualDocument(url: extra, text: "+line\n", displayName: "Extra.swift (diff)")
+        defer { store.release(extra, stillOpen: false) }
+        try expect(!store.documentIsCached(change) && !store.documentIsCached(commit)
+                    && !store.documentIsCached(gone),
+                   "the fixture's buffers were kept")
+        pane.reloadTabs()
+        try expect(pane.tabTitlesForTesting == names,
+                   "tabs without a buffer are called \(pane.tabTitlesForTesting)")
+        try expect(!store.documentIsCached(change) && !store.documentIsCached(commit)
+                    && !store.documentIsCached(gone),
+                   "drawing the tabs built their diffs again")
+
+        // Coming back to one: named while it is rebuilt, and when it is done.
+        store.maxCachedDocuments = limit
+        func waitFor(_ text: String, in url: URL) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while store.cachedDocument(for: url)?.storage.string != text, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return store.cachedDocument(for: url)?.storage.string == text
+        }
+        pane.open(url: commit)
+        try expect(pane.tabTitlesForTesting == names,
+                   "a tab rebuilding its diff is called \(pane.tabTitlesForTesting)")
+        try expect(waitFor(twoChanges, in: commit), "the commit's diff was not rebuilt")
+        pane.reloadTabs()
+        try expect(pane.tabTitlesForTesting == names,
+                   "a tab rebuilt is called \(pane.tabTitlesForTesting)")
+        // And it is a diff again, on the change it was left on, not text that
+        // reads like one.
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(pane.textViewForTesting.diffBands.count == 2
+                    && pane.diffHeaderIsVisibleForTesting
+                    && pane.diffHeaderForTesting.summaryForTesting == "2/2 changes"
+                    && !pane.diffNavigatorForTesting.isHidden,
+                   "the rebuilt diff shows \(pane.textViewForTesting.diffBands.count) bands, "
+                     + "header \(pane.diffHeaderIsVisibleForTesting), "
+                     + "\(pane.diffHeaderForTesting.summaryForTesting), buttons hidden "
+                     + "\(pane.diffNavigatorForTesting.isHidden)")
+        guard let rows = pane.changeFrameForTesting.rows else {
+            throw Failure(description: "the rebuilt diff has no frame")
+        }
+        let visible = pane.textViewForTesting.visibleRect
+        try expect(visible.minY <= rows.minY && rows.maxY <= visible.maxY,
+                   "the change it was left on, at \(rows), is not in \(visible)")
+
+        // A change committed since has no diff to show, and is still that file.
+        pane.open(url: gone)
+        try expect(waitFor("No diff available.\n", in: gone), "the lost change still shows a diff")
+        pane.reloadTabs()
+        try expect(pane.tabTitlesForTesting == names,
+                   "a tab whose change has gone is called \(pane.tabTitlesForTesting)")
     }
 
     private static func testDiffHeaderStepsThroughChanges() throws {

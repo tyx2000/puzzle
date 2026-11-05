@@ -147,7 +147,7 @@ final class DocumentStore {
         if url.scheme == Self.diffScheme {
             guard let provider = virtualContentProvider else {
                 return setVirtualDocument(url: url, text: "No diff available.\n",
-                                          displayName: url.lastPathComponent + " (diff)")
+                                          displayName: Self.diffName(for: url))
             }
             // The rebuild runs Git, and this getter is called from a tab
             // activation on the main thread — a repository with a textconv or
@@ -155,7 +155,7 @@ final class DocumentStore {
             // buffer comes back immediately and fills itself in.
             let placeholder = setVirtualDocument(
                 url: url, text: "Rebuilding this diff…\n",
-                displayName: url.lastPathComponent + " (diff)")
+                displayName: Self.diffName(for: url))
             let generation = placeholder.contentReplacements
             GitService.workQueue.async { [weak self, weak placeholder] in
                 let content = provider(url)
@@ -163,9 +163,12 @@ final class DocumentStore {
                     guard let self, let placeholder, self.docs[url] === placeholder,
                           placeholder.contentReplacements == generation else { return }
                     placeholder.replaceVirtualContent(content?.text ?? "No diff available.\n",
-                                                      displayName: content?.displayName)
+                                                      displayName: content?.displayName
+                                                        ?? Self.diffName(for: url))
                     placeholder.svgDiffSides = content?.svgSides
                     HighlightService.shared.highlight(placeholder)
+                    NotificationCenter.default.post(name: Document.didRebuildDiff,
+                                                    object: placeholder)
                 }
             }
             return placeholder
@@ -207,6 +210,23 @@ final class DocumentStore {
         order = order.filter { docs[$0] != nil }
         let stillNeeded = Set(docs.values.compactMap { $0.languageSpec?.name })
         HighlightService.shared.evictUnused(keeping: stillNeeded)
+    }
+
+    /// What a diff's tab is called, for a commit's file or a working-tree file.
+    static func diffName(path: String, commit: String?) -> String {
+        let name = (path as NSString).lastPathComponent
+        if let commit, !commit.isEmpty { return "\(name) @ \(commit)" }
+        return "\(name) (diff)"
+    }
+
+    /// The same, from the tab's URL: it names the file and any commit, so a
+    /// buffer gone or still being built has the name it will come back with.
+    static func diffName(for url: URL) -> String {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        guard let path = items?.first(where: { $0.name == "path" })?.value, !path.isEmpty else {
+            return url.lastPathComponent + " (diff)"
+        }
+        return diffName(path: path, commit: items?.first { $0.name == "commit" }?.value)
     }
 
     /// Register (or replace) an in-memory document, e.g. a git diff. Replacing

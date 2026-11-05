@@ -58,6 +58,10 @@ final class ChangeFrameOverlay: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        // The box follows the code, so a tall change scrolled past the view's
+        // edge runs out of it. AppKit does not clip this drawing unasked, and
+        // it would land on the path and tabs above the code.
+        clipsToBounds = true
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError() }

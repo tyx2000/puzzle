@@ -17,6 +17,8 @@ final class Document {
     /// or stops being.
     static let syntaxTreeDidChange = Notification.Name("PuzzleDocumentSyntaxTreeDidChange")
     static let didReloadFromDisk = Notification.Name("PuzzleDocumentDidReloadFromDisk")
+    /// A diff released from memory has its content back.
+    static let didRebuildDiff = Notification.Name("PuzzleDocumentDidRebuildDiff")
 
     private enum SaveError: LocalizedError {
         case readOnly

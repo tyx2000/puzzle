@@ -636,7 +636,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                                           in directory: URL) -> DocumentStore.VirtualContent {
         DocumentStore.VirtualContent(
             text: GitService.diff(for: entry, in: directory, wholeFile: true),
-            displayName: "\((entry.path as NSString).lastPathComponent) (diff)",
+            displayName: DocumentStore.diffName(path: entry.path, commit: nil),
             // A picture that is also source: the diff tab shows both versions
             // above the diff itself.
             svgSides: GitService.svgDiffSides(for: entry.path, in: directory))
@@ -860,7 +860,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                   !path.isEmpty else { return nil }
             let directory = URL(fileURLWithPath:
                 (url.path as NSString).deletingLastPathComponent)
-            let name = (path as NSString).lastPathComponent
             let commit = components.queryItems?
                 .first(where: { $0.name == "commit" })?.value
             if let commit, !commit.isEmpty {
@@ -869,7 +868,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             guard let text = GitService.diff(forPath: path, in: directory,
                                              wholeFile: true) else { return nil }
             return DocumentStore.VirtualContent(
-                text: text, displayName: "\(name) (diff)",
+                text: text, displayName: DocumentStore.diffName(path: path, commit: nil),
                 svgSides: GitService.svgDiffSides(for: path, in: directory))
         }
     }
@@ -882,16 +881,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// the preview has one version to show rather than two.
     static func commitDiffContent(commit: String, path: String,
                                   in directory: URL) -> DocumentStore.VirtualContent {
-        let name = (path as NSString).lastPathComponent
+        let displayName = DocumentStore.diffName(path: path, commit: commit)
         let sides = GitService.svgDiffSides(inCommit: commit, path: path, in: directory)
         if let sides, sides.before == nil, let after = sides.after,
            let text = String(data: after, encoding: .utf8) {
-            return DocumentStore.VirtualContent(
-                text: text, displayName: "\(name) @ \(commit)", svgSides: sides)
+            return DocumentStore.VirtualContent(text: text, displayName: displayName,
+                                                svgSides: sides)
         }
         return DocumentStore.VirtualContent(
             text: GitService.diff(inCommit: commit, path: path, in: directory, wholeFile: true),
-            displayName: "\(name) @ \(commit)", svgSides: sides)
+            displayName: displayName, svgSides: sides)
     }
 
     /// Preserve the repository path below the per-commit temp directory. Using
