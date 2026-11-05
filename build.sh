@@ -148,8 +148,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key>     <string>Puzzle</string>
     <key>CFBundleExecutable</key>      <string>Puzzle</string>
     <key>CFBundleIdentifier</key>      <string>com.example.puzzle</string>
-    <key>CFBundleVersion</key>         <string>2.1</string>
-    <key>CFBundleShortVersionString</key> <string>2.1</string>
+    <key>CFBundleVersion</key>         <string>2.2</string>
+    <key>CFBundleShortVersionString</key> <string>2.2</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>Puzzle-AppIcon</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
