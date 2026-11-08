@@ -260,6 +260,7 @@ enum RegressionTests {
         try testExternalRefreshKeepsBoundedPreview()
         try testSettingsRejectUnusableNumbers()
         try testSearchStopsWhenCancelled()
+        try testSearchStopsForAProjectLeftBehind()
         try testDiffBuffersAreRebuiltAfterEviction()
         try testSavePolicyIsOnePlace()
         try testUnreadableGitObjectIsNotANewFile()
@@ -301,6 +302,7 @@ enum RegressionTests {
         try testOpenRowBackgroundTravels()
         try testSidebarBackgroundLandsWhenItsListScrolls()
         try testGitPanelRestoresSidebarSelection()
+        try testReleasingHiddenGitPanelKeepsWorkInHand()
         try testCommitFileTabsRevealCollapsedHistory()
         try testWindowSessionComesBack()
         try testMaterialFileIcons()
@@ -17848,6 +17850,37 @@ enum RegressionTests {
         settle()
         try expect(!BackgroundFetch.fetchedForTesting.contains(local),
                    "a project with no remote was fetched")
+        // Still answered, though, without being said to start: whoever waits
+        // on a fetch that turns out to have nothing to do hears it is over.
+        var localStarted = false
+        var localFinished: Bool?
+        let localQueued = BackgroundFetch.fetchIfDue(local, started: { localStarted = true },
+                                                     finished: { localFinished = $0 })
+        try expect(localQueued && waitUntil { localFinished != nil },
+                   "a fetch with no remote to fetch was never answered")
+        try expect(localFinished == false && !localStarted,
+                   "a fetch with no remote said it ran, or that it moved something")
+        // One waiting its turn is not queued a second time.
+        let gate = DispatchSemaphore(value: 0)
+        var gateOpen = false
+        func openGate() {
+            guard !gateOpen else { return }
+            gateOpen = true
+            gate.signal()
+        }
+        defer { openGate() }
+        BackgroundFetch.queue.async { gate.wait() }
+        var answers = 0
+        let queuedOnce = BackgroundFetch.fetchIfDue(second.clone, finished: { _ in answers += 1 })
+        let queuedTwice = BackgroundFetch.fetchIfDue(second.clone, finished: { _ in answers += 1 })
+        try expect(queuedOnce && !queuedTwice,
+                   "a project with a fetch waiting its turn was queued again: "
+                     + "\(queuedOnce) \(queuedTwice)")
+        openGate()
+        try expect(waitUntil { answers == 1 }, "the queued fetch was not answered once: \(answers)")
+        try expect(BackgroundFetch.fetchIfDue(second.clone, finished: { _ in answers += 1 }),
+                   "a project whose fetch had finished could not be fetched again")
+        try expect(waitUntil { answers == 2 }, "the next fetch was not answered")
 
         // A remote that cannot be reached fails quietly: nothing in the way,
         // and the project carries on.
@@ -17861,6 +17894,49 @@ enum RegressionTests {
         settle()
         try expect(workspace.window?.attachedSheet == nil && NSApp.modalWindow == nil,
                    "a failed fetch put something in front of the user")
+
+        // A fetch holds its repository: a pull or a push there, from anywhere —
+        // another window's row, the Git panel, the commit line — waits for it
+        // rather than failing on Git's ref locks beside it. Started off the
+        // main thread, as every caller does, and without any window's own
+        // record of the fetch, which is what another window on the project has.
+        try pushFromElsewhere(second.remote, subject: "pulled once the fetch let go")
+        func held(_ label: String, _ command: @escaping () -> GitService.RemoteResult) throws {
+            var fetchStarted = false
+            var fetchFinished = false
+            BackgroundFetch.delayForTesting = 1
+            defer { BackgroundFetch.delayForTesting = 0 }
+            try expect(BackgroundFetch.fetchIfDue(second.clone,
+                                                  started: { fetchStarted = true },
+                                                  finished: { _ in fetchFinished = true }),
+                       "the fetch to hold the \(label) behind was not queued")
+            try expect(waitUntil { fetchStarted }, "the fetch to hold the \(label) behind never ran")
+            var result: GitService.RemoteResult?
+            DispatchQueue.global(qos: .userInitiated).async {
+                let answer = command()
+                DispatchQueue.main.async { result = answer }
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            try expect(result == nil && !fetchFinished,
+                       "a \(label) ran beside a fetch in the same repository")
+            try expect(waitUntil { result != nil }, "the \(label) never ran once the fetch let go")
+            // Both answers come back through the main queue in the order the
+            // work ended, so the fetch's is in first.
+            try expect(fetchFinished, "the \(label) finished before the fetch it waited for")
+            try expect(result?.ok == true,
+                       "the \(label) behind the fetch failed: \(result?.message ?? "")")
+        }
+        try held("pull") { GitService.pull(in: second.clone) }
+        try expect(git(["rev-parse", "HEAD"], in: second.clone)
+                    == git(["rev-parse", "main"], in: second.remote),
+                   "the pull behind the fetch did not bring the remote's commits")
+        try Data("pushed\n".utf8).write(to: second.clone.appendingPathComponent("pushed.txt"))
+        try expect(GitService.commit("pushed behind a fetch", in: second.clone).code == 0,
+                   "could not commit something to push")
+        try held("push") { GitService.push(in: second.clone) }
+        try expect(git(["rev-parse", "main"], in: second.remote)
+                    == git(["rev-parse", "HEAD"], in: second.clone),
+                   "the push behind the fetch did not reach the remote")
     }
 
     private static func testGitMarkPulls() throws {
@@ -18141,6 +18217,42 @@ enum RegressionTests {
         try expect(git(["rev-parse", "HEAD"], in: first.clone) == mine,
                    "a pull that could not fast-forward moved the branch")
         try expect(waitUntil { !syncing(first.clone) }, "a failed pull kept showing")
+
+        // A fetch still waiting its turn — fetches run one at a time, and
+        // another project's slow remote can hold the queue for a minute — is
+        // as much out as one running: a pull clicked meanwhile waits for it,
+        // rather than running beside it in the same repository, and the mark
+        // shows the click was taken.
+        BackgroundFetch.resetForTesting()
+        let gate = DispatchSemaphore(value: 0)
+        var gateOpen = false
+        func openGate() {
+            guard !gateOpen else { return }
+            gateOpen = true
+            gate.signal()
+        }
+        defer { openGate() }
+        BackgroundFetch.queue.async { gate.wait() }
+        try pushFromElsewhere(second.remote, subject: "pulled behind a queued fetch")
+        let waitingHead = git(["rev-parse", "HEAD"], in: second.clone)
+        let errorsBefore = errors.count
+        workspace.openProject(second.clone)
+        try press(second.clone)
+        try expect(syncing(second.clone),
+                   "a pull waiting for a queued fetch did not show on the mark")
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        try expect(git(["rev-parse", "HEAD"], in: second.clone) == waitingHead,
+                   "a pull ran while that project's fetch was still waiting its turn")
+        try expect(syncing(second.clone), "the mark went still while the pull waited")
+        openGate()
+        try expect(waitUntil { git(["rev-parse", "HEAD"], in: second.clone)
+                                == git(["rev-parse", "main"], in: second.remote) },
+                   "the pull behind a queued fetch never ran: \(errors)")
+        try expect(BackgroundFetch.fetchedForTesting.contains(second.clone),
+                   "the queued fetch never ran")
+        try expect(waitUntil { !syncing(second.clone) }, "the queued pull never stopped showing")
+        try expect(errors.count == errorsBefore,
+                   "the pull behind a queued fetch reported an error: \(errors)")
     }
 
     /// A sidebar flight is in viewport coordinates. Moving either participating
@@ -18379,6 +18491,92 @@ enum RegressionTests {
 
     /// Returning to a commit-file tab reveals its row in both histories,
     /// including when the log or the commit's files have not arrived yet.
+    /// Letting a hidden Git panel go under memory pressure frees what it can
+    /// read again, not what it cannot: a message typed and not committed —
+    /// for the project on screen or one left — or a command still running,
+    /// whose one-at-a-time lock lives in the panel.
+    private static func testReleasingHiddenGitPanelKeepsWorkInHand() throws {
+        func repository(_ name: String) throws -> URL {
+            let root = try temporaryDirectory("git-panel-release-\(name)")
+            _ = GitService.run(["init", "-q", "-b", "main"], in: root)
+            _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+            _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+            try Data("one\n".utf8).write(to: root.appendingPathComponent("a.txt"))
+            try expect(GitService.commit("start", in: root).code == 0,
+                       "the release fixture could not commit")
+            try Data("two\n".utf8).write(to: root.appendingPathComponent("a.txt"))
+            return root.standardizedFileURL.resolvingSymlinksInPath()
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        let first = try repository("first"), second = try repository("second")
+        defer { for url in [first, second] { try? FileManager.default.removeItem(at: url) } }
+        let sidebar = SidebarViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = sidebar
+        defer {
+            RowFrameFlight.land()
+            window.close()
+        }
+        _ = sidebar.view
+        sidebar.setDirectory(first)
+        sidebar.showGit()
+        guard let panel = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the Git panel was not created")
+        }
+        panel.setCommitMessageForTesting("first's message")
+        sidebar.setDirectory(second)
+        panel.setCommitMessageForTesting("second's message")
+
+        sidebar.showFiles()
+        sidebar.releaseHiddenPanels()
+        try expect(sidebar.gitPanelForTesting == nil, "the hidden Git panel was not released")
+        sidebar.showGit()
+        guard let next = sidebar.gitPanelForTesting else {
+            throw Failure(description: "the Git panel was not recreated")
+        }
+        try expect(next.commitMessageForTesting == "second's message",
+                   "the message in the box went with the released panel: "
+                     + next.commitMessageForTesting.debugDescription)
+        sidebar.setDirectory(first)
+        try expect(next.commitMessageForTesting == "first's message",
+                   "the message typed for the project left went with the released panel: "
+                     + next.commitMessageForTesting.debugDescription)
+
+        // A commit still running: the queue is held, so it cannot finish
+        // while the panel is hidden and let go.
+        var errors: [String] = []
+        next.presentErrorForTesting = { title, _ in errors.append(title) }
+        let gate = DispatchSemaphore(value: 0)
+        var gateOpen = false
+        func openGate() {
+            guard !gateOpen else { return }
+            gateOpen = true
+            gate.signal()
+        }
+        defer { openGate() }
+        next.operationQueueForTesting.async { gate.wait() }
+        next.commitForTesting()
+        try expect(next.isOperationRunningForTesting, "the commit did not start")
+        sidebar.showFiles()
+        sidebar.releaseHiddenPanels()
+        try expect(sidebar.gitPanelForTesting === next,
+                   "the hidden Git panel was let go with its commit still running")
+        openGate()
+        try expect(waitUntil { !next.isOperationRunningForTesting }, "the commit never finished")
+        try expect(errors.isEmpty, "the held commit failed: \(errors)")
+        sidebar.releaseHiddenPanels()
+        try expect(sidebar.gitPanelForTesting == nil,
+                   "a hidden Git panel with nothing running was kept")
+    }
+
     private static func testCommitFileTabsRevealCollapsedHistory() throws {
         let root = try temporaryDirectory("commit-file-reveal")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -19812,6 +20010,44 @@ enum RegressionTests {
         var tornDown = false
         token.whenCancelled { tornDown = true }
         try expect(tornDown, "a late handler was never run on an already-cancelled token")
+    }
+
+    /// A search still running when its project is left, or when its panel
+    /// lets go of its results, is stopped — not only its answer thrown away.
+    /// Left going, it held the search queue, which runs one query at a time,
+    /// and the next project's first search waited behind it.
+    private static func testSearchStopsForAProjectLeftBehind() throws {
+        let first = try temporaryDirectory("search-left-first")
+        let second = try temporaryDirectory("search-left-second")
+        defer { for url in [first, second] { try? FileManager.default.removeItem(at: url) } }
+        try Data("needle one\n".utf8).write(to: first.appendingPathComponent("a.txt"))
+        try Data("needle two\n".utf8).write(to: second.appendingPathComponent("b.txt"))
+        let search = SearchViewController()
+        _ = search.view
+
+        search.setDirectory(first)
+        search.performSearch("needle")
+        guard let leftBehind = search.queryTokenForTesting else {
+            throw Failure(description: "the search did not start")
+        }
+        search.setDirectory(second)
+        try expect(leftBehind.isCancelled,
+                   "the search for the project left behind was not stopped")
+
+        search.performSearch("needle")
+        guard let released = search.queryTokenForTesting else {
+            throw Failure(description: "the second project's search did not start")
+        }
+        search.releaseTransientMemory()
+        try expect(released.isCancelled,
+                   "the search running when the panel let go of its results was not stopped")
+
+        // And the panel still searches to an answer afterwards.
+        search.performSearch("needle")
+        try settleSearch(search)
+        try expect(search.groupsForTesting.map(\.url.lastPathComponent) == ["b.txt"],
+                   "a search after the stopped ones found "
+                     + "\(search.groupsForTesting.map(\.url.lastPathComponent))")
     }
 
     private static func testUnreadableGitObjectIsNotANewFile() throws {

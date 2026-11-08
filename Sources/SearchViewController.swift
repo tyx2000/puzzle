@@ -82,9 +82,7 @@ final class SearchViewController: NSViewController {
         replaceReport = nil
         lastReplace = []
         undoReplaceButton.isHidden = true
-        searchGeneration += 1
-        searchWork?.cancel()
-        searchWork = nil
+        cancelSearch()
         groups.removeAll()
         hitRowCache.removeAll()
         if isViewLoaded {
@@ -426,6 +424,8 @@ final class SearchViewController: NSViewController {
     var groupsForTesting: [FileGroup] { groups }
     /// A search is waiting out its debounce or running.
     var isSearchingForTesting: Bool { searchWork != nil }
+    /// What stops the query in hand, from the moment it is asked for.
+    var queryTokenForTesting: CancellationToken? { searchToken }
     var summaryForTesting: String { summaryLabel.stringValue }
     var offersUndoForTesting: Bool { !undoReplaceButton.isHidden }
     func replaceAllForTesting() { replaceEverything() }
@@ -471,9 +471,7 @@ final class SearchViewController: NSViewController {
     }
 
     func releaseTransientMemory() {
-        searchGeneration += 1
-        searchWork?.cancel()
-        searchWork = nil
+        cancelSearch()
         groups.removeAll()
         hitRowCache.removeAll()
         if isViewLoaded { outline.reloadData() }
@@ -485,19 +483,28 @@ final class SearchViewController: NSViewController {
         queryChanged()
     }
 
+    /// Stop the query in hand, wherever it has got to, and make sure no
+    /// answer to it is shown.
+    ///
+    /// All three, every time. The generation alone only throws the answer
+    /// away when it lands; the work item alone only stops a query still
+    /// waiting out the debounce; and the token is what stops one that has
+    /// started — a project-wide search runs for as long as the tree is big,
+    /// on a queue that runs one at a time, so one left going holds up the
+    /// next project's first search behind it.
+    private func cancelSearch() {
+        searchGeneration += 1
+        searchWork?.cancel()
+        searchWork = nil
+        searchToken?.cancel()
+        searchToken = nil
+    }
+
     @objc private func searchChanged() {
         let query = searchField.stringValue
         let options = searchField.options
-        searchGeneration += 1
+        cancelSearch()
         let generation = searchGeneration
-        searchWork?.cancel()
-        searchWork = nil
-        // Cancel the query that is already running, not just the one still
-        // waiting out the debounce: `DispatchWorkItem.cancel()` only stops an
-        // item that has not started, and a project-wide search that has started
-        // runs for as long as the tree is big.
-        searchToken?.cancel()
-        searchToken = nil
         guard query.count >= 2, let directory else {
             groups = []; hitRowCache.removeAll(); outline.reloadData()
             summaryLabel.stringValue = query.isEmpty ? "" : "Type at least 2 characters"

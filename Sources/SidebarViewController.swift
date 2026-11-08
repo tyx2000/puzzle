@@ -38,6 +38,9 @@ final class SidebarViewController: NSViewController {
     // not build those view trees until the user asks for them.
     private var searchController: SearchViewController?
     private var gitController: GitPanelViewController?
+    /// The commit messages a released Git panel held, until the next one is
+    /// made.
+    private var releasedGitDrafts: [URL: String] = [:]
     private var mountedControllers: [NSViewController] = []
     private var directory: URL?
     /// Selection belongs to the sidebar, including while a heavy panel has
@@ -489,13 +492,19 @@ final class SidebarViewController: NSViewController {
 
     /// Drop heavy hidden view trees under memory pressure or when the window is
     /// miniaturized. Reopening a panel recreates it and refreshes its data.
+    ///
+    /// What the user put there is not data to refresh: the Git panel's commit
+    /// messages are kept here for the next panel, and a panel with a command
+    /// still running is kept whole until a later release — its lock and its
+    /// progress go with it.
     func releaseHiddenPanels() {
         if visiblePanel != .search, let search = searchController {
             search.releaseTransientMemory()
             unmount(search)
             searchController = nil
         }
-        if visiblePanel != .git, let git = gitController {
+        if visiblePanel != .git, let git = gitController, !git.isRunningOperation {
+            releasedGitDrafts = git.commitDrafts
             git.releaseTransientMemory()
             unmount(git)
             gitController = nil
@@ -537,6 +546,8 @@ final class SidebarViewController: NSViewController {
             self?.selectHistoryCommit(hash)
         }
         git.onChanged = { [weak self] directory in self?.onGitChanged?(directory) }
+        git.commitDrafts = releasedGitDrafts
+        releasedGitDrafts = [:]
         if let directory { git.setDirectory(directory) }
         synchronizeSelection(in: git)
         gitController = git

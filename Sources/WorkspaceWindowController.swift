@@ -528,20 +528,31 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // project only, and not again if it was fetched a moment ago — nor
         // while a pull, which brings the remote down itself, is running.
         if !pulling.contains(url) {
-            var fetchStarted = Date()
-            BackgroundFetch.fetchIfDue(url, started: { [weak self] in
+            // Set when the fetch gets the queue, which can be well after it
+            // was asked for: fetches run one at a time, behind other
+            // projects' remotes. Nil when it never ran — no remote.
+            var fetchStarted: Date?
+            let queued = BackgroundFetch.fetchIfDue(url, started: { [weak self] in
                 fetchStarted = Date()
-                self?.fetching.insert(url)
                 self?.beginSync(url)
             }, finished: { [weak self] moved in
                 guard let self else { return }
                 self.fetching.remove(url)
                 // A pull asked for meanwhile goes now, before this fetch lets
                 // go of the mark, so the band runs on without a break.
-                if self.pullAfterFetch.remove(url) != nil { self.startPull(url) }
-                self.endSync(url, startedAt: fetchStarted)
+                if self.pullAfterFetch.remove(url) != nil {
+                    self.startPull(url)
+                    // The pull holds the mark now; the hold taken when it
+                    // was asked for can go.
+                    self.endSync(url, startedAt: .distantPast)
+                }
+                if let fetchStarted { self.endSync(url, startedAt: fetchStarted) }
                 if moved, self.projectURL == url { self.remoteRefsMoved() }
             })
+            // Out from the moment it is queued, not from when it starts: a
+            // pull clicked while it waits its turn waits for it too, rather
+            // than running beside it in the same repository.
+            if queued { fetching.insert(url) }
         }
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
@@ -954,8 +965,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Syncing with the remote
 
-    /// Projects with a fetch or a pull running, and how many of each.
+    /// Projects whose Git mark shows a sync, and how many holds each has: a
+    /// running fetch, a pull, a pull waiting for a fetch.
     private var syncing: [URL: Int] = [:]
+    /// Projects with a fetch queued or running.
     private var fetching: Set<URL> = []
     private var pulling: Set<URL> = []
     /// Pulls asked for while that project's fetch was still out. The click
@@ -1002,6 +1015,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         guard !fetching.contains(url) else {
             pullAfterFetch.insert(url)
+            // The fetch may still be waiting for the queue, with nothing on
+            // the mark yet: the click is seen to have been taken.
+            beginSync(url)
             return
         }
         startPull(url)

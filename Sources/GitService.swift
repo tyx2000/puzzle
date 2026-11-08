@@ -903,7 +903,8 @@ enum GitService {
     }
 
     static func deleteBranch(_ name: String, in directory: URL) -> RemoteResult {
-        remote(["branch", "-d", name], in: directory, verb: "Delete branch")
+        remote(["branch", "-d", name], in: directory, verb: "Delete branch",
+               writesRefs: true)
     }
 
     static func deleteBranch(_ branch: Branch, in directory: URL) -> RemoteResult {
@@ -913,7 +914,7 @@ enum GitService {
             return deleteBranch(branch.name, in: directory)
         }
         return remote(["push", remoteName, "--delete", remoteBranch],
-                      in: directory, verb: "Delete remote branch")
+                      in: directory, verb: "Delete remote branch", writesRefs: true)
     }
 
     static func saveRemote(name: String, fetchURL: String, pushURL: String,
@@ -956,7 +957,7 @@ enum GitService {
         let args = hasUpstream
             ? ["push", remoteName, branch]
             : ["push", "--set-upstream", remoteName, branch]
-        return remote(args, in: directory, verb: "Push")
+        return remote(args, in: directory, verb: "Push", writesRefs: true)
     }
 
     /// Anything that talks to a server. Local work has no ceiling — a big
@@ -964,9 +965,56 @@ enum GitService {
     /// indistinguishable from a hang, so those calls get one.
     static let networkTimeout: TimeInterval = 300
 
+    /// Run `body` while no other command that writes this repository's refs
+    /// is running in it.
+    ///
+    /// Git guards each ref with a lock file and refuses, rather than waits,
+    /// when another process holds it: a push landing while a fetch updates
+    /// `refs/remotes`, or a branch delete while `fetch --prune` rewrites
+    /// `packed-refs`, fails with "cannot lock ref". Those commands come from
+    /// several places — the background fetch, a project row's pull, the Git
+    /// panel, the commit line, another window on the same project — on
+    /// different queues, so the turn-taking is per repository here rather
+    /// than per caller. Keyed by the repository's common Git directory, so
+    /// two folders of one repository, or two of its worktrees, share a lock.
+    ///
+    /// Blocks the calling thread until its turn: never call it on the main
+    /// thread for a command that talks to a server.
+    static func exclusively<T>(in directory: URL, _ body: () -> T) -> T {
+        let lock = refLock(for: directory)
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    private static var refLocks: [String: NSRecursiveLock] = [:]
+    private static let refLocksGuard = NSLock()
+
+    private static func refLock(for directory: URL) -> NSRecursiveLock {
+        let common = run(["rev-parse", "--git-common-dir"], in: directory)
+        let key: String
+        if common.code == 0 {
+            let path = common.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            key = URL(fileURLWithPath: path, relativeTo: directory)
+                .standardizedFileURL.resolvingSymlinksInPath().path
+        } else {
+            key = directory.standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        refLocksGuard.lock()
+        defer { refLocksGuard.unlock() }
+        if let lock = refLocks[key] { return lock }
+        let lock = NSRecursiveLock()
+        refLocks[key] = lock
+        return lock
+    }
+
+    /// `writesRefs`: the command moves branches or remote-tracking branches,
+    /// so it takes its turn with the others that do — see `exclusively`.
     private static func remote(_ args: [String], in directory: URL,
-                               verb: String) -> RemoteResult {
-        let result = run(args, in: directory, timeout: networkTimeout)
+                               verb: String, writesRefs: Bool = false) -> RemoteResult {
+        let result = writesRefs
+            ? exclusively(in: directory) { run(args, in: directory, timeout: networkTimeout) }
+            : run(args, in: directory, timeout: networkTimeout)
         if result.code == 0 {
             let text = (result.out + result.err).trimmingCharacters(in: .whitespacesAndNewlines)
             return RemoteResult(ok: true, message: text.isEmpty ? "\(verb) succeeded." : text)
@@ -982,7 +1030,7 @@ enum GitService {
         // A branch with no upstream needs one setting, or push fails with a
         // "no upstream" error that reads like a bug rather than a first push.
         if aheadCount(in: directory).hasUpstream {
-            return remote(["push"], in: directory, verb: "Push")
+            return remote(["push"], in: directory, verb: "Push", writesRefs: true)
         }
         let branch = run(["rev-parse", "--abbrev-ref", "HEAD"], in: directory)
             .out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1004,15 +1052,16 @@ enum GitService {
                 ok: false,
                 message: "This branch has no upstream. Choose a specific ‘Push to …’ item from the Push menu.")
         }
-        return remote(["push", "--set-upstream", target, branch], in: directory, verb: "Push")
+        return remote(["push", "--set-upstream", target, branch], in: directory,
+                      verb: "Push", writesRefs: true)
     }
 
     static func fetch(in directory: URL) -> RemoteResult {
-        remote(["fetch", "--all", "--prune"], in: directory, verb: "Fetch")
+        remote(["fetch", "--all", "--prune"], in: directory, verb: "Fetch", writesRefs: true)
     }
 
     static func pull(in directory: URL) -> RemoteResult {
-        remote(["pull", "--ff-only"], in: directory, verb: "Pull")
+        remote(["pull", "--ff-only"], in: directory, verb: "Pull", writesRefs: true)
     }
 
     /// Stage every change inside the opened project, without reaching into

@@ -120,6 +120,27 @@ final class GitPanelViewController: NSViewController {
     /// that project's changes under it — the commit line over a project's
     /// changes keeps its drafts the same way.
     private var drafts: [URL: String] = [:]
+    /// Every message typed and not yet committed, by project — the one in
+    /// the box included. A hidden panel can be let go under memory pressure;
+    /// the sidebar keeps these meanwhile and hands them to the next one, so
+    /// what was typed is not part of what is released.
+    var commitDrafts: [URL: String] {
+        get {
+            var all = drafts
+            if let directory {
+                all[directory] = commitField.string.isEmpty ? nil : commitField.string
+            }
+            return all
+        }
+        set {
+            drafts = newValue
+            if let directory { commitField.string = newValue[directory] ?? "" }
+        }
+    }
+    /// A Git command started here has not finished. Its lock — one command at
+    /// a time — and its progress live in this panel, so a panel replaced
+    /// while one runs would let a second start beside it.
+    var isRunningOperation: Bool { activeOperationID != nil }
     private var entries: [GitService.Status.Entry] = []
     private var history: [GitService.Commit] = []
     private var historyGraphRows: [String: GitHistoryGraph.Row] = [:]
