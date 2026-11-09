@@ -132,8 +132,6 @@ enum Theme {
     static let border = token(\.border)
     /// The line between regions: `border`, most of the way back into the panel.
     static let divider = token(\.divider)
-    /// The mark on a divider where its knob is.
-    static let dividerMark = token(\.dividerMark)
     static let selection = token(\.selection)
     static let lineHighlight = token(\.lineHighlight)
     // The code area matches the panel, so the active tab cannot also match the

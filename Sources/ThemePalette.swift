@@ -97,8 +97,6 @@ struct ThemePalette {
     /// still read as apart, but the line is not looked at. `border` keeps its
     /// strength for outlines, where it is the edge of a thing to press.
     var divider: UInt32 { mixed(border, into: panelBackground, keeping: Self.dividerStrength) }
-    /// The mark a divider's knob leaves on its line, taken back as far.
-    var dividerMark: UInt32 { mixed(raisedEdge, into: panelBackground, keeping: Self.dividerStrength) }
     /// How much of its contrast with the panel a divider keeps.
     static let dividerStrength = 0.35
     /// How much of the gutter colour an indent guide is drawn with, in the

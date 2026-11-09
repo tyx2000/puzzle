@@ -32,9 +32,8 @@ final class PuzzleSplitViewController: NSSplitViewController {
     /// AppKit uses this rectangle for pointer hit-testing and cursor feedback.
     ///
     /// The divider beside the panel takes no hold of its own: the handle laid
-    /// over it (`SplitDividerHandleView`) is its one target, at its knob. A
-    /// band here put AppKit's resize cursor over that knob, which is a thing
-    /// to press and shows the hand.
+    /// over it (`SplitDividerHandleView`) is its one target, and the one that
+    /// lights the line. A band of AppKit's here would answer beside it, unlit.
     override func splitView(_ splitView: NSSplitView,
                             effectiveRect proposedEffectiveRect: NSRect,
                             forDrawnRect drawnRect: NSRect,

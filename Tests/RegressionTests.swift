@@ -294,8 +294,8 @@ enum RegressionTests {
         try testStripedGitLists()
         try testGitPanelHistoryPages()
         try testSplitterAndRowGestures()
-        try testDividersTakeHoldAtTheirMiddle()
-        try testDividerKnobMarksResetsAndHolds()
+        try testDividersLightAlongTheirLength()
+        try testDividersResetAndHold()
         try testCutHistoryRowsSayTheRest()
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
@@ -9803,19 +9803,20 @@ enum RegressionTests {
         }
 
         // Away from the scrollers the handles still take hold: the line
-        // beside the panel at its knob — where the line between the changes
-        // and the history meets it — the window's right edge in the title
-        // band, above the code's scroller. The line takes hold nowhere else —
-        // not at the height of the project rows.
+        // beside the panel, anywhere along it — by the project rows as by the
+        // lists — and the window's right edge in the title band, above the
+        // code's scroller.
         let panel = workspace.sidebar.view
-        let knobY = DividerGrip.crossing(in: window)
-            .map { panel.convert(NSPoint(x: 0, y: $0), from: nil).y } ?? panel.bounds.midY
-        let besidePanel = panel.convert(NSPoint(x: panel.bounds.maxX, y: knobY), to: nil)
-        try expect(frameView.hitTest(besidePanel) is SplitDividerHandleView,
-                   "the line beside the panel no longer takes hold where no scroller is")
+        let alongLine = stride(from: panel.bounds.minY + 10, to: panel.bounds.maxY - 10, by: 10).map {
+            panel.convert(NSPoint(x: panel.bounds.maxX, y: $0), to: nil)
+        }
+        let unscrolled = alongLine.filter { !PuzzleScroller.isShowing(at: $0, in: window) }
         let besideRows = panel.convert(NSPoint(x: panel.bounds.maxX, y: panel.bounds.maxY - 50), to: nil)
-        try expect(!(frameView.hitTest(besideRows) is SplitDividerHandleView),
-                   "the line beside the panel took hold away from its knob")
+        try expect(unscrolled.contains(besideRows),
+                   "a scroller shows beside the project rows, so the line is not tried there")
+        let missed = unscrolled.filter { !(frameView.hitTest($0) is SplitDividerHandleView) }
+        try expect(missed.isEmpty,
+                   "the line beside the panel does not take hold where no scroller is: \(missed)")
         let rightEdge = NSPoint(x: window.frame.width - 5, y: window.frame.height - 20)
         try expect(frameView.hitTest(rightEdge) is WindowResizeHandleView,
                    "the window's right edge no longer resizes it where no scroller is")
@@ -10270,14 +10271,11 @@ enum RegressionTests {
                      + "and \(PuzzleTextView.indentGuideAlpha) in the code, not both 0.175")
         for palette in ThemePalette.all {
             func channels(_ v: UInt32) -> [Double] { [16, 8, 0].map { Double((v >> UInt32($0)) & 0xff) } }
-            for (name, mixed, full) in [("divider", palette.divider, palette.border),
-                                        ("knob mark", palette.dividerMark, palette.raisedEdge)] {
-                let ground = channels(palette.panelBackground)
-                let expected = zip(channels(full), ground).map { ($0 - $1) * 0.35 + $1 }
-                try expect(zip(channels(mixed), expected).allSatisfy { abs($0 - $1) <= 0.5 },
-                           "\(palette.id)'s \(name) is not 35% of the way from the panel to "
-                             + "its full colour: \(String(mixed, radix: 16))")
-            }
+            let ground = channels(palette.panelBackground)
+            let expected = zip(channels(palette.border), ground).map { ($0 - $1) * 0.35 + $1 }
+            try expect(zip(channels(palette.divider), expected).allSatisfy { abs($0 - $1) <= 0.5 },
+                       "\(palette.id)'s divider is not 35% of the way from the panel to "
+                         + "its border: \(String(palette.divider, radix: 16))")
             try expect(palette.divider != palette.border,
                        "\(palette.id)'s divider is as strong as its outlines")
         }
@@ -12541,9 +12539,9 @@ enum RegressionTests {
         // Divider, ribbon and clickable line numbers keep separate targets.
         let numberColumn = LineNumberRulerView.numberColumn(digits: 2)
         let dividerReach = LineNumberRulerView.dividerReach
-        try expect(dividerReach >= DividerGrip.diameter / 2
-                    && dividerReach >= SplitDividerHandleView.hitWidth / 2 - 1,
-                   "the ribbon column starts inside the divider's drag handle")
+        try expect(dividerReach >= SplitDividerHandleView.hitWidth / 2
+                    && dividerReach >= DividerGrip.lineWidth / 2 + DividerGrip.glowWidth,
+                   "the ribbon column starts under the divider's handle or its light")
         try expect(ruler.changeMarkTargetsForTesting.allSatisfy { $0.maxX <= numberColumn.start },
                    "a change target reaches into the clickable line numbers: "
                     + "\(ruler.changeMarkTargetsForTesting)")
@@ -16094,23 +16092,50 @@ enum RegressionTests {
                    "a normal file showed the diff header or its buttons")
     }
 
-    /// A divider is taken hold of only at a round knob on its line — its
-    /// middle, or where the line across the panel meets it. The knob shows
-    /// only while the pointer is on it, and for the whole of a drag; along
-    /// the rest of the line the pointer and a press are the panes'. The same
-    /// for the line between the tree and the Git lists, the one between the
-    /// changes and the history, and the one beside the panel.
-    private static func testDividersTakeHoldAtTheirMiddle() throws {
+    /// A divider is taken hold of anywhere along its line, a few points either
+    /// side of it. The pointer there lights the line as a diff frames its
+    /// change, fading in, and it stays lit for the whole of a drag, the
+    /// pointer the resize cursor; off the band the pointer and a press are
+    /// the panes'. The same for the line between the tree and the Git lists,
+    /// the one between the changes and the history, and the one beside the
+    /// panel.
+    private static func testDividersLightAlongTheirLength() throws {
         defer { pinPointer(at: pointerNowhere) }
-        // The knob: a 20pt disc, taking hold across its own span, fading in
-        // and out.
-        try expect(DividerGrip.diameter == 20 && DividerGrip.reach == DividerGrip.diameter
-                    && DividerGrip.radius == DividerGrip.diameter / 2 && DividerGrip.fade == 0.15,
-                   "the knob is \(DividerGrip.diameter)pt, takes hold along \(DividerGrip.reach)pt "
-                     + "and fades in \(DividerGrip.fade)s, not 20, 20 and 0.15")
-        // A thing to press, under the hand — not an edge to pull.
-        try expect(DividerGrip.cursor === NSCursor.pointingHand,
-                   "the knob shows \(DividerGrip.cursor), not the hand")
+        try expect(DividerGrip.radius == 4 && DividerGrip.fade == 0.15
+                    && DividerGrip.lineWidth == ChangeFrameOverlay.strokeWidth
+                    && DividerGrip.glowWidth == ChangeFrameOverlay.glowWidth
+                    && DividerGrip.glowAlpha == ChangeFrameOverlay.glowAlpha
+                    && DividerGrip.colour == Theme.blue,
+                   "a divider answers \(DividerGrip.radius)pt either side and lights in "
+                     + "\(DividerGrip.colour), not 4pt in a diff frame's blue")
+        // An edge to pull, the way it moves — not a thing to press.
+        func image(_ cursor: NSCursor) -> Data? { cursor.image.tiffRepresentation }
+        let column: NSCursor, row: NSCursor
+        if #available(macOS 15.0, *) {
+            (column, row) = (.columnResize, .rowResize)
+        } else {
+            (column, row) = (.resizeLeftRight, .resizeUpDown)
+        }
+        try expect(image(DividerGrip.cursor(lineIsVertical: true)) == image(column)
+                    && image(DividerGrip.cursor(lineIsVertical: false)) == image(row)
+                    && DividerGrip.cursor(lineIsVertical: true) === DividerGrip.cursor(lineIsVertical: true),
+                   "a divider does not show the resize cursor for the way it moves")
+        // Lit: the blue line down the middle, the faint band either side.
+        let thickness = DividerGrip.lineWidth + DividerGrip.glowWidth * 2
+        let lit = DividerGrip.Light(frame: NSRect(x: 0, y: 0, width: thickness, height: 20))
+        lit.show(true)
+        guard let litRep = lit.bitmapImageRepForCachingDisplay(in: lit.bounds) else {
+            throw Failure(description: "the light could not be drawn")
+        }
+        lit.cacheDisplay(in: lit.bounds, to: litRep)
+        let litScale = CGFloat(litRep.pixelsWide) / lit.bounds.width
+        let centre = litRep.colorAt(x: Int(lit.bounds.midX * litScale), y: Int(10 * litScale))
+        let edge = litRep.colorAt(x: 0, y: Int(10 * litScale))
+        try expect(centre.map { sameColor($0, Theme.blue) } == true,
+                   "the lit line is \(String(describing: centre)), not the theme's blue")
+        try expect(edge.map { abs($0.alphaComponent - DividerGrip.glowAlpha) < 0.03 } == true,
+                   "the band beside the lit line is \(String(describing: edge)), not faint")
+
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -16137,195 +16162,134 @@ enum RegressionTests {
             splitter.layoutSubtreeIfNeeded()
             let name = axis == .horizontal ? "the line between the columns"
                                            : "the line between the changes and the history"
-            // Where the line is: its middle, and a point on it far from that;
-            // and the same two a little way into the first pane, where the
-            // band lies over the pane.
+            let lineIsVertical = axis == .horizontal
+            // Its middle and a point near one end; and how far into the first
+            // pane is still on the band, and how far is past it.
             let middle: NSPoint
             let end: NSPoint
-            let intoFirst: (dx: CGFloat, dy: CGFloat)
+            let toFirst: (dx: CGFloat, dy: CGFloat)
             switch axis {
             case .horizontal:
                 middle = NSPoint(x: splitter.divider + 0.5, y: 150)
                 end = NSPoint(x: splitter.divider + 0.5, y: 20)
-                intoFirst = (-2, 0)
+                toFirst = (-1, 0)
             case .vertical:
                 let lineY = splitter.bounds.height - splitter.divider - 0.5
                 middle = NSPoint(x: 200, y: lineY)
                 end = NSPoint(x: 20, y: lineY)
-                intoFirst = (0, 2)
+                toFirst = (0, 1)
             }
-            func beside(_ point: NSPoint) -> NSPoint {
-                NSPoint(x: point.x + intoFirst.dx, y: point.y + intoFirst.dy)
+            func into(_ point: NSPoint, by distance: CGFloat) -> NSPoint {
+                NSPoint(x: point.x + toFirst.dx * distance, y: point.y + toFirst.dy * distance)
             }
-            // Just past the knob's edge, along the line.
-            let pastKnob = axis == .horizontal
-                ? NSPoint(x: middle.x, y: middle.y + DividerGrip.reach / 2 + 2)
-                : NSPoint(x: middle.x + DividerGrip.reach / 2 + 2, y: middle.y)
 
-            try expect(splitter.subviews.last is DividerGrip.Knob,
-                       "\(name)'s knob lies under the panes")
-            let knob = splitter.gripRectForTesting
-            try expect(abs(knob.midX - middle.x) <= 0.5 && abs(knob.midY - middle.y) <= 0.5
-                        && knob.width == DividerGrip.diameter && knob.height == DividerGrip.diameter,
-                       "\(name)'s knob is not on its middle: \(knob)")
-            try expect(splitter.grabRectForTesting.insetBy(dx: -0.5, dy: -0.5).contains(knob),
-                       "\(name) takes hold along \(splitter.grabRectForTesting), short of its knob \(knob)")
+            // The light: over the panes, the line's whole length, a diff
+            // frame's line and band across it.
+            try expect(splitter.subviews.last is DividerGrip.Light,
+                       "\(name)'s light lies under the panes")
+            let light = splitter.lightRectForTesting
+            let across = lineIsVertical ? light.width : light.height
+            let along = lineIsVertical ? light.height : light.width
+            let lightMiddle = lineIsVertical ? light.midX : light.midY
+            let lineMiddle = lineIsVertical ? middle.x : middle.y
+            try expect(abs(lightMiddle - lineMiddle) <= 0.5 && abs(across - thickness) < 0.01
+                        && along == (lineIsVertical ? splitter.bounds.height : splitter.bounds.width),
+                       "\(name)'s light is not along its line: \(light)")
 
             pinPointer(at: pointerNowhere)
-            splitter.refreshGripForTesting()
-            try expect(!splitter.showsGripForTesting, "\(name) shows its knob at rest")
-            // On the line away from the knob nothing comes up, and a press
-            // there is the pane's.
-            for away in [end, pastKnob] {
-                pin(away, in: splitter)
-                splitter.refreshGripForTesting()
-                try expect(!splitter.showsGripForTesting,
-                           "\(name) showed its knob with the pointer on the line at \(away), off the knob")
-                try expect(hit(beside(away), in: splitter) === first,
-                           "\(name) took hold at \(away), off its knob")
+            splitter.refreshLightForTesting()
+            try expect(!splitter.showsLightForTesting, "\(name) is lit at rest")
+            // Anywhere along the line it lights, fading in, and takes hold.
+            for point in [middle, end] {
+                pinPointer(at: pointerNowhere)
+                splitter.refreshLightForTesting()
+                pin(into(point, by: 3), in: splitter)
+                splitter.refreshLightForTesting()
+                try expect(splitter.showsLightForTesting
+                            && splitter.lightFadeForTesting?.duration == DividerGrip.fade,
+                           "\(name) did not fade its light in with the pointer on it at \(point)")
+                try expect(hit(into(point, by: 3), in: splitter) === splitter,
+                           "\(name) did not take hold at \(point)")
             }
-            // On the knob it comes up, fading in, and takes hold.
-            pin(middle, in: splitter)
-            splitter.refreshGripForTesting()
-            try expect(splitter.showsGripForTesting,
-                       "\(name) hid its knob with the pointer on it")
-            try expect(splitter.gripFadeForTesting?.duration == DividerGrip.fade,
-                       "\(name)'s knob came up without fading in")
-            try expect(hit(beside(middle), in: splitter) === splitter,
-                       "\(name) did not take hold at its knob")
-
-            // Pressed away from the middle, it stays; pressed at the middle it
-            // moves, its knob up the whole way even with the pointer gone.
+            // Past the band, neither.
+            let off = into(end, by: DividerGrip.radius + 2)
+            pin(off, in: splitter)
+            splitter.refreshLightForTesting()
+            try expect(!splitter.showsLightForTesting, "\(name) is lit with the pointer off it")
+            try expect(hit(off, in: splitter) === first, "\(name) took hold \(off), off its band")
             let fraction = splitter.fraction
-            try expect(!splitter.pressForTesting(at: end, draggingTo: NSPoint(x: 120, y: 120)),
-                       "a press on \(name) away from its middle took hold of it")
-            try expect(splitter.fraction == fraction,
-                       "a press on \(name) away from its middle moved it")
+            try expect(!splitter.pressForTesting(at: off, draggingTo: NSPoint(x: 120, y: 120))
+                        && splitter.fraction == fraction,
+                       "a press off \(name) took hold of it")
+
+            // Pressed near an end it moves, lit the whole way with the pointer
+            // gone, under the resize cursor; let go, neither.
             pinPointer(at: pointerNowhere)
-            var hiddenWhileHeld = false
+            var unlitWhileHeld = false
+            var cursorWhileHeld = true
             var events = [NSEvent.EventType.leftMouseDragged, .leftMouseUp].map {
                 NSEvent.mouseEvent(with: $0, location: splitter.convert(NSPoint(x: 120, y: 120), to: nil),
                                    modifierFlags: [], timestamp: 0, windowNumber: 0,
                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
             }
-            try expect(splitter.trackDivider(from: middle) {
-                           hiddenWhileHeld = hiddenWhileHeld || !splitter.showsGripForTesting
+            try expect(splitter.trackDivider(from: end) {
+                           unlitWhileHeld = unlitWhileHeld || !splitter.showsLightForTesting
+                           cursorWhileHeld = cursorWhileHeld
+                               && NSCursor.current === DividerGrip.cursor(lineIsVertical: lineIsVertical)
                            return events.isEmpty ? nil : events.removeFirst()
                        },
-                       "a press at the middle of \(name) did not take hold of it")
+                       "a press near the end of \(name) did not take hold of it")
             try expect(splitter.fraction != fraction, "dragging \(name) did not move it")
-            try expect(!hiddenWhileHeld, "\(name) hid its knob while it was held")
-            try expect(!splitter.showsGripForTesting,
-                       "\(name) kept its knob up after it was let go")
+            try expect(!unlitWhileHeld, "\(name) went out while it was held")
+            try expect(cursorWhileHeld, "\(name) was not held under the resize cursor")
+            try expect(!splitter.showsLightForTesting
+                        && NSCursor.current !== DividerGrip.cursor(lineIsVertical: lineIsVertical),
+                       "\(name) stayed lit, or kept its cursor, after it was let go")
         }
 
-        // The line beside the panel: its handle runs the window's height,
-        // and takes hold only at the middle.
+        // The line beside the panel: its handle runs the window's height, and
+        // takes hold and lights anywhere along it.
+        try expect(SplitDividerHandleView.hitWidth == DividerGrip.radius * 2 + 1,
+                   "the handle beside the panel is \(SplitDividerHandleView.hitWidth)pt wide")
         let handle = SplitDividerHandleView(
             frame: NSRect(x: 100, y: 0, width: SplitDividerHandleView.hitWidth, height: 300))
         host.subviews = [handle]
         handle.layoutSubtreeIfNeeded()
         let line = handle.paintedDividerRectForTesting
-        let lineMiddle = NSPoint(x: line.midX, y: line.midY)
-        let lineEnd = NSPoint(x: line.midX, y: 20)
-        let knob = handle.gripRectForTesting
-        try expect(abs(knob.midX - lineMiddle.x) <= 0.5 && abs(knob.midY - lineMiddle.y) <= 0.5
-                    && knob.width == DividerGrip.diameter && knob.height == DividerGrip.diameter,
-                   "the knob beside the panel is not on its line's middle: \(knob)")
-        try expect(handle.bounds.contains(knob),
-                   "the handle beside the panel cuts its knob: \(knob) in \(handle.bounds)")
-        try expect(handle.grabRectForTesting.height == DividerGrip.reach,
-                   "the line beside the panel takes hold along \(handle.grabRectForTesting)")
-        try expect(hit(lineEnd, in: handle) !== handle,
-                   "the line beside the panel took hold away from its middle")
-        try expect(hit(lineMiddle, in: handle) === handle,
-                   "the line beside the panel did not take hold at its middle")
-        handle.refreshGripForTesting()
-        try expect(!handle.showsGripForTesting, "the line beside the panel shows its knob at rest")
-        pin(lineEnd, in: handle)
-        handle.refreshGripForTesting()
-        try expect(!handle.showsGripForTesting,
-                   "the line beside the panel showed its knob with the pointer on the line, off the knob")
-        pin(lineMiddle, in: handle)
-        handle.refreshGripForTesting()
-        try expect(handle.showsGripForTesting && handle.gripFadeForTesting?.duration == DividerGrip.fade,
-                   "the line beside the panel did not fade its knob in with the pointer on it")
-        let press = NSEvent.mouseEvent(with: .leftMouseDown, location: handle.convert(lineMiddle, to: nil),
+        let light = handle.lightRectForTesting
+        try expect(abs(light.midX - line.midX) <= 0.5 && abs(light.width - thickness) < 0.01
+                    && light.height == handle.bounds.height && handle.bounds.contains(light),
+                   "the light beside the panel is not along its line: \(light) for \(line)")
+        for y: CGFloat in [20, 150, 280] {
+            try expect(hit(NSPoint(x: line.midX, y: y), in: handle) === handle,
+                       "the line beside the panel did not take hold at \(y)")
+        }
+        handle.refreshLightForTesting()
+        try expect(!handle.showsLightForTesting, "the line beside the panel is lit at rest")
+        pin(NSPoint(x: line.midX, y: 20), in: handle)
+        handle.refreshLightForTesting()
+        try expect(handle.showsLightForTesting && handle.lightFadeForTesting?.duration == DividerGrip.fade,
+                   "the line beside the panel did not fade its light in with the pointer on it")
+        let press = NSEvent.mouseEvent(with: .leftMouseDown, location: handle.convert(line.origin, to: nil),
                                        modifierFlags: [], timestamp: 0, windowNumber: 0,
                                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         handle.mouseDown(with: press)
         pinPointer(at: pointerNowhere)
-        handle.refreshGripForTesting()
-        try expect(handle.showsGripForTesting,
-                   "the line beside the panel hid its knob while it was held")
+        handle.refreshLightForTesting()
+        try expect(handle.showsLightForTesting
+                    && NSCursor.current === DividerGrip.cursor(lineIsVertical: true),
+                   "the line beside the panel went out, or lost its cursor, while it was held")
         handle.mouseUp(with: press)
-        try expect(!handle.showsGripForTesting,
-                   "the line beside the panel kept its knob up after it was let go")
-
-        // Where the line across the panel — between the changes and the
-        // history — meets the lines down it, they take hold there, not at
-        // their middle.
-        let columns = ProjectColumnsView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
-        let tree = NSView()
-        let gitColumn = ProjectColumnsView()
-        gitColumn.axis = .vertical
-        gitColumn.minimumPane = ProjectColumnsView.minimumRow
-        gitColumn.fraction = 0.2
-        let changes = NSView(), history = NSView()
-        gitColumn.first = changes
-        gitColumn.second = history
-        gitColumn.addSubview(changes)
-        gitColumn.addSubview(history)
-        columns.first = tree
-        columns.second = gitColumn
-        columns.addSubview(tree)
-        columns.addSubview(gitColumn)
-        let beside = SplitDividerHandleView(
-            frame: NSRect(x: 300, y: 0, width: SplitDividerHandleView.hitWidth, height: 300))
-        host.subviews = [columns, beside]
-        columns.layoutSubtreeIfNeeded()
-        beside.layoutSubtreeIfNeeded()
-        guard let crossing = DividerGrip.crossing(in: window) else {
-            throw Failure(description: "the line between the changes and the history was not found")
-        }
-        let crossingInColumns = columns.convert(NSPoint(x: 0, y: crossing), from: nil).y
-        try expect(abs(crossingInColumns - columns.bounds.midY) > DividerGrip.reach,
-                   "the fixture's crossing is too near the middle to tell them apart")
-        try expect(abs(columns.gripRectForTesting.midY - crossingInColumns) <= 0.5
-                    && abs(columns.grabRectForTesting.midY - crossingInColumns) <= 0.5,
-                   "the line beside the tree does not take hold where the line across meets it: "
-                     + "\(columns.grabRectForTesting) for a crossing at \(crossingInColumns)")
-        let lineX = columns.divider + 0.5
-        try expect(hit(NSPoint(x: lineX, y: crossingInColumns), in: columns) === columns,
-                   "the line beside the tree did not take hold where the line across meets it")
-        try expect(hit(NSPoint(x: lineX - 2, y: columns.bounds.midY), in: columns) === tree,
-                   "the line beside the tree still takes hold at its middle")
-        let crossingBeside = beside.convert(NSPoint(x: 0, y: crossing), from: nil).y
-        try expect(abs(beside.grabRectForTesting.midY - crossingBeside) <= 0.5
-                    && abs(beside.gripRectForTesting.midY - crossingBeside) <= 0.5,
-                   "the line beside the code does not take hold where the line across meets it: "
-                     + "\(beside.grabRectForTesting) for a crossing at \(crossingBeside)")
-        // The line across keeps to its own middle.
-        try expect(abs(gitColumn.grabRectForTesting.midX - gitColumn.bounds.midX) <= 0.5,
-                   "the line across the panel left its middle: \(gitColumn.grabRectForTesting)")
-        // With nothing crossing, the lines down the panel go back to their middle.
-        gitColumn.isHidden = true
-        try expect(DividerGrip.crossing(in: window) == nil,
-                   "a hidden line still counts as crossing the panel")
-        try expect(abs(beside.grabRectForTesting.midY - beside.bounds.midY) <= 0.5,
-                   "with nothing crossing it, the line beside the code left its middle")
+        try expect(!handle.showsLightForTesting
+                    && NSCursor.current !== DividerGrip.cursor(lineIsVertical: true),
+                   "the line beside the panel stayed lit, or kept its cursor, after it was let go")
     }
 
-    /// Around a divider's knob: the line is a little thicker where it is,
-    /// for a short stretch, so it can be found before it shows; while the line is held the hand is
-    /// closed on it; and a double-click on it puts the line back where it
-    /// started — halves in the panel, half the window beside the code.
-    private static func testDividerKnobMarksResetsAndHolds() throws {
+    /// A double-click anywhere along a divider puts the line back where it
+    /// started — halves in the panel, half the window beside the code — and
+    /// one off it is the pane's.
+    private static func testDividersResetAndHold() throws {
         defer { pinPointer(at: pointerNowhere) }
-        try expect(DividerGrip.markerThickness == 2 && DividerGrip.markerLength == 8
-                    && DividerGrip.dragCursor === NSCursor.closedHand,
-                   "the mark is \(DividerGrip.markerThickness)×\(DividerGrip.markerLength)pt and "
-                     + "the held hand \(DividerGrip.dragCursor), not 2×8pt and closed")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         defer { window.close() }
@@ -16349,54 +16313,32 @@ enum RegressionTests {
             splitter.layoutSubtreeIfNeeded()
             let name = axis == .horizontal ? "the line between the columns"
                                            : "the line between the changes and the history"
-            let knob = splitter.gripRectForTesting
-            let centre = NSPoint(x: knob.midX, y: knob.midY)
-
-            // The mark: on the knob's place, lying along the line, there at
-            // rest with the knob down, under the knob and over the panes.
-            let marker = splitter.markerRectForTesting
-            let along = axis == .horizontal ? marker.height : marker.width
-            let across = axis == .horizontal ? marker.width : marker.height
-            try expect(abs(marker.midX - centre.x) <= 0.5 && abs(marker.midY - centre.y) <= 0.5
-                        && along == DividerGrip.markerLength && across == DividerGrip.markerThickness,
-                       "\(name)'s mark is not along its line at its knob's place: "
-                         + "\(marker) for \(knob)")
-            try expect(!splitter.showsGripForTesting, "\(name)'s knob is up at rest")
-            let top = splitter.subviews.suffix(2)
-            try expect(top.first is DividerGrip.Marker && top.last is DividerGrip.Knob,
-                       "\(name)'s mark and knob are not over the panes, the knob on top: "
-                         + "\(splitter.subviews.map { String(describing: type(of: $0)) })")
-
-            // Held, the hand is closed on it; let go, it is not.
-            var closedWhileHeld = false
-            var up = [NSEvent.mouseEvent(with: .leftMouseUp, location: splitter.convert(centre, to: nil),
-                                         modifierFlags: [], timestamp: 0, windowNumber: 0,
-                                         context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!]
-            try expect(splitter.trackDivider(from: centre) {
-                           closedWhileHeld = NSCursor.current === DividerGrip.dragCursor
-                           return up.isEmpty ? nil : up.removeFirst()
-                       }, "a press on \(name)'s knob did not take hold")
-            try expect(closedWhileHeld, "\(name) did not close the hand while held")
-            try expect(NSCursor.current !== DividerGrip.dragCursor,
-                       "\(name) left the hand closed after it was let go")
-
-            // A double-click puts it back at halves, and says so.
-            try expect(splitter.doubleClickForTesting(at: centre),
-                       "a double-click on \(name)'s knob did not take hold")
+            // Near one end of the line, and the same a little way past its band.
+            func onLine() -> (on: NSPoint, off: NSPoint) {
+                let past = DividerGrip.radius + 2
+                switch axis {
+                case .horizontal:
+                    let x = splitter.divider + 0.5
+                    return (NSPoint(x: x, y: 20), NSPoint(x: x - past, y: 20))
+                case .vertical:
+                    let y = splitter.bounds.height - splitter.divider - 0.5
+                    return (NSPoint(x: 20, y: y), NSPoint(x: 20, y: y + past))
+                }
+            }
+            try expect(splitter.doubleClickForTesting(at: onLine().on),
+                       "a double-click near the end of \(name) did not take hold")
             try expect(splitter.fraction == ProjectColumnsView.defaultFraction
                         && told == ProjectColumnsView.defaultFraction,
                        "a double-click left \(name) at \(splitter.fraction), told "
                          + "\(String(describing: told))")
-            // Away from the knob a double-click is the pane's.
             splitter.fraction = 0.3
             splitter.layoutSubtreeIfNeeded()
-            let away = axis == .horizontal ? NSPoint(x: centre.x, y: 20) : NSPoint(x: 20, y: centre.y)
-            try expect(!splitter.doubleClickForTesting(at: away) && splitter.fraction == 0.3,
-                       "a double-click on \(name) off its knob moved it")
+            try expect(!splitter.doubleClickForTesting(at: onLine().off) && splitter.fraction == 0.3,
+                       "a double-click off \(name) moved it")
         }
 
-        // The line beside the code: its mark, the closed hand, and a double-
-        // click back to half the window.
+        // The line beside the code: held under the resize cursor, and a
+        // double-click back to half the window.
         let root = RootViewController(sidebar: SidebarViewController(),
                                       editor: EditorViewController())
         _ = root.view
@@ -16406,13 +16348,6 @@ enum RegressionTests {
             throw Failure(description: "the window has no handle beside the panel")
         }
         handle.layoutSubtreeIfNeeded()
-        let knob = handle.gripRectForTesting
-        let marker = handle.markerRectForTesting
-        try expect(abs(marker.midX - knob.midX) <= 0.5 && abs(marker.midY - knob.midY) <= 0.5
-                    && marker.width == DividerGrip.markerThickness
-                    && marker.height == DividerGrip.markerLength,
-                   "the mark beside the panel is not along its line at its knob's place: "
-                     + "\(marker) for \(knob)")
         root.resizeSidebarForTesting(to: 400)
         root.view.layoutSubtreeIfNeeded()
         func click(_ type: NSEvent.EventType, _ count: Int) -> NSEvent {
@@ -16420,12 +16355,13 @@ enum RegressionTests {
                                windowNumber: 0, context: nil, eventNumber: 0,
                                clickCount: count, pressure: 1)!
         }
+        let resize = DividerGrip.cursor(lineIsVertical: true)
         handle.mouseDown(with: click(.leftMouseDown, 1))
-        try expect(NSCursor.current === DividerGrip.dragCursor,
-                   "the line beside the panel did not close the hand while held")
+        try expect(NSCursor.current === resize,
+                   "the line beside the panel was not held under the resize cursor")
         handle.mouseUp(with: click(.leftMouseUp, 1))
-        try expect(NSCursor.current !== DividerGrip.dragCursor,
-                   "the line beside the panel left the hand closed after it was let go")
+        try expect(NSCursor.current !== resize,
+                   "the line beside the panel kept the resize cursor after it was let go")
         try expect(root.sidebarWidthForTesting == 400, "a single click moved the panel")
         handle.mouseDown(with: click(.leftMouseDown, 2))
         handle.mouseUp(with: click(.leftMouseUp, 2))

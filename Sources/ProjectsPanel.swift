@@ -613,8 +613,8 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         }
     }
     var onFractionChanged: ((CGFloat) -> Void)?
-    /// Halves: where a pair starts, and where a double-click on the knob
-    /// puts the line back.
+    /// Halves: where a pair starts, and where a double-click on the line
+    /// puts it back.
     static let defaultFraction: CGFloat = 0.5
 
     /// Neither pane may be squeezed away. A column needs this much to say a
@@ -623,8 +623,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// A stacked pane keeps a couple of rows.
     static let minimumRow: CGFloat = 44
     var minimumPane: CGFloat = minimumColumn
-    /// How far either side of the line answers to a drag — at the knob's
-    /// place on it, the only part that does (see `DividerGrip`).
+    /// How far either side of the line answers to a drag (see `DividerGrip`).
     private static let grabRadius: CGFloat = DividerGrip.radius
 
     /// The line's place for a given share of a given length, kept inside the
@@ -657,74 +656,12 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     /// A scroller showing under the band — the left list's, against the
     /// line — is the scroller's, or it could not be caught.
     private func isOnGrabBand(_ point: NSPoint) -> Bool {
-        showsSecond && grabRect.contains(point)
+        showsSecond && band.contains(point)
             && !PuzzleScroller.isShowing(at: convert(point, to: nil), in: window)
     }
 
     /// The band either side of the line, its whole length.
     private var band: NSRect { dividerRect(radius: Self.grabRadius).intersection(bounds) }
-
-    /// The only part of the band that takes hold, or brings the knob up:
-    /// the knob's place, where the line across the second pane meets this
-    /// one, or the middle.
-    private var grabRect: NSRect {
-        DividerGrip.grabRect(in: band, lineIsVertical: axis == .horizontal, centre: crossing)
-    }
-
-    /// Where the line across the second pane — between the changes and the
-    /// history — meets this one, in this view along the line; nil when there
-    /// is no such line on screen.
-    private var crossing: CGFloat? {
-        guard axis == .horizontal, showsSecond, let inner = second as? ProjectColumnsView,
-              let line = inner.crossingLine else { return nil }
-        return inner.convert(line, to: self).midY
-    }
-
-    /// This line, when it is one that runs across a column.
-    private var crossingLine: NSRect? {
-        guard axis == .vertical, showsSecond, !isHiddenOrHasHiddenAncestor,
-              !line.frame.isEmpty else { return nil }
-        return line.frame
-    }
-
-    /// The lines across a column, so the handle beside the code — outside the
-    /// panel — can find where this one meets it.
-    private static let crossings = NSHashTable<ProjectColumnsView>.weakObjects()
-
-    static func crossingY(in window: NSWindow?) -> CGFloat? {
-        guard let window else { return nil }
-        for view in crossings.allObjects where view.window === window {
-            if let line = view.crossingLine { return view.convert(line, to: nil).midY }
-        }
-        return nil
-    }
-
-    /// What was last said about where this line lies, and to which window.
-    private var announcedCrossing: CGFloat??
-    private weak var announcedWindow: NSWindow?
-
-    private func announceCrossing() {
-        guard axis == .vertical, let window else { return }
-        let now = crossingLine.map { convert($0, to: nil).midY }
-        guard announcedCrossing != .some(now) else { return }
-        announcedCrossing = .some(now)
-        NotificationCenter.default.post(name: DividerGrip.crossingDidMove, object: window)
-    }
-
-    override func viewDidHide() {
-        super.viewDidHide()
-        announceCrossing()
-    }
-
-    override func viewDidUnhide() {
-        super.viewDidUnhide()
-        announceCrossing()
-    }
-
-    @objc private func crossingMoved() {
-        needsLayout = true
-        window?.invalidateCursorRects(for: self)
-    }
 
     /// Where a point falls along the axis, measured the way `divider` is: from
     /// the leading edge across, or from the top down. This view is not
@@ -733,70 +670,54 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         axis == .horizontal ? point.x : bounds.height - point.y
     }
 
+    /// A line down the panel moves from side to side, one across it up and down.
+    private var cursor: NSCursor { DividerGrip.cursor(lineIsVertical: axis == .horizontal) }
+
     override func resetCursorRects() {
         super.resetCursorRects()
         guard showsSecond else { return }
-        for rect in PuzzleScroller.uncovered(grabRect, in: self) {
-            addCursorRect(rect, cursor: DividerGrip.cursor)
+        for rect in PuzzleScroller.uncovered(band, in: self) {
+            addCursorRect(rect, cursor: cursor)
         }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         PuzzleScroller.rebuildCursors(of: self)
-        NotificationCenter.default.removeObserver(self, name: DividerGrip.crossingDidMove, object: nil)
-        if axis == .vertical {
-            Self.crossings.add(self)
-            // Gone from a window, it no longer crosses anything there.
-            if let old = announcedWindow, old !== window {
-                NotificationCenter.default.post(name: DividerGrip.crossingDidMove, object: old)
-            }
-            announcedWindow = window
-            announcedCrossing = nil
-        }
-        guard let window else { return }
-        if axis == .horizontal {
-            NotificationCenter.default.addObserver(self, selector: #selector(crossingMoved),
-                                                   name: DividerGrip.crossingDidMove, object: window)
-        }
-        announceCrossing()
     }
 
     @objc func scrollersMoved() {
         window?.invalidateCursorRects(for: self)
-        refreshGrip()
+        refreshLight()
     }
 
-    /// Only the pointer on the knob's place brings it up: along the rest of
-    /// the line it came up over the lists' own scrollers, which the pointer
-    /// there was meant for. Rebuilt whenever the line moves, since the knob
-    /// goes with it.
+    /// Rebuilt whenever the line moves, since the band goes with it.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let gripArea { removeTrackingArea(gripArea) }
-        gripArea = nil
+        if let lightArea { removeTrackingArea(lightArea) }
+        lightArea = nil
         guard showsSecond else { return }
-        let area = NSTrackingArea(rect: grabRect,
+        let area = NSTrackingArea(rect: band,
                                   options: [.mouseEnteredAndExited, .activeInKeyWindow],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
-        gripArea = area
+        lightArea = area
     }
-    private var gripArea: NSTrackingArea?
+    private var lightArea: NSTrackingArea?
 
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
-        refreshGrip()
+        refreshLight()
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        refreshGrip()
+        refreshLight()
     }
 
-    /// The knob is up while the line is held, or while the pointer is where
-    /// a press would take hold of it.
-    private func refreshGrip() {
+    /// The line is lit while it is held, or while the pointer is where a press
+    /// would take hold of it.
+    private func refreshLight() {
         let shown: Bool
         if isDraggingDivider {
             shown = true
@@ -805,27 +726,17 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         } else {
             shown = false
         }
-        placeGrip()
-        grip.show(shown)
+        light.lineIsVertical = axis == .horizontal
+        light.frame = DividerGrip.lightRect(over: line.frame, lineIsVertical: axis == .horizontal)
+        light.show(shown)
     }
     private var isDraggingDivider = false
 
-    /// On the line, where it takes hold, over the mark on the line there.
-    private func placeGrip() {
-        let at = axis == .horizontal
-            ? NSPoint(x: line.frame.midX, y: grabRect.midY)
-            : NSPoint(x: grabRect.midX, y: line.frame.midY)
-        grip.frame = DividerGrip.knobRect(centredOn: at)
-        grip.movesVertically = axis == .vertical
-        marker.frame = DividerGrip.markerRect(centredOn: at, lineIsVertical: axis == .horizontal)
-    }
-
-    var showsGripForTesting: Bool { grip.isShown }
-    var gripFadeForTesting: CAAnimation? { grip.fadeForTesting }
-    var gripRectForTesting: NSRect { grip.frame }
-    var markerRectForTesting: NSRect { marker.isHidden ? .zero : marker.frame }
-    var grabRectForTesting: NSRect { grabRect }
-    func refreshGripForTesting() { refreshGrip() }
+    var showsLightForTesting: Bool { light.isShown }
+    var lightFadeForTesting: CAAnimation? { light.fadeForTesting }
+    var lightRectForTesting: NSRect { light.frame }
+    var bandForTesting: NSRect { band }
+    func refreshLightForTesting() { refreshLight() }
 
     /// The line itself at radius 0, the band that answers to a drag above it.
     private func dividerRect(radius: CGFloat) -> NSRect {
@@ -871,7 +782,7 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
 
     /// Tracked in its own event loop, like the rows' own drag: the panes are
     /// laid out as it travels, so what is on screen is the size being chosen.
-    /// A double-click on the knob puts the line back at halves first.
+    /// A double-click on the line puts it back at halves first.
     override func mouseDown(with event: NSEvent) {
         let tracked = press(at: convert(event.locationInWindow, from: nil),
                             clicks: event.clickCount) { [weak self] in
@@ -887,8 +798,8 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
             return trackDivider(from: start, nextEvent: nextEvent)
         }
         resetDivider()
-        // The knob went with the line, out from under the pointer: what is
-        // left of this press is only its release.
+        // The line went back, out from under the pointer: what is left of
+        // this press is only its release.
         while let next = nextEvent(), next.type != .leftMouseUp {}
         return true
     }
@@ -907,12 +818,12 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     func trackDivider(from start: NSPoint, nextEvent: () -> NSEvent?) -> Bool {
         guard isOnGrabBand(start) else { return false }
         isDraggingDivider = true
-        DividerGrip.dragCursor.push()
-        refreshGrip()
+        cursor.push()
+        refreshLight()
         defer {
             isDraggingDivider = false
             NSCursor.pop()
-            refreshGrip()
+            refreshLight()
         }
         var tracking = true
         while tracking, let next = nextEvent() {
@@ -994,26 +905,21 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
     private final class DividerLine: FlatView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
-    /// On the line where it takes hold, and over the panes either side of it.
-    private let grip = DividerGrip.Knob()
-    /// The mark on the line under the knob, which stays.
-    private let marker = DividerGrip.Marker()
+    /// The line lit, over the panes either side of it.
+    private let light = DividerGrip.Light()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         line.fillColor = Theme.divider
         addSubview(line)
-        addSubview(marker)
-        addSubview(grip)
+        addSubview(light)
     }
 
-    /// The panes are added after the mark and the knob, which have to stay
-    /// over them, the knob on top.
+    /// The panes are added after the light, which has to stay over them.
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
-        guard subview !== grip, subview !== marker else { return }
-        addSubview(marker, positioned: .above, relativeTo: nil)
-        addSubview(grip, positioned: .above, relativeTo: nil)
+        guard subview !== light else { return }
+        addSubview(light, positioned: .above, relativeTo: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -1051,10 +957,8 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
         refuseAnimations(on: first)
         refuseAnimations(on: second)
         refuseAnimations(on: line)
-        refuseAnimations(on: grip)
-        refuseAnimations(on: marker)
+        refuseAnimations(on: light)
         line.isHidden = !showsSecond
-        marker.isHidden = !showsSecond
         line.frame = dividerRect(radius: 0)
         second?.isHidden = !showsSecond
         first?.frame = firstPaneRect
@@ -1063,12 +967,9 @@ final class ProjectColumnsView: FlatView, ScrollerCursorRebuilding {
             second?.frame = secondPaneRect
             second?.layoutSubtreeIfNeeded()
         }
-        // After the panes: where the line across the second one lies decides
-        // where this one takes hold.
         updateTrackingAreas()
-        refreshGrip()
+        refreshLight()
         window?.invalidateCursorRects(for: self)
-        announceCrossing()
     }
 
     /// A resize that does not come through the layout engine — an animated

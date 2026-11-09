@@ -61,13 +61,12 @@ final class LineNumberRulerView: NSRulerView {
     ///
     ///     [ divider reach ][ ribbon ][ gap ][ clickable line numbers ]
     ///
-    /// The first band belongs to the split divider's drag handle, which is
-    /// centred on the boundary and reaches into the editor; anything drawn or
-    /// clicked there is really the resize target. The number's badge keeps
-    /// clear of the ribbon, which alone opens the line's change. The handle takes
-    /// hold only at its knob, which is centred on the line and reaches half
-    /// its width past it.
-    static let dividerReach: CGFloat = DividerGrip.radius
+    /// The first band is left to the split divider: its drag handle is
+    /// centred on the boundary and reaches into the editor, and its light a
+    /// little less; anything drawn or clicked there would be under them. The
+    /// number's badge keeps clear of the ribbon, which alone opens the line's
+    /// change.
+    static let dividerReach: CGFloat = 10
     /// The ribbon's one width. It was 3pt and grew to this under the pointer;
     /// it is this wide throughout now, so the target never has to be found
     /// first. Stops short of the numbers, which keep their column.
