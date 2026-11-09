@@ -12024,11 +12024,25 @@ enum RegressionTests {
             }
             // CALayer.render uses its own bounds. This catches a flipped or
             // offset mask that a correct drawBackground fallback could hide.
-            context.cgContext.clear(NSRect(x: 0, y: 0, width: 240, height: 24))
-            background.render(in: context.cgContext)
+            //
+            // The band stops at fractions of a point, wherever the flight was
+            // sampled, so the seam can cut through a pixel. The pixel read
+            // 0.5pt inside it is then only partly covered, and a square seam
+            // reads as one rounded off (alpha 0.8, in about half of all
+            // runs). Rendered with the seam on a pixel boundary, that pixel
+            // lies wholly inside the band, and only rounding takes from it.
             let layerPoint = NSPoint(x: local.x - background.frame.minX,
                                      y: local.y - background.frame.minY)
-            let alpha = bitmap.colorAt(x: Int(layerPoint.x), y: bitmap.pixelsHigh - 1 - Int(layerPoint.y))?.alphaComponent ?? 0
+            let seamInLayer = row.convert(NSPoint(x: 0, y: sampled.boundary), from: host).y
+                - background.frame.minY
+            let shift = seamInLayer.rounded(.up) - seamInLayer
+            context.cgContext.clear(NSRect(x: 0, y: 0, width: 240, height: 24))
+            context.cgContext.saveGState()
+            context.cgContext.translateBy(x: 0, y: shift)
+            background.render(in: context.cgContext)
+            context.cgContext.restoreGState()
+            let alpha = bitmap.colorAt(x: Int(layerPoint.x),
+                                       y: bitmap.pixelsHigh - 1 - Int(layerPoint.y + shift))?.alphaComponent ?? 0
             try expect(alpha > 0.95,
                        "the real selection mask rounded a row seam: \(sampled.shape), row \(index), point \(layerPoint)")
             let corner = row.convert(NSPoint(x: sampled.shape.minX + 0.5,
@@ -12036,7 +12050,8 @@ enum RegressionTests {
             if row.bounds.contains(corner) {
                 let cornerPoint = NSPoint(x: corner.x - background.frame.minX,
                                           y: corner.y - background.frame.minY)
-                let cornerAlpha = bitmap.colorAt(x: Int(cornerPoint.x), y: bitmap.pixelsHigh - 1 - Int(cornerPoint.y))?.alphaComponent ?? 1
+                let cornerAlpha = bitmap.colorAt(x: Int(cornerPoint.x),
+                                                 y: bitmap.pixelsHigh - 1 - Int(cornerPoint.y + shift))?.alphaComponent ?? 1
                 try expect(cornerAlpha < 0.2,
                            "the real moving mask kept a square outer corner: \(cornerPoint)")
             }
