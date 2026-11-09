@@ -526,33 +526,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         refreshGit()
         // Opened or switched to: find out what its remote has now. This
         // project only, and not again if it was fetched a moment ago — nor
-        // while a pull, which brings the remote down itself, is running.
-        if !pulling.contains(url) {
-            // Set when the fetch gets the queue, which can be well after it
-            // was asked for: fetches run one at a time, behind other
-            // projects' remotes. Nil when it never ran — no remote.
-            var fetchStarted: Date?
-            let queued = BackgroundFetch.fetchIfDue(url, started: { [weak self] in
-                fetchStarted = Date()
-                self?.beginSync(url)
-            }, finished: { [weak self] moved in
-                guard let self else { return }
-                self.fetching.remove(url)
-                // A pull asked for meanwhile goes now, before this fetch lets
-                // go of the mark, so the band runs on without a break.
-                if self.pullAfterFetch.remove(url) != nil {
-                    self.startPull(url)
-                    // The pull holds the mark now; the hold taken when it
-                    // was asked for can go.
-                    self.endSync(url, startedAt: .distantPast)
-                }
-                if let fetchStarted { self.endSync(url, startedAt: fetchStarted) }
-                if moved, self.projectURL == url { self.remoteRefsMoved() }
-            })
+        // while one is already out, or a pull, which brings the remote down
+        // itself, is running.
+        if remoteSync[url] == nil,
+           BackgroundFetch.fetchIfDue(url, started: { [weak self] in
+               // It gets the queue, which can be well after it was asked for:
+               // fetches run one at a time, behind other projects' remotes.
+               // A pull already waiting for it keeps the mark as it is.
+               guard let self, case .fetchQueued = self.remoteSync[url] else { return }
+               self.setRemoteSync(url, .fetching(since: Date()))
+           }, finished: { [weak self] moved in
+               guard let self else { return }
+               if case .pullAfterFetch = self.remoteSync[url] {
+                   // The pull takes the mark over, so the band runs on
+                   // without a break.
+                   self.startPull(url)
+               } else {
+                   self.setRemoteSync(url, nil)
+               }
+               if moved, self.projectURL == url { self.remoteRefsMoved() }
+           }) {
             // Out from the moment it is queued, not from when it starts: a
             // pull clicked while it waits its turn waits for it too, rather
             // than running beside it in the same repository.
-            if queued { fetching.insert(url) }
+            setRemoteSync(url, .fetchQueued)
         }
         gitRepositoryMonitor = GitRepositoryMonitor(directory: url) { [weak self] in
             guard let self, self.projectURL == url else { return }
@@ -965,39 +962,74 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Syncing with the remote
 
-    /// Projects whose Git mark shows a sync, and how many holds each has: a
-    /// running fetch, a pull, a pull waiting for a fetch.
-    private var syncing: [URL: Int] = [:]
-    /// Projects with a fetch queued or running.
-    private var fetching: Set<URL> = []
-    private var pulling: Set<URL> = []
-    /// Pulls asked for while that project's fetch was still out. The click
-    /// comes straight after switching, which is when that fetch runs; it
-    /// waits for the fetch rather than being turned away, and rather than
-    /// running beside it in the same repository.
-    private var pullAfterFetch: Set<URL> = []
+    /// Where a project stands with its remote, as far as this window has
+    /// asked. One state for each project, so a pull cannot be waiting for a
+    /// fetch and running at once, nor a fetch be both out and over.
+    private enum RemoteSync {
+        /// A background fetch is waiting its turn behind other projects'
+        /// remotes. Nothing shows yet: it may turn out to have no remote.
+        case fetchQueued
+        /// The fetch has the repository.
+        case fetching(since: Date)
+        /// A pull asked for while the fetch was out. The click comes straight
+        /// after switching, which is when that fetch runs; the pull goes as
+        /// soon as the fetch is done, rather than being turned away, and
+        /// rather than running beside it in the same repository.
+        case pullAfterFetch
+        case pulling(since: Date)
+
+        /// The Git mark shows it.
+        var isShown: Bool {
+            if case .fetchQueued = self { return false }
+            return true
+        }
+
+        /// When the mark began showing it, for the minimum. A pull waiting
+        /// for a fetch only ever ends in the pull itself, which has its own.
+        var shownSince: Date? {
+            switch self {
+            case .fetching(let since), .pulling(let since): return since
+            case .fetchQueued, .pullAfterFetch: return nil
+            }
+        }
+    }
+
+    private var remoteSync: [URL: RemoteSync] = [:]
+    /// Projects whose sync ended before the minimum was up: the mark runs on
+    /// for the rest of it. Each hold has its own number, so a hold that ends
+    /// does not take a later one with it.
+    private var syncRunningOn: [URL: Int] = [:]
+    private var lastSyncHold = 0
     /// A sync quicker than this would only flicker on the Git mark: the band
     /// runs at least this long, so a fetch that found nothing is still seen
     /// to have happened.
     static var minimumSyncAnimation: TimeInterval = 0.6
 
-    private func beginSync(_ url: URL) {
-        syncing[url, default: 0] += 1
+    private func setRemoteSync(_ url: URL, _ state: RemoteSync?) {
+        if state?.isShown != true, let since = remoteSync[url]?.shownSince {
+            let wait = Self.minimumSyncAnimation - Date().timeIntervalSince(since)
+            if wait > 0 {
+                lastSyncHold += 1
+                let hold = lastSyncHold
+                syncRunningOn[url] = hold
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                    guard let self, self.syncRunningOn[url] == hold else { return }
+                    self.syncRunningOn[url] = nil
+                    self.publishSyncing()
+                }
+            }
+        }
+        remoteSync[url] = state
         publishSyncing()
     }
 
-    private func endSync(_ url: URL, startedAt: Date) {
-        let wait = max(0, Self.minimumSyncAnimation - Date().timeIntervalSince(startedAt))
-        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
-            guard let self else { return }
-            let left = (self.syncing[url] ?? 1) - 1
-            self.syncing[url] = left > 0 ? left : nil
-            self.publishSyncing()
-        }
+    /// Projects whose Git mark shows a sync.
+    private var showingSync: Set<URL> {
+        Set(remoteSync.filter { $0.value.isShown }.keys).union(syncRunningOn.keys)
     }
 
     private func publishSyncing() {
-        sidebar.setSyncingProjects(Set(syncing.keys.map(\.path)))
+        sidebar.setSyncingProjects(Set(showingSync.map(\.path)))
     }
 
     /// The Git mark on a project's row: bring the remote's commits into the
@@ -1008,31 +1040,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// On the queue every other command that changes a repository runs on, so
     /// a pull never lands in the middle of a commit.
     private func pullProject(_ url: URL) {
-        // Already on its way: once is enough.
-        guard !pulling.contains(url), !pullAfterFetch.contains(url) else {
+        switch remoteSync[url] {
+        case .pulling, .pullAfterFetch:
+            // Already on its way: once is enough.
             NSSound.beep()
-            return
-        }
-        guard !fetching.contains(url) else {
-            pullAfterFetch.insert(url)
+        case .fetchQueued, .fetching:
             // The fetch may still be waiting for the queue, with nothing on
             // the mark yet: the click is seen to have been taken.
-            beginSync(url)
-            return
+            setRemoteSync(url, .pullAfterFetch)
+        case nil:
+            startPull(url)
         }
-        startPull(url)
     }
 
     private func startPull(_ url: URL) {
-        let started = Date()
-        pulling.insert(url)
-        beginSync(url)
+        setRemoteSync(url, .pulling(since: Date()))
         GitService.operationQueue.async { [weak self] in
             let result = GitService.pull(in: url)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.pulling.remove(url)
-                self.endSync(url, startedAt: started)
+                self.setRemoteSync(url, nil)
                 if url == self.projectURL {
                     // Files may have changed under open tabs, HEAD has moved,
                     // and the remote branches with it.
@@ -1067,7 +1094,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    var syncingForTesting: Set<URL> { Set(syncing.keys) }
+    var syncingForTesting: Set<URL> { showingSync }
 
     /// A fetch moved a remote-tracking branch. The lists that draw remote
     /// branches read again, and so does the ↑ count, which is measured against
