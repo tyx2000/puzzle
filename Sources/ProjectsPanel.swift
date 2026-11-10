@@ -108,6 +108,10 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
                width: Self.closeWidth, height: Self.closeWidth)
     }
 
+    /// Where a press closes the project: a little more than the ✕ itself,
+    /// shown as a round ground under the pointer.
+    private var closeTarget: NSRect { closeRect.insetBy(dx: -4, dy: -4) }
+
     /// Both headings are drawn alike: the branch names the right column the
     /// way the project names the left one, so the row reads as two headings
     /// rather than a name with a note after it.
@@ -306,6 +310,11 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
             SidebarCellDrawing.attributedText(branchLabel(), in: branchColumnRect)
         }
 
+        // Under the pointer, the ground a press there closes on.
+        if closeIsHovered {
+            Theme.selectedControl.setFill()
+            NSBezierPath(ovalIn: closeTarget).fill()
+        }
         // Always there, so the name's room never changes as the pointer moves.
         SidebarCellDrawing.attributedText(
             NSAttributedString(string: "✕", attributes: [
@@ -428,7 +437,7 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
     override func mouseMoved(with event: NSEvent) {
         guard !DividerGrip.isLit(in: window) else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let onClose = closeRect.insetBy(dx: -4, dy: -4).contains(point)
+        let onClose = closeTarget.contains(point)
         let onPull = !onClose && pullRect.contains(point)
         guard !isHovered || onClose != closeIsHovered
                 || onPull != pullIsHovered else { return }
@@ -473,7 +482,7 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
     override func mouseDown(with event: NSEvent) {
         let start = convert(event.locationInWindow, from: nil)
         // The ✕ takes the click, so closing never also selects.
-        if closeRect.insetBy(dx: -4, dy: -4).contains(start) {
+        if closeTarget.contains(start) {
             onClose?()
             return
         }
@@ -516,9 +525,8 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
             onDragEnded?()
             return
         }
-        // A press that could not become a drag — the list cannot be reordered
-        // while a project is open — and was let go somewhere else was not a
-        // click either. Selecting then closed every tab of the project being
+        // A press that could not become a drag — a list of one cannot be
+        // reordered — and was let go somewhere else was not a click either. Selecting then closed every tab of the project being
         // left, for a press the reader had already abandoned.
         guard let released, bounds.contains(released) else { return }
         if pullRect.contains(start), onPull != nil {
@@ -554,6 +562,8 @@ final class ProjectRowView: NSView, PointerHoverRefreshing {
     }
     var isActiveForTesting: Bool { isActive }
     var closeRectForTesting: NSRect { closeRect }
+    var closeTargetForTesting: NSRect { closeTarget }
+    var closeIsHoveredForTesting: Bool { closeIsHovered }
     var pullRectForTesting: NSRect { pullRect }
     var isSyncingForTesting: Bool { isSyncing }
     /// Whether the band is moving — it is not for a row off screen.
@@ -1302,7 +1312,7 @@ final class ProjectsPanelViewController: NSViewController {
         let order = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
         for (position, row) in order.enumerated() {
             row.showsDivider = position > 0
-            row.showsBottomLine = activeIndex == nil && position == order.count - 1
+            row.showsBottomLine = openRow == nil && position == order.count - 1
         }
     }
 
@@ -1371,21 +1381,54 @@ final class ProjectsPanelViewController: NSViewController {
 
     // MARK: - Reordering
 
-    /// Reordering is offered only when every project is collapsed. With one
-    /// expanded, the tree sits between the rows and "where will it land" has
-    /// no honest answer.
-    private var canReorder: Bool { activeIndex == nil && rows.count > 1 }
+    /// Any row can be carried while there is more than one. With a project
+    /// open, its tree and Git lists go with its row as one block that the
+    /// carried row moves past; the open project's own row is carried without
+    /// them, and they fold away until it is put down, to open again under it.
+    private var canReorder: Bool { rows.count > 1 }
 
     private func beginRowDrag(_ row: ProjectRowView) -> Bool {
-        guard canReorder, let index = stack.arrangedSubviews.firstIndex(of: row) else {
-            return false
-        }
+        guard canReorder, let index = rows.firstIndex(of: row) else { return false }
         clearProjectHover()
         draggingRow = row
         dragStartIndex = index
+        // Above its own tree, the open row does not move as the tree folds.
+        if let activeIndex, rows.indices.contains(activeIndex), rows[activeIndex] === row {
+            foldsOpenProject = true
+            layOut(active: nil)
+            refreshRowLines()
+        }
+        dragStartTop = top(of: row)
         lift(row)
         return true
     }
+
+    /// How far down the list `row` starts: the heights of what is above it,
+    /// the open project's tree included — known from the arrangement before
+    /// the frames are.
+    private func top(of row: ProjectRowView) -> CGFloat {
+        var above: CGFloat = 0
+        for item in stack.arrangedSubviews {
+            if item === row { break }
+            if item is ProjectRowView {
+                above += ProjectRowView.height
+            } else if item === columns, openRow != nil {
+                above += columns.frame.height
+            }
+        }
+        return above
+    }
+    private var dragStartTop: CGFloat = 0
+
+    /// The project open on screen, unless it is folded away for a drag.
+    private var openRow: ProjectRowView? {
+        guard !foldsOpenProject, let activeIndex, rows.indices.contains(activeIndex) else {
+            return nil
+        }
+        return rows[activeIndex]
+    }
+    /// The open project's tree, folded away while its own row is carried.
+    private var foldsOpenProject = false
 
     /// The row is carried as a picture of itself, raised over the list and
     /// kept under the pointer, while its own place stays open among the rows.
@@ -1406,25 +1449,48 @@ final class ProjectsPanelViewController: NSViewController {
     }
 
     /// The picture follows the pointer the whole way, kept within the run of
-    /// places; the row itself *changes places* as it passes the middle of
-    /// another, and the rows it passes slide out of its way. What is on
-    /// screen while dragging is exactly what will be committed.
+    /// places; the row itself *changes places* once the picture's top passes
+    /// the middle of what is next to it — a row, or the open project with its
+    /// tree — and what it passes slides out of its way. What is on screen
+    /// while dragging is exactly what will be committed.
     ///
-    /// Counted in whole rows travelled rather than measured against the other
-    /// rows' frames. Reordering is only offered with every project collapsed,
-    /// so the rows are a contiguous run of one height; and frames are the one
-    /// thing that cannot be trusted here, since a project switch that is still
-    /// sliding into place has not settled into its own yet.
+    /// Measured from the top of the list, as if the carried row had been
+    /// taken out of it, so the gap it leaves does not move the line it has to
+    /// cross; and by the heights of what is there, which a switch still
+    /// sliding into place has already settled even where its frames have not.
     private func rowDragMoved(_ row: ProjectRowView, by travel: CGFloat) {
         guard draggingRow === row else { return }
         let height = ProjectRowView.height
-        let carried = min(max(travel, -CGFloat(dragStartIndex) * height),
-                          CGFloat(rows.count - 1 - dragStartIndex) * height)
+        // Everything but the carried row, top down: each row, and the open
+        // project's tree with its row.
+        var others: [(row: ProjectRowView, top: CGFloat, height: CGFloat)] = []
+        var below: CGFloat = 0
+        for item in stack.arrangedSubviews {
+            if let other = item as? ProjectRowView, other !== row {
+                others.append((other, below, height))
+                below += height
+            } else if item === columns, let open = openRow, others.last?.row === open {
+                others[others.count - 1].height += columns.frame.height
+                below += columns.frame.height
+            }
+        }
+        // The picture, under the pointer, kept to the list.
+        let top = min(max(dragStartTop + travel, 0), below)
+        let carried = top - dragStartTop
         liftedRow?.rowRect.origin.y = liftedStart.minY + (view.isFlipped ? carried : -carried)
-        let moved = Int((travel / height).rounded())
-        let slot = max(0, min(rows.count - 1, dragStartIndex + moved))
-        guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
-        stack.insertArrangedSubview(row, at: slot)
+        let slot = others.filter { $0.top + $0.height / 2 <= top }.count
+        var desired: [NSView] = others.map(\.row)
+        desired.insert(row, at: slot)
+        if let open = openRow, let place = desired.firstIndex(of: open) {
+            desired.insert(columns, at: place + 1)
+        } else {
+            desired.append(columns)
+        }
+        guard desired != stack.arrangedSubviews else { return }
+        for (position, item) in desired.enumerated()
+        where stack.arrangedSubviews[position] !== item {
+            stack.insertArrangedSubview(item, at: position)
+        }
         refreshRowLines()
         let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             ? 0 : Self.slideDuration
@@ -1442,13 +1508,34 @@ final class ProjectsPanelViewController: NSViewController {
         draggingRow = nil
         let pending = pendingConfiguration
         pendingConfiguration = nil
-        let landed = row.flatMap { stack.arrangedSubviews.firstIndex(of: $0) }
+        let order = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
+        let landed = row.flatMap { order.firstIndex(of: $0) }
+        let folded = foldsOpenProject
+        foldsOpenProject = false
         if let landed, landed != dragStartIndex {
             // The reorder redraws the list from the model, which already holds
             // anything the deferred refresh would have said.
             onReorder?(dragStartIndex, landed)
         } else if let pending {
             configure(projects: pending.projects, active: pending.active)
+        }
+        // The open project's tree opens again under its row, wherever that is.
+        if folded, let open = openRow, stack.arrangedSubviews.contains(open) {
+            var desired: [NSView] = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
+            if let place = desired.firstIndex(of: open) { desired.insert(columns, at: place + 1) }
+            if desired != stack.arrangedSubviews {
+                for (position, item) in desired.enumerated()
+                where stack.arrangedSubviews[position] !== item {
+                    stack.insertArrangedSubview(item, at: position)
+                }
+                refreshRowLines()
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                        ? 0 : Self.switchDuration
+                    context.allowsImplicitAnimation = context.duration > 0
+                    stack.layoutSubtreeIfNeeded()
+                }
+            }
         }
         land(on: landed)
     }
@@ -1502,6 +1589,13 @@ final class ProjectsPanelViewController: NSViewController {
     var isLandingForTesting: Bool { landings > 0 }
 
     var rowsForTesting: [ProjectRowView] { rows }
+    /// The stack top down: each row by its name's first letter, the open
+    /// project's tree and Git lists as "+".
+    var arrangementForTesting: [String] {
+        stack.arrangedSubviews.map {
+            ($0 as? ProjectRowView).map { String($0.titleForTesting.prefix(1)) } ?? "+"
+        }
+    }
     func hoverRowForTesting(_ index: Int) {
         guard rows.indices.contains(index) else { clearProjectHover(); return }
         setProjectHovered(rows[index], hovering: true)

@@ -188,6 +188,7 @@ enum RegressionTests {
         try testCollapsingTheLastProjectKeepsThePanel()
         try testCollapsedProjectsEndInALine()
         try testCarriedProjectRowFollowsThePointer()
+        try testRowsCarriedPastAnOpenProject()
         try testReplacedContentSettlesIn()
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
@@ -2841,6 +2842,130 @@ enum RegressionTests {
                     && !panel.view.subviews.contains { String(describing: type(of: $0)) == "LiftedRowView" }
                     && panel.rowsForTesting.allSatisfy { $0.alphaValue == 1 },
                    "the picture stayed, or a row stayed hidden, after it settled")
+    }
+
+    /// With a project open, the rows can still be carried. The open project
+    /// and its tree are one block, which a row passes once the picture's top
+    /// is past the block's middle, and the tree stays under its row. The open
+    /// project's own row is carried with its tree folded away, without moving
+    /// as it folds, and the tree opens under it where it is put down. The ✕
+    /// on a row shows the round ground a press there closes on.
+    private static func testRowsCarriedPastAnOpenProject() throws {
+        let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        window.setContentSize(NSSize(width: 300, height: 400))
+        defer { window.close() }
+        let listed: [(name: String, branch: String, user: String, changes: Int, path: String)] =
+            ["a", "b", "c", "d"].map { (name: $0, branch: "", user: "", changes: 0, path: "/\($0)") }
+        panel.configure(projects: listed, active: 1)
+        panel.view.layoutSubtreeIfNeeded()
+        var reordered: (Int, Int)?
+        panel.onReorder = { reordered = ($0, $1) }
+        func settle() {
+            let deadline = Date().addingTimeInterval(2)
+            while panel.isLandingForTesting, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            panel.view.layoutSubtreeIfNeeded()
+        }
+        let height = ProjectRowView.height
+        let tree = 400 - 4 * height
+        try expect(panel.arrangementForTesting == ["a", "b", "+", "c", "d"],
+                   "the fixture does not open b: \(panel.arrangementForTesting)")
+
+        // The last row, up past c, then past the middle of b and its tree.
+        try expect(panel.beginDragForTesting(3), "a row could not be picked up with a project open")
+        panel.moveDragForTesting(3, by: -20)
+        try expect(panel.arrangementForTesting == ["a", "b", "+", "d", "c"],
+                   "the row did not pass the one above it: \(panel.arrangementForTesting)")
+        panel.moveDragForTesting(3, by: -(height + tree / 2 - 30))
+        try expect(panel.arrangementForTesting == ["a", "b", "+", "d", "c"],
+                   "the row passed the open project short of its middle: \(panel.arrangementForTesting)")
+        panel.moveDragForTesting(3, by: -(2 * height + tree / 2 + 10))
+        try expect(panel.arrangementForTesting == ["a", "d", "b", "+", "c"],
+                   "the row did not pass the open project and its tree: \(panel.arrangementForTesting)")
+        panel.endDragForTesting()
+        try expect(reordered?.0 == 3 && reordered?.1 == 1,
+                   "the drop past the open project was \(String(describing: reordered))")
+        settle()
+
+        // The open row: its tree folds away, the row stays where it was.
+        panel.configure(projects: listed, active: 1)
+        panel.view.layoutSubtreeIfNeeded()
+        try expect(panel.arrangementForTesting == ["a", "b", "+", "c", "d"],
+                   "the list did not go back to the fixture: \(panel.arrangementForTesting)")
+        let open = panel.rowsForTesting[1]
+        let before = open.convert(open.bounds, to: panel.view)
+        reordered = nil
+        try expect(panel.beginDragForTesting(1), "the open project's row could not be picked up")
+        try expect(panel.arrangementForTesting == ["a", "b", "c", "d", "+"]
+                    && panel.liftedFrameForTesting == before,
+                   "picking up the open row did not fold its tree in place: "
+                     + "\(panel.arrangementForTesting), \(String(describing: panel.liftedFrameForTesting))")
+        try expect(panel.rowsForTesting[3].showsBottomLine,
+                   "with the tree folded away, the list is not closed by a line")
+        panel.moveDragForTesting(1, by: height + 8)
+        try expect(panel.arrangementForTesting == ["a", "c", "b", "d", "+"],
+                   "the open row did not move down a place: \(panel.arrangementForTesting)")
+        panel.endDragForTesting()
+        try expect(reordered?.0 == 1 && reordered?.1 == 2,
+                   "the open row's drop was \(String(describing: reordered))")
+        try expect(panel.arrangementForTesting == ["a", "c", "b", "+", "d"],
+                   "the tree did not open again under its row: \(panel.arrangementForTesting)")
+        settle()
+        try expect(!panel.rowsForTesting.contains { $0.showsBottomLine },
+                   "a line still closes the list under an open project")
+
+        // The ✕: a round ground under the pointer, nothing otherwise.
+        let row = panel.rowsForTesting[0]
+        let target = row.closeTargetForTesting
+        func ground() throws -> NSColor? {
+            row.needsDisplay = true
+            guard let rep = row.bitmapImageRepForCachingDisplay(in: row.bounds) else {
+                throw Failure(description: "the row could not be drawn")
+            }
+            row.cacheDisplay(in: row.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / row.bounds.width
+            // Inside the circle, clear of the ✕ drawn in its middle.
+            return rep.colorAt(x: Int((target.minX + 3) * scale),
+                               y: Int((row.bounds.height - target.midY) * scale))
+        }
+        func asDrawn(_ colour: NSColor) throws -> NSColor? {
+            let swatch = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+            swatch.fillColor = colour
+            panel.view.addSubview(swatch)
+            defer { swatch.removeFromSuperview() }
+            guard let rep = swatch.bitmapImageRepForCachingDisplay(in: swatch.bounds) else {
+                throw Failure(description: "a swatch could not be drawn")
+            }
+            swatch.cacheDisplay(in: swatch.bounds, to: rep)
+            return rep.colorAt(x: 2, y: 2)
+        }
+        row.hoverForTesting(at: NSPoint(x: target.midX, y: target.midY))
+        let lit = try ground(), selected = try asDrawn(Theme.selectedControl)
+        try expect(row.closeIsHoveredForTesting && sameColor(lit, selected),
+                   "the ✕ under the pointer shows no ground: \(String(describing: lit)) "
+                     + "for \(String(describing: selected))")
+        row.hoverForTesting(at: NSPoint(x: 40, y: target.midY))
+        let away = try ground()
+        try expect(!row.closeIsHoveredForTesting && !sameColor(away, selected),
+                   "the ✕ kept its ground with the pointer away")
+
+        // A press that cannot become a drag — a list of one — and is let go
+        // away from its row is not a click either: selecting then closed every
+        // tab of the project being left, for a press already abandoned.
+        let alone = ProjectRowView()
+        alone.frame = NSRect(x: 0, y: 0, width: 300, height: height)
+        var clicks = 0
+        alone.onDragBegan = { false }
+        alone.onSelect = { clicks += 1 }
+        let grip = NSPoint(x: 200, y: height / 2)
+        alone.pressForTesting(at: grip, draggingThrough: [
+            NSPoint(x: 200, y: grip.y + height), NSPoint(x: 200, y: grip.y + height * 1.5),
+        ])
+        try expect(clicks == 0, "a press let go away from a row that could not move was a click")
     }
 
     private static func testCollapsedProjectsEndInALine() throws {
@@ -10828,24 +10953,29 @@ enum RegressionTests {
         try expect(panel.treePositionForTesting == 1,
                    "the tree did not move under the newly selected project")
 
-        // Reordering is offered only with every project collapsed: with one
-        // expanded the tree sits between the rows, and "where will it land"
-        // has no honest answer. A drag then means nothing — and a press let go
-        // away from the row is not a click either: selecting then closed every
-        // tab of the project being left, for a press already abandoned.
+        // With a project expanded the rows still travel. The open project's
+        // own row is carried with its tree folded away, and the tree opens
+        // again under it where it lands; the project stays the one showing,
+        // and the drag is not a click on it.
         host.window?.contentView?.layoutSubtreeIfNeeded()
         let grip = NSPoint(x: 200, y: ProjectRowView.height / 2)
         let travel = [NSPoint(x: 200, y: grip.y + ProjectRowView.height),
                       NSPoint(x: 200, y: grip.y + ProjectRowView.height * 1.5)]
-        let expandedOrder = host.projects.map(\.lastPathComponent)
         let expandedProject = host.projectURL
         rows[0].pressForTesting(at: grip, draggingThrough: travel)
-        try expect(host.projects.map(\.lastPathComponent) == expandedOrder,
-                   "a row was dragged while a project was expanded")
+        try expect(host.projects.map(\.lastPathComponent) == ["other", "outer"],
+                   "the open project's row was not carried: "
+                     + "\(host.projects.map(\.lastPathComponent))")
         try expect(host.projectURL == expandedProject && expandedProject != nil,
-                   "a press released away from the row still counted as a click")
+                   "carrying the open project's row closed it or counted as a click")
+        try expect(panel.treePositionForTesting == 2,
+                   "the tree did not open again under the carried row: "
+                     + "\(String(describing: panel.treePositionForTesting))")
+        // Back as it was for what follows.
+        host.moveProject(from: 1, to: 0)
+        host.window?.contentView?.layoutSubtreeIfNeeded()
         // Let go on the row itself, it is the click it started out as.
-        rows[0].pressForTesting(at: grip, draggingThrough: [
+        panel.rowsForTesting[0].pressForTesting(at: grip, draggingThrough: [
             NSPoint(x: grip.x + 30, y: grip.y + 2),
         ])
         try expect(host.projectURL == nil,
