@@ -133,17 +133,21 @@ enum SidebarCellDrawing {
             Theme.uiFont(max(9, labelFont.pointSize - 1.5))
         }
 
-        /// Always a circle: the diameter is whichever of the digits' width or
-        /// height needs more room, so "9" and "128" are both round.
+        /// One or two digits sit in a circle, its diameter whichever of their
+        /// width or height needs more room. A longer count keeps the two-digit
+        /// circle's height and stretches into a capsule: a circle round four
+        /// digits stood taller than the row it sat in.
         static func size(_ value: String, labelFont: NSFont) -> NSSize {
             guard !value.isEmpty else { return .zero }
             let badgeFont = font(for: labelFont)
-            let width = ceil((value as NSString).size(withAttributes: [.font: badgeFont]).width)
-            let capHeight = ceil(badgeFont.capHeight)
-            let diameter = max(minimumDiameter,
-                               max(width + horizontalPadding * 2,
-                                   capHeight + verticalPadding * 2))
-            return NSSize(width: diameter, height: diameter)
+            func diameter(_ digits: String) -> CGFloat {
+                let width = ceil((digits as NSString).size(withAttributes: [.font: badgeFont]).width)
+                return max(minimumDiameter,
+                           max(width + horizontalPadding * 2,
+                               ceil(badgeFont.capHeight) + verticalPadding * 2))
+            }
+            let round = diameter(value)
+            return NSSize(width: round, height: min(round, diameter("00")))
         }
 
         /// Centred on the label's *ink* — where its glyphs actually sit.
@@ -194,7 +198,8 @@ enum SidebarCellDrawing {
             let badgeFont = font(for: labelFont)
             return NSImage(size: size, flipped: true) { rect in
                 background.setFill()
-                NSBezierPath(ovalIn: rect).fill()
+                NSBezierPath(roundedRect: rect, xRadius: rect.height / 2,
+                             yRadius: rect.height / 2).fill()
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: badgeFont, .foregroundColor: foreground,
                 ]

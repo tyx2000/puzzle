@@ -12233,23 +12233,31 @@ enum RegressionTests {
         try expect(panel.pushBadgeForTesting.isEmpty,
                    "Push shows a zero badge: \(panel.pushBadgeForTesting)")
 
-        // A badge is a circle on the label's own line, growing to hold its
-        // digits rather than stretching into a pill.
+        // One or two digits sit in a circle on the label's own line, growing
+        // to hold them. A longer count keeps the two-digit height and stretches
+        // into a capsule, so a count in the thousands stays inside its row.
         let labelFont = Theme.uiFont(10.5)
         let single = SidebarCellDrawing.Badge.size("3", labelFont: labelFont)
         let double = SidebarCellDrawing.Badge.size("12", labelFont: labelFont)
         let triple = SidebarCellDrawing.Badge.size("128", labelFont: labelFont)
-        for (value, size) in [("3", single), ("12", double), ("128", triple)] {
+        let thousands = SidebarCellDrawing.Badge.size("5206", labelFont: labelFont)
+        for (value, size) in [("3", single), ("12", double)] {
             try expect(size.width == size.height,
                        "the \(value) badge is not round: \(size)")
         }
         try expect(single.width >= SidebarCellDrawing.Badge.minimumDiameter,
                    "a one-digit badge collapses: \(single)")
-        try expect(triple.width > single.width,
-                   "the badge does not grow with its digits: \(single) vs \(triple)")
         try expect(double.width >= single.width,
                    "a two-digit badge is smaller than a one-digit one: "
                     + "\(single) vs \(double)")
+        try expect(triple.height == double.height && thousands.height == double.height
+                    && triple.width > triple.height && thousands.width > triple.width,
+                   "a longer count does not stretch at the two-digit height: "
+                     + "\(double), \(triple), \(thousands)")
+        // In a project row, the tallest badge stays inside the row.
+        let rowBadge = SidebarCellDrawing.Badge.size("123456", labelFont: ProjectRowView.nameFont())
+        try expect(rowBadge.height < ProjectRowView.height,
+                   "a long count's badge is \(rowBadge.height)pt in a \(ProjectRowView.height)pt row")
         try expect(SidebarCellDrawing.Badge.size("", labelFont: labelFont) == .zero,
                    "an empty badge still takes room")
 

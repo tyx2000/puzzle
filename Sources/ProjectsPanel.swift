@@ -111,7 +111,7 @@ final class ProjectRowView: NSView {
     /// Both headings are drawn alike: the branch names the right column the
     /// way the project names the left one, so the row reads as two headings
     /// rather than a name with a note after it.
-    private static func nameFont() -> NSFont { Theme.uiFont(12) }
+    static func nameFont() -> NSFont { Theme.uiFont(12) }
     /// The row is divided: the project's name heads the file tree below it,
     /// the branch heads that project's changes. Both columns carry on down
     /// through the panel, so a row reads as the two headings it is — and the
