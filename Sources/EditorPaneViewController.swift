@@ -87,7 +87,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private let searchNavigator = SearchNavigatorView()
     /// A diff's changes, stepped through with the same round buttons a search
     /// uses, in the same place; there is nothing to close, so there are two.
-    private let diffNavigator = SearchNavigatorView(stepping: "change", closing: nil)
+    private let diffNavigator = SearchNavigatorView(counting: "change")
     private var findBarHeight: NSLayoutConstraint!
     private var findStates: [URL: FindBarView.State] = [:]
     /// The document actually bound to the shared bar, even while tab indices change.
@@ -287,6 +287,9 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffNavigator.onPrevious = { [weak self] in self?.stepThroughDiff(forward: false) }
         diffNavigator.onNext = { [weak self] in self?.stepThroughDiff(forward: true) }
         diffNavigator.scrollTarget = scrollView
+        diffHeader.onCountChanged = { [weak self] current, total in
+            self?.diffNavigator.showCount(current: current, of: total)
+        }
         diffHeader.onToggleMode = { [weak self] in self?.toggleDiffMode() }
         container.addSubview(diffHeader)
 
@@ -340,7 +343,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             searchNavigator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
             diffNavigator.trailingAnchor.constraint(
                 equalTo: scrollView.trailingAnchor,
-                constant: -SearchNavigatorView.trailingInset),
+                constant: -diffNavigator.edgeInset),
             diffNavigator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
         self.view = container

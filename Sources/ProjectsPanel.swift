@@ -3,7 +3,7 @@ import AppKit
 /// One project in the Projects panel: its name, the branch it is on, and the
 /// button that takes it out of the window. Selecting it expands its file tree
 /// underneath.
-final class ProjectRowView: NSView {
+final class ProjectRowView: NSView, PointerHoverRefreshing {
     static let height: CGFloat = 32
     /// The ✕'s square at the trailing end, held clear of the panel's edge.
     private static let closeWidth: CGFloat = 18
@@ -403,12 +403,30 @@ final class ProjectRowView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !DividerGrip.isLit(in: window) else { return }
         isHovered = true
         onHoverChanged?(true, event.locationInWindow)
         needsDisplay = true
     }
 
+    /// The line beside the panel lit, or gone out, with the pointer still: the
+    /// heading lets go of its hover while it is lit, and takes it back after.
+    func refreshHoverState() {
+        guard let window else { return }
+        let pointer = window.pointerLocation
+        if !DividerGrip.isLit(in: window), bounds.contains(convert(pointer, from: nil)) {
+            guard !isHovered else { return }
+            isHovered = true
+            onHoverChanged?(true, pointer)
+            needsDisplay = true
+        } else {
+            clearHover(notifying: true)
+        }
+    }
+    var isHoveredForTesting: Bool { isHovered }
+
     override func mouseMoved(with event: NSEvent) {
+        guard !DividerGrip.isLit(in: window) else { return }
         let point = convert(event.locationInWindow, from: nil)
         let onClose = closeRect.insetBy(dx: -4, dy: -4).contains(point)
         let onPull = !onClose && pullRect.contains(point)
@@ -586,6 +604,49 @@ final class ProjectRowView: NSView {
                            timestamp: 0, windowNumber: 0, context: nil,
                            eventNumber: 0, clickCount: 1, pressure: 1)!
     }
+}
+
+/// A project row being carried: a picture of it, raised over the list on a
+/// soft shadow, with room round it for the shadow. It never takes the pointer.
+private final class LiftedRowView: NSView {
+    private static let margin: CGFloat = 12
+    private let image: CGImage
+    /// How dark the shadow is: full while carried, gone as it settles.
+    var shadowAlpha: CGFloat = 0.22 {
+        didSet { if shadowAlpha != oldValue { needsDisplay = true } }
+    }
+
+    init(image: CGImage, row: NSRect) {
+        self.image = image
+        super.init(frame: row.insetBy(dx: -Self.margin, dy: -Self.margin))
+        // Moved by its frame, drawn once: the picture is not drawn again as
+        // it follows the pointer.
+        wantsLayer = true
+        layer?.actions = ["position": NSNull(), "bounds": NSNull(), "frame": NSNull()]
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// Where the row's picture is, in the superview.
+    var rowRect: NSRect {
+        get { frame.insetBy(dx: Self.margin, dy: Self.margin) }
+        set { frame = newValue.insetBy(dx: -Self.margin, dy: -Self.margin) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(shadowAlpha)
+        shadow.shadowBlurRadius = 8
+        shadow.shadowOffset = NSSize(width: 0, height: -2)
+        NSGraphicsContext.saveGraphicsState()
+        shadow.set()
+        NSGraphicsContext.current?.cgContext.draw(
+            image, in: bounds.insetBy(dx: Self.margin, dy: Self.margin))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// What an expanded project shows: its file tree and its changes, side by
@@ -1322,12 +1383,32 @@ final class ProjectsPanelViewController: NSViewController {
         clearProjectHover()
         draggingRow = row
         dragStartIndex = index
+        lift(row)
         return true
     }
 
-    /// The row follows the pointer by *changing places*: the list it is being
-    /// dropped into is the preview, so what is on screen while dragging is
-    /// exactly what will be committed.
+    /// The row is carried as a picture of itself, raised over the list and
+    /// kept under the pointer, while its own place stays open among the rows.
+    private func lift(_ row: ProjectRowView) {
+        // The picture is of the row alone, without the lines its place draws.
+        row.showsDivider = false
+        row.showsBottomLine = false
+        let rep = row.bitmapImageRepForCachingDisplay(in: row.bounds)
+        if let rep { row.cacheDisplay(in: row.bounds, to: rep) }
+        refreshRowLines()
+        guard let image = rep?.cgImage else { return }
+        let start = row.convert(row.bounds, to: view)
+        let lifted = LiftedRowView(image: image, row: start)
+        view.addSubview(lifted, positioned: .above, relativeTo: nil)
+        liftedRow = lifted
+        liftedStart = start
+        row.alphaValue = 0
+    }
+
+    /// The picture follows the pointer the whole way, kept within the run of
+    /// places; the row itself *changes places* as it passes the middle of
+    /// another, and the rows it passes slide out of its way. What is on
+    /// screen while dragging is exactly what will be committed.
     ///
     /// Counted in whole rows travelled rather than measured against the other
     /// rows' frames. Reordering is only offered with every project collapsed,
@@ -1336,12 +1417,23 @@ final class ProjectsPanelViewController: NSViewController {
     /// sliding into place has not settled into its own yet.
     private func rowDragMoved(_ row: ProjectRowView, by travel: CGFloat) {
         guard draggingRow === row else { return }
-        let moved = Int((travel / ProjectRowView.height).rounded())
+        let height = ProjectRowView.height
+        let carried = min(max(travel, -CGFloat(dragStartIndex) * height),
+                          CGFloat(rows.count - 1 - dragStartIndex) * height)
+        liftedRow?.rowRect.origin.y = liftedStart.minY + (view.isFlipped ? carried : -carried)
+        let moved = Int((travel / height).rounded())
         let slot = max(0, min(rows.count - 1, dragStartIndex + moved))
         guard stack.arrangedSubviews.firstIndex(of: row) != slot else { return }
         stack.insertArrangedSubview(row, at: slot)
         refreshRowLines()
-        stack.layoutSubtreeIfNeeded()
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? 0 : Self.slideDuration
+        lastSlideDurationForTesting = duration
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.allowsImplicitAnimation = duration > 0
+            stack.layoutSubtreeIfNeeded()
+        }
     }
 
     private func endRowDrag() {
@@ -1350,17 +1442,64 @@ final class ProjectsPanelViewController: NSViewController {
         draggingRow = nil
         let pending = pendingConfiguration
         pendingConfiguration = nil
-        if let row, let landed = stack.arrangedSubviews.firstIndex(of: row),
-           landed != dragStartIndex {
+        let landed = row.flatMap { stack.arrangedSubviews.firstIndex(of: $0) }
+        if let landed, landed != dragStartIndex {
             // The reorder redraws the list from the model, which already holds
             // anything the deferred refresh would have said.
             onReorder?(dragStartIndex, landed)
-            return
-        }
-        if let pending {
+        } else if let pending {
             configure(projects: pending.projects, active: pending.active)
         }
+        land(on: landed)
     }
+
+    /// The picture settles into the place the row was put down in, and goes.
+    /// The row there may be a new one, if the drop rebuilt the list.
+    private func land(on index: Int?) {
+        guard let lifted = liftedRow else { return }
+        liftedRow = nil
+        stack.layoutSubtreeIfNeeded()
+        let target = index.flatMap { index -> NSRect? in
+            let placed = stack.arrangedSubviews.compactMap { $0 as? ProjectRowView }
+            return placed.indices.contains(index)
+                ? placed[index].convert(placed[index].bounds, to: view) : nil
+        }
+        landings += 1
+        let finish = { [weak self] in
+            lifted.removeFromSuperview()
+            guard let self else { return }
+            self.landings -= 1
+            for row in self.rows where row !== self.draggingRow { row.alphaValue = 1 }
+        }
+        guard let target, view.window != nil, lifted.rowRect != target,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            finish()
+            return
+        }
+        let from = lifted.rowRect
+        let started = CACurrentMediaTime()
+        let shadow = lifted.shadowAlpha
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
+            let progress = min(1, (CACurrentMediaTime() - started) / Self.slideDuration)
+            let eased = CGFloat(1 - pow(1 - progress, 3))
+            lifted.rowRect.origin.y = from.minY + (target.minY - from.minY) * eased
+            lifted.shadowAlpha = shadow * (1 - eased)
+            guard progress >= 1 else { return }
+            timer.invalidate()
+            finish()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// How long the rows take to make way, and the carried one to settle.
+    static let slideDuration: TimeInterval = 0.18
+    private(set) var lastSlideDurationForTesting: TimeInterval?
+    private var liftedRow: LiftedRowView?
+    private var liftedStart: NSRect = .zero
+    private var landings = 0
+    var liftedFrameForTesting: NSRect? { liftedRow?.rowRect }
+    var isLiftedOnTopForTesting: Bool { liftedRow != nil && view.subviews.last === liftedRow }
+    var isLandingForTesting: Bool { landings > 0 }
 
     var rowsForTesting: [ProjectRowView] { rows }
     func hoverRowForTesting(_ index: Int) {

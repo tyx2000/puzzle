@@ -1703,7 +1703,7 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
 
     private func updateHoverLine(at point: NSPoint, animated: Bool = true) {
         let target = showsHoverLineBand && !PuzzleScroller.isDragging
-            ? lineBandRect(at: point) : nil
+            && !DividerGrip.isLit(in: window) ? lineBandRect(at: point) : nil
         setHoverLineBand(target, animated: animated)
     }
 

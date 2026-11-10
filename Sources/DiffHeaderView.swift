@@ -21,6 +21,9 @@ final class DiffHeaderView: FlatView {
     }
 
     var onToggleMode: (() -> Void)?
+    /// The change the frame is on, from 0 — nil before there is one — and
+    /// how many there are, as the summary counts them.
+    var onCountChanged: ((Int?, Int) -> Void)?
 
     static let height: CGFloat = 28
 
@@ -83,11 +86,14 @@ final class DiffHeaderView: FlatView {
 
     private func updateSummary() {
         let noun = changeCount == 1 ? "change" : "changes"
-        if let currentChange, changeCount > 0 {
-            summary = "\(min(max(0, currentChange), changeCount - 1) + 1)/\(changeCount) \(noun)"
+        let shown = changeCount > 0
+            ? currentChange.map { min(max(0, $0), changeCount - 1) } : nil
+        if let shown {
+            summary = "\(shown + 1)/\(changeCount) \(noun)"
         } else {
             summary = "\(changeCount) \(noun)"
         }
+        onCountChanged?(shown, changeCount)
         setAccessibilityLabel("\(pathForTesting), \(summary)")
         needsDisplay = true
     }

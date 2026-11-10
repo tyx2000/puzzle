@@ -144,12 +144,13 @@ enum RegressionTests {
             try testDiffGutterUsesFileLineNumbers()
             try testDiffHeaderStepsThroughChanges()
             try testDiffStepsAcrossFiles()
+            try testDiffButtonsCountTheChanges()
             try testChangeFrameStaysOverTheCode()
             try testDiffTabsKeepTheirNames()
             try testSideBySideDiff()
             try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (25)")
+            print("Editor regression tests passed (26)")
             return
         }
         try testProcessDrain()
@@ -186,6 +187,7 @@ enum RegressionTests {
         try testSidebarTogglesAndFloats()
         try testCollapsingTheLastProjectKeepsThePanel()
         try testCollapsedProjectsEndInALine()
+        try testCarriedProjectRowFollowsThePointer()
         try testReplacedContentSettlesIn()
         try testOnlyTheProjectRowsAnimate()
         try testEditorManualSave()
@@ -296,6 +298,7 @@ enum RegressionTests {
         try testSplitterAndRowGestures()
         try testDividersLightAlongTheirLength()
         try testDividersResetAndHold()
+        try testLitDividerHoldsRowHover()
         try testCutHistoryRowsSayTheRest()
         try testEmptyListsSaySo()
         try testTerminalLaunchScripts()
@@ -323,6 +326,7 @@ enum RegressionTests {
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
         try testDiffStepsAcrossFiles()
+        try testDiffButtonsCountTheChanges()
         try testChangeFrameStaysOverTheCode()
         try testDiffTabsKeepTheirNames()
         try testWholeFileDiffsFrameEachKind()
@@ -2765,6 +2769,80 @@ enum RegressionTests {
     /// line under the last row closes it off. With one open, its tree fills
     /// that space and no row needs one. The lines follow a row being dragged:
     /// the list on screen is the order being dropped.
+    /// A project row picked up follows the pointer: a picture of it, raised
+    /// over the list, stays under the pointer the whole way, within the run of
+    /// places, while the row's own place stays open. Passing the middle of
+    /// another row swaps them, and the rows passed slide out of the way. Put
+    /// down, the picture settles into the row's new place and goes.
+    private static func testCarriedProjectRowFollowsThePointer() throws {
+        let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentViewController = panel
+        window.setContentSize(NSSize(width: 300, height: 400))
+        defer { window.close() }
+        let listed: [(name: String, branch: String, user: String, changes: Int, path: String)] =
+            ["a", "b", "c"].map { (name: $0, branch: "", user: "", changes: 0, path: "/\($0)") }
+        panel.configure(projects: listed, active: nil)
+        panel.view.layoutSubtreeIfNeeded()
+        var reordered: (Int, Int)?
+        panel.onReorder = { reordered = ($0, $1) }
+        let height = ProjectRowView.height
+        let carried = panel.rowsForTesting[0]
+        let start = carried.convert(carried.bounds, to: panel.view)
+        func order() -> [String] { panel.visualOrderForTesting.map { String($0.prefix(1)) } }
+        /// The picture's place, as points travelled down from where it was picked up.
+        func travelled() -> CGFloat? {
+            panel.liftedFrameForTesting.map { panel.view.isFlipped ? $0.minY - start.minY
+                                                                   : start.minY - $0.minY }
+        }
+
+        try expect(panel.beginDragForTesting(0), "the fixture row could not be picked up")
+        try expect(panel.liftedFrameForTesting == start && panel.isLiftedOnTopForTesting
+                    && carried.alphaValue == 0,
+                   "the row was not lifted over the list from its place: "
+                     + "\(String(describing: panel.liftedFrameForTesting)) for \(start)")
+        // Short of the next row's middle, it follows without changing places.
+        panel.moveDragForTesting(0, by: 10)
+        try expect(travelled() == 10 && order() == ["a", "b", "c"],
+                   "a short move did not carry the picture: \(String(describing: travelled())), \(order())")
+        // Past it, the two swap and the one passed slides up.
+        panel.moveDragForTesting(0, by: height * 1.4)
+        try expect(abs((travelled() ?? 0) - height * 1.4) < 0.01 && order() == ["b", "a", "c"],
+                   "the picture or the order lagged: \(String(describing: travelled())), \(order())")
+        let slide = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0
+            : ProjectsPanelViewController.slideDuration
+        try expect(panel.lastSlideDurationForTesting == slide,
+                   "the row passed jumped instead of sliding: "
+                     + "\(String(describing: panel.lastSlideDurationForTesting))")
+        // Beyond the list it stops at the last place, and at the first going up.
+        panel.moveDragForTesting(0, by: height * 6)
+        try expect(travelled() == height * 2 && order() == ["b", "c", "a"],
+                   "the picture left the list: \(String(describing: travelled())), \(order())")
+        panel.moveDragForTesting(0, by: -height * 6)
+        try expect(travelled() == 0 && order() == ["a", "b", "c"],
+                   "the picture left the top of the list: \(String(describing: travelled()))")
+        // Let go short of the last place: the picture has the rest to settle.
+        panel.moveDragForTesting(0, by: height * 1.8)
+        try expect(order() == ["b", "c", "a"], "the row did not take the last place: \(order())")
+
+        // Put down, it settles into the last place and goes.
+        panel.endDragForTesting()
+        try expect(reordered?.0 == 0 && reordered?.1 == 2,
+                   "the drop was not reported: \(String(describing: reordered))")
+        let landing = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        try expect(panel.isLandingForTesting != landing,
+                   "the picture did not settle into its place")
+        let deadline = Date().addingTimeInterval(2)
+        while panel.isLandingForTesting, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        try expect(!panel.isLandingForTesting && panel.liftedFrameForTesting == nil
+                    && !panel.view.subviews.contains { String(describing: type(of: $0)) == "LiftedRowView" }
+                    && panel.rowsForTesting.allSatisfy { $0.alphaValue == 1 },
+                   "the picture stayed, or a row stayed hidden, after it settled")
+    }
+
     private static func testCollapsedProjectsEndInALine() throws {
         let panel = ProjectsPanelViewController(fileTree: FileTreeViewController())
         _ = panel.view
@@ -15680,6 +15758,9 @@ enum RegressionTests {
         func expectAt(_ tab: OpenTab, _ count: String, _ what: String) throws {
             try expect(openTab() == tab && summary() == count,
                        "\(what): at \(String(describing: openTab())), \(summary())")
+            let counts = navigator.countsForTesting
+            try expect("\(counts.current)/\(counts.total) changes" == count,
+                       "\(what): the buttons count \(counts), the header \(count)")
         }
         func expectChangeOnScreen(_ what: String) throws {
             guard let rows = pane.changeFrameForTesting.rows else {
@@ -15953,6 +16034,128 @@ enum RegressionTests {
         pane.reloadTabs()
         try expect(pane.tabTitlesForTesting == names,
                    "a tab whose change has gone is called \(pane.tabTitlesForTesting)")
+    }
+
+    /// A diff's two buttons count rather than point: the one above shows the
+    /// change the diff is on, on the accent, and the one below how many there
+    /// are, on the raised surface — each a disc lifted off the code by a
+    /// shadow, taking clicks only on the disc.
+    private static func testDiffButtonsCountTheChanges() throws {
+        let diff = """
+        @@ -1,6 +1,6 @@
+        -one
+        +ONE
+         two
+         three
+         four
+        -five
+        +FIVE
+         six
+        """
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        window.setContentSize(NSSize(width: 900, height: 600))
+        defer { window.close() }
+        let url = URL(string:
+            "puzzle-diff:///repo/.puzzle-diff-preview?window=count&path=Sources/App.swift")!
+        DocumentStore.shared.setVirtualDocument(url: url, text: diff,
+                                                displayName: "App.swift (diff)")
+        pane.open(url: url, replacingContent: true)
+        pane.view.layoutSubtreeIfNeeded()
+        let navigator = pane.diffNavigatorForTesting
+        func counts() -> String {
+            let c = navigator.countsForTesting
+            return "\(c.current)/\(c.total)"
+        }
+        try expect(counts() == "1/2", "an opened diff's buttons count \(counts())")
+        navigator.clickNextForTesting()
+        try expect(counts() == "2/2", "a step on did not count on: \(counts())")
+        pane.toggleDiffModeForTesting()
+        pane.view.layoutSubtreeIfNeeded()
+        try expect(counts() == "2/2", "side by side counts \(counts())")
+        navigator.clickPreviousForTesting()
+        try expect(counts() == "1/2", "a step back side by side counts \(counts())")
+        pane.toggleDiffModeForTesting()
+        pane.view.layoutSubtreeIfNeeded()
+
+        // 48pt discs, 8pt apart and 16pt in from the code's edge, as the round
+        // buttons are; the shadow has the room round them.
+        guard navigator.buttonsForTesting.count == 2,
+              let upper = navigator.buttonsForTesting.first,
+              let lower = navigator.buttonsForTesting.last else {
+            throw Failure(description: "the diff has \(navigator.buttonsForTesting.count) buttons")
+        }
+        let discs = [upper, lower].map { $0.convert($0.discForTesting, to: navigator) }
+        try expect(discs.allSatisfy { $0.width == SearchNavigatorView.buttonSize
+                                        && $0.height == SearchNavigatorView.buttonSize },
+                   "the discs are not 48pt: \(discs)")
+        try expect(abs(discs[0].minY - discs[1].maxY - SearchNavigatorView.spacing) <= 0.5,
+                   "the discs are not 8pt apart: \(discs)")
+        let code = pane.scrollViewForTesting.convert(pane.scrollViewForTesting.bounds, to: pane.view)
+        let lowerInPane = lower.convert(lower.discForTesting, to: pane.view)
+        try expect(abs(code.maxX - lowerInPane.maxX - SearchNavigatorView.trailingInset) <= 0.5,
+                   "the discs are not 16pt in from the code's edge: \(lowerInPane) in \(code)")
+        // The disc takes the click and the hand; the shadow's room round it
+        // is the code's.
+        for button in [upper, lower] {
+            let disc = button.discForTesting
+            let centre = button.convert(NSPoint(x: disc.midX, y: disc.midY), to: button.superview)
+            let corner = button.convert(NSPoint(x: 1, y: 1), to: button.superview)
+            try expect(button.hitTest(centre) === button && button.hitTest(corner) == nil,
+                       "a counting button does not take clicks on its disc alone")
+            button.resetCursorRects()
+            try expect(button.cursorRectForTesting?.rect == disc,
+                       "a counting button takes the hand off its disc")
+        }
+        // Drawn: the change on the accent, the count on the raised surface,
+        // in ink that reads on each.
+        func fill(of button: RoundIconButton) throws -> NSColor? {
+            guard let rep = button.bitmapImageRepForCachingDisplay(in: button.bounds) else {
+                throw Failure(description: "a counting button could not be drawn")
+            }
+            button.cacheDisplay(in: button.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / button.bounds.width
+            let disc = button.discForTesting
+            // Inside the disc, clear of the number and of the edge.
+            return rep.colorAt(x: Int((disc.minX + 7) * scale),
+                               y: Int((button.bounds.height - disc.midY) * scale))
+        }
+        /// A colour as the same window draws it, to compare like with like.
+        func asDrawn(_ colour: NSColor) throws -> NSColor? {
+            let swatch = FlatView(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+            swatch.fillColor = colour
+            pane.view.addSubview(swatch)
+            defer { swatch.removeFromSuperview() }
+            guard let rep = swatch.bitmapImageRepForCachingDisplay(in: swatch.bounds) else {
+                throw Failure(description: "a swatch could not be drawn")
+            }
+            swatch.cacheDisplay(in: swatch.bounds, to: rep)
+            return rep.colorAt(x: 2, y: 2)
+        }
+        let upperFill = try fill(of: upper), lowerFill = try fill(of: lower)
+        let accentDrawn = try asDrawn(Theme.blue), raisedDrawn = try asDrawn(Theme.raisedSurface)
+        try expect(sameColor(upperFill, accentDrawn),
+                   "the change the diff is on is not on the accent: "
+                     + "\(String(describing: upperFill)) for \(String(describing: accentDrawn))")
+        try expect(sameColor(lowerFill, raisedDrawn),
+                   "the count is not on the raised surface: "
+                     + "\(String(describing: lowerFill)) for \(String(describing: raisedDrawn))")
+        func luminance(_ colour: NSColor?) -> CGFloat {
+            guard let c = colour?.usingColorSpace(.sRGB) else { return -1 }
+            return 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent
+        }
+        let accent = luminance(Theme.blue)
+        try expect(abs(luminance(upper.inkForTesting) - accent) > 0.4,
+                   "the number on the accent does not stand out from it: "
+                     + "\(String(describing: upper.inkForTesting)) on \(Theme.blue)")
+        // The search's buttons keep their arrows.
+        let search = SearchNavigatorView()
+        try expect(search.buttonsForTesting.allSatisfy { $0.discForTesting == $0.bounds }
+                    && search.edgeInset == SearchNavigatorView.trailingInset,
+                   "the search's buttons changed with the diff's")
     }
 
     private static func testDiffHeaderStepsThroughChanges() throws {
@@ -16291,6 +16494,114 @@ enum RegressionTests {
         try expect(!handle.showsLightForTesting
                     && NSCursor.current !== DividerGrip.cursor(lineIsVertical: true),
                    "the line beside the panel stayed lit, or kept its cursor, after it was let go")
+    }
+
+    /// While a divider is lit — the pointer on its band, or the line held —
+    /// the rows under that band light no hover, and the row under the pointer
+    /// takes it back once the line goes out: in a list beside a line in the
+    /// panel, and in a project heading beside the panel's edge.
+    private static func testLitDividerHoldsRowHover() throws {
+        defer { pinPointer(at: pointerNowhere) }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        window.contentView = host
+
+        final class Rows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+            func numberOfRows(in tableView: NSTableView) -> Int { 20 }
+            func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,
+                           row: Int) -> NSView? { NSView() }
+        }
+        let rows = Rows()
+        let table = GitTableView()
+        let column = NSTableColumn(identifier: .init("row"))
+        column.width = 1000
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.rowHeight = 22
+        table.dataSource = rows
+        table.delegate = rows
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        let splitter = ProjectColumnsView(frame: host.bounds)
+        let other = NSView()
+        splitter.first = scroll
+        splitter.second = other
+        splitter.addSubview(scroll)
+        splitter.addSubview(other)
+        host.subviews = [splitter]
+        splitter.layoutSubtreeIfNeeded()
+        table.reloadData()
+        table.layoutSubtreeIfNeeded()
+
+        // The pointer at row 2's height, `x` points across the panel.
+        let rowY = table.convert(NSPoint(x: 0, y: table.rect(ofRow: 2).midY), to: splitter).y
+        func pointer(at x: CGFloat) {
+            pinPointer(at: window.convertPoint(toScreen: splitter.convert(NSPoint(x: x, y: rowY), to: nil)))
+        }
+        pointer(at: 20)
+        table.refreshHoverState()
+        splitter.refreshLightForTesting()
+        try expect(table.hoveredRow == 2 && !splitter.showsLightForTesting,
+                   "the fixture's row is not lit under the pointer: \(table.hoveredRow)")
+        // Onto the band over the list's edge: the list hears the move first,
+        // then the line lights, and the row lets go.
+        pointer(at: splitter.divider - 2)
+        table.refreshHoverState()
+        splitter.refreshLightForTesting()
+        try expect(splitter.showsLightForTesting && table.hoveredRow == -1,
+                   "the row under a lit divider kept its hover: \(table.hoveredRow)")
+        table.refreshHoverState()
+        try expect(table.hoveredRow == -1, "a move along a lit divider lit the row under it")
+        // Off the band, the line goes out and the row is lit again.
+        pointer(at: 20)
+        splitter.refreshLightForTesting()
+        try expect(!splitter.showsLightForTesting && table.hoveredRow == 2,
+                   "the row did not take its hover back after the divider went out: \(table.hoveredRow)")
+        // Held, the pointer carried across the rows lights none of them.
+        var litWhileHeld: [Int] = []
+        var events = [NSEvent.EventType.leftMouseDragged, .leftMouseUp].map {
+            NSEvent.mouseEvent(with: $0, location: splitter.convert(NSPoint(x: 120, y: rowY), to: nil),
+                               modifierFlags: [], timestamp: 0, windowNumber: 0,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        pointer(at: splitter.divider + 0.5)
+        try expect(splitter.trackDivider(from: NSPoint(x: splitter.divider + 0.5, y: rowY)) {
+                       pointer(at: 60)
+                       table.refreshHoverState()
+                       litWhileHeld.append(table.hoveredRow)
+                       return events.isEmpty ? nil : events.removeFirst()
+                   }, "the fixture's divider did not take hold")
+        try expect(!litWhileHeld.isEmpty && litWhileHeld.allSatisfy { $0 == -1 },
+                   "rows lit under the pointer while the divider was held: \(litWhileHeld)")
+
+        // A project heading beside the panel's edge does the same.
+        let heading = ProjectRowView()
+        heading.translatesAutoresizingMaskIntoConstraints = true
+        heading.frame = NSRect(x: 0, y: 200, width: 300, height: ProjectRowView.height)
+        heading.configure(name: "demo", branch: "main", user: "", changes: 0,
+                          path: "/tmp/demo", isActive: false)
+        let edge = SplitDividerHandleView(
+            frame: NSRect(x: 300 - SplitDividerHandleView.hitWidth / 2, y: 0,
+                          width: SplitDividerHandleView.hitWidth, height: 300))
+        host.subviews = [heading, edge]
+        edge.layoutSubtreeIfNeeded()
+        var told: [Bool] = []
+        heading.onHoverChanged = { hovering, _ in told.append(hovering) }
+        func pin(_ x: CGFloat) {
+            pinPointer(at: window.convertPoint(toScreen: host.convert(NSPoint(x: x, y: 216), to: nil)))
+        }
+        pin(298)
+        heading.refreshHoverState()
+        try expect(heading.isHoveredForTesting, "the fixture's heading is not lit under the pointer")
+        edge.refreshLightForTesting()
+        try expect(edge.showsLightForTesting && !heading.isHoveredForTesting && told.last == false,
+                   "the heading under the lit edge kept its hover: \(told)")
+        pin(200)
+        edge.refreshLightForTesting()
+        try expect(!edge.showsLightForTesting && heading.isHoveredForTesting && told.last == true,
+                   "the heading did not take its hover back after the edge went out: \(told)")
     }
 
     /// A double-click anywhere along a divider puts the line back where it

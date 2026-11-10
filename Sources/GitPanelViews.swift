@@ -973,9 +973,11 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     }
 
     /// Nothing is lit by the pointer while a scroller is dragged: the rows it
-    /// scrolls pass under the pointer, and each lit in turn as it went.
+    /// scrolls pass under the pointer, and each lit in turn as it went. Nor
+    /// while a divider is lit, whose band lies over the rows' edge.
     private func hover(at point: NSPoint) {
-        setHoveredRow(!PuzzleScroller.isDragging && visibleRect.contains(point) ? row(at: point) : -1)
+        setHoveredRow(!PuzzleScroller.isDragging && !DividerGrip.isLit(in: window)
+                        && visibleRect.contains(point) ? row(at: point) : -1)
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }

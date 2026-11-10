@@ -32,6 +32,29 @@ enum DividerGrip {
         return .resizeUpDown
     }()
 
+    /// The lights that are up.
+    private static let lit = NSHashTable<Light>.weakObjects()
+
+    /// Whether a divider in `window` is lit — under the pointer or held. Its
+    /// band lies over the lists' edges, and while it is lit the pointer is the
+    /// divider's: nothing lights the row under it, as nothing does while a
+    /// scroller is dragged.
+    static func isLit(in window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        return lit.allObjects.contains { $0.window === window && !$0.isHiddenOrHasHiddenAncestor }
+    }
+
+    /// A line lit or gone out: whatever in its window lights what the pointer
+    /// is over works it out again — letting go of its row, or taking it back.
+    fileprivate static func lightChanged(in window: NSWindow?) {
+        guard let root = window?.contentView?.superview ?? window?.contentView else { return }
+        func visit(_ view: NSView) {
+            (view as? PointerHoverRefreshing)?.refreshHoverState()
+            view.subviews.forEach(visit)
+        }
+        visit(root)
+    }
+
     /// The light's frame over the 1pt `line`: its whole length, and the band
     /// either side.
     static func lightRect(over line: NSRect, lineIsVertical: Bool) -> NSRect {
@@ -81,6 +104,8 @@ enum DividerGrip {
         func show(_ shown: Bool) {
             guard shown != isShown else { return }
             isShown = shown
+            if shown { DividerGrip.lit.add(self) } else { DividerGrip.lit.remove(self) }
+            defer { DividerGrip.lightChanged(in: window) }
             let from = layer?.presentation()?.opacity ?? Float(alphaValue)
             alphaValue = shown ? 1 : 0
             guard let layer else { return }

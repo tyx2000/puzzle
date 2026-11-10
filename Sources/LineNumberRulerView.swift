@@ -4,7 +4,7 @@ import AppKit
 /// Numbers are drawn into each line's actual fragment rect with the editor's
 /// paragraph style, so their baselines align exactly with the code — and
 /// soft-wrapped continuation lines are skipped.
-final class LineNumberRulerView: NSRulerView {
+final class LineNumberRulerView: NSRulerView, PointerHoverRefreshing {
     /// Uncommitted changes for the file on screen, marked beside their lines.
     var gitChanges: [GitLineChanges.Change] = [] {
         didSet { needsDisplay = true }
@@ -259,12 +259,15 @@ final class LineNumberRulerView: NSRulerView {
         for mark in changeMarkRects { addCursorRect(mark.rect, cursor: .pointingHand) }
     }
 
+    /// While the divider beside the gutter is lit, the pointer is the
+    /// divider's: no number lights, and the cursor is left to it.
     private func updateHover(at point: NSPoint, animated: Bool) {
-        let row = bounds.contains(point) ? numberRows.first { $0.hitRect.contains(point) } : nil
+        let inside = bounds.contains(point) && !DividerGrip.isLit(in: window)
+        let row = inside ? numberRows.first { $0.hitRect.contains(point) } : nil
         setHoveredNumber(row, animated: animated)
-        pointingHandForTesting = row?.blockIdentity != nil
-            || changeMarkRects.contains { $0.rect.contains(point) }
-        if bounds.contains(point) {
+        pointingHandForTesting = inside && (row?.blockIdentity != nil
+            || changeMarkRects.contains { $0.rect.contains(point) })
+        if inside {
             (pointingHandForTesting ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
     }
