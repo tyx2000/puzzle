@@ -135,7 +135,12 @@ enum GitLineChanges {
         case unavailable
     }
 
-    static func baseline(for file: URL, in repository: URL) -> Baseline {
+    /// `encoding` is the one the buffer was read in. HEAD's copy of a GBK or
+    /// Latin-1 file read as UTF-8 shares no line with the buffer that has a
+    /// character outside ASCII: each was marked changed, and reverting one
+    /// wrote the misread line into the file.
+    static func baseline(for file: URL, in repository: URL,
+                         encoding: String.Encoding = .utf8) -> Baseline {
         guard let relative = relativePath(for: file, in: repository) else { return .untracked }
         // Through GitService rather than `git show HEAD:<relative>` directly:
         // that spelling resolves from the repository root while `relative` is
@@ -148,7 +153,8 @@ enum GitLineChanges {
         case .data(let data):
             // A binary blob has no lines to mark, and splitting one would only
             // produce noise.
-            let text = String(decoding: data, as: UTF8.self)
+            let text = (encoding == .utf8 ? nil : String(data: data, encoding: encoding))
+                ?? String(decoding: data, as: UTF8.self)
             guard !text.utf16.contains(0) else { return .untracked }
             return .lines(lines(of: text))
         case .tooLarge:

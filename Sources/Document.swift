@@ -119,8 +119,8 @@ final class Document {
     var isReadOnly: Bool { isUnsupported || isVirtual || isPreviewOnly }
 
     /// Preserve the encoding that was decoded instead of silently converting a
-    /// Latin-1 source file to UTF-8 on its first save.
-    private var textEncoding: String.Encoding = .utf8
+    /// Latin-1 or GBK source file to UTF-8 on its first save.
+    private(set) var textEncoding: String.Encoding = .utf8
     /// Wall-clock ordering for last-write-wins synchronization. File-system
     /// modification dates are compared with the latest local text edit.
     private(set) var lastLocalEditAt: Date?
@@ -373,11 +373,9 @@ final class Document {
         }
 
         var text: String
-        if let utf8 = String(data: data, encoding: .utf8), !Self.looksBinary(data) {
-            text = utf8
-        } else if let latin = String(data: data, encoding: .isoLatin1), !Self.looksBinary(data) {
-            text = latin
-            textEncoding = .isoLatin1
+        if !Self.looksBinary(data), let decoded = Self.decodeText(data) {
+            text = decoded.text
+            textEncoding = decoded.encoding
         } else {
             isUnsupported = true
             text = Self.unsupportedMessage(for: url, byteCount: data.count)
@@ -864,10 +862,78 @@ final class Document {
         return true
     }
 
+    /// A file's bytes as text, and the encoding they were read in — the one
+    /// they are written back in.
+    ///
+    /// UTF-8 first. What is not UTF-8 used to be read as Latin-1 whatever it
+    /// was, since Latin-1 has a character for every byte: a GBK file came up
+    /// as rows of accented letters, and the first Chinese character typed
+    /// into it could not be written in Latin-1, so the save fell back to
+    /// UTF-8 — of the accented letters. Nothing could read the file after.
+    /// The East Asian encodings are tried before Latin-1 now.
     private static func decodeText(_ data: Data) -> (text: String, encoding: String.Encoding)? {
         if let text = String(data: data, encoding: .utf8) { return (text, .utf8) }
+        if let legacy = eastAsianText(data) { return legacy }
         if let text = String(data: data, encoding: .isoLatin1) { return (text, .isoLatin1) }
         return nil
+    }
+
+    /// The encodings a file that is not UTF-8 is tried in before Latin-1:
+    /// GB 18030 (which reads GBK and GB 2312), Big5, Shift JIS and EUC-KR.
+    /// EUC-JP is left out — its bytes are too nearly GBK's to tell short
+    /// Chinese from short Japanese.
+    static let eastAsianEncodings: [String.Encoding] = {
+        func encoding(_ name: CFStringEncodings) -> String.Encoding {
+            String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(name.rawValue)))
+        }
+        // Foundation's own Shift JIS, which is Windows' — the one files are
+        // in. Core Foundation's constant of the same name is another, and
+        // the detector does not know it: Japanese came back as GBK.
+        return [encoding(.GB_18030_2000), encoding(.big5), .shiftJIS, encoding(.EUC_KR)]
+    }()
+
+    /// `data` in the East Asian encoding it is written in, if it is in one.
+    ///
+    /// Which one is the system's call: it weighs how likely the characters
+    /// each reading gives are. Its answer is taken only when two things hold.
+    /// The text goes back to the very bytes it came from, so saving leaves
+    /// every character nobody touched as it was, even should the guess be
+    /// wrong. And the text has a character only these scripts have: in
+    /// Shift JIS every Latin-1 symbol byte is a half-width katakana on its
+    /// own, and a C file whose one such byte is the © in its header would
+    /// otherwise come up Japanese.
+    private static func eastAsianText(_ data: Data) -> (text: String, encoding: String.Encoding)? {
+        var converted: NSString?
+        let candidates = eastAsianEncodings + [.isoLatin1]
+        let found = NSString.stringEncoding(
+            for: data,
+            encodingOptions: [
+                .suggestedEncodingsKey: candidates.map { NSNumber(value: $0.rawValue) },
+                .useOnlySuggestedEncodingsKey: true,
+                .allowLossyKey: false,
+            ],
+            convertedString: &converted, usedLossyConversion: nil)
+        let encoding = String.Encoding(rawValue: found)
+        guard eastAsianEncodings.contains(encoding), let text = converted as String?,
+              text.unicodeScalars.contains(where: isEastAsian),
+              text.data(using: encoding) == data else { return nil }
+        return (text, encoding)
+    }
+
+    /// An ideograph, a kana or a hangul syllable — not the half-width forms.
+    private static func isEastAsian(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3040...0x30FF,       // hiragana, katakana
+             0x3400...0x4DBF,       // ideographs, extension A
+             0x4E00...0x9FFF,       // ideographs
+             0xAC00...0xD7AF,       // hangul syllables
+             0xF900...0xFAFF,       // compatibility ideographs
+             0x20000...0x2FFFF:     // ideographs, extensions B and on
+            return true
+        default:
+            return false
+        }
     }
 
     static func modificationDate(for url: URL) -> Date? {

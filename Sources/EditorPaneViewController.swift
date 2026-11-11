@@ -380,6 +380,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         // A re-indented buffer is compared against a re-indented HEAD: the
         // marks answer "what did you change", not "what did the formatter do".
         let formatted = document.isDisplayFormatted
+        let encoding = document.textEncoding
         // Superseded work is abandoned before it starts a subprocess, not after
         // it has finished one: switching through a dozen tabs used to queue a
         // dozen `git show`s and throw away eleven answers.
@@ -388,7 +389,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         gitBaselineToken = token
         GitService.workQueue.async { [weak self] in
             guard !token.isCancelled else { return }
-            var baseline = GitLineChanges.baseline(for: url, in: root)
+            var baseline = GitLineChanges.baseline(for: url, in: root, encoding: encoding)
             if formatted, case .lines(let lines) = baseline, !lines.isEmpty,
                let pretty = JSONFormatter.pretty(lines.joined(separator: "\n")) {
                 baseline = .lines(GitLineChanges.lines(of: pretty))

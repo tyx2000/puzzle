@@ -180,6 +180,7 @@ enum RegressionTests {
         try testDefinitionNavigation()
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
+        try testEastAsianEncodingsAreReadAndKept()
         try testContainerImageFormats()
         try testUndisplayableFilesCentreTheirMessage()
         try testTabMenuClosesEveryTab()
@@ -3683,6 +3684,101 @@ enum RegressionTests {
         let converted = String(data: try Data(contentsOf: latinURL), encoding: .utf8)
         try expect(converted == "café ☕",
                    "unrepresentable edits did not fall back to UTF-8")
+    }
+
+    /// A file that was not UTF-8 was read as Latin-1 whatever it was. A GBK
+    /// file came up as rows of accented letters, and the first Chinese
+    /// character typed into it could not be written as Latin-1, so the whole
+    /// file went out as UTF-8 — of the accented letters — and nothing read it
+    /// after. The East Asian encodings are read as themselves, and written so.
+    private static func testEastAsianEncodingsAreReadAndKept() throws {
+        let directory = try temporaryDirectory("legacy-encodings")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func encoding(_ name: CFStringEncodings) -> String.Encoding {
+            String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(name.rawValue)))
+        }
+        let gbk = encoding(.GB_18030_2000)
+
+        // Read as what it is, and an edit in Chinese written back as GBK.
+        let source = "// 中文注释：订单状态\nlet a = 1\n"
+        let file = directory.appendingPathComponent("legacy.js")
+        try source.data(using: gbk)!.write(to: file)
+        let document = Document(url: file)
+        try expect(document.text == source && !document.isReadOnly,
+                   "a GBK file was read as \(document.text.debugDescription)")
+        try expect(document.textEncoding == gbk, "a GBK file was not taken for GB 18030")
+        document.replace([Document.Edit(
+            range: NSRange(location: document.storage.length, length: 0), text: "// 新增\n")])
+        try document.save()
+        let written = try Data(contentsOf: file)
+        try expect(written == (source + "// 新增\n").data(using: gbk)!,
+                   "an edited GBK file was not written back as GBK")
+
+        // Rewritten behind the editor, it is read the same way again.
+        let rewritten = "// 已由别的程序改写\nlet a = 2\n"
+        try rewritten.data(using: gbk)!.write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: file.path)
+        try expect(document.reloadFromDiskIfLatest() && document.text == rewritten,
+                   "a GBK file reloaded from disk as \(document.text.debugDescription)")
+
+        // One short comment in a file otherwise ASCII is enough to go by.
+        var long = ""
+        for index in 0..<400 { long += "function f\(index)() { return \(index); }\n" }
+        long += "// 测试\n"
+        let mostlyASCII = directory.appendingPathComponent("mostly-ascii.js")
+        try long.data(using: gbk)!.write(to: mostlyASCII)
+        try expect(Document(url: mostlyASCII).text == long,
+                   "a single GBK comment in a long file was not read as GBK")
+
+        // The other three, each read as itself and saved byte for byte.
+        for (name, legacy, text) in [
+            ("big5", encoding(.big5), "// 訂單狀態：已完成\nlet a = 1\n"),
+            ("shift-jis", String.Encoding.shiftJIS, "// 日本語のコメントです\nlet a = 1\n"),
+            ("euc-kr", encoding(.EUC_KR), "// 한국어 주석입니다\nlet a = 1\n"),
+        ] {
+            let url = directory.appendingPathComponent("\(name).js")
+            let bytes = text.data(using: legacy)!
+            try bytes.write(to: url)
+            let read = Document(url: url)
+            try expect(read.text == text && read.textEncoding == legacy,
+                       "a \(name) file was read as \(read.text.debugDescription)")
+            try read.save()
+            let kept = try Data(contentsOf: url)
+            try expect(kept == bytes, "saving a \(name) file changed its bytes")
+        }
+
+        // Western text is still Latin-1 — the symbols too, each of which is
+        // a half-width katakana in Shift JIS: a © in a header is not Japanese.
+        for (index, text) in ["// Copyright © 2010 Acme Inc. All rights reserved.\nint main() { return 0; }\n",
+                              "printf(\"%d°C ±5 £3 ½ µm\\n\", t);\n",
+                              "déjà vu, café naïve, garçon\n",
+                              "Größe über Maß, schön\n",
+                              "©"].enumerated() {
+            let url = directory.appendingPathComponent("western-\(index).c")
+            try text.data(using: .isoLatin1)!.write(to: url)
+            let read = Document(url: url)
+            try expect(read.text == text && read.textEncoding == .isoLatin1,
+                       "Latin-1 text \(text.debugDescription) was read as \(read.text.debugDescription)")
+        }
+
+        // The gutter compares the buffer with HEAD's copy read the same way:
+        // read as UTF-8, no line with Chinese in it matched the buffer's.
+        let root = directory.appendingPathComponent("repository")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try expect(GitService.run(["init", "-q"], in: root).code == 0, "git init failed")
+        _ = GitService.run(["config", "user.name", "Puzzle Test"], in: root)
+        _ = GitService.run(["config", "user.email", "puzzle@example.invalid"], in: root)
+        GitService.forgetRepositoryInfo()
+        let tracked = root.appendingPathComponent("tracked.js")
+        try source.data(using: gbk)!.write(to: tracked)
+        _ = GitService.run(["add", "-A"], in: root)
+        _ = GitService.run(["commit", "-qm", "base"], in: root)
+        let buffer = Document(url: tracked)
+        try expect(GitLineChanges.baseline(for: tracked, in: root, encoding: buffer.textEncoding)
+                    == .lines(GitLineChanges.lines(of: buffer.text)),
+                   "HEAD's copy of a GBK file was not read as the buffer was")
     }
 
     /// A click moves the caret and draws at once; the selection change — and
