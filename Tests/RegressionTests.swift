@@ -181,6 +181,7 @@ enum RegressionTests {
         try testAbsoluteRowHeights()
         try testReadOnlyAndEncodingProtection()
         try testEastAsianEncodingsAreReadAndKept()
+        try testSavingWritesThroughSymbolicLinks()
         try testContainerImageFormats()
         try testUndisplayableFilesCentreTheirMessage()
         try testTabMenuClosesEveryTab()
@@ -3779,6 +3780,48 @@ enum RegressionTests {
         try expect(GitLineChanges.baseline(for: tracked, in: root, encoding: buffer.textEncoding)
                     == .lines(GitLineChanges.lines(of: buffer.text)),
                    "HEAD's copy of a GBK file was not read as the buffer was")
+    }
+
+    /// Saving wrote a new file over the path it was given. For a symbolic
+    /// link — a dotfile kept in a repository, say, opened from the tree — that
+    /// put a copy where the link was, and left the file it led to unedited.
+    private static func testSavingWritesThroughSymbolicLinks() throws {
+        let directory = try temporaryDirectory("symlink-save")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fm = FileManager.default
+        let real = directory.appendingPathComponent("real")
+        try fm.createDirectory(at: real, withIntermediateDirectories: true)
+        let target = real.appendingPathComponent("target.sh")
+        try Data("echo one\n".utf8).write(to: target)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+        // Relative, as links inside a checkout are.
+        let link = directory.appendingPathComponent("link.sh")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "real/target.sh")
+
+        let document = Document(url: link)
+        try expect(document.text == "echo one\n" && !document.isReadOnly,
+                   "a file was not read through its symbolic link")
+        document.replace([Document.Edit(range: NSRange(location: 0, length: 0), text: "echo zero\n")])
+        try document.save()
+        try expect((try? fm.destinationOfSymbolicLink(atPath: link.path)) == "real/target.sh",
+                   "saving replaced the symbolic link with a file")
+        let behind = try String(contentsOf: target, encoding: .utf8)
+        try expect(behind == "echo zero\necho one\n",
+                   "the file the link leads to was not the one written")
+        let mode = try fm.attributesOfItem(atPath: target.path)[.posixPermissions] as? NSNumber
+        try expect(mode?.intValue == 0o755, "saving through a link lost the file's mode")
+        try expect(!document.isModified && !document.diskChangedSinceLastSync,
+                   "a file just saved through a link reads as changed on disk")
+
+        // The date watched is the file's, not the link's, which never moves:
+        // a change to the file behind the link is seen as one.
+        try Data("echo elsewhere\n".utf8).write(to: target)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                             ofItemAtPath: target.path)
+        try expect(document.diskChangedSinceLastSync,
+                   "a change to the file behind a link was not seen")
+        try expect(document.reloadFromDiskIfLatest() && document.text == "echo elsewhere\n",
+                   "the file behind a link was not reloaded")
     }
 
     /// A click moves the caret and draws at once; the selection change — and

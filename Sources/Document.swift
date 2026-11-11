@@ -768,7 +768,11 @@ final class Document {
             data = utf8
             savedEncoding = .utf8
         }
-        try data.write(to: url, options: .atomic)
+        // Written to the file the path leads to, not over the path itself.
+        // An atomic write puts a new file where the name was, so a symbolic
+        // link opened from the tree was replaced by a copy of what it pointed
+        // at, and the file it pointed at never saw the edit.
+        try data.write(to: url.resolvingSymlinksInPath(), options: .atomic)
         textEncoding = savedEncoding
         lastKnownDiskModificationDate = Self.modificationDate(for: url)
         lastLocalEditAt = nil
@@ -936,8 +940,12 @@ final class Document {
         }
     }
 
+    /// When the file was last written. For a symbolic link that is the file
+    /// it leads to: the link's own date never moves, and with it a file
+    /// reached through one could change on disk without ever being seen to.
     static func modificationDate(for url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate])
+        let path = url.resolvingSymlinksInPath().path
+        return (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate])
             as? Date
     }
 }
