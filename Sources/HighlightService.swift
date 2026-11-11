@@ -89,13 +89,21 @@ final class HighlightService {
                 return
             }
         }
+        // Whether the text is the one this document was last parsed from. A
+        // language has one tree, and a document that has lost it to another
+        // parses again from nothing — to the same tree, if its text is the
+        // same, so what it had coloured is still coloured. Taking every fresh
+        // tree for a change had two long documents waiting to be coloured
+        // undo each other's every pass: neither got past its first, and the
+        // main thread parsed one and then the other until one was closed.
+        let parsedBefore = doc.syntaxTreeIsCurrent
         guard let parsed = hl.parse(text: text, owner: storage) else {
             paintPlain(doc)
             return
         }
         if let changed = parsed.changed {
             changed.forEach { doc.markUnhighlighted($0) }
-        } else {
+        } else if !parsedBefore {
             doc.markUnhighlighted()
         }
         doc.updateJSXTagMatches(parsed.tagMatches)
@@ -243,6 +251,10 @@ final class HighlightService {
         let url = doc.url
         detachedParses[url] = number
         let grammar = language.language
+        // As in `paint`: a tree for text this document was already parsed
+        // from changes nothing. One for text edited since has no tree before
+        // it to say what the edit changed, which can be anything after it.
+        let parsedBefore = doc.syntaxTreeIsCurrent
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak doc] in
             let tree = SyntaxHighlighter.parseDetached(bytes, language: grammar)
             DispatchQueue.main.async {
@@ -258,6 +270,7 @@ final class HighlightService {
                     return
                 }
                 hl.adopt(tree, bytes: bytes, for: doc.storage)
+                if !parsedBefore { doc.markUnhighlighted() }
                 self.paint(doc)
             }
         }

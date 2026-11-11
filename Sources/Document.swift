@@ -172,7 +172,9 @@ final class Document {
     private(set) var textRevision = 0
 
     /// The revision of the text the highlighter's syntax tree was last built
-    /// from; nil when it holds none for this buffer.
+    /// from; nil when this buffer has never had one, or is not parsed any
+    /// more. It stands when the tree itself goes to another document of the
+    /// language: what was coloured from it is still right for this text.
     private(set) var syntaxTreeRevision: Int?
     /// Whether the syntax tree describes the text as it stands — not as it
     /// was before an edit the next parse has yet to catch up with.

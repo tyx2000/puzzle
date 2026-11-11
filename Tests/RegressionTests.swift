@@ -129,6 +129,8 @@ enum RegressionTests {
             try testByteMapperRoundTrips()
             try testHighlightingColoursOnlyWhatChanged()
             try testLongFileHighlightsOffTheMainThread()
+            try testLongDocumentsOfOneLanguageAllFinishColouring()
+            try testLongFileEditedWithoutItsTreeIsColouredWhole()
             try testMarkdownLiveEditing()
             try testMarkdownReading()
             try testMarkdownRevealsOnEdit()
@@ -150,7 +152,7 @@ enum RegressionTests {
             try testSideBySideDiff()
             try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (26)")
+            print("Editor regression tests passed (28)")
             return
         }
         try testProcessDrain()
@@ -215,6 +217,8 @@ enum RegressionTests {
         try testByteMapperRoundTrips()
         try testHighlightingColoursOnlyWhatChanged()
         try testLongFileHighlightsOffTheMainThread()
+        try testLongDocumentsOfOneLanguageAllFinishColouring()
+        try testLongFileEditedWithoutItsTreeIsColouredWhole()
         try testImageDownsampling()
         try testEPUBReading()
         try testMarkdownLiveEditing()
@@ -5430,6 +5434,142 @@ enum RegressionTests {
         try expect(service.passCountForTesting - passes > 2, "a long file was coloured in one pass")
         try expectColouredWhole(document, "colouring a long file")
         document.isModified = false
+    }
+
+    /// Two long documents of one language, both waiting to be coloured. The
+    /// language has one tree, so each pass of one took it from the other,
+    /// which parsed again from nothing and took that for a change to all of
+    /// its text: neither got past its first pass, and the main thread parsed
+    /// one and then the other for as long as both were open.
+    private static func testLongDocumentsOfOneLanguageAllFinishColouring() throws {
+        let directory = try temporaryDirectory("long-together")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Each longer than two passes, and short of the length whose first
+        // parse leaves the main thread.
+        func source(_ name: String) -> String {
+            var text = ""
+            var index = 0
+            while text.utf16.count < HighlightService.passLength * 5 / 2 {
+                text += "let \(name)\(index) = \"text \(index)\" // note\n"
+                text += "func \(name)F\(index)() -> Int { return \(index) }\n"
+                index += 1
+            }
+            // A line comment as it stands; the end of a block comment, once
+            // one is opened above it.
+            return text + "// end */\nlet \(name)Last = 1\n"
+        }
+        let documents = try ["one", "two", "three"].map { name -> Document in
+            let file = directory.appendingPathComponent("\(name).swift")
+            try Data(source(name).utf8).write(to: file)
+            return Document(url: file)
+        }
+        try expect(documents.allSatisfy { $0.storage.length < HighlightService.detachedParseLength },
+                   "the documents are long enough to be parsed off the main thread")
+        let service = HighlightService()
+        defer { documents.forEach { service.cancelPending(for: $0.url) } }
+        func settle(_ waiting: [Document]) {
+            let deadline = Date().addingTimeInterval(10)
+            while waiting.contains(where: { !$0.unhighlighted.isEmpty }) && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+
+        documents.forEach { service.highlight($0) }
+        try expect(documents.allSatisfy { !$0.unhighlighted.isEmpty },
+                   "a document longer than two passes was coloured in one")
+        settle(documents)
+        for document in documents {
+            try expect(document.unhighlighted.isEmpty,
+                       "\(document.name) was never coloured to its end beside the others: "
+                       + "\(document.unhighlighted.count) of \(document.storage.length) left")
+            try expectColouredWhole(document, "colouring \(document.name) beside the others")
+        }
+        // And there it rests: nothing goes on parsing once all are coloured.
+        let passes = service.passCountForTesting
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        try expect(service.passCountForTesting == passes,
+                   "passes went on after every document was coloured")
+
+        // The other half of the rule: a document that has lost the tree *and*
+        // been edited has nothing to say where the edit changed the colours,
+        // which can be anywhere after it. All of it is coloured again.
+        let edited = documents[0]
+        try expect(service.parseCountsForTesting(language: "swift") != nil
+                   && !edited.unhighlighted.contains(edited.storage.length - 1),
+                   "the documents did not settle")
+        service.highlight(documents[1])
+        settle([documents[1]])
+        let far = (edited.text as NSString).range(of: "func oneF40(").location
+        try expect(far != NSNotFound
+                   && !sameColor(edited.storage.attribute(.foregroundColor, at: far,
+                                                          effectiveRange: nil) as? NSColor,
+                                 Theme.comment),
+                   "the code was a comment before any was opened")
+        edited.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "/* ")
+        service.scheduleHighlight(edited)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        settle([edited])
+        try expect(sameColor(edited.storage.attribute(.foregroundColor, at: far + 3,
+                                                      effectiveRange: nil) as? NSColor,
+                             Theme.comment),
+                   "a comment opened in a document that had lost its tree coloured only its own line")
+        try expectColouredWhole(edited, "an edit to a document that had lost its tree")
+    }
+
+    /// The same for a document long enough that its parse leaves the main
+    /// thread. Its tree comes back by another road — parsed elsewhere, then
+    /// adopted — and an edit made while another document held the language's
+    /// tree coloured only the line it was on: a comment opened at the top
+    /// left everything below it as code.
+    private static func testLongFileEditedWithoutItsTreeIsColouredWhole() throws {
+        let directory = try temporaryDirectory("long-edited")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var source = ""
+        var count = 0
+        while source.utf16.count < HighlightService.detachedParseLength + 20_000 {
+            source += "let value\(count) = \"text \(count)\" // note\n"
+            count += 1
+        }
+        // A line comment as it stands; the end of a block comment, once one
+        // is opened above it.
+        source += "// end */\nlet last = 1\n"
+        let file = directory.appendingPathComponent("long.swift")
+        try Data(source.utf8).write(to: file)
+        let other = directory.appendingPathComponent("other.swift")
+        try Data("let other = 1\n".utf8).write(to: other)
+        let document = Document(url: file)
+        let neighbour = Document(url: other)
+        let service = HighlightService()
+        defer {
+            service.cancelPending(for: document.url)
+            service.cancelPending(for: neighbour.url)
+        }
+        func settle() {
+            let deadline = Date().addingTimeInterval(20)
+            while (service.isParsingDetachedForTesting(document.url)
+                    || !document.unhighlighted.isEmpty) && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        service.highlight(document)
+        try expect(service.isParsingDetachedForTesting(document.url),
+                   "the long file was parsed on the main thread")
+        settle()
+        try expectColouredWhole(document, "colouring the long file")
+
+        // The neighbour takes the language's tree; then the long file is edited.
+        service.highlight(neighbour)
+        let far = (document.text as NSString).range(of: "let value\(count / 2) ").location
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "/* ")
+        service.scheduleHighlight(document)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        settle()
+        try expect(document.unhighlighted.isEmpty, "the edited long file was never coloured to its end")
+        try expect(sameColor(document.storage.attribute(.foregroundColor, at: far + 3,
+                                                        effectiveRange: nil) as? NSColor,
+                             Theme.comment),
+                   "a comment opened in a long file that had lost its tree coloured only its own line")
+        try expectColouredWhole(document, "an edit to a long file that had lost its tree")
     }
 
     private static func testHighlightServiceKeepsParseOwner() throws {
