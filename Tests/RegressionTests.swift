@@ -9678,6 +9678,13 @@ enum RegressionTests {
         try expect(!editor.reopenLastClosedTab(),
                    "reopen invented a tab that was never closed")
 
+        // Closing a different tab must leave the displayed document alone,
+        // even when the removed tab sits before it in the tab strip.
+        pane.close(index: 0, reopenable: false)
+        try expect(editor.currentURL == files[1]
+                   && pane.openURLs == [files[0], files[1]],
+                   "closing an inactive tab switched away from the selected file")
+
         // A file deleted after it was closed is not resurrected.
         let doomed = files[0]
         pane.close(index: pane.openURLs.firstIndex(of: doomed) ?? 0)

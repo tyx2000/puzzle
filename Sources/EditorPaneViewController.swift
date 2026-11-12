@@ -1485,6 +1485,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             onEmptied?(self)
             return
         }
+        if showingNext, let active = activeIndex, active != index {
+            // Removing another tab can shift this one's index, but its
+            // document and on-screen editor stay selected.
+            if index < active { activeIndex = active - 1 }
+            reloadTabs()
+            return
+        }
         guard showingNext else {
             // The buffer on screen lets go of the pane before it is released,
             // or the store keeps it for a tab that no longer exists.
