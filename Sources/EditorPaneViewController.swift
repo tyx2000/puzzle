@@ -1899,6 +1899,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         diffHeader.refreshAppearance()
         sideBySideDiff?.refreshAppearance()
         imagePreview?.refreshFonts()
+        svgPreview?.refreshFonts()
         mediaPreview?.refreshFonts()
         pdfPreview?.refreshFonts()
         epubReader?.refreshFonts()

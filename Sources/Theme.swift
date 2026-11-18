@@ -20,7 +20,7 @@ enum Theme {
         return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     }
     static var rowHighlightTint: NSColor {
-        cursor.withAlphaComponent(palette.isDark ? 0.22 : 0.16)
+        cursor.withAlphaComponent(palette.isDark ? 0.13 : 0.09)
     }
     static func rowHighlightPath(in rects: [NSRect]) -> NSBezierPath {
         let path = NSBezierPath()

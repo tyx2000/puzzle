@@ -20,6 +20,7 @@ final class SVGPreviewView: FlatView {
     }
 
     private var panes: [Pane] = []
+    private var pictures: [ImagePreviewView] = []
 
     /// Space around and between the pictures.
     private static let padding: CGFloat = 12
@@ -33,11 +34,27 @@ final class SVGPreviewView: FlatView {
 
     func show(_ panes: [Pane]) {
         self.panes = panes
+        if pictures.count != panes.count {
+            pictures.forEach { $0.removeFromSuperview() }
+            pictures = panes.map { _ in
+                let preview = ImagePreviewView()
+                preview.imagePadding = 4
+                addSubview(preview)
+                return preview
+            }
+        }
+        for (pane, picture) in zip(panes, pictures) {
+            picture.updateVectorImage(pane.image, caption: pane.caption ?? "")
+        }
+        needsLayout = true
         needsDisplay = true
     }
 
-    func clear() {
-        panes = []
+    func clear() { show([]) }
+
+    func refreshFonts() {
+        fillColor = Theme.editorBackground
+        pictures.forEach { $0.refreshFonts() }
         needsDisplay = true
     }
 
@@ -80,92 +97,52 @@ final class SVGPreviewView: FlatView {
         // unflipped, so its own bottom edge is the one that meets the text.
         Theme.border.setFill()
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
-        guard !panes.isEmpty else { return }
-        let padding = Self.padding
-        let width = (bounds.width - padding * CGFloat(panes.count + 1)) / CGFloat(panes.count)
-        guard width > 1 else { return }
         for (index, pane) in panes.enumerated() {
-            let x = padding + (width + padding) * CGFloat(index)
-            draw(pane, in: NSRect(x: x, y: padding, width: width,
-                                  height: max(1, bounds.height - padding * 2)))
-            // A hairline between the two versions, so the pictures are read as
-            // two rather than as one wide one.
+            let rect = paneRect(at: index)
             if index > 0 {
                 Theme.border.setFill()
-                NSRect(x: x - padding / 2, y: padding,
-                       width: 1, height: max(1, bounds.height - padding * 2)).fill()
+                NSRect(x: rect.minX - Self.padding / 2, y: rect.minY,
+                       width: 1, height: rect.height).fill()
+            }
+            if let title = pane.title {
+                drawLabel(title, in: rect, at: rect.maxY - Self.titleHeight, color: Theme.dimText)
+            }
+            if let note = pane.note {
+                drawLabel(note, in: rect, at: rect.minY,
+                          color: pane.image == nil ? Theme.dimText : Theme.yellow)
             }
         }
     }
 
-    private func draw(_ pane: Pane, in rect: NSRect) {
-        var content = rect
-        func centred(_ text: String, at y: CGFloat, in colour: NSColor) {
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: Theme.uiFont(10.5), .foregroundColor: colour,
-            ]
-            let size = (text as NSString).size(withAttributes: attributes)
-            (text as NSString).draw(at: NSPoint(x: rect.midX - size.width / 2, y: y),
-                                    withAttributes: attributes)
+    override func layout() {
+        super.layout()
+        for (index, picture) in pictures.enumerated() {
+            var rect = paneRect(at: index)
+            let titleSpace = panes[index].title == nil ? 0 : Self.titleHeight + 4
+            let noteSpace = panes[index].note == nil ? 0 : Self.titleHeight + 2
+            rect.origin.y += noteSpace
+            rect.size.height = max(0, rect.height - noteSpace - titleSpace)
+            picture.frame = rect
         }
-        if let title = pane.title {
-            centred(title, at: rect.maxY - Self.titleHeight, in: Theme.dimText)
-            content.size.height -= Self.titleHeight + 4
-        }
-        // Under the picture: what it is, then why it is not current. Both strips
-        // come out of the space the picture is drawn in, so nothing overlaps.
-        var footer = rect.minY
-        if let caption = pane.caption {
-            centred(caption, at: footer, in: Theme.dimText)
-            footer += Self.titleHeight
-            content.origin.y += Self.titleHeight
-            content.size.height -= Self.titleHeight
-        }
-        if let note = pane.note {
-            centred(note, at: footer,
-                    in: pane.image == nil ? Theme.dimText : Theme.yellow)
-            content.origin.y += Self.titleHeight + 2
-            content.size.height -= Self.titleHeight + 2
-        }
-        guard let image = pane.image, content.width > 1, content.height > 1 else { return }
-        let size = Self.fitted(image.size, in: content.size)
-        let frame = NSRect(x: content.midX - size.width / 2,
-                           y: content.midY - size.height / 2,
-                           width: size.width, height: size.height)
-        drawCheckerboard(in: frame)
-        image.draw(in: frame)
     }
 
-    /// Shrunk to fit and never enlarged, the rule the image preview uses: a
-    /// 24pt icon blown up to fill half the pane says nothing about how it will
-    /// look, and a picture at its own size can be compared with one.
-    static func fitted(_ image: NSSize, in available: NSSize) -> NSSize {
-        guard image.width > 0, image.height > 0 else { return .zero }
-        let scale = min(1, available.width / image.width, available.height / image.height)
-        return NSSize(width: floor(image.width * scale), height: floor(image.height * scale))
+    private func paneRect(at index: Int) -> NSRect {
+        let padding = Self.padding
+        let width = max(0, (bounds.width - padding * CGFloat(panes.count + 1))
+                        / CGFloat(panes.count))
+        return NSRect(x: padding + (width + padding) * CGFloat(index), y: padding,
+                      width: width, height: max(0, bounds.height - 2 * padding))
     }
 
-    /// The grey squares that stand in for transparency, the same ones the
-    /// image preview draws: an SVG is mostly transparent, and without them a
-    /// white drawing on the dark editor looks like a drawing on a white card.
-    private func drawCheckerboard(in frame: NSRect) {
-        guard frame.width > 1, frame.height > 1 else { return }
-        let square: CGFloat = 8
-        NSColor(white: 0.22, alpha: 1).setFill()
-        frame.fill()
-        NSColor(white: 0.27, alpha: 1).setFill()
-        var row = 0
-        var y = frame.minY
-        while y < frame.maxY {
-            var x = frame.minX + (row % 2 == 0 ? 0 : square)
-            while x < frame.maxX {
-                NSRect(x: x, y: y, width: min(square, frame.maxX - x),
-                       height: min(square, frame.maxY - y)).fill()
-                x += square * 2
-            }
-            y += square
-            row += 1
-        }
+    private func drawLabel(_ text: String, in rect: NSRect, at y: CGFloat, color: NSColor) {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        (text as NSString).draw(in: NSRect(x: rect.minX, y: y, width: rect.width,
+                                           height: Self.titleHeight),
+                                withAttributes: [.font: Theme.uiFont(10.5),
+                                                 .foregroundColor: color,
+                                                 .paragraphStyle: style])
     }
 
     var paneCountForTesting: Int { panes.count }

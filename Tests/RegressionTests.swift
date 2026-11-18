@@ -4994,11 +4994,45 @@ enum RegressionTests {
         imagePreview.layoutSubtreeIfNeeded()
         try expect(imagePreview.imageFrameForTesting.size == NSSize(width: 50, height: 100),
                    "image preview lost natural size or aspect ratio when changing images")
+        try testImageZoomControls(in: imagePreview)
         imagePreview.clear()
         try expect(!imagePreview.hasImageForTesting
                    && imagePreview.imageFrameForTesting == .zero,
                    "clearing an image preview retained its bitmap or constraints")
 
+    }
+
+    private static func testImageZoomControls(in preview: ImagePreviewView) throws {
+        let buttons = preview.subviews.compactMap { $0 as? NSButton }
+        guard let minus = buttons.first(where: { $0.toolTip == "Zoom out" }),
+              let plus = buttons.first(where: { $0.toolTip == "Zoom in" }),
+              let percentage = buttons.first(where: { $0.toolTip == "Zoom to fit" }),
+              let scroll = preview.subviews.compactMap({ $0 as? NSScrollView }).first else {
+            throw Failure(description: "image preview is missing zoom controls or scroll view")
+        }
+        let fitted = preview.imageFrameForTesting
+        let fittedTitle = percentage.attributedTitle.string
+        plus.performClick(nil)
+        try expect(preview.imageFrameForTesting.width > fitted.width
+                    && percentage.attributedTitle.string != fittedTitle,
+                   "zoom in did not enlarge the picture and update the percentage")
+        minus.performClick(nil)
+        try expect(preview.imageFrameForTesting.width < fitted.width * 1.25,
+                   "zoom out did not shrink the picture")
+        for _ in 0..<7 { plus.performClick(nil) }
+        let enlarged = preview.imageFrameForTesting
+        let clip = scroll.contentView
+        try expect(enlarged.height > clip.bounds.height,
+                   "the picture could not be zoomed beyond the viewport")
+        clip.scroll(to: clip.constrainBoundsRect(
+            NSRect(origin: NSPoint(x: enlarged.maxX, y: enlarged.maxY),
+                   size: clip.bounds.size)).origin)
+        try expect(clip.bounds.maxY >= enlarged.maxY,
+                   "could not scroll to the far edge of an enlarged picture")
+        percentage.performClick(nil)
+        try expect(preview.imageFrameForTesting == fitted
+                    && percentage.attributedTitle.string == fittedTitle,
+                   "clicking the percentage did not restore the fitted size")
     }
 
     private static func testMediaFilesPlayInsteadOfLoading() throws {
@@ -11472,8 +11506,8 @@ enum RegressionTests {
                    "moving up takes a different time from moving down the same distance")
         let tint = PuzzleTextView.currentLineTint
         try expect(sameColor(tint.withAlphaComponent(1), Theme.cursor)
-                    && abs(tint.alphaComponent - (Theme.palette.isDark ? 0.22 : 0.16)) < 0.001,
-                   "the caret's band is not the accent at the theme's stronger opacity: \(tint)")
+                    && abs(tint.alphaComponent - (Theme.palette.isDark ? 0.13 : 0.09)) < 0.001,
+                   "the caret's band is not the accent at the theme's row highlight opacity: \(tint)")
 
         let directory = try temporaryDirectory("caret-flight")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -21712,16 +21746,13 @@ enum RegressionTests {
         try expect(pane.textForTesting.contains("-") && pane.textForTesting.contains("+"),
                    "the diff itself is not shown under the pictures")
 
-        // Drawn at its own size, never blown up: a 24pt icon stretched across
-        // half the pane says nothing about how it will look.
-        let room = NSSize(width: 300, height: 200)
-        try expect(SVGPreviewView.fitted(NSSize(width: 24, height: 24), in: room)
-                    == NSSize(width: 24, height: 24),
-                   "a small picture was enlarged to fill the pane")
-        try expect(SVGPreviewView.fitted(NSSize(width: 900, height: 300), in: room)
-                    == NSSize(width: 300, height: 100),
-                   "a large picture was not shrunk to fit: "
-                     + "\(SVGPreviewView.fitted(NSSize(width: 900, height: 300), in: room))")
+        let pictures = diffPreview.subviews.compactMap { $0 as? ImagePreviewView }
+        try expect(pictures.count == 2 && pictures.allSatisfy {
+            $0.imageFrameForTesting.size == NSSize(width: 120, height: 90)
+        }, "SVG comparison did not keep both small pictures at their natural size")
+        try testImageZoomControls(in: pictures[0])
+        try expect(pictures[1].imageFrameForTesting.size == NSSize(width: 120, height: 90),
+                   "zooming one SVG comparison picture moved the other")
 
         // History shows the same two versions, taken from the commit and its
         // parent — and a commit that *adds* an SVG has only one, so the tab
