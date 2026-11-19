@@ -58,11 +58,15 @@ enum SideBySideDiff {
     }
 
     static func rows(from diff: String) -> [Row] {
+        // `doc.text` is backed by NSTextStorage's bridged NSMutableString;
+        // making it contiguous once avoids bridging overhead on every line split.
+        var contiguous = diff
+        contiguous.makeContiguousUTF8()
         var rows: [Row] = []
         var removed: [(Int, String)] = []
         var added: [(Int, String)] = []
         // A whole file's body is one hunk from the first line of both sides.
-        var inHunk = DiffHighlighter.isWholeFileBody(diff)
+        var inHunk = DiffHighlighter.isWholeFileBody(contiguous)
         var oldNext = inHunk ? 1 : 0
         var newNext = inHunk ? 1 : 0
 
@@ -77,7 +81,7 @@ enum SideBySideDiff {
             added.removeAll()
         }
 
-        for rawLine in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+        for rawLine in contiguous.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(rawLine)
             if line.hasPrefix("@@") {
                 flushChanges()

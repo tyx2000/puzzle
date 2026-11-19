@@ -865,7 +865,10 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         in textContainer: NSTextContainer,
         forGlyphRange glyphRange: NSRange
     ) -> Bool {
-        if glyphRange.length > 0 {
+        let skipMarkdown = (textContainer.textView as? PuzzleTextView)?.rendersMarkdown == false
+            && markdownCollapsedLineRanges.isEmpty
+            && markdownTableRowMetrics.isEmpty
+        if !skipMarkdown, glyphRange.length > 0 {
             let firstCharacter = characterIndexForGlyph(at: glyphRange.location)
             let lastCharacter = characterIndexForGlyph(
                 at: NSMaxRange(glyphRange) - 1)
@@ -907,7 +910,7 @@ final class FoldingLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         // Rendered Markdown sizes each line for what it holds — a heading, a
         // line of prose, the gap a blank line stands for, a row of code —
         // rather than giving every line the code row.
-        if glyphRange.length > 0, let placed = markdownLineBox(forGlyphRange: glyphRange) {
+        if !skipMarkdown, glyphRange.length > 0, let placed = markdownLineBox(forGlyphRange: glyphRange) {
             lineFragmentRect.pointee.size.height = placed.height
             lineFragmentUsedRect.pointee.size.height = placed.height
             baselineOffset.pointee = placed.layout.baselineOffset(spaceAbove: placed.spaceAbove)

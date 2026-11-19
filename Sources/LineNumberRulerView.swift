@@ -136,6 +136,10 @@ final class LineNumberRulerView: NSRulerView, PointerHoverRefreshing {
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
         ruleThickness = Self.gutterWidth(digits: Self.minimumDigits)
+        // Partially scrolled rows and the active-line badge can sit partly or
+        // wholly above y = 0; AppKit does not clip custom drawing to a view's
+        // bounds unasked, so they would otherwise paint over the tab bar.
+        clipsToBounds = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Code folding gutter")
@@ -559,14 +563,15 @@ final class LineNumberRulerView: NSRulerView, PointerHoverRefreshing {
                              width: numbers.end - numbers.start, height: size.height)
             let pill = Self.activePill(around: box, textWidth: size.width)
             // Two opaque badges can cross, but their digits must not overlap.
-            if displayedHoverPill.map({ !$0.intersects(pill) }) ?? true {
+            if pill.intersects(bounds),
+               displayedHoverPill.map({ !$0.intersects(pill) }) ?? true {
                 Theme.cursor.setFill()
                 NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
                 value.draw(in: box, withAttributes: badge)
                 drawnActiveMarkForTesting = pill
             }
         }
-        if let hoveredNumber, let pill = displayedHoverPill {
+        if let hoveredNumber, let pill = displayedHoverPill, pill.intersects(bounds) {
             let value = "\(hoveredNumber.number)" as NSString
             var box = hoveredNumber.labelBox
             box.origin.y = pill.midY - box.height / 2

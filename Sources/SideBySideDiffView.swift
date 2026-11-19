@@ -38,6 +38,7 @@ final class SideBySideDiffView: FlatView {
         table.autoresizingMask = [.width]
         table.headerView = nil
         table.rowSizeStyle = .custom
+        table.rowHeight = Theme.lineMetrics().target
         table.backgroundColor = Theme.editorBackground
         table.selectionHighlightStyle = .none
         table.intercellSpacing = NSSize(width: 0, height: 0)
@@ -106,6 +107,7 @@ final class SideBySideDiffView: FlatView {
         currentBlock = -1
         changeFrame.clear()
         horizontalOffset = 0
+        table.rowHeight = Theme.lineMetrics().target
         measureTextWidths()
         table.reloadData()
         table.layoutSubtreeIfNeeded()
@@ -119,6 +121,7 @@ final class SideBySideDiffView: FlatView {
     func refreshAppearance() {
         fillColor = Theme.editorBackground
         table.backgroundColor = Theme.editorBackground
+        table.rowHeight = Theme.lineMetrics().target
         scroll.backgroundColor = Theme.editorBackground
         measureTextWidths()
         updateHorizontalGeometry()
@@ -133,11 +136,68 @@ final class SideBySideDiffView: FlatView {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font, .paragraphStyle: paragraph,
         ]
-        maximumTextWidth = rows.reduce(CGFloat(0)) { maximum, row in
-            max(maximum, [row.leftText, row.rightText].compactMap { text in
-                text.map { ceil(($0 as NSString).size(withAttributes: attributes).width) }
-            }.max() ?? 0)
+        guard font.isFixedPitch else {
+            var best: CGFloat = 0
+            for row in rows {
+                if let left = row.leftText {
+                    best = max(best, ceil((left as NSString).size(withAttributes: attributes).width))
+                }
+                if let right = row.rightText, right != row.leftText {
+                    best = max(best, ceil((right as NSString).size(withAttributes: attributes).width))
+                }
+            }
+            maximumTextWidth = best
+            return
         }
+
+        var maxASCII = 0
+        var longestASCII: String?
+        var tabbed: [String] = []
+        var nonPlain: [String] = []
+
+        func consider(_ text: String?) {
+            guard let text, !text.isEmpty else { return }
+            var isPlainASCII = true
+            var hasTab = false
+            var asciiCount = 0
+            for byte in text.utf8 {
+                if byte == 0x09 {
+                    hasTab = true
+                    isPlainASCII = false
+                    break
+                }
+                if byte < 0x20 || byte >= 0x7F {
+                    isPlainASCII = false
+                } else {
+                    asciiCount += 1
+                }
+            }
+            if isPlainASCII {
+                if asciiCount > maxASCII {
+                    maxASCII = asciiCount
+                    longestASCII = text
+                }
+            } else if hasTab {
+                tabbed.append(text)
+            } else {
+                nonPlain.append(text)
+            }
+        }
+
+        for row in rows {
+            consider(row.leftText)
+            if row.rightText != row.leftText { consider(row.rightText) }
+        }
+
+        var best = longestASCII.map { ceil(($0 as NSString).size(withAttributes: attributes).width) } ?? 0
+        for text in tabbed {
+            best = max(best, ceil((text as NSString).size(withAttributes: attributes).width))
+        }
+        let upperBoundPerUnit = max(Theme.characterWidth() * 2.5, 24)
+        for text in nonPlain where CGFloat(text.utf16.count) * upperBoundPerUnit > best {
+            best = max(best, ceil((text as NSString).size(withAttributes: attributes).width))
+        }
+        maximumTextWidth = best
     }
 
     private func updateHorizontalGeometry() {
@@ -239,10 +299,6 @@ final class SideBySideDiffView: FlatView {
 
 extension SideBySideDiffView: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        Theme.lineMetrics().target
-    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,
                    row: Int) -> NSView? {

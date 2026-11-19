@@ -49,77 +49,55 @@ enum DiffHighlighter {
 
     /// The room after a line's marker: one column of the code's own face.
     static var markerGap: CGFloat {
-        (" " as NSString).size(withAttributes: [.font: Theme.editorFont()]).width
+        Theme.spaceWidth()
     }
+
+    private static let fileHeaderPrefixes = [
+        "diff --git", "index ", "new file", "deleted file", "similarity index", "rename ",
+    ]
 
     /// Paint a whole diff buffer, returning the full-width line bands the text
     /// view should draw (see `PuzzleTextView.diffBands`).
     @discardableResult
     static func apply(to storage: NSTextStorage) -> [(range: NSRange, color: NSColor)] {
+        applyWithLineNumbers(to: storage).bands
+    }
+
+    /// Paint a whole diff buffer and build its file line-number mapping in a
+    /// single pass over the text storage.
+    static func applyWithLineNumbers(to storage: NSTextStorage)
+        -> (bands: [(range: NSRange, color: NSColor)], lineNumbers: [Int?]) {
         var bands: [(range: NSRange, color: NSColor)] = []
+        var numbers: [Int?] = []
         let text = storage.string as NSString
-        let wholeFile = isWholeFileBody(storage.string)
-        let full = NSRange(location: 0, length: text.length)
+        let length = text.length
+        let full = NSRange(location: 0, length: length)
+        let firstChar = length > 0 ? text.character(at: 0) : 0
+        let wholeFile = firstChar == 0x2B || firstChar == 0x2D
+            || firstChar == 0x20 || firstChar == 0x5C
+        let gap = markerGap
+        let addedColor = Theme.diffAddedText
+        let removedColor = Theme.diffRemovedText
+        let hunkColor = Theme.blue
+        let fileHeaderColor = Theme.dimText
+        let addedBg = Theme.diffAddedBackground
+        let removedBg = Theme.diffRemovedBackground
+        var boldFont: NSFont?
+
         storage.beginEditing()
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground), range: full)
 
-        var lines: [(range: NSRange, kind: LineKind)] = []
-        text.enumerateSubstrings(in: full, options: [.byLines, .substringNotRequired]) {
-            _, _, enclosingRange, _ in
-            let lineRange = NSIntersectionRange(enclosingRange, full)
-            guard lineRange.length > 0 else { return }
-            let line = text.substring(with: lineRange)
-            let kind = wholeFile ? bodyKind(of: line) : kind(of: line)
-            lines.append((lineRange, kind))
-
-            storage.addAttribute(.foregroundColor, value: kind.foreground, range: lineRange)
-            // A line's `+`, `-` or leading space stands a column apart from
-            // the code after it, which it ran straight into. The gap is
-            // kerning, so the text is the diff as Git wrote it.
-            if [.added, .removed, .context].contains(kind),
-               let first = line.unicodeScalars.first, "+- ".unicodeScalars.contains(first) {
-                storage.addAttribute(.kern, value: Self.markerGap,
-                                     range: NSRange(location: lineRange.location, length: 1))
+        var removedRun: [NSRange] = []
+        var addedRun: [NSRange] = []
+        func flushWordRun() {
+            guard !removedRun.isEmpty, !addedRun.isEmpty else {
+                removedRun.removeAll(keepingCapacity: true)
+                addedRun.removeAll(keepingCapacity: true)
+                return
             }
-            if let bg = kind.background {
-                // Recorded, not applied as an attribute — the text view paints
-                // these full-width so every changed line reads as a solid block.
-                bands.append((lineRange, bg))
-            }
-            if kind == .hunkHeader || kind == .fileHeader {
-                let bold = NSFontManager.shared.convert(Theme.editorFont(),
-                                                        toHaveTrait: .boldFontMask)
-                storage.addAttribute(.font, value: bold, range: lineRange)
-            }
-        }
-        markChangedWords(in: lines, of: text, storage: storage)
-        storage.endEditing()
-        return bands
-    }
-
-    /// Inside a block of removed lines followed by the added lines that
-    /// replace it, the words that actually changed, in a deeper shade of the
-    /// line's colour — a line with one changed character no longer has to be
-    /// read against its twin letter by letter. Lines are paired in order, as
-    /// Git lists them; a pair too unlike to be one line edited is left whole.
-    private static func markChangedWords(in lines: [(range: NSRange, kind: LineKind)],
-                                         of text: NSString, storage: NSTextStorage) {
-        // Git places this metadata between the old and new last lines. It is
-        // not a context line and must not split the replacement block.
-        let lines = lines.filter { !text.substring(with: $0.range).hasPrefix("\\") }
-        var index = 0
-        while index < lines.count {
-            guard lines[index].kind == .removed else {
-                index += 1
-                continue
-            }
-            var removedEnd = index
-            while removedEnd < lines.count, lines[removedEnd].kind == .removed { removedEnd += 1 }
-            var addedEnd = removedEnd
-            while addedEnd < lines.count, lines[addedEnd].kind == .added { addedEnd += 1 }
-            for offset in 0..<min(removedEnd - index, addedEnd - removedEnd) {
-                let removed = body(of: lines[index + offset].range, in: text)
-                let added = body(of: lines[removedEnd + offset].range, in: text)
+            for offset in 0..<min(removedRun.count, addedRun.count) {
+                let removed = body(of: removedRun[offset], in: text)
+                let added = body(of: addedRun[offset], in: text)
                 guard let words = changedWords(removed: text.substring(with: removed),
                                                added: text.substring(with: added)) else { continue }
                 for range in words.removed {
@@ -133,8 +111,164 @@ enum DiffHighlighter {
                                                         length: range.length))
                 }
             }
-            index = max(addedEnd, removedEnd)
+            removedRun.removeAll(keepingCapacity: true)
+            addedRun.removeAll(keepingCapacity: true)
         }
+
+        var inHunk = wholeFile
+        var oldNext = wholeFile ? 1 : 0
+        var newNext = wholeFile ? 1 : 0
+        var loc = 0
+
+        while loc < length {
+            var lineEnd = 0
+            var contentsEnd = 0
+            text.getLineStart(nil, end: &lineEnd, contentsEnd: &contentsEnd,
+                              for: NSRange(location: loc, length: 0))
+            let lineRange = NSRange(location: loc, length: lineEnd - loc)
+            let contentLength = contentsEnd - loc
+            let c0 = contentLength > 0 ? text.character(at: loc) : 0
+
+            if wholeFile {
+                if c0 == 0x2B { // "+"
+                    storage.addAttribute(.foregroundColor, value: addedColor, range: lineRange)
+                    storage.addAttribute(.kern, value: gap,
+                                         range: NSRange(location: loc, length: 1))
+                    bands.append((lineRange, addedBg))
+                    addedRun.append(lineRange)
+                    if inHunk {
+                        numbers.append(newNext)
+                        newNext += 1
+                    } else {
+                        numbers.append(nil)
+                    }
+                } else if c0 == 0x2D { // "-"
+                    if !addedRun.isEmpty { flushWordRun() }
+                    storage.addAttribute(.foregroundColor, value: removedColor, range: lineRange)
+                    storage.addAttribute(.kern, value: gap,
+                                         range: NSRange(location: loc, length: 1))
+                    bands.append((lineRange, removedBg))
+                    removedRun.append(lineRange)
+                    if inHunk {
+                        numbers.append(oldNext)
+                        oldNext += 1
+                    } else {
+                        numbers.append(nil)
+                    }
+                } else if c0 == 0x20 { // " "
+                    if !removedRun.isEmpty || !addedRun.isEmpty { flushWordRun() }
+                    storage.addAttribute(.kern, value: gap,
+                                         range: NSRange(location: loc, length: 1))
+                    if inHunk {
+                        numbers.append(newNext)
+                        newNext += 1
+                        oldNext += 1
+                    } else {
+                        numbers.append(nil)
+                    }
+                } else if c0 == 0x5C { // "\"
+                    numbers.append(nil)
+                } else {
+                    if !removedRun.isEmpty || !addedRun.isEmpty { flushWordRun() }
+                    inHunk = false
+                    numbers.append(nil)
+                }
+            } else {
+                let kind: LineKind
+                if c0 == 0x40, contentLength >= 2, text.character(at: loc + 1) == 0x40 {
+                    kind = .hunkHeader
+                } else if c0 == 0x2B {
+                    kind = (contentLength >= 3 && text.character(at: loc + 1) == 0x2B
+                            && text.character(at: loc + 2) == 0x2B) ? .fileHeader : .added
+                } else if c0 == 0x2D {
+                    kind = (contentLength >= 3 && text.character(at: loc + 1) == 0x2D
+                            && text.character(at: loc + 2) == 0x2D) ? .fileHeader : .removed
+                } else if c0 == 0x64 || c0 == 0x69 || c0 == 0x6E || c0 == 0x73 || c0 == 0x72 {
+                    let prefix = text.substring(with: NSRange(location: loc,
+                                                              length: min(contentLength, 16)))
+                    kind = Self.fileHeaderPrefixes.contains { prefix.hasPrefix($0) }
+                        ? .fileHeader : .context
+                } else {
+                    kind = .context
+                }
+
+                switch kind {
+                case .added:
+                    storage.addAttribute(.foregroundColor, value: addedColor, range: lineRange)
+                    storage.addAttribute(.kern, value: gap,
+                                         range: NSRange(location: loc, length: 1))
+                    bands.append((lineRange, addedBg))
+                    addedRun.append(lineRange)
+                case .removed:
+                    if !addedRun.isEmpty { flushWordRun() }
+                    storage.addAttribute(.foregroundColor, value: removedColor, range: lineRange)
+                    storage.addAttribute(.kern, value: gap,
+                                         range: NSRange(location: loc, length: 1))
+                    bands.append((lineRange, removedBg))
+                    removedRun.append(lineRange)
+                case .context:
+                    if c0 == 0x20 || c0 == 0x2B || c0 == 0x2D {
+                        storage.addAttribute(.kern, value: gap,
+                                             range: NSRange(location: loc, length: 1))
+                    }
+                    if c0 != 0x5C && (!removedRun.isEmpty || !addedRun.isEmpty) {
+                        flushWordRun()
+                    }
+                case .hunkHeader, .fileHeader:
+                    if !removedRun.isEmpty || !addedRun.isEmpty { flushWordRun() }
+                    storage.addAttribute(.foregroundColor,
+                                         value: kind == .hunkHeader ? hunkColor : fileHeaderColor,
+                                         range: lineRange)
+                    let bold = boldFont ?? NSFontManager.shared.convert(
+                        Theme.editorFont(), toHaveTrait: .boldFontMask)
+                    boldFont = bold
+                    storage.addAttribute(.font, value: bold, range: lineRange)
+                }
+
+                if kind == .hunkHeader {
+                    let hunkLine = text.substring(with: NSRange(location: loc,
+                                                                length: contentLength))
+                    if let start = hunkStart(hunkLine) {
+                        oldNext = start.old
+                        newNext = start.new
+                        inHunk = true
+                    } else {
+                        inHunk = false
+                    }
+                    numbers.append(nil)
+                } else if !inHunk || contentLength == 0 {
+                    inHunk = false
+                    numbers.append(nil)
+                } else {
+                    switch c0 {
+                    case 0x2B:
+                        numbers.append(newNext)
+                        newNext += 1
+                    case 0x2D:
+                        numbers.append(oldNext)
+                        oldNext += 1
+                    case 0x20:
+                        numbers.append(newNext)
+                        newNext += 1
+                        oldNext += 1
+                    case 0x5C:
+                        numbers.append(nil)
+                    default:
+                        inHunk = false
+                        numbers.append(nil)
+                    }
+                }
+            }
+
+            loc = lineEnd
+        }
+
+        flushWordRun()
+        if length == 0 || text.character(at: length - 1) == 0x0A {
+            numbers.append(nil)
+        }
+        storage.endEditing()
+        return (bands, numbers)
     }
 
     /// A diff line without its marker and its line break.
@@ -272,51 +406,56 @@ enum DiffHighlighter {
     /// The result is indexed by zero-based buffer line, so the gutter can look a
     /// line up directly instead of counting hunks itself.
     static func lineNumbers(in text: String) -> [Int?] {
-        var numbers: [Int?] = []
-        // A whole file's body is one hunk from the first line of both sides.
-        var inHunk = isWholeFileBody(text)
-        var oldNext = inHunk ? 1 : 0
-        var newNext = inHunk ? 1 : 0
-        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(raw)
-            if line.hasPrefix("@@") {
-                if let start = hunkStart(line) {
-                    oldNext = start.old
-                    newNext = start.new
-                    inHunk = true
-                } else {
+        var contiguous = text
+        contiguous.makeContiguousUTF8()
+        return contiguous.utf8.withContiguousStorageIfAvailable { buffer in
+            var numbers: [Int?] = []
+            // A whole file's body is one hunk from the first line of both sides.
+            var inHunk = isWholeFileBody(contiguous)
+            var oldNext = inHunk ? 1 : 0
+            var newNext = inHunk ? 1 : 0
+            let count = buffer.count
+            var i = 0
+            while true {
+                var lineEnd = i
+                while lineEnd < count && buffer[lineEnd] != 0x0A { lineEnd += 1 }
+                if lineEnd - i >= 2 && buffer[i] == 0x40 && buffer[i + 1] == 0x40 {
+                    let line = String(decoding: buffer[i..<lineEnd], as: UTF8.self)
+                    if let start = hunkStart(line) {
+                        oldNext = start.old
+                        newNext = start.new
+                        inHunk = true
+                    } else {
+                        inHunk = false
+                    }
+                    numbers.append(nil)
+                } else if !inHunk || i == lineEnd {
                     inHunk = false
+                    numbers.append(nil)
+                } else {
+                    switch buffer[i] {
+                    case 0x2B: // "+"
+                        numbers.append(newNext)
+                        newNext += 1
+                    case 0x2D: // "-"
+                        numbers.append(oldNext)
+                        oldNext += 1
+                    case 0x20: // " "
+                        numbers.append(newNext)
+                        newNext += 1
+                        oldNext += 1
+                    case 0x5C: // "\"
+                        numbers.append(nil)
+                    default:   // next file's header — the hunk is over
+                        inHunk = false
+                        numbers.append(nil)
+                    }
                 }
-                numbers.append(nil)
-                continue
+                if lineEnd == count { break }
+                i = lineEnd + 1
             }
-            // Inside a hunk the first character decides the line's fate, and
-            // only there: a body line reading "+++ x" is an addition, not the
-            // file header `kind(of:)` would call it.
-            guard inHunk, let first = line.first else {
-                inHunk = false
-                numbers.append(nil)
-                continue
-            }
-            switch first {
-            case "+":
-                numbers.append(newNext)
-                newNext += 1
-            case "-":
-                numbers.append(oldNext)
-                oldNext += 1
-            case " ":
-                numbers.append(newNext)
-                newNext += 1
-                oldNext += 1
-            case "\\":  // "\ No newline at end of file"
-                numbers.append(nil)
-            default:      // next file's header — the hunk is over
-                inHunk = false
-                numbers.append(nil)
-            }
-        }
-        return numbers
+            return numbers
+        } ?? []
     }
 
     // MARK: - A whole file
@@ -331,13 +470,46 @@ enum DiffHighlighter {
     /// A diff that is not one hunk from the top of the file — binary, a mode
     /// change, a note that there is nothing to show — comes back as it went in.
     static func wholeFileBody(of diff: String) -> String {
-        let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
-        let hunks = lines.indices.filter { lines[$0].hasPrefix("@@") }
-        guard hunks.count == 1, let start = hunkStart(String(lines[hunks[0]])),
-              start.old <= 1, start.new <= 1 else { return diff }
-        let body = lines[(hunks[0] + 1)...]
-        guard body.contains(where: { !$0.isEmpty }) else { return diff }
-        return body.joined(separator: "\n")
+        var contiguous = diff
+        contiguous.makeContiguousUTF8()
+        let bodyByteOffset: Int? = contiguous.utf8.withContiguousStorageIfAvailable { buffer in
+            let count = buffer.count
+            var hunkLineStart = -1
+            var hunkLineEnd = -1
+            var hunkCount = 0
+            var i = 0
+            while i <= count {
+                var lineEnd = i
+                while lineEnd < count && buffer[lineEnd] != 0x0A { lineEnd += 1 }
+                if lineEnd - i >= 2 && buffer[i] == 0x40 && buffer[i + 1] == 0x40 {
+                    hunkCount += 1
+                    if hunkCount > 1 { return nil }
+                    hunkLineStart = i
+                    hunkLineEnd = lineEnd
+                }
+                if lineEnd == count { break }
+                i = lineEnd + 1
+            }
+            guard hunkCount == 1, hunkLineEnd < count else { return nil }
+            let hunkLine = String(decoding: buffer[hunkLineStart..<hunkLineEnd], as: UTF8.self)
+            guard let start = hunkStart(hunkLine), start.old <= 1, start.new <= 1 else {
+                return nil
+            }
+            let bodyStart = hunkLineEnd + 1
+            var j = bodyStart
+            var hasNonEmptyBodyLine = false
+            while j < count {
+                if buffer[j] != 0x0A {
+                    hasNonEmptyBodyLine = true
+                    break
+                }
+                j += 1
+            }
+            return hasNonEmptyBodyLine ? bodyStart : nil
+        } ?? nil
+        guard let bodyByteOffset else { return diff }
+        let idx = contiguous.utf8.index(contiguous.utf8.startIndex, offsetBy: bodyByteOffset)
+        return String(contiguous[idx...])
     }
 
     /// Whether `text` is such a body. A diff starts with a header; a body

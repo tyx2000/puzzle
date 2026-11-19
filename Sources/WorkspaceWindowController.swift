@@ -33,6 +33,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
     private var isSteppingPastDiff = false
+    private var diffStepPrefetches: [Bool: DiffStepPrefetch] = [:]
+    private var diffPrefetchGeneration = 0
+    private var waitingPrefetchGeneration: Int?
     private(set) var trafficLightTopInset = (EditorTabBar.defaultRowHeight - 14) / 2
     private(set) var trafficLightHeight: CGFloat = 14
 
@@ -158,6 +161,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.onStepPastDiff = { [weak self] url, forward in
             self?.stepPastDiff(url, forward: forward)
         }
+        editor.onDiffChangeChanged = { [weak self] url, index, count in
+            self?.prefetchDiffNeighbors(from: url, index: index, count: count)
+        }
         sidebar.onGitCommitDiff = { [weak self] commit, file, directory in
             self?.showCommitDiff(commit: commit, file: file, in: directory)
         }
@@ -212,6 +218,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         // tree, a diff's in the list it was opened from.
         editor.onActiveDocumentChanged = { [weak self] url in
             guard let self, let url else { return }
+            if self.diffStepPrefetches.values.contains(where: { $0.fromURL != url }) {
+                self.invalidateDiffPrefetches()
+            }
             self.sidebar.showOpenTab(url, as: Self.openTab(for: url))
             self.refreshWindowTitle(activeFile: url)
         }
@@ -249,6 +258,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidMiniaturize(_ notification: Notification) {
         quickOpenIndex = []
+        invalidateDiffPrefetches()
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
         DocumentStore.shared.releaseTransientMemory()
@@ -509,6 +519,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         workspaceFileMonitor?.stop()
         workspaceFileMonitor = nil
         projectURL = url
+        invalidateDiffPrefetches()
         quickOpenIndex = []
         palette?.dismiss()
         editor.hasProject = true
@@ -575,6 +586,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// repository, and when Puzzle becomes active after such a change.
     func refreshExternalGitState() {
         guard let projectURL else { return }
+        invalidateDiffPrefetches()
         // Something changed inside .git — possibly the repository's own
         // `user.name`, which is otherwise resolved once and reused.
         GitService.forgetRepositoryInfo()
@@ -659,6 +671,154 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         editor.open(url: url, replacingContent: true, atLastChange: atLastChange)
     }
 
+    private struct ChangeEntrySignature: Equatable {
+        let size: Int?
+        let modified: Date?
+        let indexModified: Date?
+    }
+
+    private struct DiffStepLanding {
+        let path: String
+        let content: DocumentStore.VirtualContent
+        let signature: ChangeEntrySignature?
+    }
+
+    private enum DiffPrefetchState {
+        case loading([() -> Void])
+        case ready(DiffStepLanding?)
+    }
+
+    private struct DiffStepPrefetch {
+        let generation: Int
+        let directory: URL
+        let fromURL: URL
+        let entriesSnapshot: [GitService.Status.Entry]
+        var state: DiffPrefetchState
+    }
+
+    private func invalidateDiffPrefetches() {
+        diffPrefetchGeneration += 1
+        diffStepPrefetches.removeAll()
+        if waitingPrefetchGeneration != nil {
+            waitingPrefetchGeneration = nil
+            isSteppingPastDiff = false
+        }
+    }
+
+    private static func changeEntrySignature(for path: String,
+                                             in directory: URL) -> ChangeEntrySignature {
+        let fileURL = directory.appendingPathComponent(path)
+        let fileValues = try? fileURL.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let indexURL = directory.appendingPathComponent(".git/index")
+        let indexValues = try? indexURL.resourceValues(forKeys: [.contentModificationDateKey])
+        return ChangeEntrySignature(
+            size: fileValues?.fileSize,
+            modified: fileValues?.contentModificationDate,
+            indexModified: indexValues?.contentModificationDate)
+    }
+
+    private static func resolveNextDiff(
+        for tab: OpenTab, entries: [GitService.Status.Entry], in directory: URL, forward: Bool
+    ) -> (commit: String?, landing: DiffStepLanding?) {
+        typealias Neighbour = (path: String, content: () -> DocumentStore.VirtualContent)
+        let commit: String?
+        let neighbours: [Neighbour]
+        switch tab {
+        case .file:
+            return (nil, nil)
+        case .change(let path):
+            commit = nil
+            neighbours = Self.beside(path, in: entries, forward: forward, pathOf: \.path).map { entry in
+                (entry.path, { Self.changeDiffContent(for: entry, in: directory) })
+            }
+        case .commitFile(let hash, let path):
+            commit = hash
+            neighbours = Self.beside(path, in: GitService.files(inCommit: hash, in: directory),
+                                     forward: forward, pathOf: \.path).map { file in
+                (file.path, { Self.commitDiffContent(commit: hash, path: file.path, in: directory) })
+            }
+        }
+        for file in neighbours where !Self.isImage(file.path) && !Self.isPlayable(file.path) {
+            let content = file.content()
+            guard DiffHighlighter.hasChanges(in: content.text) else { continue }
+            let signature = commit == nil ? changeEntrySignature(for: file.path, in: directory) : nil
+            return (commit, DiffStepLanding(path: file.path, content: content, signature: signature))
+        }
+        return (commit, nil)
+    }
+
+    private func prefetchDiffNeighbors(from url: URL, index: Int, count: Int) {
+        guard count > 0, let directory = projectURL else { return }
+        let tab = Self.openTab(for: url)
+        if case .file = tab { return }
+        if diffStepPrefetches.values.contains(where: {
+            $0.fromURL != url || $0.directory != directory
+        }) {
+            invalidateDiffPrefetches()
+        }
+        let entries = sidebar.projectsPanel.changes.entries
+        if index == count - 1 {
+            startDiffPrefetch(for: url, tab: tab, entries: entries, in: directory, forward: true)
+        }
+        if index == 0 {
+            startDiffPrefetch(for: url, tab: tab, entries: entries, in: directory, forward: false)
+        }
+    }
+
+    private func startDiffPrefetch(for url: URL, tab: OpenTab, entries: [GitService.Status.Entry],
+                                   in directory: URL, forward: Bool) {
+        if let existing = diffStepPrefetches[forward],
+           existing.directory == directory,
+           existing.fromURL == url {
+            if case .change = tab, existing.entriesSnapshot != entries {
+                // Entries changed since this prefetch started; replace it.
+            } else {
+                return
+            }
+        }
+        diffPrefetchGeneration += 1
+        let generation = diffPrefetchGeneration
+        let snapshot: [GitService.Status.Entry]
+        if case .change = tab { snapshot = entries } else { snapshot = [] }
+        diffStepPrefetches[forward] = DiffStepPrefetch(
+            generation: generation, directory: directory, fromURL: url,
+            entriesSnapshot: snapshot, state: .loading([]))
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resolved = Self.resolveNextDiff(
+                for: tab, entries: snapshot, in: directory, forward: forward)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      var entry = self.diffStepPrefetches[forward],
+                      entry.generation == generation else { return }
+                let waiters: [() -> Void]
+                if case .loading(let list) = entry.state {
+                    waiters = list
+                } else {
+                    waiters = []
+                }
+                entry.state = .ready(resolved.landing)
+                self.diffStepPrefetches[forward] = entry
+                waiters.forEach { $0() }
+            }
+        }
+    }
+
+    private static func isPrefetchFresh(
+        _ prefetch: DiffStepPrefetch, landing: DiffStepLanding?,
+        directory: URL, url: URL, commit: String?, entries: [GitService.Status.Entry]
+    ) -> Bool {
+        guard prefetch.directory == directory, prefetch.fromURL == url else { return false }
+        if commit == nil {
+            guard prefetch.entriesSnapshot == entries else { return false }
+            if let landing,
+               changeEntrySignature(for: landing.path, in: directory) != landing.signature {
+                return false
+            }
+        }
+        return true
+    }
+
     /// A step off the end of `url`'s diff goes on to the file beside it in the
     /// list it belongs to, a commit's files staying within that commit. It
     /// lands on the change nearest the one it left: the first going down, the
@@ -666,51 +826,76 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     /// is passed over, and with no file left the step does nothing.
     private func stepPastDiff(_ url: URL, forward: Bool) {
         guard let directory = projectURL, !isSteppingPastDiff else { return }
-        typealias Neighbour = (path: String, content: () -> DocumentStore.VirtualContent)
+        let tab = Self.openTab(for: url)
         let commit: String?
-        let neighbours: () -> [Neighbour]
-        switch Self.openTab(for: url) {
-        case .file:
-            return
-        case .change(let path):
-            commit = nil
-            let entries = Self.beside(path, in: sidebar.projectsPanel.changes.entries,
-                                      forward: forward, pathOf: \.path)
-            neighbours = {
-                entries.map { entry in
-                    (entry.path, { Self.changeDiffContent(for: entry, in: directory) })
+        switch tab {
+        case .file: return
+        case .change: commit = nil
+        case .commitFile(let hash, _): commit = hash
+        }
+        let currentEntries = commit == nil ? sidebar.projectsPanel.changes.entries : []
+
+        func applyLanding(_ landing: DiffStepLanding?) {
+            guard let landing, self.projectURL == directory,
+                  self.editor.currentURL == url else { return }
+            self.showDiffContent(landing.content,
+                                 at: self.diffPreviewURL(in: directory, path: landing.path,
+                                                         commit: commit),
+                                 atLastChange: !forward)
+        }
+
+        if let prefetch = diffStepPrefetches[forward],
+           prefetch.directory == directory, prefetch.fromURL == url,
+           commit != nil || prefetch.entriesSnapshot == currentEntries {
+            switch prefetch.state {
+            case .ready(let landing):
+                if Self.isPrefetchFresh(prefetch, landing: landing, directory: directory,
+                                        url: url, commit: commit, entries: currentEntries) {
+                    invalidateDiffPrefetches()
+                    applyLanding(landing)
+                    return
                 }
-            }
-        case .commitFile(let hash, let path):
-            commit = hash
-            neighbours = {
-                Self.beside(path, in: GitService.files(inCommit: hash, in: directory),
-                            forward: forward, pathOf: \.path).map { file in
-                    (file.path, { Self.commitDiffContent(commit: hash, path: file.path,
-                                                         in: directory) })
+                diffStepPrefetches.removeValue(forKey: forward)
+            case .loading(var waiters):
+                let generation = prefetch.generation
+                isSteppingPastDiff = true
+                waitingPrefetchGeneration = generation
+                waiters.append { [weak self] in
+                    guard let self, self.waitingPrefetchGeneration == generation else { return }
+                    self.waitingPrefetchGeneration = nil
+                    self.isSteppingPastDiff = false
+                    guard let completed = self.diffStepPrefetches[forward],
+                          completed.generation == generation,
+                          case .ready(let landing) = completed.state else {
+                        self.stepPastDiff(url, forward: forward)
+                        return
+                    }
+                    let latestEntries = commit == nil
+                        ? self.sidebar.projectsPanel.changes.entries : []
+                    if Self.isPrefetchFresh(completed, landing: landing, directory: directory,
+                                            url: url, commit: commit, entries: latestEntries) {
+                        self.invalidateDiffPrefetches()
+                        applyLanding(landing)
+                    } else {
+                        self.diffStepPrefetches.removeValue(forKey: forward)
+                        self.stepPastDiff(url, forward: forward)
+                    }
                 }
+                diffStepPrefetches[forward]?.state = .loading(waiters)
+                return
             }
         }
+
+        invalidateDiffPrefetches()
         // Clicks while the file is read would each go one file further.
         isSteppingPastDiff = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var landing: (path: String, content: DocumentStore.VirtualContent)?
-            for file in neighbours() where !Self.isImage(file.path) && !Self.isPlayable(file.path) {
-                let content = file.content()
-                guard DiffHighlighter.hasChanges(in: content.text) else { continue }
-                landing = (file.path, content)
-                break
-            }
+            let resolved = Self.resolveNextDiff(
+                for: tab, entries: currentEntries, in: directory, forward: forward)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.isSteppingPastDiff = false
-                // The reader may have gone elsewhere while the file was read.
-                guard let landing, self.projectURL == directory,
-                      self.editor.currentURL == url else { return }
-                self.showDiffContent(landing.content,
-                                     at: self.diffPreviewURL(in: directory, path: landing.path,
-                                                             commit: commit),
-                                     atLastChange: !forward)
+                applyLanding(resolved.landing)
             }
         }
     }
@@ -922,6 +1107,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     /// What follows a file reaching disk, whether a tab or a replace wrote it.
     private func fileWasWritten(_ url: URL) {
+        invalidateDiffPrefetches()
         // The file changed on disk, so its cached blame is stale.
         editor.invalidateBlame(for: url)
         // Saving settings.json applies the new display config immediately.
@@ -953,6 +1139,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     /// Something committed, pushed or otherwise moved the repository.
     private func gitChanged() {
+        invalidateDiffPrefetches()
         refreshGit(requireFollowUp: true)
         // Committing rewrites authorship for the committed lines, and clears
         // the gutter marks for everything it took.
@@ -1108,6 +1295,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     func refreshGit(requireFollowUp: Bool = false) {
         gitRefreshRequestCountForTesting += 1
+        invalidateDiffPrefetches()
         guard let projectURL else { return }
         if gitSummaryRefreshInFlight {
             // Coalesced into the one in flight — unless that one no longer
@@ -1492,6 +1680,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         workspaceFileMonitor = nil
         GitService.forgetRepositoryInfo()
         projectURL = nil
+        invalidateDiffPrefetches()
         quickOpenIndex = []
         palette?.dismiss()
         editor.hasProject = false

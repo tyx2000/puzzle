@@ -57,8 +57,9 @@ final class HighlightService {
             doc.noteSyntaxTree(built: false)
             doc.updateJSXTagMatches([])
             doc.updateMarkdownPresentation(MarkdownPresentation())
-            doc.diffBands = DiffHighlighter.apply(to: storage)
-            doc.diffLineNumbers = DiffHighlighter.lineNumbers(in: storage.string)
+            let painted = DiffHighlighter.applyWithLineNumbers(to: storage)
+            doc.diffBands = painted.bands
+            doc.diffLineNumbers = painted.lineNumbers
             return
         }
 

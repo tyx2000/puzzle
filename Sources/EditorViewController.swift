@@ -7,6 +7,7 @@ final class EditorViewController: NSViewController {
     var onOpenSettings: (() -> Void)?
     var onActiveDocumentChanged: ((URL?) -> Void)?
     var onStepPastDiff: ((URL, _ forward: Bool) -> Void)?
+    var onDiffChangeChanged: ((URL, _ index: Int, _ count: Int) -> Void)?
     /// Welcome-screen actions, forwarded to the window controller.
     var onOpenFolder: (() -> Void)?
     /// True once this window has a project. The welcome screen invites you to
@@ -145,6 +146,9 @@ final class EditorViewController: NSViewController {
         }
         pane.onStepPastDiff = { [weak self] url, forward in
             self?.onStepPastDiff?(url, forward)
+        }
+        pane.onDiffChangeChanged = { [weak self] url, index, count in
+            self?.onDiffChangeChanged?(url, index, count)
         }
         pane.onEmptied = { [weak self] _ in self?.updatePlaceholder() }
         pane.onTabOpened = { [weak pane] url in

@@ -42,11 +42,12 @@ enum RegressionTests {
             try testGutterWidthFollowsLineCount()
             try testGutterMarksUncommittedChanges()
             try testActiveLineBadge()
+            try testLineNumbersStayBelowTabBar()
             try testRoundedLineBackgrounds()
             try testRoundedRowBackgroundStaysWholeWhileMoving()
             try testLineBandLeavesNoRepaintResidue()
             try testFlatSurfacesHoldNoBitmap()
-            print("Clickable gutter and rounded background regression tests passed (9)")
+            print("Clickable gutter and rounded background regression tests passed (10)")
             return
         }
         if CommandLine.arguments.contains("--animated-background-regressions") {
@@ -123,6 +124,24 @@ enum RegressionTests {
             print("Wrapping regression tests passed (4)")
             return
         }
+        if CommandLine.arguments.contains("--diff-regressions") {
+            try testDiffPairIgnoresTheMarks()
+            try testDiffMarkersStandApart()
+            try testDiffInlineChanges()
+            try testDiffGutterUsesFileLineNumbers()
+            try testDiffHeaderStepsThroughChanges()
+            try testDiffStepsAcrossFiles()
+            try testLargeDiffStepsWithoutFullLayout()
+            try testDiffButtonsCountTheChanges()
+            try testChangeFrameStaysOverTheCode()
+            try testDiffTabsKeepTheirNames()
+            try testDiffBuffersAreRebuiltAfterEviction()
+            try testSideBySideDiff()
+            try testSideBySideDiffScrollsLongLines()
+            try testWholeFileDiffsFrameEachKind()
+            print("Diff regression tests passed (14)")
+            return
+        }
         if CommandLine.arguments.contains("--editor-regressions") {
             try testIncrementalParsing()
             try testHighlightServiceKeepsParseOwner()
@@ -146,13 +165,14 @@ enum RegressionTests {
             try testDiffGutterUsesFileLineNumbers()
             try testDiffHeaderStepsThroughChanges()
             try testDiffStepsAcrossFiles()
+            try testLargeDiffStepsWithoutFullLayout()
             try testDiffButtonsCountTheChanges()
             try testChangeFrameStaysOverTheCode()
             try testDiffTabsKeepTheirNames()
             try testSideBySideDiff()
             try testWholeFileDiffsFrameEachKind()
             try testRecentProjectsDialog()
-            print("Editor regression tests passed (28)")
+            print("Editor regression tests passed (29)")
             return
         }
         try testProcessDrain()
@@ -333,6 +353,7 @@ enum RegressionTests {
         try testSavedThemeAppliesAtOnce()
         try testDiffHeaderStepsThroughChanges()
         try testDiffStepsAcrossFiles()
+        try testLargeDiffStepsWithoutFullLayout()
         try testDiffButtonsCountTheChanges()
         try testChangeFrameStaysOverTheCode()
         try testDiffTabsKeepTheirNames()
@@ -372,6 +393,7 @@ enum RegressionTests {
         try testGutterWidthFollowsLineCount()
         try testSideBySideDiff()
         try testActiveLineBadge()
+        try testLineNumbersStayBelowTabBar()
         try testCaretLineFlies()
         try testHoverLineFlies()
         try testHoverKeepsUpWithRapidPointerMovement()
@@ -12720,6 +12742,72 @@ enum RegressionTests {
                    "a selection still painted an active-line band")
     }
 
+    private static func testLineNumbersStayBelowTabBar() throws {
+        let directory = try temporaryDirectory("ruler-clips-to-tab-bar")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("long.swift")
+        let body = (1...80).map { "let line\($0) = \($0)" }.joined(separator: "\n") + "\n"
+        try Data(body.utf8).write(to: url)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 400),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.contentViewController = pane
+        defer { window.close() }
+        pane.open(url: url)
+        pane.jumpToLine(1)
+        window.setContentSize(NSSize(width: 700, height: 400))
+        pane.view.layoutSubtreeIfNeeded()
+
+        guard let ruler = pane.lineNumberRulerForTesting else {
+            throw Failure(description: "the editor has no line-number gutter")
+        }
+        try expect(ruler.clipsToBounds, "the line-number gutter does not clip to its bounds")
+        ruler.gitChanges = [GitLineChanges.Change(kind: .modified, lines: 1...3,
+                                                  removed: [], added: [])]
+
+        func tabBarPixels() throws -> Data {
+            let tabBar = pane.tabBarForTesting
+            let area = pane.view.convert(tabBar.bounds, from: tabBar)
+            guard let rep = pane.view.bitmapImageRepForCachingDisplay(in: area) else {
+                throw Failure(description: "the tab bar could not be drawn")
+            }
+            pane.view.cacheDisplay(in: area, to: rep)
+            return rep.tiffRepresentation ?? Data()
+        }
+
+        let scrollView = pane.scrollViewForTesting
+        let clip = scrollView.contentView
+        for layered in [false, true] {
+            if layered {
+                pane.view.wantsLayer = true
+                CATransaction.flush()
+            }
+            for offset: CGFloat in [8, 20] {
+                clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: offset))
+                scrollView.reflectScrolledClipView(clip)
+                pane.view.layoutSubtreeIfNeeded()
+                ruler.needsDisplay = true
+                ruler.displayIfNeeded()
+                let withRuler = try tabBarPixels()
+                ruler.isHidden = true
+                let withoutRuler = try tabBarPixels()
+                ruler.isHidden = false
+                try expect(withRuler == withoutRuler,
+                           "the gutter drew onto the file tab bar at scroll y=\(offset) (layered=\(layered))")
+            }
+        }
+
+        clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: 60))
+        scrollView.reflectScrolledClipView(clip)
+        pane.view.layoutSubtreeIfNeeded()
+        ruler.needsDisplay = true
+        ruler.displayIfNeeded()
+        try expect(ruler.drawnActiveMarkForTesting == nil,
+                   "an off-screen active-line badge was still drawn: \(String(describing: ruler.drawnActiveMarkForTesting))")
+    }
+
     /// Counts appear only where there is something to count, and Push reads as
     /// one control with two targets.
     private static func testGitPanelCounters() throws {
@@ -16314,6 +16402,169 @@ enum RegressionTests {
             try expect(DiffHighlighter.hasChanges(in: text) == expected,
                        "\(text.debugDescription) should be \(expected)")
         }
+    }
+
+    /// Stepping across files into a multi-thousand-line diff keeps non-contiguous
+    /// layout, settles the change frame onto the landed change (even at the far
+    /// end of the file), and never serves a stale prefetched diff.
+    private static func testLargeDiffStepsWithoutFullLayout() throws {
+        // 1. Verify single-pass highlighter line numbers and wholeFileBody edge cases.
+        let samples = [
+            "",
+            "+only\n",
+            " context\n-old\n+new\n\\ No newline at end of file\n",
+            "diff --git a/x.swift b/x.swift\n--- a/x.swift\n+++ b/x.swift\n@@ -10,3 +10,3 @@\n a\n-b\n+c\n\\ No newline at end of file\n",
+        ]
+        for sample in samples {
+            let storage = NSTextStorage(string: sample)
+            let painted = DiffHighlighter.applyWithLineNumbers(to: storage)
+            let expectedNumbers = DiffHighlighter.lineNumbers(in: sample)
+            try expect(painted.lineNumbers == expectedNumbers,
+                       "single-pass line numbers diverged for \(sample.debugDescription): \(painted.lineNumbers) vs \(expectedNumbers)")
+        }
+        let singleHunk = "diff --git a/f.swift b/f.swift\nindex 111..222 100644\n--- a/f.swift\n+++ b/f.swift\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n"
+        try expect(DiffHighlighter.wholeFileBody(of: singleHunk) == "-a\n+b\n c\n",
+                   "single-hunk wholeFileBody did not strip header cleanly")
+        let multiHunk = "diff --git a/f.swift b/f.swift\n@@ -1,1 +1,1 @@\n-a\n+b\n@@ -10,1 +10,1 @@\n-x\n+y\n"
+        try expect(DiffHighlighter.wholeFileBody(of: multiHunk) == multiHunk,
+                   "multi-hunk wholeFileBody should remain untouched")
+        let emptyHunk = "diff --git a/f.swift b/f.swift\n@@ -0,0 +1,0 @@\n"
+        try expect(DiffHighlighter.wholeFileBody(of: emptyHunk) == emptyHunk,
+                   "empty-body hunk should remain untouched")
+
+        let root = try temporaryDirectory("large-diff-steps")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func git(_ arguments: [String]) throws {
+            let result = GitService.run(arguments, in: root)
+            try expect(result.code == 0, "git \(arguments) failed: \(result.err)")
+        }
+        func waitUntil(_ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.name", "Test"])
+        try git(["config", "user.email", "test@example.invalid"])
+
+        let smallLines = (1...20).map { "let small\($0) = \($0)" }
+        let bigLines = (1...5000).map { "let bigLine\($0) = \($0)" }
+        let aURL = root.appendingPathComponent("a.swift")
+        let bURL = root.appendingPathComponent("b.swift")
+        try Data((smallLines.joined(separator: "\n") + "\n").utf8).write(to: aURL)
+        try Data((bigLines.joined(separator: "\n") + "\n").utf8).write(to: bURL)
+        try git(["add", "-A"])
+        try expect(GitService.commit("base", in: root).code == 0, "base commit failed")
+
+        var smallEdited = smallLines
+        smallEdited[2] = "let small3 = 300"
+        smallEdited[14] = "let small15 = 1500"
+        var bigEdited = bigLines
+        bigEdited[49] = "let bigLine50 = 50000"
+        bigEdited[4949] = "let bigLine4950 = 495000"
+        try Data((smallEdited.joined(separator: "\n") + "\n").utf8).write(to: aURL)
+        try Data((bigEdited.joined(separator: "\n") + "\n").utf8).write(to: bURL)
+
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.window?.setContentSize(NSSize(width: 1100, height: 700))
+        workspace.openProject(root)
+        let panel = workspace.sidebar.projectsPanel
+        try expect(waitUntil { panel.changes.rowCountForTesting == 2 },
+                   "the fixture's two changes never appeared")
+        workspace.window?.orderFrontRegardless()
+        defer { workspace.window?.orderOut(nil) }
+        workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        let directory = root.standardizedFileURL.resolvingSymlinksInPath()
+
+        func openTab() -> OpenTab? {
+            workspace.editor.currentURL.map(WorkspaceWindowController.openTab(for:))
+        }
+        guard let aEntry = panel.changes.entries.first(where: { $0.path == "a.swift" }) else {
+            throw Failure(description: "a.swift not in changes")
+        }
+        workspace.showDiff(for: aEntry, in: directory)
+        try expect(waitUntil { openTab() == .change(path: "a.swift") },
+                   "a.swift diff never opened")
+        guard let pane = workspace.editor.activePaneForTesting else {
+            throw Failure(description: "no active pane")
+        }
+        try expect(pane.nonContiguousLayoutForTesting,
+                   "diff buffer did not enable non-contiguous layout")
+
+        let navigator = pane.diffNavigatorForTesting
+        func summary() -> String { pane.diffHeaderForTesting.summaryForTesting }
+        func step(forward: Bool) throws {
+            if forward {
+                navigator.clickNextForTesting()
+            } else {
+                navigator.clickPreviousForTesting()
+            }
+            try expect(waitUntil { !workspace.isSteppingPastDiffForTesting },
+                       "a step past a diff's end never finished")
+            RunLoop.main.run(until: Date().addingTimeInterval(
+                ChangeFrameOverlay.scrollingMoveDuration + 0.15))
+            workspace.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        func expectChangeOnScreen(_ what: String) throws {
+            guard let rows = pane.changeFrameForTesting.rows else {
+                throw Failure(description: "\(what): no change is framed")
+            }
+            let visible = pane.textViewForTesting.visibleRect
+            try expect(visible.minY <= rows.minY && rows.maxY <= visible.maxY,
+                       "\(what): the change at \(rows) is not in \(visible)")
+        }
+
+        // Step to a.swift's 2nd change (triggers prefetch of b.swift), wait briefly for prefetch, then cross into b.swift.
+        try step(forward: true)
+        try expect(openTab() == .change(path: "a.swift") && summary() == "2/2 changes",
+                   "did not reach a.swift 2/2: \(summary())")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+
+        try step(forward: true)
+        try expect(openTab() == .change(path: "b.swift") && summary() == "1/2 changes",
+                   "did not step into b.swift 1/2: \(String(describing: openTab())) \(summary())")
+        try expect(pane.nonContiguousLayoutForTesting,
+                   "large diff buffer lost non-contiguous layout")
+        try expectChangeOnScreen("b.swift first change")
+
+        // Step down to line ~4950 in non-contiguous layout and confirm it converges on screen.
+        try step(forward: true)
+        try expect(openTab() == .change(path: "b.swift") && summary() == "2/2 changes",
+                   "did not reach b.swift 2/2: \(summary())")
+        try expectChangeOnScreen("b.swift second change near line 4950")
+
+        // Step backward twice -> b.swift 1/2 -> a.swift 2/2.
+        try step(forward: false)
+        try expect(openTab() == .change(path: "b.swift") && summary() == "1/2 changes",
+                   "did not step back to b.swift 1/2: \(summary())")
+        try expectChangeOnScreen("b.swift back to first change")
+        try step(forward: false)
+        try expect(openTab() == .change(path: "a.swift") && summary() == "2/2 changes",
+                   "did not step back into a.swift 2/2: \(String(describing: openTab())) \(summary())")
+        try expectChangeOnScreen("a.swift last change after stepping back")
+
+        // Modify b.swift on disk while a.swift's prefetch may already hold the old b.swift diff,
+        // and verify stepping into b.swift picks up the new 3rd change rather than stale cache.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        bigEdited[2499] = "let bigLine2500 = 2500999"
+        try Data((bigEdited.joined(separator: "\n") + "\n").utf8).write(to: bURL)
+
+        try step(forward: true)
+        try expect(openTab() == .change(path: "b.swift") && summary() == "1/3 changes",
+                   "stepping after editing b.swift served stale diff: \(summary())")
+        try expectChangeOnScreen("b.swift refreshed first change")
+
+        // Side-by-side mode on the large diff, and stepping back to a.swift.
+        pane.toggleDiffModeForTesting()
+        defer { if pane.sideBySideVisibleForTesting { pane.toggleDiffModeForTesting() } }
+        try expect(pane.sideBySideVisibleForTesting && pane.sideBySideBlockForTesting == 0,
+                   "side-by-side mode failed to open large diff at block 0")
+        try step(forward: false)
+        try expect(openTab() == .change(path: "a.swift") && pane.sideBySideBlockForTesting == 1,
+                   "side-by-side step back into a.swift landed at \(String(describing: openTab())) block \(pane.sideBySideBlockForTesting)")
     }
 
     /// A change taller than the view runs past the top of the code once it is

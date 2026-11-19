@@ -37,9 +37,11 @@ final class ChangeFrameOverlay: NSView {
     /// The rows framed, in the document view's coordinates; nil for no frame.
     private(set) var rows: NSRect?
     private(set) var colour: NSColor = Theme.blue
+    private var rowsProvider: (() -> NSRect?)?
     private var motion: Motion?
     private var timer: Timer?
     private var scrollObserver: NSObjectProtocol?
+    private var isSettling = false
 
     private struct Motion {
         let fromRows: NSRect
@@ -75,7 +77,9 @@ final class ChangeFrameOverlay: NSView {
     /// bring them on screen if they are not — unless `revealing` is false, for
     /// a tab come back to where it was left. Moved there when there was a
     /// frame already and `animated`; otherwise put there, fading in.
-    func frame(rows target: NSRect, colour: NSColor, animated: Bool, revealing: Bool = true) {
+    func frame(rows target: NSRect, colour: NSColor, animated: Bool,
+               revealing: Bool = true, resolveRows: (() -> NSRect?)? = nil) {
+        rowsProvider = resolveRows
         let clip = scrollView?.contentView
         let fromScroll = clip?.bounds.minY ?? 0
         let toScroll = revealing ? scrollTarget(for: target) ?? fromScroll : fromScroll
@@ -85,9 +89,8 @@ final class ChangeFrameOverlay: NSView {
         guard animated, !reduceMotion, let from = currentRows else {
             motion = nil
             let appearing = rows == nil
-            rows = target
+            rows = revealing ? settleNonContiguous(rows: target, revealing: true) : target
             self.colour = colour
-            scroll(to: toScroll)
             needsDisplay = true
             if appearing, !reduceMotion, window != nil {
                 alphaValue = 0
@@ -123,7 +126,44 @@ final class ChangeFrameOverlay: NSView {
         timer = nil
         motion = nil
         rows = nil
+        rowsProvider = nil
         needsDisplay = true
+    }
+
+    /// Under non-contiguous layout, jumping across unlaid-out lines moves the
+    /// target's y-origin as the visible viewport lays out. Scroll and resolve
+    /// until the change box and viewport settle on the same row.
+    private func settleNonContiguous(rows initial: NSRect, revealing: Bool) -> NSRect {
+        guard let resolveRows = rowsProvider,
+              let textView = scrollView?.documentView as? NSTextView,
+              let layoutManager = textView.layoutManager,
+              layoutManager.allowsNonContiguousLayout,
+              let container = textView.textContainer,
+              let clip = scrollView?.contentView else {
+            if revealing, let targetScroll = scrollTarget(for: initial) {
+                scroll(to: targetScroll)
+            }
+            return initial
+        }
+        isSettling = true
+        defer { isSettling = false }
+        var current = initial
+        for _ in 0..<4 {
+            if revealing, let targetScroll = scrollTarget(for: current) {
+                scroll(to: targetScroll)
+            }
+            let visibleRect = clip.bounds.offsetBy(
+                dx: -textView.textContainerOrigin.x,
+                dy: -textView.textContainerOrigin.y)
+            layoutManager.ensureLayout(forBoundingRect: visibleRect, in: container)
+            guard let refreshed = resolveRows() else { break }
+            let moved = abs(refreshed.minY - current.minY)
+            current = refreshed
+            let scrollSettled = !revealing || scrollTarget(for: current)
+                .map { abs($0 - clip.bounds.minY) < 0.5 } ?? true
+            if moved < 0.5 && scrollSettled { break }
+        }
+        return current
     }
 
     /// Where the frame is drawn this moment: on its way, or where it was put.
@@ -170,9 +210,15 @@ final class ChangeFrameOverlay: NSView {
         scroll(to: motion.fromScroll + (motion.toScroll - motion.fromScroll) * eased)
         needsDisplay = true
         if progress >= 1 {
+            let finalTarget = motion.toRows
             self.motion = nil
             timer?.invalidate()
             timer = nil
+            if rowsProvider != nil,
+               let textView = scrollView?.documentView as? NSTextView,
+               textView.layoutManager?.allowsNonContiguousLayout == true {
+                rows = settleNonContiguous(rows: rows ?? finalTarget, revealing: true)
+            }
         }
     }
 
@@ -206,6 +252,9 @@ final class ChangeFrameOverlay: NSView {
             forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
         ) { [weak self] _ in
             guard let self, self.rows != nil else { return }
+            if !self.isSettling, self.motion == nil, let refreshed = self.rowsProvider?() {
+                self.rows = refreshed
+            }
             self.needsDisplay = true
         }
     }

@@ -1322,6 +1322,14 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         guard !diffBands.isEmpty, let layoutManager, let container = textContainer else { return }
         let inset = textContainerInset
         let visible = visibleRect
+        let visibleContainerRect = visible.offsetBy(dx: -inset.width, dy: -inset.height)
+        let visibleGlyphs = layoutManager.glyphRange(
+            forBoundingRect: visibleContainerRect, in: container)
+        let visibleCharacters = layoutManager.characterRange(
+            forGlyphRange: visibleGlyphs, actualGlyphRange: nil)
+        guard visibleCharacters.length > 0 else { return }
+        let visibleEnd = NSMaxRange(visibleCharacters)
+
         // A horizontally scrolling text container is intentionally configured
         // with an unbounded width. Never turn that sentinel into a draw rect:
         // enormous fills escape normal clip/layer tiling and appear fixed while
@@ -1331,7 +1339,21 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         let width = max(bounds.width, visible.maxX, laidOutWidth)
         let length = (string as NSString).length
 
-        for band in diffBands {
+        var low = 0
+        var high = diffBands.count
+        while low < high {
+            let middle = (low + high) / 2
+            if NSMaxRange(diffBands[middle].range) <= visibleCharacters.location {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+
+        var index = low
+        while index < diffBands.count, diffBands[index].range.location < visibleEnd {
+            let band = diffBands[index]
+            index += 1
             let clamped = NSIntersectionRange(band.range, NSRange(location: 0, length: length))
             guard clamped.length > 0 else { continue }
             let glyphRange = layoutManager.glyphRange(forCharacterRange: clamped,
@@ -1817,7 +1839,9 @@ final class PuzzleTextView: NSTextView, PointerHoverRefreshing {
         let range = NSIntersectionRange(lines,
                                         NSRange(location: 0, length: (string as NSString).length))
         guard range.length > 0 else { return nil }
+        layoutManager.ensureLayout(forCharacterRange: range)
         let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
         var rows = NSRect.null
         layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { fragment, _, _, _, _ in
             rows = rows.union(fragment)

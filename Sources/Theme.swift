@@ -253,8 +253,14 @@ enum Theme {
     /// Natural vs. target line height. The layout-manager delegate fixes every
     /// fragment to this target and centers its baseline inside the line box.
     static func lineMetrics() -> (natural: CGFloat, target: CGFloat) {
-        let font = editorFont()
-        let natural = NSLayoutManager().defaultLineHeight(for: font)
+        let natural: CGFloat
+        if let cachedNaturalLineHeight {
+            natural = cachedNaturalLineHeight
+        } else {
+            let computed = NSLayoutManager().defaultLineHeight(for: editorFont())
+            cachedNaturalLineHeight = computed
+            natural = computed
+        }
         return (natural, Settings.shared.codeLineHeight)
     }
 
@@ -263,6 +269,14 @@ enum Theme {
         if let cachedCharWidth { return cachedCharWidth }
         let w = ("0" as NSString).size(withAttributes: [.font: editorFont()]).width
         cachedCharWidth = w
+        return w
+    }
+
+    /// Width of one space character in the current editor font.
+    static func spaceWidth() -> CGFloat {
+        if let cachedSpaceWidth { return cachedSpaceWidth }
+        let w = (" " as NSString).size(withAttributes: [.font: editorFont()]).width
+        cachedSpaceWidth = w
         return w
     }
 
@@ -275,6 +289,8 @@ enum Theme {
     private static var cachedFont: NSFont?
     private static var cachedParagraph: NSParagraphStyle?
     private static var cachedCharWidth: CGFloat?
+    private static var cachedSpaceWidth: CGFloat?
+    private static var cachedNaturalLineHeight: CGFloat?
     private static var cachedAttributes: [NSColor: [NSAttributedString.Key: Any]] = [:]
     private static var cachedSymbols: [String: NSImage] = [:]
 
@@ -283,6 +299,8 @@ enum Theme {
         cachedFont = nil
         cachedParagraph = nil
         cachedCharWidth = nil
+        cachedSpaceWidth = nil
+        cachedNaturalLineHeight = nil
         cachedAttributes.removeAll()
         // Symbols are appearance-independent templates, but clearing here also
         // bounds the cache if future settings add configurable symbol sizes.

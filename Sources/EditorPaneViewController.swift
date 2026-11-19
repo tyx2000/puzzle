@@ -6,6 +6,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var onActiveDocumentChanged: ((URL?) -> Void)?
     /// A step went past the first or last change of the diff at this URL.
     var onStepPastDiff: ((URL, _ forward: Bool) -> Void)?
+    /// The diff's active change index or count changed, so neighbours at either boundary can be prepared.
+    var onDiffChangeChanged: ((URL, _ index: Int, _ count: Int) -> Void)?
     var onEmptied: ((EditorPaneViewController) -> Void)?
     var onDocumentEdited: (() -> Void)?
     var onDocumentSaved: ((URL) -> Void)?
@@ -653,6 +655,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let index = min(diffChanges[url] ?? 0, diffHeader.changeCount - 1)
         diffChanges[url] = index
         diffHeader.setCurrentChange(index)
+        onDiffChangeChanged?(url, index, diffHeader.changeCount)
         if let sideBySideDiff, !sideBySideDiff.isHidden {
             changeFrame.clear()
             changeFrame.isHidden = true
@@ -671,8 +674,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             changeFrame.clear()
             return
         }
-        changeFrame.frame(rows: rows, colour: changeKind(of: blocks[index]).colour,
-                          animated: animated, revealing: revealing)
+        let block = blocks[index]
+        let url = currentURL
+        changeFrame.frame(rows: rows, colour: changeKind(of: block).colour,
+                          animated: animated, revealing: revealing,
+                          resolveRows: { [weak self] in
+                              guard let self, self.currentURL == url else { return nil }
+                              return self.textView.rowsBandRect(for: block)
+                          })
     }
 
     /// Lines only taken out, only put in, or both: what each line's marker says.
@@ -740,10 +749,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let view = SideBySideDiffView()
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
-        view.onCurrentChange = { [weak self] index in
+        view.onCurrentChange = { [weak self, weak view] index in
             guard let self else { return }
-            if let url = self.currentURL { self.diffChanges[url] = index }
             self.diffHeader.setCurrentChange(index)
+            if let url = self.currentURL {
+                self.diffChanges[url] = index
+                self.onDiffChangeChanged?(url, index, view?.changeCount ?? 0)
+            }
         }
         // Under the round buttons that float over the code, as the code is.
         self.view.addSubview(view, positioned: .below, relativeTo: searchNavigator)
@@ -794,6 +806,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         diffChanges[url] = index
         diffHeader.setCurrentChange(index)
+        onDiffChangeChanged?(url, index, count)
         textView.setSelectedRange(NSRange(location: blocks[index].location, length: 0))
         frameChange(index, animated: true)
         scrollView.verticalRulerView?.needsDisplay = true
@@ -1286,14 +1299,15 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
 
         // Lay out only what is asked for. A full layout of a multi-megabyte file
         // cost ~34 MB of fragment storage before its first line was drawn; on
-        // demand that is ~16 MB.
+        // demand that is ~16 MB. Diffs also use non-contiguous layout so stepping
+        // into a long file never blocks the main thread; ChangeFrameOverlay
+        // ensures layout around the target block and re-resolves after scrolling.
         //
-        // Not for Markdown or diffs: both decorate ranges across the whole
-        // document (code-block boxes, full-width change bands), and geometry
-        // for a range that has not been laid out yet comes back at the origin —
-        // measured, a fenced block's box landed at the top of the file.
-        layoutManager.allowsNonContiguousLayout =
-            !doc.isVirtual && doc.languageSpec?.name != "markdown"
+        // Not for Markdown: it decorates ranges across the whole document
+        // (code-block boxes), and geometry for a range that has not been laid
+        // out yet comes back at the origin — measured, a fenced block's box
+        // landed at the top of the file.
+        layoutManager.allowsNonContiguousLayout = doc.languageSpec?.name != "markdown"
 
         // Move this pane's layout manager onto the document's storage.
         if layoutManager.textStorage !== doc.storage {
