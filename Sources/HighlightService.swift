@@ -11,10 +11,18 @@ final class HighlightService {
     static let shared = HighlightService()
     private var cache: [String: SyntaxHighlighter] = [:]
     private var pending: [URL: DispatchWorkItem] = [:]
+    /// Idle timers that discard each language's retained parse tree and UTF-8
+    /// source copy once editing stops, reclaiming AST memory without dropping
+    /// the compiled grammar/queries.
+    private var treeIdleTimers: [String: DispatchWorkItem] = [:]
     /// Documents whose first parse is running on another thread, with the
     /// number of the parse: one cancelled, or overtaken, is not adopted.
     private var detachedParses: [URL: Int] = [:]
     private var detachedParseCount = 0
+
+    /// Seconds after the last highlight pass before a language's retained parse
+    /// tree and UTF-8 source copy are released.
+    static var parseTreeIdleTimeout: TimeInterval = 45
 
     /// Markdown is restyled whole on every pass, so it keeps the limit all
     /// highlighting had while every pass coloured the whole document.
@@ -118,7 +126,13 @@ final class HighlightService {
             Self.apply(hl.colours(in: ranges), over: ranges, to: storage)
             ranges.forEach { doc.markHighlighted($0) }
         }
-        if !doc.unhighlighted.isEmpty { paintRest(of: doc) }
+        if !doc.unhighlighted.isEmpty {
+            treeIdleTimers[lang.name]?.cancel()
+            treeIdleTimers.removeValue(forKey: lang.name)
+            paintRest(of: doc)
+        } else {
+            scheduleParseTreeIdleRelease(for: lang.name)
+        }
     }
 
     /// Too long, unsupported, or a language with no grammar: one colour.
@@ -165,6 +179,7 @@ final class HighlightService {
            let hl = highlighter(for: lang) {
             tags = hl.highlight(text: text, storage: painted, fullRange: full,
                                 parseOwner: storage)
+            scheduleParseTreeIdleRelease(for: lang.name)
         } else {
             tags = []
         }
@@ -391,12 +406,34 @@ final class HighlightService {
 
     /// Memory pressure can discard incremental state without changing text.
     func discardParseTrees() {
+        treeIdleTimers.values.forEach { $0.cancel() }
+        treeIdleTimers.removeAll()
         cache.values.forEach { $0.discardParseTree() }
+    }
+
+    private func scheduleParseTreeIdleRelease(for language: String) {
+        treeIdleTimers[language]?.cancel()
+        let timeout = Self.parseTreeIdleTimeout
+        guard timeout > 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.treeIdleTimers.removeValue(forKey: language)
+            self.cache[language]?.discardParseTree()
+        }
+        treeIdleTimers[language] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
+    }
+
+    func hasParseTreeForTesting(language: String) -> Bool {
+        cache[language]?.hasParseTreeForTesting ?? false
     }
 
     /// Release parsers/queries for languages nothing has open any more.
     func evictUnused(keeping languages: Set<String>) {
-        for key in cache.keys where !languages.contains(key) { cache.removeValue(forKey: key) }
+        for key in cache.keys where !languages.contains(key) {
+            treeIdleTimers.removeValue(forKey: key)?.cancel()
+            cache.removeValue(forKey: key)
+        }
         cache.values.forEach { $0.discardUnownedParseTree() }
         SyntaxHighlighter.unloadDefinitions(keeping: languages)
     }

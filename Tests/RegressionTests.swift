@@ -354,6 +354,8 @@ enum RegressionTests {
         try testDiffHeaderStepsThroughChanges()
         try testDiffStepsAcrossFiles()
         try testLargeDiffStepsWithoutFullLayout()
+        try testHiddenDiffAndHistoryViewsAreReleased()
+        try testIdleParseTreeIsDiscardedAfterTimeout()
         try testDiffButtonsCountTheChanges()
         try testChangeFrameStaysOverTheCode()
         try testDiffTabsKeepTheirNames()
@@ -22319,5 +22321,96 @@ enum RegressionTests {
         bar.setQuery("after")
         try expect(textView.isFolded(blocks[1]),
                    "searching opened a fold that held no result")
+    }
+
+    private static func testHiddenDiffAndHistoryViewsAreReleased() throws {
+        let dir = try temporaryDirectory("release-diff-history")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("sample.swift")
+        try "let a = 1\n".write(to: file, atomically: true, encoding: .utf8)
+
+        let pane = EditorPaneViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = pane
+        pane.view.layoutSubtreeIfNeeded()
+        defer {
+            window.close()
+            DocumentStore.shared.releaseTransientMemory()
+        }
+
+        let diffURL = URL(string: "puzzle-diff://release-test?path=sample.swift")!
+        let diffText = """
+        --- a/sample.swift
+        +++ b/sample.swift
+        @@ -1 +1 @@
+        -let a = 1
+        +let a = 2
+        """
+        DocumentStore.shared.setVirtualDocument(url: diffURL, text: diffText,
+                                                displayName: "sample.swift (diff)")
+        pane.open(url: diffURL)
+        defer { if pane.sideBySideVisibleForTesting { pane.toggleDiffModeForTesting() } }
+        pane.toggleDiffModeForTesting()
+        try expect(pane.sideBySideVisibleForTesting && pane.hasSideBySideDiffViewForTesting,
+                   "side-by-side diff view did not appear")
+
+        // Switching back to unified mode must tear down SideBySideDiffView.
+        pane.toggleDiffModeForTesting()
+        try expect(!pane.sideBySideVisibleForTesting && !pane.hasSideBySideDiffViewForTesting,
+                   "hiding side-by-side diff left SideBySideDiffView allocated")
+
+        // Switching from a file-history tab to a normal file must tear down FileHistoryView.
+        let historyURL = URL(string: "puzzle-diff://release-test/history/sample.swift")!
+        pane.fileHistoryProvider = { url in
+            guard url == historyURL else { return nil }
+            return FileHistoryModel(tabURL: historyURL, repository: dir,
+                                    relativePath: "sample.swift",
+                                    displayName: "sample.swift History",
+                                    commits: [])
+        }
+        DocumentStore.shared.setVirtualDocument(url: historyURL, text: "",
+                                                displayName: "sample.swift History")
+        pane.open(url: historyURL)
+        try expect(pane.hasFileHistoryViewForTesting, "file history view did not appear")
+
+        pane.open(url: file)
+        try expect(!pane.hasFileHistoryViewForTesting,
+                   "switching away from file history left FileHistoryView allocated")
+    }
+
+    private static func testIdleParseTreeIsDiscardedAfterTimeout() throws {
+        let dir = try temporaryDirectory("idle-parse-tree")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("idle.swift")
+        try "struct Sample { let value = 42 }\n".write(to: file, atomically: true, encoding: .utf8)
+
+        let savedTimeout = HighlightService.parseTreeIdleTimeout
+        HighlightService.parseTreeIdleTimeout = 0.05
+        defer {
+            HighlightService.parseTreeIdleTimeout = savedTimeout
+            HighlightService.shared.discardParseTrees()
+            DocumentStore.shared.releaseTransientMemory()
+        }
+
+        let doc = DocumentStore.shared.document(for: file)
+        HighlightService.shared.highlight(doc)
+        try expect(HighlightService.shared.hasParseTreeForTesting(language: "swift"),
+                   "Swift parse tree was not built")
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while HighlightService.shared.hasParseTreeForTesting(language: "swift")
+                && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        try expect(!HighlightService.shared.hasParseTreeForTesting(language: "swift"),
+                   "idle timeout did not discard the retained Swift parse tree")
+
+        // A subsequent edit rebuilds the parse tree cleanly.
+        doc.storage.replaceCharacters(in: NSRange(location: doc.storage.length, length: 0),
+                                      with: "let next = 1\n")
+        HighlightService.shared.highlight(doc)
+        try expect(HighlightService.shared.hasParseTreeForTesting(language: "swift"),
+                   "editing after idle eviction did not rebuild the parse tree")
     }
 }

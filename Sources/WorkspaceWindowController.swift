@@ -29,6 +29,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var palette: PalettePanel?
     private var quickOpenIndex: [String] = []
     private var quickOpenIndexInFlight = false
+    private var quickOpenIndexIdleWork: DispatchWorkItem?
+    static var quickOpenIndexIdleTimeout: TimeInterval = 60
     /// One replaceable Git preview buffer per window. Giving every path/commit a
     /// permanent synthetic URL made an inspection session grow without bound.
     private let diffPreviewID = UUID().uuidString
@@ -1501,8 +1503,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         panel.setQuery("")
         panel.setItems(quickOpenItems(matching: ""))
+        quickOpenIndexIdleWork?.cancel()
+        quickOpenIndexIdleWork = nil
+        panel.onDismiss = { [weak self] in
+            self?.scheduleQuickOpenIndexRelease()
+        }
         panel.present(over: window)
         refreshQuickOpenIndex(for: directory)
+    }
+
+    private func scheduleQuickOpenIndexRelease() {
+        quickOpenIndexIdleWork?.cancel()
+        let timeout = Self.quickOpenIndexIdleTimeout
+        guard timeout > 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.quickOpenIndexIdleWork = nil
+            guard self.palette?.isVisible != true else { return }
+            self.quickOpenIndex.removeAll(keepingCapacity: false)
+        }
+        quickOpenIndexIdleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
     }
 
     /// ⌘L. Same panel, no list: a line (or `line:column`) to jump to.
@@ -1520,6 +1541,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         }
         panel.setQuery("")
         panel.setItems([])
+        panel.onDismiss = nil
         panel.present(over: window)
     }
 

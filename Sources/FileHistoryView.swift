@@ -242,6 +242,19 @@ PuzzleScroller.adopt(detailScroll, alongWindowEdge: true)
         table.deselectAll(nil)
     }
 
+    func clear() {
+        model = nil
+        detailGeneration += 1
+        expandedRow = nil
+        preferredDetailHeight = nil
+        detailContainer.isHidden = true
+        detailHeight.constant = 0
+        detailTitle.stringValue = ""
+        setDetailText("")
+        emptyLabel.isHidden = true
+        table.reloadData()
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         model?.commits.count ?? 0
     }

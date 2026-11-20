@@ -111,8 +111,11 @@ final class GitPanelViewController: NSViewController {
         let row = openRowIndex.flatMap { table.rowView(atRow: $0, makeIfNecessary: false) as? FlatRowView }
         RowFrameFlight.fly(in: view, from: from, to: openRowRect(), landingOn: row)
     }
-    /// Files per commit, fetched on first expand.
+    /// Files per commit, fetched on first expand. Bounded by LRU so long
+    /// history browsing does not retain every expanded commit's file list.
     private var commitFiles: [String: [GitService.CommitFile]] = [:]
+    private var commitFilesOrder: [String] = []
+    private static let maxCachedCommitFiles = 64
 
     private var directory: URL?
     /// A message typed for one project stays with that project. Without this
@@ -247,6 +250,7 @@ final class GitPanelViewController: NSViewController {
         selectedCommit = nil
         expandedCommits.removeAll()
         commitFiles.removeAll()
+        commitFilesOrder.removeAll()
         entries.removeAll()
         // Another repository's depth is not this one's.
         resetHistoryDepth()
@@ -273,6 +277,7 @@ final class GitPanelViewController: NSViewController {
         historyRows.removeAll()
         expandedCommits.removeAll()
         commitFiles.removeAll()
+        commitFilesOrder.removeAll()
         entries.removeAll()
         history.removeAll()
         clearHistoryGraph()
@@ -1481,11 +1486,24 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard let self, self.directory == directory,
                       self.expandedCommits.contains(hash) else { return }
-                self.commitFiles[hash] = files
+                self.cacheCommitFiles(files, for: hash)
                 self.rebuildHistoryRows()
                 if self.showingHistory { self.table.reloadData() }
                 self.scrollToRequestedCommitFile()
             }
+        }
+    }
+
+    private func cacheCommitFiles(_ files: [GitService.CommitFile], for hash: String) {
+        commitFiles[hash] = files
+        commitFilesOrder.removeAll { $0 == hash }
+        commitFilesOrder.append(hash)
+        while commitFilesOrder.count > Self.maxCachedCommitFiles {
+            guard let victimIndex = commitFilesOrder.firstIndex(where: { !expandedCommits.contains($0) }) else {
+                break
+            }
+            let victim = commitFilesOrder.remove(at: victimIndex)
+            commitFiles.removeValue(forKey: victim)
         }
     }
 

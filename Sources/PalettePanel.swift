@@ -13,6 +13,7 @@ final class PalettePanel: NSPanel {
 
     var onAccept: ((Item?) -> Void)?
     var onQueryChanged: ((String) -> Void)?
+    var onDismiss: (() -> Void)?
 
     private let field = NSTextField()
     private let table = NSTableView()
@@ -142,6 +143,10 @@ PuzzleScroller.adopt(scroll)
     func dismiss() {
         parent?.removeChildWindow(self)
         orderOut(nil)
+        items.removeAll(keepingCapacity: false)
+        selection = -1
+        table.reloadData()
+        onDismiss?()
     }
 
     private func accept() {

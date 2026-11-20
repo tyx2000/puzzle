@@ -217,6 +217,8 @@ final class SyntaxHighlighter {
         previousTree != nil && previousStorage === storage
     }
 
+    var hasParseTreeForTesting: Bool { previousTree != nil }
+
     /// Parse `bytes` with a parser of its own, on whatever thread calls this:
     /// a long text's first parse, which the reader should not wait on. The
     /// tree comes back to its highlighter through `adopt`.

@@ -426,7 +426,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     /// Re-mark after an edit. Debounced, because the marks only need to keep up
     /// with the typing, not with each keystroke.
     func scheduleGitLineChanges() {
-        guard gitBaselineURL != nil, gitBaselineURL == currentURL else { return }
+        if gitBaselineURL == nil {
+            guard let url = currentURL, url.isFileURL,
+                  let document = currentDocument, !document.isVirtual,
+                  repositoryRoot != nil else { return }
+            liveMarkWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.refreshGitLineChanges(reloadBaseline: true)
+            }
+            liveMarkWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.liveMarkDelay, execute: work)
+            return
+        }
+        guard gitBaselineURL == currentURL else { return }
         liveMarkWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.recomputeGitLineChanges() }
         liveMarkWork = work
@@ -741,7 +753,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func hideSideBySideDiff() {
-        sideBySideDiff?.isHidden = true
+        releaseSideBySideDiff()
     }
 
     private func ensureSideBySideDiff() -> SideBySideDiffView {
@@ -878,6 +890,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
     var diffHeaderIsVisibleForTesting: Bool { !diffHeader.isHidden }
     var sideBySideVisibleForTesting: Bool { sideBySideDiff.map { !$0.isHidden } ?? false }
+    var hasSideBySideDiffViewForTesting: Bool { sideBySideDiff != nil }
+    var hasFileHistoryViewForTesting: Bool { fileHistoryView != nil }
     var sideBySideBlockForTesting: Int { sideBySideDiff?.currentBlockForTesting ?? -1 }
     var sideBySideGeometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat)? {
         sideBySideDiff?.geometryForTesting
@@ -1382,7 +1396,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if let source = doc.previewImage {
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             releaseMediaPreview()
             releaseEPUBReader()
             let imagePreview = ensureImagePreview()
@@ -1391,7 +1405,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isMedia {
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             releaseImagePreview()
             releaseEPUBReader()
             let mediaPreview = ensureMediaPreview()
@@ -1400,7 +1414,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isPDF {
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             releaseEPUBReader()
@@ -1413,14 +1427,14 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // A file that claims to be an EPUB but is not a readable archive
             // falls through to the text path, where it reports itself as an
             // unsupported binary instead of showing an empty reader.
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             epubReader?.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isPlaceholder {
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             releaseEPUBReader()
@@ -1432,7 +1446,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else {
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
             hidePreviews()
             scrollView.isHidden = false
             // An SVG is source with a picture attached: the drawing goes above
@@ -1492,7 +1506,8 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             textView.updateMarkdownDecorations(
                 codeBlocks: [], tables: [], tasks: [], activeSourceRange: nil)
             hidePreviews()
-            fileHistoryView?.isHidden = true
+            releaseFileHistoryView()
+            releaseSideBySideDiff()
             scrollView.isHidden = false
             reloadTabs()
             onActiveDocumentChanged?(nil)
@@ -1874,6 +1889,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         pdfPreview = nil
     }
 
+    private func releaseSideBySideDiff() {
+        sideBySideDiff?.clear()
+        sideBySideDiff?.isHidden = true
+        sideBySideDiff?.removeFromSuperview()
+        sideBySideDiff = nil
+    }
+
+    private func releaseFileHistoryView() {
+        fileHistoryView?.clear()
+        fileHistoryView?.isHidden = true
+        fileHistoryView?.removeFromSuperview()
+        fileHistoryView = nil
+    }
+
     private func hidePreviews() {
         releasePlaceholder()
         releasePDFPreview()
@@ -1892,7 +1921,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if mediaPreview?.isHidden != false { releaseMediaPreview() }
         if epubReader?.isHidden != false { releaseEPUBReader() }
         if pdfPreview?.isHidden != false { releasePDFPreview() }
+        if sideBySideDiff?.isHidden != false { releaseSideBySideDiff() }
+        if fileHistoryView?.isHidden != false { releaseFileHistoryView() }
         if findBar.isHidden { findBar.clearHighlights() }
+        gitBaselineToken?.cancel()
+        gitBaselineToken = nil
+        gitBaseline = nil
+        gitBaselineURL = nil
     }
 
     /// Re-apply font / line metrics after settings change.

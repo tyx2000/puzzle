@@ -118,6 +118,16 @@ final class SideBySideDiffView: FlatView {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
+    func clear() {
+        rows.removeAll(keepingCapacity: false)
+        changeStarts.removeAll(keepingCapacity: false)
+        currentBlock = -1
+        changeFrame.clear()
+        horizontalOffset = 0
+        maximumTextWidth = 0
+        table.reloadData()
+    }
+
     func refreshAppearance() {
         fillColor = Theme.editorBackground
         table.backgroundColor = Theme.editorBackground
