@@ -136,6 +136,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     private var epubContentsVisible = true
     /// Shown instead of the text view for a file-history table tab.
     private var fileHistoryView: FileHistoryView?
+    private var fileHistoryScrollPositions: [URL: NSPoint] = [:]
 
     /// Fold identities are pane-local, but survive switching between tabs.
     private var foldedBlocks: [URL: Set<Int>] = [:]
@@ -372,8 +373,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         guard let url = currentURL, url.isFileURL,
               let document = currentDocument, !document.isVirtual,
               let root = repositoryRoot else {
-            gitBaseline = nil
-            gitBaselineURL = nil
+            discardGitBaseline()
             applyGitLineChanges([], for: nil)
             return
         }
@@ -398,7 +398,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             }
             guard !token.isCancelled else { return }
             DispatchQueue.main.async {
-                guard let self, self.gitLineChangeGeneration == generation,
+                guard !token.isCancelled, let self, self.gitLineChangeGeneration == generation,
                       self.currentURL == url else { return }
                 switch baseline {
                 case .lines(let lines):
@@ -417,6 +417,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
                     guard self.gitBaselineURL != url else { return }
                     self.gitBaseline = nil
                     self.gitBaselineURL = nil
+                    guard self.gitLineChangesURL != url else { return }
                     self.applyGitLineChanges([], for: url)
                 }
             }
@@ -827,6 +828,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     // MARK: - Regression-test surface
 
     var gitLineChangesForTesting: [GitLineChanges.Change] { gitLineChanges }
+    var hasGitBaselineForTesting: Bool { gitBaseline != nil }
     var gitChangePopoverSizeForTesting: NSSize? { gitChangePopover?.frame.size }
     var gitChangePanelForTesting: NSPanel? { gitChangePopover }
     var gitChangeCodeAreaForTesting: NSRect { visibleCodeAreaOnScreen }
@@ -891,7 +893,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     var diffHeaderIsVisibleForTesting: Bool { !diffHeader.isHidden }
     var sideBySideVisibleForTesting: Bool { sideBySideDiff.map { !$0.isHidden } ?? false }
     var hasSideBySideDiffViewForTesting: Bool { sideBySideDiff != nil }
-    var hasFileHistoryViewForTesting: Bool { fileHistoryView != nil }
+    var fileHistoryViewForTesting: FileHistoryView? { fileHistoryView }
     var sideBySideBlockForTesting: Int { sideBySideDiff?.currentBlockForTesting ?? -1 }
     var sideBySideGeometryForTesting: (rows: Int, contentHeight: CGFloat, scrollOffset: CGFloat)? {
         sideBySideDiff?.geometryForTesting
@@ -1388,15 +1390,19 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         }
         // Synthetic file-history tabs use a real four-column table. Keep this
         // check ahead of images/text so only one primary content view is shown.
-        if let historyModel = fileHistoryProvider?(url) {
+        let historyModel = fileHistoryProvider?(url)
+        if fileHistoryView?.tabURL != historyModel?.tabURL { releaseFileHistoryView() }
+        if let historyModel {
             let history = ensureFileHistoryView()
             history.configure(historyModel)
             history.isHidden = false
             hidePreviews()
             scrollView.isHidden = true
             showDiffHeader(for: nil)
+            if let position = fileHistoryScrollPositions.removeValue(forKey: url) {
+                history.scrollPosition = position
+            }
         } else if let source = doc.previewImage {
-            releaseFileHistoryView()
             releaseMediaPreview()
             releaseEPUBReader()
             let imagePreview = ensureImagePreview()
@@ -1405,7 +1411,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isMedia {
-            releaseFileHistoryView()
             releaseImagePreview()
             releaseEPUBReader()
             let mediaPreview = ensureMediaPreview()
@@ -1414,7 +1419,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isPDF {
-            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             releaseEPUBReader()
@@ -1427,14 +1431,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             // A file that claims to be an EPUB but is not a readable archive
             // falls through to the text path, where it reports itself as an
             // unsupported binary instead of showing an empty reader.
-            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             epubReader?.isHidden = false
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else if doc.isPlaceholder {
-            releaseFileHistoryView()
             releaseImagePreview()
             releaseMediaPreview()
             releaseEPUBReader()
@@ -1446,7 +1448,6 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             scrollView.isHidden = true
             showDiffHeader(for: nil)
         } else {
-            releaseFileHistoryView()
             hidePreviews()
             scrollView.isHidden = false
             // An SVG is source with a picture attached: the drawing goes above
@@ -1487,6 +1488,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             if closedURLs.count > Self.reopenableTabs { closedURLs.removeFirst() }
         }
         selections.removeValue(forKey: url)
+        fileHistoryScrollPositions.removeValue(forKey: url)
         findStates.removeValue(forKey: url)
         lineActivatedURLs.remove(url)
         markdownSourceURLs.remove(url)
@@ -1509,6 +1511,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             releaseFileHistoryView()
             releaseSideBySideDiff()
             scrollView.isHidden = false
+            refreshGitLineChanges()
             reloadTabs()
             onActiveDocumentChanged?(nil)
             onEmptied?(self)
@@ -1575,14 +1578,20 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         var urls: [URL] = []
         var activeURL: URL?
         var selections: [URL: NSRange] = [:]
+        var fileHistoryScrollPositions: [URL: NSPoint] = [:]
         var isEmpty: Bool { urls.isEmpty }
     }
 
     func tabSession() -> TabSession {
         if let url = currentURL { selections[url] = textView.selectedRange() }
         let open = Set(openURLs)
+        var historyPositions = fileHistoryScrollPositions
+        if let history = fileHistoryView, let url = history.tabURL {
+            historyPositions[url] = history.scrollPosition
+        }
         return TabSession(urls: openURLs, activeURL: currentURL,
-                          selections: selections.filter { open.contains($0.key) })
+                          selections: selections.filter { open.contains($0.key) },
+                          fileHistoryScrollPositions: historyPositions.filter { open.contains($0.key) })
     }
 
     /// Put a project's tabs back after the switch away emptied the pane.
@@ -1596,6 +1605,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
             openURLs.append(url)
             closedURLs.removeAll { $0 == url }
             if let selection = session.selections[url] { selections[url] = selection }
+            fileHistoryScrollPositions[url] = session.fileHistoryScrollPositions[url]
             onTabOpened?(url)
         }
         activate(index: session.activeURL.flatMap { openURLs.firstIndex(of: $0) }
@@ -1842,7 +1852,11 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         let urls = openURLs
         openURLs.removeAll()
         activeIndex = nil
+        releaseFileHistoryView()
+        releaseSideBySideDiff()
+        discardGitBaseline()
         selections.removeAll()
+        fileHistoryScrollPositions.removeAll()
         findStates.removeAll()
         restoreFindState(for: nil)
         lineActivatedURLs.removeAll()
@@ -1897,9 +1911,13 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
     }
 
     private func releaseFileHistoryView() {
-        fileHistoryView?.clear()
-        fileHistoryView?.isHidden = true
-        fileHistoryView?.removeFromSuperview()
+        guard let history = fileHistoryView else { return }
+        if let url = history.tabURL, openURLs.contains(url) {
+            fileHistoryScrollPositions[url] = history.scrollPosition
+        }
+        history.clear()
+        history.isHidden = true
+        history.removeFromSuperview()
         fileHistoryView = nil
     }
 
@@ -1924,6 +1942,12 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         if sideBySideDiff?.isHidden != false { releaseSideBySideDiff() }
         if fileHistoryView?.isHidden != false { releaseFileHistoryView() }
         if findBar.isHidden { findBar.clearHighlights() }
+        discardGitBaseline()
+    }
+
+    private func discardGitBaseline() {
+        liveMarkWork?.cancel()
+        liveMarkWork = nil
         gitBaselineToken?.cancel()
         gitBaselineToken = nil
         gitBaseline = nil

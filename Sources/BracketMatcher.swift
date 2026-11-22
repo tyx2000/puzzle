@@ -26,7 +26,7 @@ enum BracketMatcher {
         }
     }
 
-    private static func isBracket(_ character: unichar) -> Bool {
+    static func isBracket(_ character: unichar) -> Bool {
         isOpening(character) || opening(closedBy: character) != nil
     }
 

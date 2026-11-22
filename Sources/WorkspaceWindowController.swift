@@ -27,8 +27,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private var gitSummaryGeneration = 0
     /// ⌘P's panel and the file list behind it.
     private var palette: PalettePanel?
+    private var isQuickOpenActive = false
     private var quickOpenIndex: [String] = []
     private var quickOpenIndexInFlight = false
+    private var quickOpenIndexGeneration = 0
     private var quickOpenIndexIdleWork: DispatchWorkItem?
     static var quickOpenIndexIdleTimeout: TimeInterval = 60
     /// One replaceable Git preview buffer per window. Giving every path/commit a
@@ -244,6 +246,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     var windowTitleForTesting: String { window?.title ?? "" }
 
     func windowWillClose(_ notification: Notification) {
+        dismissPaletteAndReleaseQuickOpenIndex()
         gitRepositoryMonitor?.stop()
         gitRepositoryMonitor = nil
         workspaceFileMonitor?.stop()
@@ -259,7 +262,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
-        quickOpenIndex = []
+        dismissPaletteAndReleaseQuickOpenIndex()
         invalidateDiffPrefetches()
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
@@ -386,8 +389,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     func releaseTransientMemory() {
         // Rebuilt in well under a second the next time ⌘P is used, and on a
         // large checkout it is the biggest thing this window holds.
-        quickOpenIndex = []
-        palette?.dismiss()
+        dismissPaletteAndReleaseQuickOpenIndex()
         sidebar.releaseHiddenPanels()
         editor.releaseTransientMemory()
     }
@@ -522,8 +524,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         workspaceFileMonitor = nil
         projectURL = url
         invalidateDiffPrefetches()
-        quickOpenIndex = []
-        palette?.dismiss()
+        dismissPaletteAndReleaseQuickOpenIndex()
         editor.hasProject = true
         editor.repositoryRoot = url
         RecentProjects.shared.add(url)
@@ -1485,11 +1486,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Quick Open / Go to Line
 
-    /// ⌘P. The file index is built off the main thread on first use and reused
-    /// until the project changes, so typing stays responsive on a big checkout.
+    /// ⌘P. Build the index off the main thread and keep it between nearby uses,
+    /// so typing stays responsive on a big checkout.
     @objc func quickOpen(_ sender: Any?) {
         guard let directory = projectURL, let window else { return }
         let panel = ensurePalette()
+        isQuickOpenActive = true
+        quickOpenIndexIdleWork?.cancel()
+        quickOpenIndexIdleWork = nil
         panel.configure(placeholder: "Search files by name",
                         hint: "Type to filter · ↑↓ to choose · ↩ to open · esc to dismiss")
         panel.onQueryChanged = { [weak self, weak panel] query in
@@ -1502,33 +1506,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
             self.editor.open(url: url)
         }
         panel.setQuery("")
-        panel.setItems(quickOpenItems(matching: ""))
-        quickOpenIndexIdleWork?.cancel()
-        quickOpenIndexIdleWork = nil
         panel.onDismiss = { [weak self] in
-            self?.scheduleQuickOpenIndexRelease()
+            self?.finishQuickOpen()
         }
         panel.present(over: window)
         refreshQuickOpenIndex(for: directory)
     }
 
-    private func scheduleQuickOpenIndexRelease() {
-        quickOpenIndexIdleWork?.cancel()
+    private func finishQuickOpen() {
+        guard isQuickOpenActive else { return }
+        isQuickOpenActive = false
         let timeout = Self.quickOpenIndexIdleTimeout
         guard timeout > 0 else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isQuickOpenActive else { return }
             self.quickOpenIndexIdleWork = nil
-            guard self.palette?.isVisible != true else { return }
-            self.quickOpenIndex.removeAll(keepingCapacity: false)
+            self.releaseQuickOpenIndex()
         }
         quickOpenIndexIdleWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
     }
 
+    private func releaseQuickOpenIndex() {
+        quickOpenIndexIdleWork?.cancel()
+        quickOpenIndexIdleWork = nil
+        quickOpenIndexGeneration += 1
+        quickOpenIndex.removeAll(keepingCapacity: false)
+    }
+
+    private func dismissPaletteAndReleaseQuickOpenIndex() {
+        isQuickOpenActive = false
+        palette?.dismiss()
+        releaseQuickOpenIndex()
+    }
+
     /// ⌘L. Same panel, no list: a line (or `line:column`) to jump to.
     @objc func goToLine(_ sender: Any?) {
         guard let window, editor.hasOpenDocument else { return }
+        finishQuickOpen()
         let panel = ensurePalette()
         panel.configure(placeholder: "Line number",
                         hint: "Type a line, or line:column · ↩ to jump · esc to dismiss")
@@ -1546,6 +1561,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     var quickOpenIndexForTesting: [String] { quickOpenIndex }
+    var quickOpenIndexInFlightForTesting: Bool { quickOpenIndexInFlight }
+    var paletteForTesting: PalettePanel? { palette }
 
     private func ensurePalette() -> PalettePanel {
         if let palette { return palette }
@@ -1566,6 +1583,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     private func refreshQuickOpenIndex(for directory: URL) {
         guard !quickOpenIndexInFlight else { return }
         quickOpenIndexInFlight = true
+        let generation = quickOpenIndexGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let paths = QuickOpen.index(in: directory)
             DispatchQueue.main.async {
@@ -1574,16 +1592,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
                 // for a project no longer on screen, it turned every later ⌘P
                 // in this window away, and the list stayed empty for good.
                 self.quickOpenIndexInFlight = false
-                guard self.projectURL == directory else {
-                    // ⌘P opened on the project switched to while this one was
-                    // being read is still waiting for an index of its own.
-                    if let current = self.projectURL, self.palette?.isVisible == true {
+                guard self.quickOpenIndexGeneration == generation, self.projectURL == directory else {
+                    // A new ⌘P session may be waiting on the previous read.
+                    if self.isQuickOpenActive, let current = self.projectURL {
                         self.refreshQuickOpenIndex(for: current)
                     }
                     return
                 }
                 self.quickOpenIndex = paths
-                guard let palette = self.palette, palette.isVisible else { return }
+                guard self.isQuickOpenActive, let palette = self.palette, palette.isVisible else { return }
                 palette.setItems(self.quickOpenItems(matching: palette.query))
             }
         }
@@ -1703,8 +1720,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
         GitService.forgetRepositoryInfo()
         projectURL = nil
         invalidateDiffPrefetches()
-        quickOpenIndex = []
-        palette?.dismiss()
+        dismissPaletteAndReleaseQuickOpenIndex()
         editor.hasProject = false
         editor.repositoryRoot = nil
         sidebar.fileTree.clearRoot()

@@ -19,6 +19,8 @@ final class HighlightService {
     /// number of the parse: one cancelled, or overtaken, is not adopted.
     private var detachedParses: [URL: Int] = [:]
     private var detachedParseCount = 0
+    /// Caret lookups waiting for a current tree that was evicted.
+    private var bracketTreeRequests: Set<URL> = []
 
     /// Seconds after the last highlight pass before a language's retained parse
     /// tree and UTF-8 source copy are released.
@@ -117,7 +119,7 @@ final class HighlightService {
         }
         doc.updateJSXTagMatches(parsed.tagMatches)
         doc.updateMarkdownPresentation(MarkdownPresentation())
-        doc.noteSyntaxTree(built: true)
+        doc.noteSyntaxTree(built: true, restored: bracketTreeRequests.remove(doc.url) != nil)
 
         let ranges = rangesToPaint(doc)
         passCountForTesting += 1
@@ -129,7 +131,7 @@ final class HighlightService {
         if !doc.unhighlighted.isEmpty {
             treeIdleTimers[lang.name]?.cancel()
             treeIdleTimers.removeValue(forKey: lang.name)
-            paintRest(of: doc)
+            schedulePaint(doc, after: Self.passInterval)
         } else {
             scheduleParseTreeIdleRelease(for: lang.name)
         }
@@ -137,6 +139,7 @@ final class HighlightService {
 
     /// Too long, unsupported, or a language with no grammar: one colour.
     private func paintPlain(_ doc: Document) {
+        bracketTreeRequests.remove(doc.url)
         let storage = doc.storage
         storage.setAttributes(Theme.textAttributes(color: Theme.foreground),
                               range: NSRange(location: 0, length: storage.length))
@@ -247,8 +250,7 @@ final class HighlightService {
         return visible
     }
 
-    /// Queue the next pass for what `doc` still has waiting.
-    private func paintRest(of doc: Document) {
+    private func schedulePaint(_ doc: Document, after delay: TimeInterval) {
         pending[doc.url]?.cancel()
         let work = DispatchWorkItem { [weak self, weak doc] in
             guard let self, let doc else { return }
@@ -256,7 +258,7 @@ final class HighlightService {
             self.paint(doc)
         }
         pending[doc.url] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.passInterval, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Parse a long document on another thread; colour it when the tree
@@ -282,6 +284,7 @@ final class HighlightService {
                 guard let doc, let tree, let spec = doc.languageSpec,
                       let lang = SyntaxHighlighter.definition(for: spec),
                       let hl = self.highlighter(for: lang) else {
+                    self.bracketTreeRequests.remove(url)
                     if let tree { ts_tree_delete(tree) }
                     return
                 }
@@ -295,13 +298,21 @@ final class HighlightService {
     func isParsingDetachedForTesting(_ url: URL) -> Bool { detachedParses[url] != nil }
 
     /// The bracket pair beside `caret` in `doc` as its syntax tree has it.
-    /// Nil when there is no tree for its text as it stands — no grammar, or
-    /// an edit the parse has not caught up with — and the text is to be
-    /// scanned instead.
+    /// Nil when the text is to be scanned instead. If the current text was
+    /// already parsed, rebuild a missing tree on demand before pairing it:
+    /// the scan cannot distinguish some language constructs from comments.
     func bracketPair(beside caret: Int, in doc: Document) -> [NSRange]? {
-        guard doc.syntaxTreeIsCurrent, let name = doc.languageSpec?.name,
-              let hl = cache[name] else { return nil }
-        return hl.bracketPair(beside: caret, in: doc.storage)
+        guard doc.syntaxTreeIsCurrent, let name = doc.languageSpec?.name else { return nil }
+        if let pair = cache[name]?.bracketPair(beside: caret, in: doc.storage) { return pair }
+        let text = doc.storage.mutableString
+        guard [caret - 1, caret].contains(where: {
+            $0 >= 0 && $0 < text.length && BracketMatcher.isBracket(text.character(at: $0))
+        }) else { return [] }
+        if bracketTreeRequests.insert(doc.url).inserted,
+           pending[doc.url] == nil, detachedParses[doc.url] == nil {
+            schedulePaint(doc, after: 0)
+        }
+        return []
     }
 
     /// Give each of `ranges` the attributes `runs` describe — the plain ones
@@ -443,21 +454,15 @@ final class HighlightService {
         pending[url]?.cancel()
         pending.removeValue(forKey: url)
         detachedParses.removeValue(forKey: url)
+        bracketTreeRequests.remove(url)
     }
 
     /// Debounced re-highlight after edits: what they changed.
     func scheduleHighlight(_ doc: Document) {
-        pending[doc.url]?.cancel()
-        let work = DispatchWorkItem { [weak self, weak doc] in
-            guard let self, let doc else { return }
-            self.pending[doc.url] = nil
-            self.paint(doc)
-        }
-        pending[doc.url] = work
         // Markdown is formatted in-place, so publish its visual syntax on the
         // next run-loop turn. Other grammars retain the typing debounce because
         // their full tree-sitter parse has no visible read/edit mode transition.
         let delay = doc.languageSpec?.name == "markdown" ? 0 : 0.18
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        schedulePaint(doc, after: delay)
     }
 }

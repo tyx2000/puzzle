@@ -24,6 +24,11 @@ enum RegressionTests {
         // it: a history list laid out under it lit that row, and ↓↓ counted
         // on from there. Every test starts with it nowhere.
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
+        if CommandLine.arguments.contains("--transient-memory-regressions") {
+            try testTransientMemoryRegressions()
+            print("Transient memory regression tests passed (6)")
+            return
+        }
         if CommandLine.arguments.contains("--sidebar-hover-regressions") {
             try testSidebarHoverFollowerKeepsUp()
             try testSidebarHoverAndSelectionShareOneCoat()
@@ -354,8 +359,7 @@ enum RegressionTests {
         try testDiffHeaderStepsThroughChanges()
         try testDiffStepsAcrossFiles()
         try testLargeDiffStepsWithoutFullLayout()
-        try testHiddenDiffAndHistoryViewsAreReleased()
-        try testIdleParseTreeIsDiscardedAfterTimeout()
+        try testTransientMemoryRegressions()
         try testDiffButtonsCountTheChanges()
         try testChangeFrameStaysOverTheCode()
         try testDiffTabsKeepTheirNames()
@@ -22323,6 +22327,23 @@ enum RegressionTests {
                    "searching opened a fold that held no result")
     }
 
+    private static func testTransientMemoryRegressions() throws {
+        try testHiddenDiffAndHistoryViewsAreReleased()
+        try testIdleParseTreeIsDiscardedAfterTimeout()
+        try testBracketMatchingRestoresAnIdleTree()
+        try testCollapsedCommitFilesAreEvicted()
+        try testQuickOpenIndexFollowsPaletteMode()
+        try testPurgedGitBaselineRejectsOldRead()
+    }
+
+    private static func waitFor(_ condition: () -> Bool, timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
+    }
+
     private static func testHiddenDiffAndHistoryViewsAreReleased() throws {
         let dir = try temporaryDirectory("release-diff-history")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -22362,21 +22383,36 @@ enum RegressionTests {
 
         // Switching from a file-history tab to a normal file must tear down FileHistoryView.
         let historyURL = URL(string: "puzzle-diff://release-test/history/sample.swift")!
+        let commits = (0..<100).map {
+            GitService.Commit(shortHash: String($0), subject: "Commit \($0)",
+                              author: "Author", absoluteDate: "", email: "")
+        }
         pane.fileHistoryProvider = { url in
             guard url == historyURL else { return nil }
             return FileHistoryModel(tabURL: historyURL, repository: dir,
                                     relativePath: "sample.swift",
                                     displayName: "sample.swift History",
-                                    commits: [])
+                                    commits: commits)
         }
         DocumentStore.shared.setVirtualDocument(url: historyURL, text: "",
                                                 displayName: "sample.swift History")
         pane.open(url: historyURL)
-        try expect(pane.hasFileHistoryViewForTesting, "file history view did not appear")
+        pane.fileHistoryViewForTesting?.scrollPosition = NSPoint(x: 0, y: 1100)
+        try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == 1100,
+                   "file history did not scroll to the test position")
 
         pane.open(url: file)
-        try expect(!pane.hasFileHistoryViewForTesting,
+        try expect(pane.fileHistoryViewForTesting == nil,
                    "switching away from file history left FileHistoryView allocated")
+        pane.open(url: historyURL)
+        try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == 1100,
+                   "the rebuilt history lost the tab's scroll position")
+        let session = pane.tabSession()
+        try expect(pane.closeAllTabs() && pane.fileHistoryViewForTesting == nil,
+                   "closing the history tab did not release its view")
+        pane.restore(session) { _ in true }
+        try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == 1100,
+                   "restoring the project's tabs lost the history's scroll position")
     }
 
     private static func testIdleParseTreeIsDiscardedAfterTimeout() throws {
@@ -22412,5 +22448,162 @@ enum RegressionTests {
         HighlightService.shared.highlight(doc)
         try expect(HighlightService.shared.hasParseTreeForTesting(language: "swift"),
                    "editing after idle eviction did not rebuild the parse tree")
+    }
+
+    private static func testBracketMatchingRestoresAnIdleTree() throws {
+        let dir = try temporaryDirectory("idle-brackets")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let savedTimeout = HighlightService.parseTreeIdleTimeout
+        HighlightService.parseTreeIdleTimeout = 0.1
+        defer {
+            HighlightService.parseTreeIdleTimeout = savedTimeout
+            DocumentStore.shared.releaseTransientMemory()
+        }
+        // A large buffer restores its tree off the main thread.
+        for large in [false, true] {
+            let file = dir.appendingPathComponent(large ? "large.css" : "small.css")
+            let padding = large ? "/*" + String(repeating: " padding\n", count: 30_000) + "*/\n" : ""
+            let source = padding + "#header {\n  color: red;\n}\n"
+            try source.write(to: file, atomically: true, encoding: .utf8)
+            let pane = EditorPaneViewController()
+            _ = pane.view
+            pane.open(url: file)
+            let doc = DocumentStore.shared.document(for: file)
+            try expect(waitFor { doc.syntaxTreeIsCurrent && doc.unhighlighted.isEmpty },
+                       "CSS was not fully parsed and painted")
+            try expect(waitFor { !HighlightService.shared.hasParseTreeForTesting(language: "css") },
+                       "CSS tree was not evicted before the caret moved")
+            let text = pane.textViewForTesting
+            let sourceText = source as NSString
+            let opening = sourceText.range(of: "{")
+            let closing = sourceText.range(of: "}")
+            text.setSelectedRange(NSRange(location: opening.location - 3, length: 0))
+            text.refreshBracketMatches()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            try expect(!HighlightService.shared.hasParseTreeForTesting(language: "css"),
+                       "a caret away from brackets rebuilt the idle tree")
+            text.setSelectedRange(NSRange(location: NSMaxRange(opening), length: 0))
+            text.refreshBracketMatches()
+            try expect(waitFor { text.bracketMatchRanges == [opening, closing] },
+                       "moving beside a CSS brace after eviction did not restore the pair")
+            try expect(waitFor { !HighlightService.shared.hasParseTreeForTesting(language: "css") },
+                       "the restored CSS tree was not evicted again")
+            pane.prepareForClose()
+        }
+    }
+
+    private static func testCollapsedCommitFilesAreEvicted() throws {
+        let dir = try temporaryDirectory("commit-file-cache")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try initializeTransientMemoryTestRepository(dir)
+        let file = dir.appendingPathComponent("sample.txt")
+        for index in 0..<66 {
+            try "\(index)\n".write(to: file, atomically: true, encoding: .utf8)
+            try expect(GitService.commit("Commit \(index)", in: dir).code == 0,
+                       "could not create a Git history cache fixture")
+        }
+        let hashes = GitService.log(in: dir, limit: 66).map(\.shortHash)
+        try expect(hashes.count == 66, "expected 66 commits")
+        let panel = GitPanelViewController()
+        panel.setDirectoryForTesting(dir)
+        panel.showHistoryForTesting()
+        panel.refresh()
+        panel.settleHistoryForTesting()
+        for (index, hash) in hashes.enumerated() {
+            panel.expandCommit(at: index)
+            try expect(waitFor { panel.cachedCommitFileIDsForTesting.contains(hash) },
+                       "expanded commit's file list did not load")
+        }
+        try expect(panel.historyRowIsCommitForTesting.count == 132,
+                   "a commit lost its file row while it was still expanded")
+        for index in 0..<3 { panel.expandCommit(at: index) }
+        try expect(panel.cachedCommitFileIDsForTesting == Set(hashes.dropFirst(2)),
+                   "folding commits did not trim the cached lists to 64")
+        panel.expandCommit(at: 2) // Reuse the oldest retained list.
+        for index in 2..<5 { panel.expandCommit(at: index) }
+        panel.expandCommit(at: 0)
+        try expect(waitFor { panel.cachedCommitFileIDsForTesting.contains(hashes[0]) },
+                   "reopening an evicted commit did not reload its file list")
+        try expect(panel.cachedCommitFileIDsForTesting.count == 64
+                    && panel.cachedCommitFileIDsForTesting.contains(hashes[2])
+                    && !panel.cachedCommitFileIDsForTesting.contains(hashes[3]),
+                   "cache eviction did not keep the list that was recently reused")
+    }
+
+    private static func testQuickOpenIndexFollowsPaletteMode() throws {
+        let dir = try temporaryDirectory("quick-open-index-idle")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("sample.txt")
+        try "first\nsecond\n".write(to: file, atomically: true, encoding: .utf8)
+        let savedTimeout = WorkspaceWindowController.quickOpenIndexIdleTimeout
+        WorkspaceWindowController.quickOpenIndexIdleTimeout = 0.1
+        defer { WorkspaceWindowController.quickOpenIndexIdleTimeout = savedTimeout }
+        let workspace = WorkspaceWindowController()
+        defer { workspace.window?.close() }
+        workspace.openProject(dir)
+        workspace.editor.open(url: file)
+
+        workspace.quickOpen(nil)
+        try expect(waitFor { workspace.quickOpenIndexForTesting == ["sample.txt"] },
+                   "quick open did not build its index")
+        workspace.paletteForTesting?.dismiss()
+        workspace.goToLine(nil)
+        try expect(waitFor { workspace.quickOpenIndexForTesting.isEmpty }
+                    && workspace.paletteForTesting?.isVisible == true,
+                   "Go to Line kept the closed Quick Open index alive")
+        workspace.paletteForTesting?.dismiss()
+
+        workspace.quickOpen(nil)
+        workspace.goToLine(nil)
+        try expect(waitFor { !workspace.quickOpenIndexInFlightForTesting },
+                   "the file index read never finished")
+        try expect(workspace.paletteForTesting?.selectedIndexForTesting == -1,
+                   "a late file index put search results into Go to Line")
+        try expect(waitFor { workspace.quickOpenIndexForTesting.isEmpty },
+                   "switching directly to Go to Line did not expire the file index")
+
+        workspace.quickOpen(nil)
+        workspace.releaseTransientMemory()
+        try expect(waitFor { !workspace.quickOpenIndexInFlightForTesting }
+                    && workspace.quickOpenIndexForTesting.isEmpty,
+                   "an old index read undid the memory release")
+        workspace.quickOpen(nil)
+        try expect(waitFor { workspace.quickOpenIndexForTesting == ["sample.txt"] },
+                   "quick open could not rebuild the released index")
+    }
+
+    private static func initializeTransientMemoryTestRepository(_ dir: URL) throws {
+        for args in [["init", "-q"], ["config", "user.name", "Memory Test"],
+                     ["config", "user.email", "memory@example.invalid"]] {
+            try expect(GitService.run(args, in: dir).code == 0, "could not set up the Git fixture")
+        }
+    }
+
+    private static func testPurgedGitBaselineRejectsOldRead() throws {
+        let dir = try temporaryDirectory("git-baseline-release")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try initializeTransientMemoryTestRepository(dir)
+        let file = dir.appendingPathComponent("sample.txt")
+        try "original\n".write(to: file, atomically: true, encoding: .utf8)
+        try expect(GitService.commit("Initial", in: dir).code == 0, "could not commit the Git baseline")
+        try "changed\n".write(to: file, atomically: true, encoding: .utf8)
+        let pane = EditorPaneViewController()
+        _ = pane.view
+        pane.repositoryRoot = dir
+        pane.open(url: file)
+        defer { pane.prepareForClose() }
+        // Finish the Git read without letting its main-queue delivery run.
+        GitService.workQueue.sync {}
+        pane.releaseTransientMemory()
+        var delivered = false
+        DispatchQueue.main.async { delivered = true }
+        try expect(waitFor { delivered } && !pane.hasGitBaselineForTesting,
+                   "an old Git read put the baseline back after release")
+        pane.scheduleGitLineChanges()
+        try expect(waitFor { pane.gitLineChangesForTesting.first?.removed == ["original"] },
+                   "reloading the released baseline did not restore the live gutter marks")
+        pane.close(index: 0)
+        try expect(!pane.hasGitBaselineForTesting && pane.gitLineChangesForTesting.isEmpty,
+                   "closing the last tab retained its Git baseline or gutter marks")
     }
 }

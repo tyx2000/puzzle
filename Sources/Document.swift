@@ -13,8 +13,8 @@ struct SVGDiffSides: Equatable {
 
 final class Document {
     static let structureDidChange = Notification.Name("PuzzleDocumentStructureDidChange")
-    /// Posted when the syntax tree is built from the text as it now stands,
-    /// or stops being.
+    /// Posted when a current syntax tree becomes available, including on
+    /// demand after eviction, or when the document stops being parsed.
     static let syntaxTreeDidChange = Notification.Name("PuzzleDocumentSyntaxTreeDidChange")
     static let didReloadFromDisk = Notification.Name("PuzzleDocumentDidReloadFromDisk")
     /// A diff released from memory has its content back.
@@ -180,9 +180,9 @@ final class Document {
     /// was before an edit the next parse has yet to catch up with.
     var syntaxTreeIsCurrent: Bool { syntaxTreeRevision == textRevision }
 
-    func noteSyntaxTree(built: Bool) {
+    func noteSyntaxTree(built: Bool, restored: Bool = false) {
         let revision = built ? textRevision : nil
-        guard revision != syntaxTreeRevision else { return }
+        guard revision != syntaxTreeRevision || restored else { return }
         syntaxTreeRevision = revision
         NotificationCenter.default.post(name: Self.syntaxTreeDidChange, object: self)
     }

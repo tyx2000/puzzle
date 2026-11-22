@@ -228,6 +228,20 @@ PuzzleScroller.adopt(detailScroll, alongWindowEdge: true)
         return resolved
     }
 
+    var tabURL: URL? { model?.tabURL }
+
+    var scrollPosition: NSPoint {
+        get { tableScroll.contentView.bounds.origin }
+        set {
+            tableScroll.layoutSubtreeIfNeeded()
+            let clip = tableScroll.contentView
+            var bounds = clip.bounds
+            bounds.origin = newValue
+            clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+            tableScroll.reflectScrolledClipView(clip)
+        }
+    }
+
     func configure(_ model: FileHistoryModel) {
         self.model = model
         detailGeneration += 1

@@ -111,8 +111,8 @@ final class GitPanelViewController: NSViewController {
         let row = openRowIndex.flatMap { table.rowView(atRow: $0, makeIfNecessary: false) as? FlatRowView }
         RowFrameFlight.fly(in: view, from: from, to: openRowRect(), landingOn: row)
     }
-    /// Files per commit, fetched on first expand. Bounded by LRU so long
-    /// history browsing does not retain every expanded commit's file list.
+    /// Files per commit, fetched on first expand. Expanded rows keep their
+    /// files; collapsed lists are evicted in least recently used order.
     private var commitFiles: [String: [GitService.CommitFile]] = [:]
     private var commitFilesOrder: [String] = []
     private static let maxCachedCommitFiles = 64
@@ -651,6 +651,8 @@ final class GitPanelViewController: NSViewController {
         // one is never shallower.
         historyLoadCountForTesting += 1
         history = read.log
+        expandedCommits.formIntersection(history.map(\.shortHash))
+        trimCommitFiles()
         historyHasMore = read.log.count >= depth
         unpushed = read.unpushed
         historyGraphRows = read.graphRows
@@ -1459,6 +1461,7 @@ final class GitPanelViewController: NSViewController {
                 pendingCommitFileReveal = nil
             }
             expandedCommits.remove(hash)
+            trimCommitFiles()
             rebuildHistoryRows()
             table.reloadData()
             return
@@ -1477,6 +1480,7 @@ final class GitPanelViewController: NSViewController {
         rebuildHistoryRows()
         if showingHistory { table.reloadData() }
         guard commitFiles[hash] == nil else {
+            markCommitFilesUsed(hash)
             scrollToRequestedCommitFile()
             return
         }
@@ -1486,7 +1490,9 @@ final class GitPanelViewController: NSViewController {
             DispatchQueue.main.async {
                 guard let self, self.directory == directory,
                       self.expandedCommits.contains(hash) else { return }
-                self.cacheCommitFiles(files, for: hash)
+                self.commitFiles[hash] = files
+                self.markCommitFilesUsed(hash)
+                self.trimCommitFiles()
                 self.rebuildHistoryRows()
                 if self.showingHistory { self.table.reloadData() }
                 self.scrollToRequestedCommitFile()
@@ -1494,10 +1500,12 @@ final class GitPanelViewController: NSViewController {
         }
     }
 
-    private func cacheCommitFiles(_ files: [GitService.CommitFile], for hash: String) {
-        commitFiles[hash] = files
+    private func markCommitFilesUsed(_ hash: String) {
         commitFilesOrder.removeAll { $0 == hash }
         commitFilesOrder.append(hash)
+    }
+
+    private func trimCommitFiles() {
         while commitFilesOrder.count > Self.maxCachedCommitFiles {
             guard let victimIndex = commitFilesOrder.firstIndex(where: { !expandedCommits.contains($0) }) else {
                 break
@@ -1610,6 +1618,7 @@ final class GitPanelViewController: NSViewController {
     }
     var activeChangesPathForTesting: String? { activeChangesPath }
     var expandedCommitCountForTesting: Int { expandedCommits.count }
+    var cachedCommitFileIDsForTesting: Set<String> { Set(commitFiles.keys) }
     var operationQueueForTesting: DispatchQueue { gitQueue }
 
     /// The line above the commit box: project, branch and commit author.
