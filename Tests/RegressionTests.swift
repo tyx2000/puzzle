@@ -22397,6 +22397,7 @@ enum RegressionTests {
         DocumentStore.shared.setVirtualDocument(url: historyURL, text: "",
                                                 displayName: "sample.swift History")
         pane.open(url: historyURL)
+        let initialScrollY = pane.fileHistoryViewForTesting?.scrollPosition.y
         pane.fileHistoryViewForTesting?.scrollPosition = NSPoint(x: 0, y: 1100)
         try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == 1100,
                    "file history did not scroll to the test position")
@@ -22413,6 +22414,15 @@ enum RegressionTests {
         pane.restore(session) { _ in true }
         try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == 1100,
                    "restoring the project's tabs lost the history's scroll position")
+        pane.open(url: file)
+        if let fileIndex = pane.openURLs.firstIndex(of: file) {
+            pane.closeOtherTabs(around: fileIndex)
+        }
+        DocumentStore.shared.setVirtualDocument(url: historyURL, text: "",
+                                                displayName: "sample.swift History")
+        pane.open(url: historyURL)
+        try expect(pane.fileHistoryViewForTesting?.scrollPosition.y == initialScrollY,
+                   "batch-closing a history tab retained its scroll position")
     }
 
     private static func testIdleParseTreeIsDiscardedAfterTimeout() throws {

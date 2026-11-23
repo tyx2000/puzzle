@@ -1638,6 +1638,7 @@ final class EditorPaneViewController: NSViewController, NSTextViewDelegate {
         saveFindState()
         closed.forEach {
             selections.removeValue(forKey: $0)
+            fileHistoryScrollPositions.removeValue(forKey: $0)
             findStates.removeValue(forKey: $0)
             lineActivatedURLs.remove($0)
             markdownSourceURLs.remove($0)
