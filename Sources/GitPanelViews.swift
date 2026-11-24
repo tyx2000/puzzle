@@ -852,6 +852,14 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     var contextMenuProvider: ((Int) -> NSMenu?)?
     /// Return does to the lit row what a click on it does.
     var onActivateRow: ((Int) -> Void)?
+    var commitIDAtRow: ((Int) -> String?)?
+    var copyCommitID: (String) -> Void = { id in
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(id, forType: .string)
+    }
+    private var pendingCommitID: String?
+    private var pendingCommitClick: DispatchWorkItem?
+    private var pressedCommitID: String?
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoveredRow = -1
     private lazy var hoverFollower = RowHoverFollower(host: self)
@@ -887,7 +895,56 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
            cell.performAction(at: event.locationInWindow) {
             return
         }
+        if let id = commitIDAtRow?(row) {
+            window?.makeFirstResponder(self)
+            // Cancel on the second press, before the first click's timer
+            // can fire while the mouse button is still held.
+            if event.clickCount == 2, id == pendingCommitID {
+                cancelPendingCommitClick()
+                copyCommitID(id)
+            } else {
+                pressedCommitID = id
+            }
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if pressedCommitID == nil { super.mouseDragged(with: event) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let id = pressedCommitID else {
+            super.mouseUp(with: event)
+            return
+        }
+        pressedCommitID = nil
+        let point = convert(event.locationInWindow, from: nil)
+        guard commitIDAtRow?(row(at: point)) == id else { return }
+        // A separate click starts a new sequence. Finish the previous
+        // single click and resolve the new one by ID after any row changes.
+        finishPendingCommitClick()
+        let work = DispatchWorkItem { [weak self] in self?.finishPendingCommitClick() }
+        pendingCommitID = id
+        pendingCommitClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
+    func cancelPendingCommitClick() {
+        pendingCommitClick?.cancel()
+        pendingCommitClick = nil
+        pendingCommitID = nil
+        pressedCommitID = nil
+    }
+
+    private func finishPendingCommitClick() {
+        guard let id = pendingCommitID else { return }
+        cancelPendingCommitClick()
+        if let row = (0..<numberOfRows).first(where: { commitIDAtRow?($0) == id }) {
+            selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            onActivateRow?(row)
+        }
     }
     override func mouseMoved(with event: NSEvent) {
         keysLitRow = false
@@ -900,7 +957,10 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { setHoveredRow(-1) }
+        if window == nil {
+            cancelPendingCommitClick()
+            setHoveredRow(-1)
+        }
     }
 
     // MARK: Keys

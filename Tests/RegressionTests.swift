@@ -81,6 +81,15 @@ enum RegressionTests {
             print("Commit file reveal regression tests passed (1)")
             return
         }
+        if CommandLine.arguments.contains("--project-history-regressions") {
+            try testProjectTitleStrip()
+            try testCutHistoryRowsSayTheRest()
+            try testHistoryRowOpenActions()
+            try testStripedGitLists()
+            try testCommitFileTabsRevealCollapsedHistory()
+            print("Project history regression tests passed (5)")
+            return
+        }
         if CommandLine.arguments.contains("--line-popup-regressions") {
             try testActiveLineStaysInFiniteDocument()
             try testActiveLineBadge()
@@ -18522,6 +18531,59 @@ enum RegressionTests {
                 cell.cacheDisplay(in: cell.bounds, to: rep)
             }
         }
+        let hash = GitService.log(in: root, limit: 1).first?.shortHash ?? ""
+        func checkCommitClicks(in table: NSTableView, window: NSWindow) throws {
+            guard let table = table as? GitTableView, !hash.isEmpty else {
+                throw Failure(description: "fixture history is unavailable")
+            }
+            window.contentView?.layoutSubtreeIfNeeded()
+            table.layoutSubtreeIfNeeded()
+            let activation = table.onActivateRow
+            let copy = table.copyCommitID
+            var copied: [String] = []
+            var activated: [Int] = []
+            table.copyCommitID = { copied.append($0) }
+            table.onActivateRow = { row in
+                activated.append(row)
+                activation?(row)
+            }
+            defer {
+                table.copyCommitID = copy
+                table.onActivateRow = activation
+            }
+
+            func click(_ count: Int) {
+                let rect = table.rect(ofRow: 0)
+                let point = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+                func event(_ type: NSEvent.EventType) -> NSEvent {
+                    NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                       timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber, context: nil,
+                                       eventNumber: 0, clickCount: count, pressure: 1)!
+                }
+                table.mouseDown(with: event(.leftMouseDown))
+                table.mouseUp(with: event(.leftMouseUp))
+            }
+
+            func doubleClickAndCheck() throws {
+                let rows = table.numberOfRows
+                let before = activated.count
+                click(1)
+                try expect(activated.count == before && table.numberOfRows == rows,
+                           "the first press of a double-click activated the row")
+                click(2)
+                RunLoop.main.run(until: Date().addingTimeInterval(NSEvent.doubleClickInterval + 0.05))
+                try expect(copied.last == hash && activated.count == before && table.numberOfRows == rows,
+                           "double-clicking copied \(copied), activated \(activated), rows \(table.numberOfRows) instead of \(rows)")
+            }
+
+            try doubleClickAndCheck()
+            click(1)
+            try expect(waitUntil { table.numberOfRows == 3 } && activated == [0],
+                       "a single click did not expand the commit")
+            try doubleClickAndCheck()
+            try expect(copied == [hash, hash], "each double-click must copy exactly once")
+        }
         func clickOpen(_ cell: GitHistoryFileCell) throws {
             draw(cell)
             let box = cell.actionRectForTesting(.open)
@@ -18556,7 +18618,7 @@ enum RegressionTests {
         let status = GitService.status(in: project)
         history.setSource(directory: project, state: .init(head: status.head))
         try expect(waitUntil { history.rowCountForTesting == 1 }, "project history did not load")
-        history.clickRowForTesting(0)
+        try checkCommitClicks(in: history.openRowTable, window: window)
         try expect(waitUntil { history.fileRowsForTesting.count == 2 }, "history did not expand")
         guard let sourceIndex = history.fileRowsForTesting.firstIndex(of: "source.swift"),
               let missingIndex = history.fileRowsForTesting.firstIndex(of: "removed.swift") else {
@@ -18593,7 +18655,7 @@ enum RegressionTests {
         panel.setDirectory(project)
         try expect(waitUntil { panel.historyRowIsCommitForTesting == [true] },
                    "Git History did not load")
-        panel.expandCommit(at: 0)
+        try checkCommitClicks(in: panel.openRowTable, window: panelWindow)
         try expect(waitUntil { panel.historyRowIsCommitForTesting == [true, false, false] },
                    "Git History did not expand")
         panel.setHoveredRowForTesting(sourceRow)

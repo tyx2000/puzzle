@@ -96,6 +96,7 @@ final class ProjectHistoryViewController: NSViewController {
     private var unpushed: Set<String> = []
     private var expanded: Set<String> = []
     private var files: [String: [GitService.CommitFile]] = [:]
+    private var loadingFiles: Set<String> = []
     /// The branch this one was started from, when it can be told.
     private var baseName: String?
     /// Full IDs of the listed commits that came with that branch.
@@ -137,6 +138,11 @@ final class ProjectHistoryViewController: NSViewController {
         table.target = self
         table.action = #selector(rowClicked)
         table.onActivateRow = { [weak self] row in self?.act(on: row) }
+        table.commitIDAtRow = { [weak self] row in
+            guard let self, self.rows.indices.contains(row),
+                  case .commit(let commit) = self.rows[row] else { return nil }
+            return commit.shortHash
+        }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("commit"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -189,6 +195,7 @@ final class ProjectHistoryViewController: NSViewController {
     /// second `git log`.
     func prepare(for directory: URL?) {
         guard directory != self.directory else { return }
+        table.cancelPendingCommitClick()
         self.directory = directory
         state = nil
         // Another project's commits must not sit here while its own load is
@@ -201,6 +208,7 @@ final class ProjectHistoryViewController: NSViewController {
         selectedCommit = nil
         openFile = nil
         files = [:]
+        loadingFiles = []
         baseName = nil
         inherited = []
         rebuildRows()
@@ -257,6 +265,7 @@ final class ProjectHistoryViewController: NSViewController {
                 let listed = Set(log.map(\.shortHash))
                 self.expanded.formIntersection(listed)
                 self.files = self.files.filter { listed.contains($0.key) }
+                self.loadingFiles.formIntersection(listed)
                 self.rebuildRows()
                 self.revealOpenFile()
             }
@@ -416,15 +425,17 @@ final class ProjectHistoryViewController: NSViewController {
             finishOpenFileReveal()
             return
         }
-        // An already-open commit without cached files is still loading.
-        guard inserted else { return }
+        // An already-loading commit need not spawn a second `git show`.
+        guard loadingFiles.insert(hash).inserted else { return }
         // `git show` on a large commit is not instant.
         GitService.workQueue.async { [weak self] in
             let found = GitService.files(inCommit: hash, in: directory)
             DispatchQueue.main.async {
-                guard let self, self.directory == directory,
-                      self.expanded.contains(hash) else { return }
+                guard let self, self.directory == directory else { return }
+                self.loadingFiles.remove(hash)
+                guard self.commits.contains(where: { $0.shortHash == hash }) else { return }
                 self.files[hash] = found
+                guard self.expanded.contains(hash) else { return }
                 self.rebuildRows()
                 self.finishOpenFileReveal()
             }
