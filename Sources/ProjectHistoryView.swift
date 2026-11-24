@@ -138,11 +138,6 @@ final class ProjectHistoryViewController: NSViewController {
         table.target = self
         table.action = #selector(rowClicked)
         table.onActivateRow = { [weak self] row in self?.act(on: row) }
-        table.commitIDAtRow = { [weak self] row in
-            guard let self, self.rows.indices.contains(row),
-                  case .commit(let commit) = self.rows[row] else { return nil }
-            return commit.shortHash
-        }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("commit"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -195,7 +190,7 @@ final class ProjectHistoryViewController: NSViewController {
     /// second `git log`.
     func prepare(for directory: URL?) {
         guard directory != self.directory else { return }
-        table.cancelPendingCommitClick()
+        table.cancelCommitPress()
         self.directory = directory
         state = nil
         // Another project's commits must not sit here while its own load is

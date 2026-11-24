@@ -401,7 +401,8 @@ enum SidebarCellDrawing {
                                    trailingPinned: String = "",
                                    in rect: NSRect, gap: CGFloat = 8,
                                    trailingShare: CGFloat = 0.6,
-                                   leadingLineBreak: NSLineBreakMode = .byTruncatingTail)
+                                   leadingLineBreak: NSLineBreakMode = .byTruncatingTail,
+                                   drawPinnedBackground: ((NSRect) -> Void)? = nil)
         -> LeadingAndTrailingRects {
         var drawn = LeadingAndTrailingRects()
         guard rect.width > 0, rect.height > 0 else { return drawn }
@@ -418,6 +419,7 @@ enum SidebarCellDrawing {
             let pinnedWidth = min(width(trailingPinned), budget)
             let pinned = NSRect(x: rect.maxX - pinnedWidth, y: rect.minY,
                                 width: pinnedWidth, height: rect.height)
+            drawPinnedBackground?(pinned)
             text(trailingPinned, font: trailingFont, color: trailingColor, baseline: baseline,
                  in: pinned, lineBreak: .byClipping, alignment: .right)
             drawn.pinned = pinned

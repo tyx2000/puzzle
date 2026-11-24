@@ -233,7 +233,7 @@ final class GitPanelViewController: NSViewController {
     private(set) var historyLoadCountForTesting = 0
 
     func setDirectory(_ url: URL?) {
-        table.cancelPendingCommitClick()
+        table.cancelCommitPress()
         if url != directory {
             if let old = directory {
                 drafts[old] = commitField.string.isEmpty ? nil : commitField.string
@@ -274,7 +274,7 @@ final class GitPanelViewController: NSViewController {
     }
 
     func releaseTransientMemory() {
-        table.cancelPendingCommitClick()
+        table.cancelCommitPress()
         pendingCommitFileReveal = nil
         historyRows.removeAll()
         expandedCommits.removeAll()
@@ -351,11 +351,6 @@ final class GitPanelViewController: NSViewController {
         table.target = self
         table.action = #selector(rowClicked)
         table.onActivateRow = { [weak self] row in self?.activate(row: row) }
-        table.commitIDAtRow = { [weak self] row in
-            guard let self, self.showingHistory, self.historyRows.indices.contains(row),
-                  case .commit(let commit, _) = self.historyRows[row] else { return nil }
-            return commit.shortHash
-        }
         table.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
         table.usesAlternatingRowBackgroundColors = false
 
@@ -782,7 +777,7 @@ final class GitPanelViewController: NSViewController {
     }
 
     @objc func tabChanged() {
-        table.cancelPendingCommitClick()
+        table.cancelCommitPress()
         showingBranches = segmented.selectedSegment == 1
         showingHistory = segmented.selectedSegment == 2
         updateTabLayout()

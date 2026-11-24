@@ -19,7 +19,13 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
     /// nil when it all fit.
     private var cutShort: String?
     private var date = ""
-    private var commitID = ""
+    private(set) var commitID = ""
+    private var timePointer: NSPoint?
+    private var timeActionRect = NSRect.zero {
+        didSet {
+            if timeActionRect != oldValue { window?.invalidateCursorRects(for: self) }
+        }
+    }
     private var showsID = true
     private var metaColor = NSColor.clear
     private var subjectColor = Theme.foreground
@@ -73,6 +79,10 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
         self.graphRow = graphRow
         self.graphWidth = graphWidth
         refDecorations = commit.refDecorations
+        if commitID != commit.shortHash {
+            timePointer = nil
+            timeActionRect = .zero
+        }
         commitID = commit.shortHash
         subject = commit.subject
         // The name gives way before the timestamp does: a truncated name still
@@ -160,7 +170,9 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
         let drawn = SidebarCellDrawing.leadingAndTrailing(
             leading: subject, leadingFont: Theme.uiFont(11), leadingColor: subjectColor,
             trailing: author, trailingFont: Theme.uiFont(9.5), trailingColor: metaColor,
-            trailingPinned: date, in: content, gap: Self.columnGap)
+            trailingPinned: date, in: content, gap: Self.columnGap,
+            drawPinnedBackground: drawTimeAction)
+        if drawn.pinned.isEmpty { timeActionRect = .zero }
         drawnSubjectRectForTesting = drawn.leading
         drawnAuthorRectForTesting = drawn.trailing
         drawnDateRectForTesting = drawn.pinned
@@ -176,6 +188,33 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
         cutShort = anyCut ? fullText : nil
     }
 
+    private var isTimeActionHovered: Bool {
+        timePointer.map(isTimeAction(at:)) ?? false
+    }
+
+    func isTimeAction(at point: NSPoint) -> Bool {
+        timeActionRect.contains(point)
+    }
+
+    func updateTimeHover(at point: NSPoint?) {
+        let wasHovered = isTimeActionHovered
+        timePointer = point
+        if wasHovered != isTimeActionHovered { needsDisplay = true }
+    }
+
+    private func drawTimeAction(in dateRect: NSRect) {
+        timeActionRect = commitID.isEmpty || dateRect.isEmpty
+            ? .zero : bounds.intersection(dateRect.insetBy(dx: -4, dy: 1))
+        guard isTimeActionHovered else { return }
+        Theme.activeRow.setFill()
+        Theme.rowHighlightPath(in: timeActionRect).fill()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if !timeActionRect.isEmpty { addCursorRect(timeActionRect, cursor: .pointingHand) }
+    }
+
     /// Message; then id, name and time; then the branches, if any.
     private var fullText: String {
         let meta = [showsID ? commitID : "", commitAuthor, date]
@@ -188,6 +227,7 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
     /// The tip covers the whole row, and asks what to say only when it is
     /// about to show — after the row has been drawn at the width it has.
     override func setFrameSize(_ newSize: NSSize) {
+        if frame.size != newSize { timeActionRect = .zero }
         super.setFrameSize(newSize)
         removeAllToolTips()
         addToolTip(bounds, owner: self, userData: nil)
@@ -195,7 +235,7 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
               point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
-        cutShort ?? ""
+        isTimeAction(at: point) ? "Copy Commit ID" : cutShort ?? ""
     }
 
     var subjectForTesting: String { subject }
@@ -209,6 +249,8 @@ final class GitCommitCell: DrawnSidebarCell, NSViewToolTipOwner {
         refDecorations.map { GitRefLabelsDrawing.text(for: $0, currentBranch: currentBranch) }
     }
     var isInheritedForTesting: Bool { subjectColor == Theme.dimText }
+    var timeActionRectForTesting: NSRect { timeActionRect }
+    var timeActionHoveredForTesting: Bool { isTimeActionHovered }
 }
 
 /// Where the history under a project's changes stops being the branch's own:
@@ -852,14 +894,12 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     var contextMenuProvider: ((Int) -> NSMenu?)?
     /// Return does to the lit row what a click on it does.
     var onActivateRow: ((Int) -> Void)?
-    var commitIDAtRow: ((Int) -> String?)?
     var copyCommitID: (String) -> Void = { id in
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(id, forType: .string)
     }
-    private var pendingCommitID: String?
-    private var pendingCommitClick: DispatchWorkItem?
-    private var pressedCommitID: String?
+    private var pressedCommit: (id: String, onTime: Bool)?
+    private weak var hoveredTimeCell: GitCommitCell?
     private var hoverTrackingArea: NSTrackingArea?
     private(set) var hoveredRow = -1
     private lazy var hoverFollower = RowHoverFollower(host: self)
@@ -888,69 +928,57 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     /// list, not the cell, hears a click on a row's plain views, and without
     /// this it selected the row: discard and open showed the diff instead.
     override func mouseDown(with event: NSEvent) {
+        pressedCommit = nil
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point), column = self.column(at: point)
-        if row >= 0, column >= 0,
-           let cell = view(atColumn: column, row: row, makeIfNecessary: false) as? GitFileActionCell,
-           cell.performAction(at: event.locationInWindow) {
+        let cell = row >= 0 && column >= 0
+            ? view(atColumn: column, row: row, makeIfNecessary: false) : nil
+        if let cell = cell as? GitFileActionCell, cell.performAction(at: event.locationInWindow) {
             return
         }
-        if let id = commitIDAtRow?(row) {
+        // Track the time independently so its click never selects or folds
+        // the row. Release elsewhere cancels the original press.
+        if let cell = cell as? GitCommitCell {
+            let onTime = cell.isTimeAction(at: cell.convert(point, from: self))
+            pressedCommit = (cell.commitID, onTime)
             window?.makeFirstResponder(self)
-            // Cancel on the second press, before the first click's timer
-            // can fire while the mouse button is still held.
-            if event.clickCount == 2, id == pendingCommitID {
-                cancelPendingCommitClick()
-                copyCommitID(id)
-            } else {
-                pressedCommitID = id
-            }
             return
         }
         super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if pressedCommitID == nil { super.mouseDragged(with: event) }
+        if pressedCommit == nil { super.mouseDragged(with: event) }
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let id = pressedCommitID else {
+        guard let press = pressedCommit else {
             super.mouseUp(with: event)
             return
         }
-        pressedCommitID = nil
+        pressedCommit = nil
         let point = convert(event.locationInWindow, from: nil)
-        guard commitIDAtRow?(row(at: point)) == id else { return }
-        // A separate click starts a new sequence. Finish the previous
-        // single click and resolve the new one by ID after any row changes.
-        finishPendingCommitClick()
-        let work = DispatchWorkItem { [weak self] in self?.finishPendingCommitClick() }
-        pendingCommitID = id
-        pendingCommitClick = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
-    }
-
-    func cancelPendingCommitClick() {
-        pendingCommitClick?.cancel()
-        pendingCommitClick = nil
-        pendingCommitID = nil
-        pressedCommitID = nil
-    }
-
-    private func finishPendingCommitClick() {
-        guard let id = pendingCommitID else { return }
-        cancelPendingCommitClick()
-        if let row = (0..<numberOfRows).first(where: { commitIDAtRow?($0) == id }) {
+        let row = self.row(at: point), column = self.column(at: point)
+        guard row >= 0, column >= 0,
+              let cell = view(atColumn: column, row: row, makeIfNecessary: false) as? GitCommitCell,
+              cell.commitID == press.id,
+              cell.isTimeAction(at: cell.convert(point, from: self)) == press.onTime else { return }
+        if press.onTime {
+            copyCommitID(press.id)
+        } else {
             selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             onActivateRow?(row)
         }
     }
+
+    func cancelCommitPress() { pressedCommit = nil }
+
     override func mouseMoved(with event: NSEvent) {
         keysLitRow = false
         updateHoveredRow(with: event)
     }
     override func mouseExited(with event: NSEvent) {
+        updateTimeHover(cell: nil, point: nil)
         guard !keysLitRow else { return }
         setHoveredRow(-1)
     }
@@ -958,7 +986,8 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
-            cancelPendingCommitClick()
+            cancelCommitPress()
+            updateTimeHover(cell: nil, point: nil)
             setHoveredRow(-1)
         }
     }
@@ -994,6 +1023,7 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
             ? (step > 0 ? 0 : numberOfRows - 1)
             : min(max(from + step, 0), numberOfRows - 1)
         keysLitRow = true
+        updateTimeHover(cell: nil, point: nil)
         setHoveredRow(next)
         if selectionHighlightStyle != .none {
             selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
@@ -1036,8 +1066,17 @@ final class GitTableView: NSTableView, PointerHoverRefreshing {
     /// scrolls pass under the pointer, and each lit in turn as it went. Nor
     /// while a divider is lit, whose band lies over the rows' edge.
     private func hover(at point: NSPoint) {
-        setHoveredRow(!PuzzleScroller.isDragging && !DividerGrip.isLit(in: window)
-                        && visibleRect.contains(point) ? row(at: point) : -1)
+        let row = !PuzzleScroller.isDragging && !DividerGrip.isLit(in: window)
+            && visibleRect.contains(point) ? self.row(at: point) : -1
+        setHoveredRow(row)
+        let cell = row >= 0 ? view(atColumn: 0, row: row, makeIfNecessary: false) as? GitCommitCell : nil
+        updateTimeHover(cell: cell, point: point)
+    }
+
+    private func updateTimeHover(cell: GitCommitCell?, point: NSPoint?) {
+        if hoveredTimeCell !== cell { hoveredTimeCell?.updateTimeHover(at: nil) }
+        hoveredTimeCell = cell
+        if let cell { cell.updateTimeHover(at: point.map { cell.convert($0, from: self) }) }
     }
 
     func setHoveredRowForTesting(_ row: Int) { setHoveredRow(row) }

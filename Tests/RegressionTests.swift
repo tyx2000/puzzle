@@ -18532,57 +18532,90 @@ enum RegressionTests {
             }
         }
         let hash = GitService.log(in: root, limit: 1).first?.shortHash ?? ""
-        func checkCommitClicks(in table: NSTableView, window: NSWindow) throws {
+        func checkCommitClicks(in table: NSTableView, window: NSWindow,
+                               selectedCommits: () -> [String]) throws {
             guard let table = table as? GitTableView, !hash.isEmpty else {
                 throw Failure(description: "fixture history is unavailable")
             }
+            defer { pinPointer(at: pointerNowhere) }
             window.contentView?.layoutSubtreeIfNeeded()
             table.layoutSubtreeIfNeeded()
-            let activation = table.onActivateRow
             let copy = table.copyCommitID
             var copied: [String] = []
-            var activated: [Int] = []
             table.copyCommitID = { copied.append($0) }
-            table.onActivateRow = { row in
-                activated.append(row)
-                activation?(row)
-            }
-            defer {
-                table.copyCommitID = copy
-                table.onActivateRow = activation
-            }
+            defer { table.copyCommitID = copy }
 
-            func click(_ count: Int) {
-                let rect = table.rect(ofRow: 0)
-                let point = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
-                func event(_ type: NSEvent.EventType) -> NSEvent {
-                    NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                                       timestamp: ProcessInfo.processInfo.systemUptime,
-                                       windowNumber: window.windowNumber, context: nil,
-                                       eventNumber: 0, clickCount: count, pressure: 1)!
+            func commitCell() throws -> GitCommitCell {
+                guard let cell = table.view(atColumn: 0, row: 0, makeIfNecessary: true) as? GitCommitCell else {
+                    throw Failure(description: "history built no commit cell")
                 }
-                table.mouseDown(with: event(.leftMouseDown))
-                table.mouseUp(with: event(.leftMouseUp))
+                cell.layoutSubtreeIfNeeded()
+                if let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) {
+                    cell.cacheDisplay(in: cell.bounds, to: rep)
+                }
+                return cell
             }
 
-            func doubleClickAndCheck() throws {
+            func event(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: window.windowNumber, context: nil,
+                                   eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+
+            func move(to point: NSPoint) {
+                pinPointer(at: window.convertPoint(toScreen: point))
+                table.mouseMoved(with: event(.mouseMoved, at: point))
+            }
+
+            func click(at point: NSPoint) {
+                table.mouseDown(with: event(.leftMouseDown, at: point))
+                table.mouseUp(with: event(.leftMouseUp, at: point))
+            }
+
+            func subjectPoint(in cell: GitCommitCell) -> NSPoint {
+                let subject = cell.drawnSubjectRectForTesting
+                return cell.convert(NSPoint(x: subject.midX, y: subject.midY), to: nil)
+            }
+
+            func clickTime(expectedCopies: Int) throws {
+                let cell = try commitCell()
+                let time = cell.drawnDateRectForTesting
+                let title = cell.drawnSubjectRectForTesting
+                let timePoint = NSPoint(x: time.midX, y: time.midY)
+                let hit = cell.timeActionRectForTesting
+                try expect(!time.isEmpty && hit.contains(timePoint) && !hit.intersects(title),
+                           "the copy target \(hit) doesn't match the time \(time) beside the subject \(title)")
+                move(to: subjectPoint(in: cell))
+                try expect(!cell.timeActionHoveredForTesting, "hovering the subject highlighted the time")
+                let point = cell.convert(timePoint, to: nil)
+                move(to: point)
+                try expect(cell.timeActionHoveredForTesting, "hovering the time didn't highlight the copy target")
                 let rows = table.numberOfRows
-                let before = activated.count
-                click(1)
-                try expect(activated.count == before && table.numberOfRows == rows,
-                           "the first press of a double-click activated the row")
-                click(2)
-                RunLoop.main.run(until: Date().addingTimeInterval(NSEvent.doubleClickInterval + 0.05))
-                try expect(copied.last == hash && activated.count == before && table.numberOfRows == rows,
-                           "double-clicking copied \(copied), activated \(activated), rows \(table.numberOfRows) instead of \(rows)")
+                let selection = selectedCommits()
+                let selectedRows = table.selectedRowIndexes
+                click(at: point)
+                try expect(copied == Array(repeating: hash, count: expectedCopies)
+                            && selectedCommits() == selection && table.selectedRowIndexes == selectedRows
+                            && table.numberOfRows == rows,
+                           "clicking the time copied \(copied), selected \(selectedCommits()), rows \(table.numberOfRows) instead of \(rows)")
+                move(to: subjectPoint(in: cell))
+                try expect(!cell.timeActionHoveredForTesting, "leaving the time kept the copy target highlighted")
             }
 
-            try doubleClickAndCheck()
-            click(1)
-            try expect(waitUntil { table.numberOfRows == 3 } && activated == [0],
-                       "a single click did not expand the commit")
-            try doubleClickAndCheck()
-            try expect(copied == [hash, hash], "each double-click must copy exactly once")
+            try clickTime(expectedCopies: 1)
+            let selection = selectedCommits()
+            click(at: try subjectPoint(in: commitCell()))
+            try expect(selectedCommits() == selection + [hash],
+                       "an ordinary commit click waited instead of activating the row")
+            try expect(waitUntil { table.numberOfRows == 3 }, "a single click did not expand the commit")
+            try clickTime(expectedCopies: 2)
+            click(at: try subjectPoint(in: commitCell()))
+            try expect(table.numberOfRows == 1 && selectedCommits() == selection + [hash, hash],
+                       "an ordinary click on an expanded commit didn't collapse it immediately")
+            try expect(copied == [hash, hash], "an ordinary commit click also copied the hash")
+            click(at: try subjectPoint(in: commitCell()))
+            try expect(waitUntil { table.numberOfRows == 3 }, "the commit did not reopen")
         }
         func clickOpen(_ cell: GitHistoryFileCell) throws {
             draw(cell)
@@ -18601,6 +18634,12 @@ enum RegressionTests {
             try expect(cell.clickForTesting(at: NSPoint(x: box.midX, y: box.midY)) == .open,
                        "history open did not consume its click")
         }
+        func pinPointerOverRow(_ row: Int, in table: NSTableView, window: NSWindow) {
+            let rect = table.rect(ofRow: row)
+            let point = table.convert(NSPoint(x: rect.minX + 20, y: rect.midY), to: nil)
+            pinPointer(at: window.convertPoint(toScreen: point))
+        }
+        defer { pinPointer(at: pointerNowhere) }
 
         // Use the sidebar's actual forwarding callback for the Projects list.
         let sidebar = SidebarViewController()
@@ -18618,7 +18657,9 @@ enum RegressionTests {
         let status = GitService.status(in: project)
         history.setSource(directory: project, state: .init(head: status.head))
         try expect(waitUntil { history.rowCountForTesting == 1 }, "project history did not load")
-        try checkCommitClicks(in: history.openRowTable, window: window)
+        var projectSelected: [String] = []
+        history.onSelectCommit = { projectSelected.append($0) }
+        try checkCommitClicks(in: history.openRowTable, window: window) { projectSelected }
         try expect(waitUntil { history.fileRowsForTesting.count == 2 }, "history did not expand")
         guard let sourceIndex = history.fileRowsForTesting.firstIndex(of: "source.swift"),
               let missingIndex = history.fileRowsForTesting.firstIndex(of: "removed.swift") else {
@@ -18631,12 +18672,14 @@ enum RegressionTests {
             throw Failure(description: "project history did not build a file cell")
         }
         try expect(cell.actionRectForTesting(.open) == .zero, "history button is always visible")
+        pinPointerOverRow(sourceRow, in: history.openRowTable, window: window)
         history.setHoveredRowForTesting(sourceRow)
         try clickOpen(cell)
         try expect(opened == [source] && diffs == 0,
                    "project history open did not route only the current source file")
         history.clickRowForTesting(sourceRow)
         try expect(diffs == 1 && opened == [source], "ordinary history click no longer opens diff")
+        pinPointerOverRow(missingRow, in: history.openRowTable, window: window)
         history.setHoveredRowForTesting(missingRow)
         try expect(history.fileCellForTesting(missingRow)?.onOpenFile == nil,
                    "missing source still offers open")
@@ -18655,9 +18698,12 @@ enum RegressionTests {
         panel.setDirectory(project)
         try expect(waitUntil { panel.historyRowIsCommitForTesting == [true] },
                    "Git History did not load")
-        try checkCommitClicks(in: panel.openRowTable, window: panelWindow)
+        var panelSelected: [String] = []
+        panel.onSelectCommit = { panelSelected.append($0) }
+        try checkCommitClicks(in: panel.openRowTable, window: panelWindow) { panelSelected }
         try expect(waitUntil { panel.historyRowIsCommitForTesting == [true, false, false] },
                    "Git History did not expand")
+        pinPointerOverRow(sourceRow, in: panel.openRowTable, window: panelWindow)
         panel.setHoveredRowForTesting(sourceRow)
         guard let panelCell = panel.historyFileCellForTesting(sourceRow) else {
             throw Failure(description: "Git History did not build a file cell")
@@ -18670,6 +18716,7 @@ enum RegressionTests {
                    "Git History open did not route only the current source file")
         panel.openCommitFile(commitIndex: 0, fileIndex: sourceRow - 1)
         try expect(diffs == 2, "Git History lost its commit diff action")
+        pinPointerOverRow(missingRow, in: panel.openRowTable, window: panelWindow)
         panel.setHoveredRowForTesting(missingRow)
         try expect(panel.historyFileCellForTesting(missingRow)?.onOpenFile == nil,
                    "Git History offers an absent working-tree file")
