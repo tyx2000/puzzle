@@ -57,8 +57,13 @@ if [ -z "$BINDIR" ]; then
 fi
 
 # Bake the build location in as a last-resort fallback.
-sed "s|^DEV_BUILD=\"\"|DEV_BUILD=\"$BUILD\"|" "$ROOT/Tools/pz" > "$BINDIR/pz"
-chmod +x "$BINDIR/pz"
+# Replace an existing launcher symlink instead of modifying its signed app resource.
+LAUNCHER_TMP="$(mktemp "$BINDIR/.pz.XXXXXX")"
+trap 'rm -f "$LAUNCHER_TMP"' EXIT
+sed "s|^DEV_BUILD=\"\"|DEV_BUILD=\"$BUILD\"|" "$ROOT/Tools/pz" > "$LAUNCHER_TMP"
+chmod 755 "$LAUNCHER_TMP"
+mv -fh "$LAUNCHER_TMP" "$BINDIR/pz"
+trap - EXIT
 echo "installed $BINDIR/pz"
 
 # zsh caches command lookups; without this a new binary in an existing PATH
