@@ -232,8 +232,9 @@ final class TabPillView: NSView {
         super.layout()
         let mid = (bounds.height - 14) / 2
         closeButton.frame = NSRect(x: bounds.width - 22, y: mid, width: 14, height: 14)
-        label.frame = NSRect(x: 12, y: (bounds.height - 16) / 2,
-                             width: max(0, bounds.width - 12 - 26), height: 16)
+        let labelHeight = min(bounds.height, max(16, ceil(label.intrinsicContentSize.height)))
+        label.frame = NSRect(x: 12, y: (bounds.height - labelHeight) / 2,
+                             width: max(0, bounds.width - 12 - 26), height: labelHeight)
     }
 
     override func viewDidChangeEffectiveAppearance() {
