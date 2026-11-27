@@ -445,18 +445,27 @@ final class FileTreeViewController: NSViewController {
 
     /// Redraw after a theme / settings change.
     func refreshAppearance() {
-        guard pendingEdit == nil else {
-            deferredTreeReload = true
-            return
-        }
         outlineView.backgroundColor = Theme.panelBackground
-        outlineView.reloadData()
-        // Row heights are cached, so `tree_line_height` / `ui_font_size` changes
-        // need an explicit invalidation to take effect.
         if outlineView.numberOfRows > 0 {
             outlineView.noteHeightOfRows(withIndexesChanged:
                 IndexSet(integersIn: 0..<outlineView.numberOfRows))
         }
+        guard pendingEdit == nil else {
+            deferredTreeReload = true
+            if let row = pendingEditRowForTesting,
+               let cell = outlineView.view(atColumn: 0, row: row,
+                                           makeIfNecessary: false) as? InlineTreeNameCell {
+                cell.refreshAppearance()
+            }
+            for row in 0..<outlineView.numberOfRows {
+                outlineView.rowView(atRow: row, makeIfNecessary: false)?.needsDisplay = true
+                outlineView.view(atColumn: 0, row: row, makeIfNecessary: false)?.needsDisplay = true
+            }
+            outlineView.needsDisplay = true
+            return
+        }
+        outlineView.reloadData()
+        refreshActiveRowBackgrounds()
     }
 
     func setStatus(modified: Set<String>, untracked: Set<String>,
@@ -1019,6 +1028,11 @@ final class FileTreeViewController: NSViewController {
         outlineView.backgroundColor = Theme.panelBackground
         outlineView.reloadData()
         if let root { outlineView.expandItem(root) }
+        if outlineView.numberOfRows > 0 {
+            outlineView.noteHeightOfRows(withIndexesChanged:
+                IndexSet(integersIn: 0..<outlineView.numberOfRows))
+        }
+        refreshActiveRowBackgrounds()
     }
 
     private func presentFileError(title: String, error: Error) {
@@ -1274,7 +1288,22 @@ private final class FileTreeCell: DrawnSidebarCell {
 
 private final class InlineTreeTextView: NSTextView {
     var onResign: (() -> Void)?
+    var onLayoutInvalidated: (() -> Void)?
+    var nominalFont: NSFont = Theme.uiFont(12)
     var topShift: CGFloat = 0
+    private var lastBaselineOffset: CGFloat?
+    private var containerTopOffset: CGFloat = 0 {
+        didSet {
+            guard containerTopOffset != oldValue else { return }
+            invalidateTextContainerOrigin()
+            refreshInsertionPointIfNeeded()
+            needsDisplay = true
+        }
+    }
+
+    override var textContainerOrigin: NSPoint {
+        NSPoint(x: 0, y: containerTopOffset)
+    }
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
@@ -1282,20 +1311,94 @@ private final class InlineTreeTextView: NSTextView {
         return resigned
     }
 
+    override func didChangeText() {
+        super.didChangeText()
+        if hasMarkedText() {
+            ensureNominalTypingFont()
+        } else {
+            reapplyNominalFont()
+        }
+        onLayoutInvalidated?()
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        if hasMarkedText() {
+            ensureNominalTypingFont()
+        } else {
+            reapplyNominalFont()
+        }
+        onLayoutInvalidated?()
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        reapplyNominalFont()
+        onLayoutInvalidated?()
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue],
+                                    affinity: NSSelectionAffinity,
+                                    stillSelecting flag: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: flag)
+        ensureNominalTypingFont()
+    }
+
+    func reapplyNominalFont() {
+        if let textStorage, textStorage.length > 0 {
+            textStorage.addAttribute(.font, value: nominalFont,
+                                     range: NSRange(location: 0, length: textStorage.length))
+        }
+        ensureNominalTypingFont()
+    }
+
+    private func ensureNominalTypingFont() {
+        if (typingAttributes[.font] as? NSFont) != nominalFont {
+            typingAttributes[.font] = nominalFont
+        }
+    }
+
+    private func refreshInsertionPointIfNeeded() {
+        if shouldDrawInsertionPoint {
+            updateInsertionPointStateAndRestartTimer(false)
+        }
+    }
+
+    /// Fallback glyphs can raise TextKit's baseline above the configured
+    /// font's own metrics. Measure the actual first line, including after an
+    /// edit adds or removes such a glyph.
+    private var firstLineBaselineOffset: CGFloat? {
+        guard let layoutManager, let textContainer else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        guard layoutManager.numberOfGlyphs > 0 else {
+            return layoutManager.extraLineFragmentRect.minY
+                + layoutManager.defaultBaselineOffset(for: nominalFont)
+        }
+        let fragment = layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        return fragment.minY + layoutManager.location(forGlyphAt: 0).y
+    }
+
     func updateVerticalAlignment(in rowBounds: NSRect) {
-        guard let font else { return }
-        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: rowBounds)
-        let baselineOffset = SidebarCellDrawing.baselineOffset(for: font)
+        guard let baselineOffset = firstLineBaselineOffset else { return }
+        let baseline = SidebarCellDrawing.centeredBaseline(for: nominalFont, in: rowBounds)
         let idealTop = ((baseline - baselineOffset) * 2).rounded() / 2
         topShift = min(0, idealTop)
-        textContainerInset = NSSize(width: 0, height: max(0, idealTop))
+        let previousContainerOffset = containerTopOffset
+        containerTopOffset = max(0, idealTop)
+        if lastBaselineOffset != baselineOffset {
+            lastBaselineOffset = baselineOffset
+            if containerTopOffset == previousContainerOffset {
+                refreshInsertionPointIfNeeded()
+            }
+        }
     }
 
     func verticalCenterError(in rowBounds: NSRect) -> CGFloat? {
-        guard let font else { return nil }
-        let drawnBaseline = topShift + textContainerInset.height
-            + SidebarCellDrawing.baselineOffset(for: font)
-        return abs(drawnBaseline - SidebarCellDrawing.centeredBaseline(for: font, in: rowBounds))
+        guard let superview, let baselineOffset = firstLineBaselineOffset else { return nil }
+        let drawnBaseline = convert(NSPoint(x: textContainerOrigin.x,
+                                            y: textContainerOrigin.y + baselineOffset),
+                                    to: superview).y
+        return abs(drawnBaseline - SidebarCellDrawing.centeredBaseline(for: nominalFont, in: rowBounds))
     }
 }
 
@@ -1324,12 +1427,16 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         editor.isHorizontallyResizable = false
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.lineFragmentPadding = 0
-        editor.font = Theme.uiFont(12)
+        let initialFont = Theme.uiFont(12)
+        editor.nominalFont = initialFont
+        editor.font = initialFont
+        editor.typingAttributes[.font] = initialFont
         editor.textColor = Theme.foreground
         editor.insertionPointColor = Theme.cursor
         editor.selectedTextAttributes = [.backgroundColor: Theme.selection]
         editor.delegate = self
         editor.onResign = { [weak self] in self?.editorDidResign() }
+        editor.onLayoutInvalidated = { [weak self] in self?.needsLayout = true }
         editor.setAccessibilityLabel("File name")
         editor.translatesAutoresizingMaskIntoConstraints = false
         addSubview(editor)
@@ -1351,16 +1458,34 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
                    onSubmit: @escaping (String) -> Bool,
                    onCancel: @escaping () -> Void) {
         editingSessionStarted = false
+        if editor.hasMarkedText() {
+            editor.unmarkText()
+            editor.inputContext?.discardMarkedText()
+        }
+        let resolvedFont = Theme.uiFont(12)
+        editor.nominalFont = resolvedFont
         editor.string = value
-        editor.font = Theme.uiFont(12)
+        editor.reapplyNominalFont()
         editor.textColor = Theme.foreground
         editor.insertionPointColor = Theme.cursor
+        editor.selectedTextAttributes = [.backgroundColor: Theme.selection]
         self.disclosure = disclosure
         self.icon = icon
         self.onSubmit = onSubmit
         self.onCancel = onCancel
         submitting = false
         cancelling = false
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    func refreshAppearance() {
+        let resolvedFont = Theme.uiFont(12)
+        editor.nominalFont = resolvedFont
+        editor.reapplyNominalFont()
+        editor.textColor = Theme.foreground
+        editor.insertionPointColor = Theme.cursor
+        editor.selectedTextAttributes = [.backgroundColor: Theme.selection]
         needsLayout = true
         needsDisplay = true
     }

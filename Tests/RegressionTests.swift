@@ -24,6 +24,12 @@ enum RegressionTests {
         // it: a history list laid out under it lit that row, and ↓↓ counted
         // on from there. Every test starts with it nowhere.
         Pointer.pinnedForTesting = Pointer.Pin(location: pointerNowhere)
+        if CommandLine.arguments.contains("--rename-baseline-regressions") {
+            try testFileTreeRenameFallbackBaseline()
+            try testFileTreeContextEditing()
+            print("File tree rename baseline regression tests passed (2)")
+            return
+        }
         if CommandLine.arguments.contains("--transient-memory-regressions") {
             try testTransientMemoryRegressions()
             print("Transient memory regression tests passed (6)")
@@ -327,6 +333,7 @@ enum RegressionTests {
         try testActiveTreeRowStaysLitThroughReload()
         try testTreeIndentGuides()
         try testFileTreeContextEditing()
+        try testFileTreeRenameFallbackBaseline()
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
@@ -9480,6 +9487,222 @@ enum RegressionTests {
         let reopened = try guides("middle.txt")
         try expect(reopened.map(\.minX) == [outerChevron],
                    "a reopened folder's rows lost their guide: \(reopened)")
+    }
+
+    /// Renaming must keep the static row's baseline when TextKit substitutes a
+    /// font for Chinese or emoji. Measure the actual glyph layout, not the
+    /// editor's alignment helper: repeating its nominal-font calculation hid
+    /// this regression while the visible text moved down by several points.
+    private static func testFileTreeRenameFallbackBaseline() throws {
+        let savedFamily = Settings.shared.uiFontFamily
+        let savedSize = Settings.shared.uiFontSize
+        let savedWeight = Settings.shared.uiFontWeight
+        let savedHeight = Settings.shared.treeLineHeight
+        defer {
+            Settings.shared.uiFontFamily = savedFamily
+            Settings.shared.uiFontSize = savedSize
+            Settings.shared.uiFontWeight = savedWeight
+            Settings.shared.treeLineHeight = savedHeight
+            Theme.invalidateCaches()
+        }
+        Settings.shared.uiFontSize = 13
+        Settings.shared.uiFontWeight = 400
+
+        let directory = try temporaryDirectory("rename-fallback-baseline")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let names = ["README.md", "中文.swift", "a😀.swift"]
+        for name in names {
+            try Data("fixture\n".utf8).write(to: directory.appendingPathComponent(name))
+        }
+
+        var families = ["Menlo", "Monaco"]
+        if NSFont(name: "Iosevka Charon Mono Refit Medium", size: 13) != nil {
+            families.append("Iosevka Charon Mono Refit Medium")
+        }
+        for family in families {
+            for rowHeight in [CGFloat(26), 14] {
+                Settings.shared.uiFontFamily = family
+                Settings.shared.treeLineHeight = rowHeight
+                Theme.invalidateCaches()
+                let tree = FileTreeViewController()
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 240),
+                                      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentViewController = tree
+                window.makeKeyAndOrderFront(nil)
+                defer { window.close() }
+                tree.setRoot(directory)
+                tree.view.layoutSubtreeIfNeeded()
+
+                func checkBaseline(_ editor: NSTextView, _ stage: String) throws {
+                    // Do not mark any view as needing layout here: editing must
+                    // invalidate the containing row itself.
+                    tree.view.layoutSubtreeIfNeeded()
+                    guard let cell = editor.superview,
+                          let manager = editor.layoutManager,
+                          let container = editor.textContainer else {
+                        throw Failure(description: "rename baseline fixture has no native text layout")
+                    }
+                    let nominalFont = Theme.uiFont(12)
+                    manager.ensureLayout(for: container)
+                    let lineFragment: NSRect
+                    let glyphBaseline: CGFloat
+                    if manager.numberOfGlyphs > 0 {
+                        lineFragment = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+                        glyphBaseline = lineFragment.minY + manager.location(forGlyphAt: 0).y
+                    } else {
+                        lineFragment = manager.extraLineFragmentRect
+                        let typingFont = editor.typingAttributes[.font] as? NSFont
+                        try expect(typingFont == nominalFont,
+                                   "\(family) \(rowHeight)pt \(stage) empty typing font was \(String(describing: typingFont))")
+                        try expect(abs(lineFragment.height - manager.defaultLineHeight(for: nominalFont)) <= 0.01,
+                                   "\(family) \(rowHeight)pt \(stage) empty line height \(lineFragment.height) kept fallback metrics")
+                        glyphBaseline = lineFragment.minY + manager.defaultBaselineOffset(for: nominalFont)
+                    }
+                    let actual = editor.convert(NSPoint(x: editor.textContainerOrigin.x,
+                        y: editor.textContainerOrigin.y + glyphBaseline), to: cell).y
+                    let expected = ((cell.bounds.midY + (nominalFont.ascender + nominalFont.descender) / 2) * 2).rounded() / 2
+                    try expect(abs(actual - expected) <= 0.25,
+                               "\(family) \(rowHeight)pt \(stage) rename baseline was \(actual), expected \(expected)")
+                    let expectedLineInCell = editor.convert(
+                        lineFragment.offsetBy(dx: editor.textContainerOrigin.x,
+                                              dy: editor.textContainerOrigin.y),
+                        to: cell)
+                    let caretRange = NSRange(location: editor.selectedRange().location, length: 0)
+                    let screenCaret = editor.firstRect(forCharacterRange: caretRange, actualRange: nil)
+                    if !screenCaret.isEmpty {
+                        let caretInCell = cell.convert(window.convertFromScreen(screenCaret), from: nil)
+                        try expect(abs(caretInCell.midY - expectedLineInCell.midY) <= 1.0,
+                                   "\(family) \(rowHeight)pt \(stage) caret rect midY \(caretInCell.midY) missed line \(expectedLineInCell.midY)")
+                    }
+                    if editor.selectedRange().length == 0,
+                       let indicator = editor.subviews.first(where: {
+                           String(describing: type(of: $0)).contains("InsertionIndicator")
+                       }) {
+                        let indicatorInCell = indicator.convert(indicator.bounds, to: cell)
+                        try expect(abs(indicatorInCell.midY - expectedLineInCell.midY) <= 1.5,
+                                   "\(family) \(rowHeight)pt \(stage) insertion indicator midY \(indicatorInCell.midY) missed line \(expectedLineInCell.midY)")
+                    }
+                    if rowHeight == 14 && editor.string.contains("😀") {
+                        try expect(editor.frame.minY < cell.bounds.minY,
+                                   "the short-row fixture did not exercise a negative editor top offset")
+                    }
+                }
+
+                for name in names {
+                    let url = directory.appendingPathComponent(name)
+                    guard let row = tree.row(for: url),
+                          let item = tree.contextMenuForTesting(row: row)?.item(withTitle: "Rename"),
+                          let action = item.action,
+                          NSApp.sendAction(action, to: item.target, from: item) else {
+                        throw Failure(description: "could not begin renaming \(name)")
+                    }
+                    try expect(waitFor {
+                        guard let editor = window.firstResponder as? NSTextView else { return false }
+                        return tree.pendingEditRowForTesting != nil && editor.string == name
+                    }, "rename editor did not focus \(name)")
+                    guard let editor = window.firstResponder as? NSTextView else {
+                        throw Failure(description: "rename editor disappeared before its baseline check")
+                    }
+                    try checkBaseline(editor, "initial \(name)")
+
+                    // Replace the name through real editing operations so the
+                    // text-change notification, rather than configure/layout,
+                    // must realign fallback glyphs as they appear and disappear.
+                    editor.insertText("README.md", replacementRange:
+                        NSRange(location: 0, length: (editor.string as NSString).length))
+                    try checkBaseline(editor, "ASCII replacement")
+                    let asciiReplacedFont = editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    try expect(asciiReplacedFont == Theme.uiFont(12),
+                               "\(family) direct ASCII replacement over \(name) kept font \(String(describing: asciiReplacedFont))")
+                    editor.setMarkedText("中文", selectedRange: NSRange(location: 2, length: 0),
+                                         replacementRange: NSRange(location: 0, length: 6))
+                    try checkBaseline(editor, "IME marked Chinese")
+                    editor.setMarkedText("", selectedRange: NSRange(location: 0, length: 0),
+                                         replacementRange: NSRange(location: 0, length: 2))
+                    try checkBaseline(editor, "IME cleared marked text")
+                    editor.insertText("README", replacementRange: NSRange(location: 0, length: 0))
+                    let postIMEClearFont = editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    try expect(postIMEClearFont == Theme.uiFont(12),
+                               "\(family) ASCII after IME clear kept font \(String(describing: postIMEClearFont))")
+                    editor.setMarkedText("中", selectedRange: NSRange(location: 1, length: 0),
+                                         replacementRange: NSRange(location: 0, length: 0))
+                    editor.unmarkText()
+                    try checkBaseline(editor, "IME unmarked")
+                    editor.insertText("1\u{FE0F}\u{20E3}.md", replacementRange:
+                        NSRange(location: 0, length: (editor.string as NSString).length))
+                    try checkBaseline(editor, "keycap cluster inserted")
+                    editor.insertText("", replacementRange: NSRange(location: 1, length: 2))
+                    try checkBaseline(editor, "keycap modifier deleted")
+                    let keycapBaseFont = editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    try expect(keycapBaseFont == Theme.uiFont(12),
+                               "\(family) deleting keycap modifiers left base digit in \(String(describing: keycapBaseFont))")
+                    editor.insertText("😀", replacementRange: NSRange(location: 0, length: 0))
+                    try checkBaseline(editor, "emoji inserted")
+                    editor.insertText("", replacementRange: NSRange(location: 0, length: 2))
+                    try checkBaseline(editor, "emoji deleted")
+                    editor.insertText("中文.swift", replacementRange:
+                        NSRange(location: 0, length: (editor.string as NSString).length))
+                    try checkBaseline(editor, "Chinese replacement")
+                    editor.insertText("", replacementRange:
+                        NSRange(location: 0, length: (editor.string as NSString).length))
+                    try expect(editor.string.isEmpty, "the empty rename fixture retained text")
+                    try checkBaseline(editor, "empty caret")
+                    editor.insertText("restored.md", replacementRange: NSRange(location: 0, length: 0))
+                    try checkBaseline(editor, "typing after empty")
+                    let restoredFont = editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    try expect(restoredFont == Theme.uiFont(12),
+                               "\(family) typing ASCII after CJK retained fallback font \(String(describing: restoredFont))")
+                    // Leave active IME marked text before cancelling, then verify
+                    // a reused inline editor starts clean without marked text.
+                    editor.setMarkedText("中", selectedRange: NSRange(location: 1, length: 0),
+                                         replacementRange: NSRange(location: 0, length: 0))
+                    editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                    try expect(tree.pendingEditRowForTesting == nil,
+                               "cancelling the baseline fixture left a pending rename")
+                    try expect(FileManager.default.fileExists(atPath: url.path),
+                               "the baseline test renamed a fixture instead of cancelling")
+                }
+
+                // Reuse the inline editor for New File right after mid-IME cancel,
+                // and verify live font / row-height refresh while editing is active.
+                guard let createItem = tree.contextMenuForTesting(row: 0)?.item(withTitle: "New File"),
+                      let createAction = createItem.action,
+                      NSApp.sendAction(createAction, to: createItem.target, from: createItem) else {
+                    throw Failure(description: "could not begin New File after mid-IME cancel")
+                }
+                try expect(waitFor {
+                    guard let editor = window.firstResponder as? NSTextView else { return false }
+                    return tree.pendingEditRowForTesting != nil && editor.string.isEmpty
+                }, "New File editor did not focus after mid-IME cancel")
+                guard let newEditor = window.firstResponder as? NSTextView else {
+                    throw Failure(description: "New File editor disappeared before baseline check")
+                }
+                try expect(!newEditor.hasMarkedText(),
+                           "reused inline editor retained marked text from cancelled session")
+                try checkBaseline(newEditor, "New File after mid-IME cancel")
+                newEditor.insertText("中文.swift", replacementRange: NSRange(location: 0, length: 0))
+                Settings.shared.treeLineHeight = 20
+                Settings.shared.uiFontSize = 11
+                Theme.invalidateCaches()
+                tree.refreshAppearance()
+                try checkBaseline(newEditor, "live refreshAppearance during edit")
+                try expect(abs((newEditor.superview?.bounds.height ?? 0) - 20) <= 0.01,
+                           "active inline edit row did not resize on refreshAppearance")
+                newEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                tree.view.layoutSubtreeIfNeeded()
+                guard let staticRow = tree.row(for: directory.appendingPathComponent("README.md")),
+                      let outline = (tree.view as? NSScrollView)?.documentView as? NSOutlineView else {
+                    throw Failure(description: "missing outline row after cancelling New File")
+                }
+                let updatedRowHeight = outline.rect(ofRow: staticRow).height
+                try expect(abs(updatedRowHeight - 20) <= 0.01,
+                           "deferred tree reload lost updated row height \(updatedRowHeight)")
+                Settings.shared.uiFontSize = 13
+                Settings.shared.treeLineHeight = rowHeight
+                Theme.invalidateCaches()
+            }
+        }
     }
 
     private static func testFileTreeContextEditing() throws {
