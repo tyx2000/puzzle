@@ -1292,9 +1292,14 @@ final class SearchHitCell: SearchActionCell {
         // painted over the preview, so the row keeps its own contrast.
         if let box = highlightBox(width: textWidth),
            let line = SidebarCellDrawing.textLineRect(shown, in: textRect) {
+            let font = (shown.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+                ?? Theme.uiFont(11)
+            let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: textRect)
+            let ruleY = min(baseline + Theme.matchUnderlineOffset,
+                            min(line.maxY, textRect.maxY) - Theme.matchUnderlineWidth)
             Theme.matchUnderline.setFill()
             NSRect(x: box.minX,
-                   y: line.maxY - Theme.matchUnderlineWidth - 1,
+                   y: ruleY,
                    width: box.width,
                    height: Theme.matchUnderlineWidth).fill()
         }

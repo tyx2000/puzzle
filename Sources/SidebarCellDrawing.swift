@@ -42,7 +42,87 @@ enum SidebarIcon {
 /// painted directly instead of allocating several child views and constraints
 /// for every visible row.
 enum SidebarCellDrawing {
-    /// Baseline whose cap-height is optically centered in `rect`. Use the same
+    struct FontLayoutMetrics {
+        let baselineOffset: CGFloat
+        let lineHeight: CGFloat
+    }
+
+    private static var fontMetricsCache: [String: FontLayoutMetrics] = [:]
+    private static let fontMetricsLock = NSLock()
+
+    /// `NSString.draw` and `NSAttributedString.draw` place a single line's
+    /// baseline at `boundingRect(..., options: [.truncatesLastVisibleLine]).maxY`
+    /// below the line box's top, not at `font.ascender` — fonts whose
+    /// `hhea`/`WinAscent` exceeds `ascender` (such as custom Iosevka builds or
+    /// CJK faces) otherwise land several points low.
+    static func layoutMetrics(for font: NSFont) -> FontLayoutMetrics {
+        let key = "\(font.fontName)|\(font.pointSize)|\(font.ascender)|\(font.descender)"
+        fontMetricsLock.lock()
+        if let cached = fontMetricsCache[key] {
+            fontMetricsLock.unlock()
+            return cached
+        }
+        fontMetricsLock.unlock()
+        let probe = NSAttributedString(string: "Mg", attributes: [.font: font])
+        let bounds = probe.boundingRect(
+            with: NSSize(width: CGFloat.greatestFiniteMagnitude,
+                         height: CGFloat.greatestFiniteMagnitude),
+            options: [.truncatesLastVisibleLine])
+        let metrics = FontLayoutMetrics(
+            baselineOffset: bounds.maxY,
+            lineHeight: max(bounds.height, font.ascender - font.descender + font.leading))
+        fontMetricsLock.lock()
+        if fontMetricsCache.count >= 128 { fontMetricsCache.removeAll(keepingCapacity: true) }
+        fontMetricsCache[key] = metrics
+        fontMetricsLock.unlock()
+        return metrics
+    }
+
+    /// Measure a single line at `width` with the exact `NSStringDrawing`
+    /// engine `attributedText` paints with — automatically including visible
+    /// inline badge attachments while excluding trailing attachments that
+    /// `.byTruncatingTail` drops at narrow widths.
+    static func laidOutMetrics(
+        for attributed: NSAttributedString,
+        width: CGFloat = .greatestFiniteMagnitude
+    ) -> FontLayoutMetrics {
+        let fallbackFont = (attributed.length > 0
+            ? attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+            : nil) ?? Theme.uiFont(12)
+        let nominal = layoutMetrics(for: fallbackFont)
+        guard attributed.length > 0, width > 0 else { return nominal }
+        let bounds = attributed.boundingRect(
+            with: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+            options: [.truncatesLastVisibleLine])
+        guard bounds.height > 0 else { return nominal }
+        return FontLayoutMetrics(
+            baselineOffset: bounds.maxY,
+            lineHeight: max(bounds.height, nominal.lineHeight))
+    }
+
+    /// Y origin for `NSAttributedString.draw(at:)` in a flipped view so the
+    /// line's baseline lands on `baseline`.
+    static func lineOriginY(for attributed: NSAttributedString, baseline: CGFloat) -> CGFloat {
+        let metrics = laidOutMetrics(for: attributed)
+        return ((baseline - metrics.baselineOffset) * 2).rounded() / 2
+    }
+
+    static func invalidateCaches() {
+        fontMetricsLock.lock()
+        fontMetricsCache.removeAll()
+        fontMetricsLock.unlock()
+    }
+
+    static func baselineOffset(for font: NSFont) -> CGFloat {
+        layoutMetrics(for: font).baselineOffset
+    }
+
+    static func lineHeight(for font: NSFont) -> CGFloat {
+        layoutMetrics(for: font).lineHeight
+    }
+
+    /// Baseline that centers `font`'s ascender-to-descender box in `rect` —
+    /// the same rule `FoldingLayoutManager` uses for code rows. Use the same
     /// value for adjacent labels with different font sizes so their glyphs sit
     /// on one line instead of each label being centered independently.
     static func centeredBaseline(for font: NSFont, in rect: NSRect) -> CGFloat {
@@ -50,9 +130,7 @@ enum SidebarCellDrawing {
         // is; an unflipped host lands its text somewhere else entirely.
         //
         // Rounded to a half point: a whole device pixel on a 2x display.
-        // Flooring biased every label up to a full point above the centre,
-        // which showed up against the traffic lights in the title band.
-        ((rect.midY + font.capHeight / 2) * 2).rounded() / 2
+        ((rect.midY + (font.ascender + font.descender) / 2) * 2).rounded() / 2
     }
 
     static func text(_ string: String, font: NSFont, color: NSColor,
@@ -68,10 +146,16 @@ enum SidebarCellDrawing {
             .foregroundColor: color,
             .paragraphStyle: paragraph,
         ]
+        let isASCII = string.utf8.allSatisfy { $0 < 0x80 }
+        let metrics = isASCII
+            ? layoutMetrics(for: font)
+            : laidOutMetrics(for: NSAttributedString(string: string, attributes: attributes),
+                             width: rect.width)
+        let y = ((baseline - metrics.baselineOffset) * 2).rounded() / 2
         let lineRect = NSRect(x: rect.minX,
-                              y: floor(baseline - font.ascender),
+                              y: y,
                               width: rect.width,
-                              height: ceil(font.ascender - font.descender + font.leading) + 2)
+                              height: ceil(metrics.lineHeight) + 6)
         (string as NSString).draw(
             with: lineRect,
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
@@ -94,17 +178,19 @@ enum SidebarCellDrawing {
                     context: nil)
     }
 
-    /// Where `attributedText` puts the line. Callers that draw *along* the text
-    /// — a rule under a search match — need the same rectangle, measured the
-    /// same way, or the two drift apart at other font sizes.
+    /// Where `attributedText` puts the line, aligned so its primary font's
+    /// baseline lands on `centeredBaseline(for:in:)` even when fallback fonts
+    /// or inline badge attachments alter the laid-out fragment's baseline.
     static func textLineRect(_ string: NSAttributedString, in rect: NSRect) -> NSRect? {
         guard rect.width > 0, rect.height > 0, string.length > 0 else { return nil }
-        let measured = string.boundingRect(
-            with: NSSize(width: rect.width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-        let height = max(1, ceil(measured.height))
+        let font = (string.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+            ?? Theme.uiFont(12)
+        let laidOut = laidOutMetrics(for: string, width: rect.width)
+        let baseline = centeredBaseline(for: font, in: rect)
+        let y = ((baseline - laidOut.baselineOffset) * 2).rounded() / 2
+        let height = max(1, ceil(laidOut.lineHeight))
         return NSRect(x: rect.minX,
-                      y: floor(rect.midY - height / 2),
+                      y: y,
                       width: rect.width,
                       height: height + 2)
     }
@@ -209,11 +295,12 @@ enum SidebarCellDrawing {
                 let measured = text.size(withAttributes: attributes)
                 let capHeight = badgeFont.capHeight
                 // `draw(at:)` puts the line box's top-left at the point, so the
-                // cap sits `ascender - capHeight` below it. Rounded to a half
-                // point, which is a whole device pixel at 2x.
+                // baseline sits `baselineOffset(for:)` below it. Rounded to a
+                // half point, which is a whole device pixel at 2x.
+                let baselineFromTop = SidebarCellDrawing.baselineOffset(for: badgeFont)
                 let origin = NSPoint(
                     x: ((rect.midX - measured.width / 2) * 2).rounded() / 2,
-                    y: ((rect.midY - badgeFont.ascender + capHeight / 2) * 2).rounded() / 2)
+                    y: ((rect.midY - baselineFromTop + capHeight / 2) * 2).rounded() / 2)
                 text.draw(at: origin, withAttributes: attributes)
                 return true
             }

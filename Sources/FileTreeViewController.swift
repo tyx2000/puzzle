@@ -1274,15 +1274,7 @@ private final class FileTreeCell: DrawnSidebarCell {
 
 private final class InlineTreeTextView: NSTextView {
     var onResign: (() -> Void)?
-
-    override func layout() {
-        super.layout()
-        guard let font else { return }
-        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
-        textContainerInset = NSSize(
-            width: 0,
-            height: max(0, floor((bounds.height - lineHeight) / 2)))
-    }
+    var topShift: CGFloat = 0
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
@@ -1290,15 +1282,26 @@ private final class InlineTreeTextView: NSTextView {
         return resigned
     }
 
-    var verticalCenterError: CGFloat? {
+    func updateVerticalAlignment(in rowBounds: NSRect) {
+        guard let font else { return }
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: rowBounds)
+        let baselineOffset = SidebarCellDrawing.baselineOffset(for: font)
+        let idealTop = ((baseline - baselineOffset) * 2).rounded() / 2
+        topShift = min(0, idealTop)
+        textContainerInset = NSSize(width: 0, height: max(0, idealTop))
+    }
+
+    func verticalCenterError(in rowBounds: NSRect) -> CGFloat? {
         guard let font else { return nil }
-        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
-        return abs((textContainerInset.height + lineHeight / 2) - bounds.midY)
+        let drawnBaseline = topShift + textContainerInset.height
+            + SidebarCellDrawing.baselineOffset(for: font)
+        return abs(drawnBaseline - SidebarCellDrawing.centeredBaseline(for: font, in: rowBounds))
     }
 }
 
 private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     private let editor = InlineTreeTextView(frame: .zero)
+    private var editorTopConstraint: NSLayoutConstraint!
     private var onSubmit: ((String) -> Bool)?
     private var onCancel: (() -> Void)?
     private var submitting = false
@@ -1308,9 +1311,11 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     private var icon: SidebarIcon?
 
     override var isOpaque: Bool { true }
+    override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        clipsToBounds = true
         editor.isEditable = true
         editor.isSelectable = true
         editor.drawsBackground = false
@@ -1328,11 +1333,12 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         editor.setAccessibilityLabel("File name")
         editor.translatesAutoresizingMaskIntoConstraints = false
         addSubview(editor)
+        editorTopConstraint = editor.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
             editor.leadingAnchor.constraint(equalTo: leadingAnchor,
                                              constant: FileTreeRowLayout.titleX),
             editor.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            editor.topAnchor.constraint(equalTo: topAnchor),
+            editorTopConstraint,
             editor.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
@@ -1355,8 +1361,17 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
         self.onCancel = onCancel
         submitting = false
         cancelling = false
-        editor.needsLayout = true
+        needsLayout = true
         needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        editor.updateVerticalAlignment(in: bounds)
+        if editorTopConstraint.constant != editor.topShift {
+            editorTopConstraint.constant = editor.topShift
+            super.layout()
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1422,8 +1437,8 @@ private final class InlineTreeNameCell: NSTableCellView, NSTextViewDelegate {
     }
 
     var verticalCenterErrorForTesting: CGFloat? {
-        editor.layoutSubtreeIfNeeded()
-        return editor.verticalCenterError
+        layoutSubtreeIfNeeded()
+        return editor.verticalCenterError(in: bounds)
     }
     var hasIconForTesting: Bool { icon != nil }
     var backgroundColorForTesting: NSColor { Theme.inputBackground }

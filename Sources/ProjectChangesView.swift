@@ -738,9 +738,14 @@ final class CenteredTextFieldCell: NSTextFieldCell {
     }
 
     private func centred(_ natural: NSRect, in rect: NSRect) -> NSRect {
-        let height = min(natural.height, cellSize(forBounds: rect).height)
-        return NSRect(x: natural.minX, y: natural.minY + ((natural.height - height) / 2).rounded(),
-                      width: natural.width, height: height)
+        let resolvedFont = font ?? Theme.uiFont(11)
+        let height = min(natural.height,
+                         max(cellSize(forBounds: rect).height,
+                             ceil(SidebarCellDrawing.lineHeight(for: resolvedFont))))
+        let baseline = SidebarCellDrawing.centeredBaseline(for: resolvedFont, in: natural)
+        let idealY = ((baseline - SidebarCellDrawing.baselineOffset(for: resolvedFont)) * 2).rounded() / 2
+        let y = min(max(natural.minY, idealY), max(natural.minY, natural.maxY - height))
+        return NSRect(x: natural.minX, y: y, width: natural.width, height: height)
     }
 
     override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText,

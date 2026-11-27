@@ -56,8 +56,6 @@ final class EditorTabBar: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-
-
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -195,6 +193,7 @@ final class TabPillView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        clipsToBounds = true
         label.lineBreakMode = .byTruncatingTail
         closeButton.isBordered = false
         closeButton.bezelStyle = .regularSquare
@@ -232,9 +231,15 @@ final class TabPillView: NSView {
         super.layout()
         let mid = (bounds.height - 14) / 2
         closeButton.frame = NSRect(x: bounds.width - 22, y: mid, width: 14, height: 14)
-        let labelHeight = min(bounds.height, max(16, ceil(label.intrinsicContentSize.height)))
-        label.frame = NSRect(x: 12, y: (bounds.height - labelHeight) / 2,
-                             width: max(0, bounds.width - 12 - 26), height: labelHeight)
+        let font = label.font ?? Theme.uiFont(11.5)
+        let labelWidth = max(0, bounds.width - 12 - 26)
+        let laidOut = SidebarCellDrawing.laidOutMetrics(
+            for: label.attributedStringValue, width: max(1, labelWidth - 4))
+        let labelHeight = max(16, ceil(max(label.intrinsicContentSize.height,
+                                           laidOut.lineHeight)))
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: bounds)
+        let labelY = ((baseline - laidOut.baselineOffset) * 2).rounded() / 2
+        label.frame = NSRect(x: 12, y: labelY, width: labelWidth, height: labelHeight)
     }
 
     override func viewDidChangeEffectiveAppearance() {

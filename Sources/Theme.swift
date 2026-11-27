@@ -305,6 +305,7 @@ enum Theme {
         // Symbols are appearance-independent templates, but clearing here also
         // bounds the cache if future settings add configurable symbol sizes.
         cachedSymbols.removeAll()
+        SidebarCellDrawing.invalidateCaches()
         MarkdownLiveStyler.invalidateCaches()
     }
 
@@ -657,13 +658,25 @@ extension NSView {
 }
 
 extension NSTextField {
-    /// A frame for a label in a bar of buttons: exactly its text's height,
-    /// centred in the bar. A label draws its line at the top of a taller frame,
-    /// so given the buttons' height its text rides above their symbols.
+    /// A frame for a label in a bar of buttons: sized to its line and placed so
+    /// its glyph baseline sits at the bar's optical vertical centre (handling
+    /// both flipped and unflipped host bars).
     func centeredFrame(x: CGFloat, width: CGFloat, in bar: NSView) -> NSRect {
-        let height = ceil(intrinsicContentSize.height)
-        return NSRect(x: x, y: floor((bar.bounds.height - height) / 2),
-                      width: width, height: height)
+        let resolvedFont = font ?? Theme.uiFont(11)
+        let height = ceil(max(intrinsicContentSize.height,
+                              SidebarCellDrawing.lineHeight(for: resolvedFont)))
+        let firstBaseline = firstBaselineOffsetFromTop
+        let baselineFromTop = firstBaseline > 0
+            ? firstBaseline : SidebarCellDrawing.baselineOffset(for: resolvedFont)
+        let y: CGFloat
+        if bar.isFlipped {
+            let baseline = SidebarCellDrawing.centeredBaseline(for: resolvedFont, in: bar.bounds)
+            y = ((baseline - baselineFromTop) * 2).rounded() / 2
+        } else {
+            let targetBaseline = bar.bounds.midY - (resolvedFont.ascender + resolvedFont.descender) / 2
+            y = ((targetBaseline + baselineFromTop - height) * 2).rounded() / 2
+        }
+        return NSRect(x: x, y: y, width: width, height: height)
     }
 }
 

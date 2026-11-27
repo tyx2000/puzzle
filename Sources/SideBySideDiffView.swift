@@ -384,8 +384,10 @@ private final class SideBySideRowCell: DrawnSidebarCell {
             background.setFill()
             rect.fill()
         }
+        let baseline = SidebarCellDrawing.centeredBaseline(for: font, in: rect)
         if let number {
             SidebarCellDrawing.text("\(number)", font: font, color: Theme.gutter,
+                                    baseline: baseline,
                                     in: NSRect(x: rect.minX, y: 0,
                                                width: gutter - 8, height: rect.height),
                                     alignment: .right)
@@ -399,7 +401,7 @@ private final class SideBySideRowCell: DrawnSidebarCell {
         // Point drawing preserves the complete single line and its word-level
         // backgrounds; clipping bounds it to this side without an ellipsis.
         text.draw(at: NSPoint(x: textRect.minX - horizontalOffset,
-                              y: floor(textRect.midY - text.size().height / 2)))
+                              y: SidebarCellDrawing.lineOriginY(for: text, baseline: baseline)))
         NSGraphicsContext.restoreGraphicsState()
     }
 }

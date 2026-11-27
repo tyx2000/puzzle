@@ -83,11 +83,13 @@ enum RegressionTests {
         }
         if CommandLine.arguments.contains("--project-history-regressions") {
             try testProjectTitleStrip()
+            try testProjectCommitLine()
             try testCutHistoryRowsSayTheRest()
             try testHistoryRowOpenActions()
             try testStripedGitLists()
             try testCommitFileTabsRevealCollapsedHistory()
-            print("Project history regression tests passed (5)")
+            try testSidebarAndTabTextVerticalCentering()
+            print("Project history and vertical centering regression tests passed (7)")
             return
         }
         if CommandLine.arguments.contains("--line-popup-regressions") {
@@ -328,6 +330,7 @@ enum RegressionTests {
         try testFileHistoryTable()
         try testDiffGutterUsesFileLineNumbers()
         try testProjectTitleStrip()
+        try testSidebarAndTabTextVerticalCentering()
         try testProjectCommitLine()
         try testTimeoutSurvivesAHeldPipe()
         try testBackgroundFetch()
@@ -22724,5 +22727,201 @@ enum RegressionTests {
         pane.close(index: 0)
         try expect(!pane.hasGitBaselineForTesting && pane.gitLineChangesForTesting.isEmpty,
                    "closing the last tab retained its Git baseline or gutter marks")
+    }
+
+    private static func testSidebarAndTabTextVerticalCentering() throws {
+        final class CodeRowDelegate: NSObject, NSLayoutManagerDelegate {
+            var font: NSFont = Theme.uiFont(12)
+            var rowHeight: CGFloat = 22
+            func layoutManager(
+                _ layoutManager: NSLayoutManager,
+                shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+                lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+                baselineOffset: UnsafeMutablePointer<CGFloat>,
+                in textContainer: NSTextContainer,
+                forGlyphRange glyphRange: NSRange
+            ) -> Bool {
+                lineFragmentRect.pointee.size.height = rowHeight
+                lineFragmentUsedRect.pointee.size.height = rowHeight
+                let glyphHeight = font.ascender - font.descender
+                baselineOffset.pointee = (rowHeight - glyphHeight) / 2 + font.ascender
+                return true
+            }
+        }
+
+        final class FlippedCanvas: NSView {
+            var render: ((NSRect) -> Void)?
+            override var isFlipped: Bool { true }
+            override func draw(_ dirtyRect: NSRect) {
+                NSColor.black.setFill()
+                bounds.fill()
+                render?(bounds)
+            }
+        }
+
+        func inkMargins(in view: NSView, widthLimit: CGFloat? = nil) throws -> (top: Double, bottom: Double) {
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.bounds.size),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            defer { window.close() }
+            window.contentView = view
+            view.layoutSubtreeIfNeeded()
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Failure(description: "could not create bitmap for vertical centering check")
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            let scaleX = Double(rep.pixelsWide) / Double(max(1, view.bounds.width))
+            let scaleY = Double(rep.pixelsHigh) / Double(max(1, view.bounds.height))
+            let maxX = widthLimit.map { min(rep.pixelsWide, Int(($0 * scaleX).rounded())) } ?? rep.pixelsWide
+            var minY = rep.pixelsHigh, maxY = -1
+            for y in 0..<rep.pixelsHigh {
+                for x in 0..<maxX {
+                    if let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                       c.brightnessComponent > 0.08 {
+                        minY = min(minY, y)
+                        maxY = max(maxY, y)
+                    }
+                }
+            }
+            try expect(maxY >= minY, "text probe rendered no visible pixels")
+            return (Double(minY) / scaleY, Double(rep.pixelsHigh - 1 - maxY) / scaleY)
+        }
+
+        let savedFamily = Settings.shared.uiFontFamily
+        let savedSize = Settings.shared.uiFontSize
+        let savedHeight = Settings.shared.treeLineHeight
+        defer {
+            Settings.shared.uiFontFamily = savedFamily
+            Settings.shared.uiFontSize = savedSize
+            Settings.shared.treeLineHeight = savedHeight
+            Theme.invalidateCaches()
+        }
+
+        var families = ["Monaco", "Menlo", "PingFang SC"]
+        if NSFont(name: "Iosevka Charon Mono Refit", size: 12) != nil
+            || NSFont(name: "IosevkaCharonMonoRefit-Regular", size: 12) != nil {
+            families.append("Iosevka Charon Mono Refit")
+        }
+        Settings.shared.uiFontSize = 12
+        Settings.shared.treeLineHeight = 22
+
+        for family in families {
+            Settings.shared.uiFontFamily = family
+            Theme.invalidateCaches()
+
+            // 1. SidebarCellDrawing.text (file tree, commit list, changes),
+            //    verified against the code editor's own line-fragment centering
+            //    across capitals, descenders, and CJK fallback:
+            for sample in ["README.md", "Package.gy", "中文 README"] {
+                let uiFont = Theme.uiFont(12)
+                let sidebarProbe = FlippedCanvas(frame: NSRect(x: 0, y: 0, width: 180, height: 22))
+                sidebarProbe.render = { rect in
+                    SidebarCellDrawing.text(sample, font: uiFont,
+                                            color: .white, in: rect.insetBy(dx: 8, dy: 0))
+                }
+                let sidebarMargins = try inkMargins(in: sidebarProbe)
+
+                let storage = NSTextStorage(string: sample,
+                                            attributes: [.font: uiFont, .foregroundColor: NSColor.white])
+                let manager = NSLayoutManager()
+                let codeDelegate = CodeRowDelegate()
+                codeDelegate.font = uiFont
+                codeDelegate.rowHeight = 22
+                manager.delegate = codeDelegate
+                let container = NSTextContainer(size: NSSize(width: 180, height: 60))
+                manager.addTextContainer(container)
+                storage.addLayoutManager(manager)
+                let codeView = NSTextView(frame: NSRect(x: 0, y: 0, width: 180, height: 22),
+                                          textContainer: container)
+                codeView.backgroundColor = .black
+                codeView.drawsBackground = true
+                codeView.textContainerInset = .zero
+                let codeMargins = try inkMargins(in: codeView)
+
+                if sample.utf8.allSatisfy({ $0 < 0x80 }) {
+                    try expect(abs(sidebarMargins.top - codeMargins.top) <= 0.5
+                                && abs(sidebarMargins.bottom - codeMargins.bottom) <= 0.5,
+                               "\(family) [\(sample)] sidebar text (\(sidebarMargins)) did not match code-row centering (\(codeMargins))")
+                }
+                if sample != "Package.gy" {
+                    try expect(abs(sidebarMargins.top - sidebarMargins.bottom) <= 1.0,
+                               "\(family) [\(sample)] sidebar text is vertically off-centre: \(sidebarMargins)")
+                } else {
+                    try expect(sidebarMargins.bottom >= 2.0,
+                               "\(family) [\(sample)] clipped descender glyphs: \(sidebarMargins)")
+                }
+            }
+
+            // 2. SidebarCellDrawing.attributedText with vs without inline badge,
+            //    plus narrow truncation that drops the trailing badge attachment:
+            let plainCanvas = FlippedCanvas(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
+            plainCanvas.render = { rect in
+                SidebarCellDrawing.attributedText(
+                    SidebarCellDrawing.labelWithBadge(
+                        "README", badge: "", font: Theme.uiFont(11), colour: .white,
+                        badgeBackground: .black, badgeForeground: .black),
+                    in: rect.insetBy(dx: 8, dy: 0))
+            }
+            let badgedCanvas = FlippedCanvas(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
+            badgedCanvas.render = { rect in
+                SidebarCellDrawing.attributedText(
+                    SidebarCellDrawing.labelWithBadge(
+                        "README", badge: "12", font: Theme.uiFont(11), colour: .white,
+                        badgeBackground: .black, badgeForeground: .black),
+                    in: rect.insetBy(dx: 8, dy: 0))
+            }
+            let truncatedBadgedCanvas = FlippedCanvas(frame: NSRect(x: 0, y: 0, width: 52, height: 32))
+            truncatedBadgedCanvas.render = { rect in
+                SidebarCellDrawing.attributedText(
+                    SidebarCellDrawing.labelWithBadge(
+                        "README", badge: "12", font: Theme.uiFont(11), colour: .white,
+                        badgeBackground: .black, badgeForeground: .black),
+                    in: rect.insetBy(dx: 4, dy: 0))
+            }
+            let plainMargins = try inkMargins(in: plainCanvas, widthLimit: 64)
+            let badgedMargins = try inkMargins(in: badgedCanvas, widthLimit: 64)
+            let truncatedMargins = try inkMargins(in: truncatedBadgedCanvas, widthLimit: 32)
+            try expect(abs(plainMargins.top - plainMargins.bottom) <= 1.0,
+                       "\(family) attributed label is vertically off-centre: \(plainMargins)")
+            try expect(abs(plainMargins.top - badgedMargins.top) <= 0.5,
+                       "\(family) adding a count badge shifted the label baseline: plain=\(plainMargins), badged=\(badgedMargins)")
+            try expect(abs(plainMargins.top - truncatedMargins.top) <= 0.5,
+                       "\(family) truncating away a trailing badge shifted the label baseline: plain=\(plainMargins), truncated=\(truncatedMargins)")
+
+            // 3. Unflipped header bar NSTextField.centeredFrame(x:width:in:):
+            let unflippedBar = FlatView(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
+            unflippedBar.fillColor = .black
+            let headerLabel = NSTextField(labelWithString: "README.md")
+            headerLabel.font = Theme.uiFont(11.5)
+            headerLabel.textColor = .white
+            headerLabel.frame = headerLabel.centeredFrame(x: 12, width: 156, in: unflippedBar)
+            unflippedBar.addSubview(headerLabel)
+            let headerMargins = try inkMargins(in: unflippedBar)
+            try expect(abs(headerMargins.top - headerMargins.bottom) <= 1.0,
+                       "\(family) unflipped header label is vertically off-centre: \(headerMargins)")
+
+            // 3. EditorTabBar / TabPillView file tab title:
+            let tabBar = EditorTabBar(frame: NSRect(x: 0, y: 0, width: 260, height: 32))
+            tabBar.setRowHeight(32)
+            tabBar.reload(tabs: [.init(title: "README.md", modified: false, path: "/tmp/README.md")],
+                          active: -1)
+            tabBar.layoutSubtreeIfNeeded()
+            guard let pillFrame = tabBar.tabFramesForTesting.first else {
+                throw Failure(description: "EditorTabBar built no tab pill")
+            }
+            // Measure only the title region (before the close button at width - 24).
+            let tabHost = FlippedCanvas(frame: NSRect(x: 0, y: 0, width: pillFrame.width, height: 32))
+            let pill = tabBar.subviews.compactMap { $0 as? TabPillView }.first!
+            pill.removeFromSuperview()
+            pill.frame = tabHost.bounds
+            // Force high-contrast white on black for pixel measurement.
+            for sub in pill.subviews {
+                if let field = sub as? NSTextField { field.textColor = .white }
+                if let button = sub as? NSButton { button.isHidden = true }
+            }
+            tabHost.addSubview(pill)
+            let tabMargins = try inkMargins(in: tabHost)
+            try expect(abs(tabMargins.top - tabMargins.bottom) <= 1.0,
+                       "\(family) file tab title is vertically off-centre: top=\(tabMargins.top)pt, bottom=\(tabMargins.bottom)pt")
+        }
     }
 }
